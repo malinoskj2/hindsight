@@ -21,11 +21,19 @@ By default dxgi records **full-screen apps**: whatever app is in front with a wi
 
 The other mode, **Whole desktop, always**, records the primary monitor from the moment dxgi starts, everything on it included.
 
+## Capture backends
+
+The **Capture** setting chooses how frames are taken from Windows. Both keep every frame on the GPU.
+
+- **Windows Graphics Capture** (the default) can record just the app's window, includes the mouse cursor, and works on laptops whose display is connected to the integrated GPU.
+- **DXGI Desktop Duplication** is the older, lower-level API and does a little less work per frame. It sees whole monitors only, so a full-screen app is recorded through its monitor: anything you alt-tab to while the app is still running shows up in the clip. The cursor isn't drawn. It only works for monitors connected to the NVIDIA GPU, and not for rotated monitors. On either of those it stops with an error that tells you to switch back. A UAC prompt or the lock screen pauses it without dropping the buffer.
+
 ## Settings
 
 | Setting | Default | Range |
 | --- | --- | --- |
 | Record | Full-screen apps | Full-screen apps, or the whole desktop always |
+| Capture | Windows Graphics Capture | Windows Graphics Capture, or DXGI Desktop Duplication |
 | Codec | H.264 | H.264, HEVC, AV1 (AV1 needs an RTX 40 series GPU or newer) |
 | Frame rate | 60 fps | 24–240 fps |
 | Buffer | 30 s | 5–600 s |

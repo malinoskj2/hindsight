@@ -47,8 +47,9 @@ pub(super) fn falling_back_to_monitor(name: &str) -> String {
 
 pub(super) fn settings_applied(config: &Config) -> String {
     format!(
-        "Settings applied: {}, {}, {} s buffer, {} fps, {} Mbps, hotkey {}",
+        "Settings applied: {}, {}, {}, {} s buffer, {} fps, {} Mbps, hotkey {}",
         config.mode,
+        config.backend,
         config.codec,
         config.buffer_seconds,
         config.frame_rate,

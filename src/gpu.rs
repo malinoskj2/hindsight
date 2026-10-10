@@ -1,5 +1,5 @@
-//! Capture and encoding on the GPU. Frames go from Windows Graphics Capture into textures the
-//! encoder owns and from there straight to NVENC; only compressed packets reach system memory.
+//! Capture and encoding on the GPU. Frames go from Windows Graphics Capture or DXGI Desktop
+//! Duplication into textures the encoder owns and from there straight to NVENC; only compressed packets reach system memory.
 //!
 //! The submodules marked below are the only ones that call into native code directly.
 

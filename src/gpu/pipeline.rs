@@ -1,9 +1,9 @@
-//! One capture session: on every tick of the frame clock, the newest captured picture (or, when
-//! the screen did not change, the previous one) is copied into a free encoder slot and
-//! submitted, and whatever NVENC has finished goes into the replay buffer.
+//! One capture session: on every tick of the frame clock, the newest picture from the chosen
+//! capture backend (or, when the screen did not change, the previous one) is copied into a free
+//! encoder slot and submitted, and whatever NVENC has finished goes into the replay buffer.
 
 use super::{
-    capture::{self, Capture, CaptureError, Frame},
+    capture::{self, CaptureError, Frame},
     device::{Device, DeviceError},
     nvenc::{Encoded, Encoder, NvencError, Settings},
     pacer::Pacer,
@@ -44,7 +44,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
         Some(DeviceError::NoNvidiaAdapter)
     ) || matches!(
         error.downcast_ref::<CaptureError>(),
-        Some(CaptureError::Unsupported)
+        Some(CaptureError::Unsupported(_))
     ) || matches!(
         error.downcast_ref::<NvencError>(),
         Some(
@@ -59,7 +59,10 @@ fn is_permanent(error: &anyhow::Error) -> bool {
 
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     let device = Device::create()?;
-    log::info(format!("Capturing on {}", device.adapter));
+    log::info(format!(
+        "Capturing on {} with {}",
+        device.adapter, config.backend
+    ));
     if let Err(error) = device.raise_priority() {
         log::warning(format!(
             "GPU thread priority was not raised ({error}); run as administrator for the highest priority"
@@ -67,7 +70,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     }
 
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
-    let capture = Capture::start(&device, pacer.period(), target)?;
+    let mut capture = capture::start(config.backend, &device, pacer.period(), target)?;
     let (width, height) = encodable(capture.size());
     let mut encoder = Encoder::open(
         &device.d3d,
@@ -110,7 +113,8 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         );
     };
 
-    let first_frame_deadline = matches!(target, Target::Window { .. })
+    let first_frame_deadline = capture
+        .captures_window()
         .then(|| u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS);
     let ended = loop {
         if stop.load(Ordering::Relaxed) {
@@ -151,7 +155,6 @@ const fn encodable((width, height): (u32, u32)) -> (u32, u32) {
 
 /// Returns the thread's multimedia-class membership, which lasts as long as the session.
 fn prepare_thread() -> Option<priority::MultimediaThread> {
-    capture::join_apartment();
     let multimedia = match priority::join_multimedia_class() {
         Ok(multimedia) => Some(multimedia),
         Err(error) => {

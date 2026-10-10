@@ -42,7 +42,7 @@ const ICON_RESOURCE: u16 = 1;
 
 /// The tab and its margins; a footer row is added only while it has something to say.
 const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
-const TAB_HEIGHT: i32 = 330;
+const TAB_HEIGHT: i32 = 358;
 
 /// Shows the application window, or the startup error, until the user quits.
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
