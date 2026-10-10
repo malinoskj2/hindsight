@@ -31,6 +31,7 @@ pub(super) const MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
 pub(super) const REGISTER_RESOURCE_VER: u32 = struct_version(4);
 pub(super) const CREATE_BITSTREAM_BUFFER_VER: u32 = struct_version(1);
 pub(super) const EVENT_PARAMS_VER: u32 = struct_version(1);
+pub(super) const CAPS_PARAM_VER: u32 = struct_version(1);
 
 // The header's own values for the versions above.
 const _: () = assert!(API_VERSION == 0x0100_000C);
@@ -82,6 +83,8 @@ pub(super) const PRESET_P4: GUID = GUID::from_values(
     [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
 );
 
+pub(super) const CAPS_WIDTH_MAX: u32 = 16;
+pub(super) const CAPS_HEIGHT_MAX: u32 = 17;
 pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const RATE_CONTROL_VBR: u32 = 1;
 pub(super) const MULTI_PASS_DISABLED: u32 = 0;
@@ -186,6 +189,8 @@ pub(super) type OpenEncodeSessionEx =
 pub(super) type GetEncodeGuidCount = unsafe extern "system" fn(Session, *mut u32) -> Status;
 pub(super) type GetEncodeGuids =
     unsafe extern "system" fn(Session, *mut GUID, u32, *mut u32) -> Status;
+pub(super) type GetEncodeCaps =
+    unsafe extern "system" fn(Session, GUID, *mut CapsParam, *mut i32) -> Status;
 pub(super) type GetEncodePresetConfigEx =
     unsafe extern "system" fn(Session, GUID, GUID, u32, *mut PresetConfig) -> Status;
 pub(super) type InitializeEncoder =
@@ -212,7 +217,9 @@ pub(super) struct FunctionList {
     pub(super) get_encode_guid_count: Option<GetEncodeGuidCount>,
     _profile_guids: [Entry; 2],
     pub(super) get_encode_guids: Option<GetEncodeGuids>,
-    _input_formats_to_preset_config: [Entry; 6],
+    _input_formats: [Entry; 2],
+    pub(super) get_encode_caps: Option<GetEncodeCaps>,
+    _preset_queries: [Entry; 3],
     pub(super) initialize_encoder: Option<InitializeEncoder>,
     _input_buffers: [Entry; 2],
     pub(super) create_bitstream_buffer: Option<CreateBitstreamBufferFn>,
@@ -242,6 +249,7 @@ unsafe impl Zeroed for FunctionList {}
 
 const _: () = assert!(size_of::<FunctionList>() == 2552);
 const _: () = assert!(offset_of!(FunctionList, get_encode_guids) == 40);
+const _: () = assert!(offset_of!(FunctionList, get_encode_caps) == 64);
 const _: () = assert!(offset_of!(FunctionList, initialize_encoder) == 96);
 const _: () = assert!(offset_of!(FunctionList, create_bitstream_buffer) == 120);
 const _: () = assert!(offset_of!(FunctionList, encode_picture) == 136);
@@ -252,6 +260,19 @@ const _: () = assert!(offset_of!(FunctionList, open_encode_session_ex) == 240);
 const _: () = assert!(offset_of!(FunctionList, register_resource) == 248);
 const _: () = assert!(offset_of!(FunctionList, get_last_error_string) == 304);
 const _: () = assert!(offset_of!(FunctionList, get_encode_preset_config_ex) == 320);
+
+/// `NV_ENC_CAPS_PARAM`.
+#[repr(C)]
+pub(super) struct CapsParam {
+    pub(super) version: u32,
+    pub(super) caps_to_query: u32,
+    _reserved: [u32; 62],
+}
+
+// SAFETY: integers only.
+unsafe impl Zeroed for CapsParam {}
+
+const _: () = assert!(size_of::<CapsParam>() == 256);
 
 /// `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`.
 #[repr(C)]

@@ -16,7 +16,7 @@ use windows::{
         Graphics::{
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
-                ID3D11Texture2D,
+                ID3D11Multithread, ID3D11Texture2D,
             },
             Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
         },
@@ -52,6 +52,16 @@ pub(crate) enum NvencError {
     VersionRejected,
     #[error("this GPU's NVENC has no {0} encoder")]
     Unsupported(Codec),
+    #[error(
+        "the display is {width}×{height}, larger than the {max_width}×{max_height} this GPU's {codec} encoder accepts"
+    )]
+    TooLarge {
+        codec: Codec,
+        width: u32,
+        height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
     #[error("{call} failed with {status}{detail}")]
     Call {
         call: &'static str,
@@ -114,12 +124,38 @@ pub(super) struct Encoder {
     next: usize,
     /// The slot of the newest submitted frame, whose texture holds the latest picture.
     latest: Option<usize>,
+    /// The device's lock, held around calls that touch its resources: the capture frame pool
+    /// works on the same device from its own threads.
+    device_lock: ID3D11Multithread,
+    /// NVENC stopped answering; teardown does not wait for it again.
+    stalled: bool,
     library: HMODULE,
+}
+
+/// Holds the device lock while it lives.
+struct Locked<'a>(&'a ID3D11Multithread);
+
+impl<'a> Locked<'a> {
+    fn new(lock: &'a ID3D11Multithread) -> Self {
+        // SAFETY: a re-entrant lock on a live device, released in `Drop`.
+        unsafe { lock.Enter() };
+        Self(lock)
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        // SAFETY: releases the `Enter` in `new`.
+        unsafe { self.0.Leave() };
+    }
 }
 
 impl Encoder {
     /// Opens an encode session on `device` and prepares its slots.
     pub(super) fn open(device: &ID3D11Device, settings: Settings) -> Result<Self, NvencError> {
+        let device_lock: ID3D11Multithread = device
+            .cast()
+            .map_err(|error| NvencError::Windows("lock the device", error))?;
         let library = load_library()?;
         let mut encoder = Self {
             api: Box::new(ffi::FunctionList::zeroed()),
@@ -129,11 +165,14 @@ impl Encoder {
             queue: VecDeque::with_capacity(SLOTS),
             next: 0,
             latest: None,
+            device_lock,
+            stalled: false,
             library,
         };
         // From here on, `Drop` releases whatever has been created when a step fails.
         encoder.connect(device)?;
         encoder.require_codec()?;
+        encoder.require_size()?;
         encoder.initialize()?;
         for _ in 0..SLOTS {
             let slot = encoder.create_slot(device)?;
@@ -188,10 +227,19 @@ impl Encoder {
         // SAFETY: the device outlives the session (the pipeline drops the encoder first), and
         // the session handle is written on success only.
         let status = unsafe { open(&raw mut params, &raw mut self.session) };
-        if status != Status::SUCCESS {
-            self.session = ptr::null_mut();
+        if status == Status::SUCCESS {
+            return Ok(());
         }
-        self.check("nvEncOpenEncodeSessionEx", status)
+        let error = self.check("nvEncOpenEncodeSessionEx", status);
+        // A failed open may still hand back a session, which must be destroyed.
+        if !self.session.is_null()
+            && let Some(destroy) = self.api.destroy_encoder
+        {
+            // SAFETY: destroys the half-open session the driver returned.
+            let _ = unsafe { destroy(self.session) };
+        }
+        self.session = ptr::null_mut();
+        error
     }
 
     fn require_codec(&self) -> Result<(), NvencError> {
@@ -214,6 +262,47 @@ impl Encoder {
         } else {
             Err(NvencError::Unsupported(self.settings.codec))
         }
+    }
+
+    /// Fails when the frame is larger than the codec's encoder accepts (H.264 stops at 4096
+    /// pixels across on every NVENC generation).
+    fn require_size(&self) -> Result<(), NvencError> {
+        let max_width = self.capability(ffi::CAPS_WIDTH_MAX)?;
+        let max_height = self.capability(ffi::CAPS_HEIGHT_MAX)?;
+        let Settings {
+            codec,
+            width,
+            height,
+            ..
+        } = self.settings;
+        if width > max_width || height > max_height {
+            return Err(NvencError::TooLarge {
+                codec,
+                width,
+                height,
+                max_width,
+                max_height,
+            });
+        }
+        Ok(())
+    }
+
+    fn capability(&self, capability: u32) -> Result<u32, NvencError> {
+        let get_caps = function(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
+        let mut query = ffi::CapsParam::zeroed();
+        query.version = ffi::CAPS_PARAM_VER;
+        query.caps_to_query = capability;
+        let mut value = 0;
+        // SAFETY: a versioned query structure and one integer to write.
+        self.check("nvEncGetEncodeCaps", unsafe {
+            get_caps(
+                self.session,
+                codec_guid(self.settings.codec),
+                &raw mut query,
+                &raw mut value,
+            )
+        })?;
+        Ok(value.unsigned_abs())
     }
 
     fn initialize(&mut self) -> Result<(), NvencError> {
@@ -364,6 +453,8 @@ impl Encoder {
 
     /// Encodes the texture [`input`](Self::input) returned as frame `index`.
     pub(super) fn submit(&mut self, index: u64, fresh: bool) -> Result<(), NvencError> {
+        let lock = self.device_lock.clone();
+        let _locked = Locked::new(&lock);
         let slot = self.next;
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
@@ -429,7 +520,10 @@ impl Encoder {
         match unsafe { WaitForSingleObject(self.slots[slot].event, timeout) } {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT if !wait => return Ok(false),
-            WAIT_TIMEOUT => return Err(NvencError::Timeout),
+            WAIT_TIMEOUT => {
+                self.stalled = true;
+                return Err(NvencError::Timeout);
+            }
             _ => {
                 return Err(NvencError::Windows(
                     "wait for NVENC",
@@ -443,8 +537,12 @@ impl Encoder {
             .take()
             .expect("a queued slot has a frame in flight");
 
-        let result = self.read_bitstream(slot);
-        self.unmap(frame.mapped);
+        let result = {
+            let _locked = Locked::new(&self.device_lock);
+            let result = self.read_bitstream(slot);
+            self.unmap(frame.mapped);
+            result
+        };
         let (picture_type, data) = result?;
         output(Encoded {
             index: frame.index,
@@ -559,14 +657,20 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         if !self.session.is_null() {
-            // Frames still in flight are abandoned; their buffers are released below.
-            for &slot in &self.queue {
-                if let Some(event) = self.slots.get(slot).map(|slot| slot.event) {
-                    // SAFETY: the slot's event is open.
-                    let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
+            // Frames still in flight are abandoned; their buffers are released below. A
+            // stalled encoder is not waited for again.
+            if !self.stalled {
+                for &slot in &self.queue {
+                    if let Some(event) = self.slots.get(slot).map(|slot| slot.event) {
+                        // SAFETY: the slot's event is open.
+                        let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
+                    }
                 }
             }
-            self.end_of_stream();
+            let _locked = Locked::new(&self.device_lock);
+            if !self.stalled {
+                self.end_of_stream();
+            }
             for slot in &self.slots {
                 self.release_slot(slot);
             }

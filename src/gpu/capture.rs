@@ -3,10 +3,16 @@
 //! texture on the GPU and hands the pool's buffer straight back to Windows.
 
 use super::device::Device;
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use thiserror::Error;
 use windows::{
-    Foundation::TimeSpan,
+    Foundation::{TimeSpan, TypedEventHandler},
     Graphics::{
         Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
@@ -37,6 +43,8 @@ pub(crate) enum CaptureError {
         "Windows Graphics Capture is not available; Windows 10 version 1903 or newer is needed"
     )]
     Unsupported,
+    #[error("the captured display went away")]
+    Closed,
     #[error("{0}: {1}")]
     Windows(&'static str, windows::core::Error),
 }
@@ -59,13 +67,19 @@ pub(super) fn join_apartment() {
 }
 
 pub(super) struct Capture {
+    item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
+    /// Set when Windows ends the capture: the monitor was unplugged or the device was lost.
+    closed: Arc<AtomicBool>,
+    closed_token: i64,
 }
 
 impl Capture {
-    /// Starts capturing the primary monitor, with the cursor, at most once per `period`.
+    /// Starts capturing the primary monitor, with the cursor, at most twice per `period`: the
+    /// display delivers frames only on its own refresh, so a limit of exactly one period would
+    /// skip to every other refresh whenever the two rates do not divide evenly.
     pub(super) fn primary_monitor(device: &Device, period: Duration) -> Result<Self, CaptureError> {
         let failed = |step| move |error| CaptureError::Windows(step, error);
         if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
@@ -80,6 +94,14 @@ impl Capture {
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }
             .map_err(failed("capture the primary monitor"))?;
         let size = item.Size().map_err(failed("read the monitor size"))?;
+        let closed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&closed);
+        let closed_token = item
+            .Closed(&TypedEventHandler::new(move |_, _| {
+                flag.store(true, Ordering::Relaxed);
+                Ok(())
+            }))
+            .map_err(failed("watch the capture item"))?;
 
         let dxgi: IDXGIDevice = device
             .d3d
@@ -105,14 +127,17 @@ impl Capture {
         let _ = session.SetIsCursorCaptureEnabled(true);
         let _ = session.SetIsBorderRequired(false);
         let _ = session.SetMinUpdateInterval(TimeSpan {
-            Duration: i64::try_from(period.as_nanos() / 100).unwrap_or(i64::MAX),
+            Duration: i64::try_from(period.as_nanos() / 200).unwrap_or(i64::MAX),
         });
         session.StartCapture().map_err(failed("start capturing"))?;
 
         Ok(Self {
+            item,
             pool,
             session,
             size,
+            closed,
+            closed_token,
         })
     }
 
@@ -134,6 +159,9 @@ impl Capture {
         height: u32,
     ) -> Result<Frame, CaptureError> {
         let failed = |step| move |error| CaptureError::Windows(step, error);
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(CaptureError::Closed);
+        }
 
         // Older frames are dropped unseen; only the newest matters. No frame reads as an error.
         let mut newest = None;
@@ -187,6 +215,7 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }
