@@ -91,14 +91,12 @@ pub(crate) fn write(
     output.write_all(&LARGE_SIZE.to_be_bytes())?;
     output.write_all(b"mdat")?;
     output.write_all(&(MDAT_HEADER_BYTES + media_bytes).to_be_bytes())?;
-    for sample in &samples {
-        for part in &sample.parts {
-            if prefixed {
-                let length: u32 = fit(part.len())?;
-                output.write_all(&length.to_be_bytes())?;
-            }
-            output.write_all(part)?;
+    for part in samples.iter().flat_map(|sample| &sample.parts) {
+        if prefixed {
+            let length: u32 = fit(part.len())?;
+            output.write_all(&length.to_be_bytes())?;
         }
+        output.write_all(part)?;
     }
     output.flush()?;
     Ok(())

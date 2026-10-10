@@ -474,13 +474,14 @@ impl Machine {
     }
 
     fn stop_session(&mut self) {
-        if let Some(session) = self.session.take() {
-            session.stop.store(true, Ordering::Relaxed);
-            match session.join.join() {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => log::error(text::session_failed(&format!("{error:#}"))),
-                Err(_) => log::error(text::session_failed(text::CAPTURE_PANICKED)),
-            }
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        session.stop.store(true, Ordering::Relaxed);
+        match session.join.join() {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => log::error(text::session_failed(&format!("{error:#}"))),
+            Err(_) => log::error(text::session_failed(text::CAPTURE_PANICKED)),
         }
     }
 
@@ -501,37 +502,7 @@ impl Machine {
     /// Notices a session that ended by itself, a retry that is due and a save that finished.
     fn poll(&mut self) {
         if let Some(session) = self.session.take_if(|session| session.join.is_finished()) {
-            match session.join.join() {
-                Ok(Ok(Ended::Resized)) => {
-                    log::info(text::RESIZED);
-                    self.restart_session();
-                }
-                Ok(Ok(Ended::Stopped)) => {
-                    self.status.state = DisplayStatus::Stopped;
-                }
-                Ok(Ok(Ended::Closed)) => match self.config.mode {
-                    Mode::Fullscreen => {
-                        let name = self.target.as_ref().map_or("", Target::name);
-                        log::info(text::target_closed(name));
-                        self.status.state = DisplayStatus::Waiting;
-                    }
-                    Mode::Desktop => self.fail(text::DISPLAY_GONE),
-                },
-                Ok(Ok(Ended::NoFrames)) => match &self.target {
-                    Some(window @ Target::Window { .. }) => {
-                        log::info(text::falling_back_to_monitor(window.name()));
-                        let monitor = window.monitor();
-                        self.start_session(monitor);
-                    }
-                    _ => self.fail(text::NO_FRAMES),
-                },
-                Ok(Ok(Ended::Unsupported(reason))) => {
-                    self.report_error(text::session_failed(&reason));
-                    self.status.state = DisplayStatus::Unsupported;
-                }
-                Ok(Err(error)) => self.fail(&format!("{error:#}")),
-                Err(_) => self.fail(text::CAPTURE_PANICKED),
-            }
+            self.session_ended(session.join.join());
         }
 
         if self.retry_at.is_some_and(|due| Instant::now() >= due) {
@@ -548,6 +519,44 @@ impl Machine {
         if let Some(saving) = self.saving.take_if(|saving| saving.join.is_finished()) {
             self.finish_save(saving);
         }
+    }
+
+    /// Acts on how a session that ended by itself finished.
+    fn session_ended(&mut self, outcome: thread::Result<Result<Ended>>) {
+        match outcome {
+            Ok(Ok(Ended::Resized)) => {
+                log::info(text::RESIZED);
+                self.restart_session();
+            }
+            Ok(Ok(Ended::Stopped)) => self.status.state = DisplayStatus::Stopped,
+            Ok(Ok(Ended::Closed)) if self.config.mode == Mode::Desktop => {
+                self.fail(text::DISPLAY_GONE);
+            }
+            Ok(Ok(Ended::Closed)) => {
+                let name = self.target.as_ref().map_or("", Target::name);
+                log::info(text::target_closed(name));
+                self.status.state = DisplayStatus::Waiting;
+            }
+            Ok(Ok(Ended::NoFrames)) => self.fall_back_to_monitor(),
+            Ok(Ok(Ended::Unsupported(reason))) => {
+                self.report_error(text::session_failed(&reason));
+                self.status.state = DisplayStatus::Unsupported;
+            }
+            Ok(Err(error)) => self.fail(&format!("{error:#}")),
+            Err(_) => self.fail(text::CAPTURE_PANICKED),
+        }
+    }
+
+    /// A window capture delivered no frame, so its monitor is captured instead; a monitor that
+    /// delivers none is a failure.
+    fn fall_back_to_monitor(&mut self) {
+        let Some(window @ Target::Window { .. }) = &self.target else {
+            self.fail(text::NO_FRAMES);
+            return;
+        };
+        log::info(text::falling_back_to_monitor(window.name()));
+        let monitor = window.monitor();
+        self.start_session(monitor);
     }
 
     fn save(&mut self) {
@@ -667,32 +676,38 @@ impl Machine {
             .map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
 
         let (encoded, _) = live.map_or((0, 0), Live::counters);
-        let current = Sample {
-            at: Instant::now(),
-            encoded,
-        };
-        match self.sample {
-            Some(previous) if running => {
-                // A publish soon after the last one keeps its rate: the figure moves slowly.
-                let elapsed = current.at.duration_since(previous.at);
-                let span = if self.status.encode_rate.is_some() {
-                    RATE_SPAN
-                } else {
-                    FIRST_RATE_SPAN
-                };
-                if elapsed >= span {
-                    self.status.encode_rate =
-                        Some((encoded - previous.encoded) as f64 / elapsed.as_secs_f64());
-                    self.sample = Some(current);
-                }
-            }
-            _ => {
-                self.status.encode_rate = None;
-                self.sample = running.then_some(current);
-            }
-        }
+        self.measure_rate(
+            running,
+            Sample {
+                at: Instant::now(),
+                encoded,
+            },
+        );
 
         *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
+    }
+
+    /// Updates the encode rate from the counters at `current`. It is cleared while nothing
+    /// records, and starts over with the next session.
+    fn measure_rate(&mut self, running: bool, current: Sample) {
+        let Some(previous) = self.sample.filter(|_| running) else {
+            self.status.encode_rate = None;
+            self.sample = running.then_some(current);
+            return;
+        };
+        // A publish soon after the last one keeps its rate: the figure moves slowly.
+        let elapsed = current.at.duration_since(previous.at);
+        let span = if self.status.encode_rate.is_some() {
+            RATE_SPAN
+        } else {
+            FIRST_RATE_SPAN
+        };
+        if elapsed < span {
+            return;
+        }
+        self.status.encode_rate =
+            Some((current.encoded - previous.encoded) as f64 / elapsed.as_secs_f64());
+        self.sample = Some(current);
     }
 }
 

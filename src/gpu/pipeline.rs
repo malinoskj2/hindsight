@@ -95,14 +95,10 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     // the driver has shown that it flags keyframes, which the first one does within a second.
     let mut driver_flags_keyframes = false;
     let mut output = |encoded: Encoded| {
-        let keyframe = if encoded.is_idr() {
-            driver_flags_keyframes = true;
-            true
-        } else if driver_flags_keyframes {
-            false
-        } else {
-            replay::is_keyframe(settings.codec, &encoded.data)
-        };
+        let idr = encoded.is_idr();
+        driver_flags_keyframes |= idr;
+        let keyframe =
+            idr || (!driver_flags_keyframes && replay::is_keyframe(settings.codec, &encoded.data));
         live.push(
             Packet {
                 index: encoded.index,
@@ -127,17 +123,17 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         let input = encoder.input();
         let fresh = match capture.take(&device, input, width, height) {
             Ok(Frame::Fresh) => true,
-            Ok(Frame::Unchanged) => {
-                let Some(latest) = encoder.latest() else {
-                    // Nothing has been captured yet; there is no picture to repeat.
-                    if first_frame_deadline.is_some_and(|deadline| index >= deadline) {
-                        break Ended::NoFrames;
-                    }
-                    continue;
-                };
-                device.copy(input, latest);
-                false
-            }
+            Ok(Frame::Unchanged) => match encoder.latest() {
+                Some(latest) => {
+                    device.copy(input, latest);
+                    false
+                }
+                // Nothing has been captured yet; there is no picture to repeat.
+                None if first_frame_deadline.is_some_and(|deadline| index >= deadline) => {
+                    break Ended::NoFrames;
+                }
+                None => continue,
+            },
             Ok(Frame::Resized) => break Ended::Resized,
             Err(CaptureError::Closed) => break Ended::Closed,
             Err(error) => return Err(error.into()),
@@ -159,14 +155,7 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
     let multimedia = match priority::join_multimedia_class() {
         Ok(multimedia) => Some(multimedia),
         Err(error) => {
-            log::warning(format!(
-                "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
-            ));
-            if let Err(error) = priority::raise_thread() {
-                log::warning(format!(
-                    "The capture thread priority was not raised: {error}"
-                ));
-            }
+            raise_thread_instead(&error);
             None
         }
     };
@@ -181,6 +170,18 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
         log::warning("The GPU scheduling priority could not be raised");
     }
     multimedia
+}
+
+/// Falls back to a high thread priority when joining the multimedia class failed with `error`.
+fn raise_thread_instead(error: &windows::core::Error) {
+    log::warning(format!(
+        "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
+    ));
+    if let Err(error) = priority::raise_thread() {
+        log::warning(format!(
+            "The capture thread priority was not raised: {error}"
+        ));
+    }
 }
 
 #[cfg(test)]

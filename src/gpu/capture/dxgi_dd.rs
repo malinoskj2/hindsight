@@ -59,13 +59,7 @@ impl DesktopDuplication {
         let (monitor, window) = monitor_of(target);
         let output = find_output(device, monitor)?;
         let (duplication, description) =
-            duplicate(&output, device).map_err(|error| match error.code() {
-                DXGI_ERROR_UNSUPPORTED => CaptureError::Unsupported(
-                    "Desktop Duplication is not available for this monitor; choose Windows Graphics Capture"
-                        .to_owned(),
-                ),
-                _ => failed("duplicate the monitor")(error),
-            })?;
+            duplicate(&output, device).map_err(first_duplication_failed)?;
         if is_rotated(&description) {
             return Err(CaptureError::Unsupported(
                 "the monitor is rotated, which Desktop Duplication does not undo; choose Windows Graphics Capture"
@@ -90,28 +84,33 @@ impl DesktopDuplication {
         if self.reopen_at.is_some_and(|due| now < due) {
             return Ok(Frame::Unchanged);
         }
-        match duplicate(&self.output, device) {
-            Ok((duplication, description)) => {
-                self.reopen_at = None;
-                if size(&description) != self.size || is_rotated(&description) {
-                    return Ok(Frame::Resized);
-                }
-                self.duplication = Some(duplication);
-                self.primed = false;
-                Ok(Frame::Unchanged)
-            }
+        let (duplication, description) = match duplicate(&self.output, device) {
+            Ok(opened) => opened,
             Err(error) if PASSING_REFUSALS.contains(&error.code()) => {
-                // SAFETY: reads the description of a live output.
-                let attached = unsafe { self.output.GetDesc() }
-                    .is_ok_and(|description| description.AttachedToDesktop.as_bool());
-                if !attached {
-                    return Err(CaptureError::Closed);
-                }
-                self.reopen_at = Some(now + REOPEN_INTERVAL);
-                Ok(Frame::Unchanged)
+                return self.retry_later(now);
             }
-            Err(error) => Err(failed("duplicate the monitor again")(error)),
+            Err(error) => return Err(failed("duplicate the monitor again")(error)),
+        };
+        self.reopen_at = None;
+        if size(&description) != self.size || is_rotated(&description) {
+            return Ok(Frame::Resized);
         }
+        self.duplication = Some(duplication);
+        self.primed = false;
+        Ok(Frame::Unchanged)
+    }
+
+    /// Schedules the next attempt after Windows refused to duplicate the monitor for now,
+    /// unless the monitor has left the desktop, which ends the session.
+    fn retry_later(&mut self, now: Instant) -> Result<Frame, CaptureError> {
+        // SAFETY: reads the description of a live output.
+        let attached = unsafe { self.output.GetDesc() }
+            .is_ok_and(|description| description.AttachedToDesktop.as_bool());
+        if !attached {
+            return Err(CaptureError::Closed);
+        }
+        self.reopen_at = Some(now + REOPEN_INTERVAL);
+        Ok(Frame::Unchanged)
     }
 }
 
@@ -210,6 +209,18 @@ fn duplicate(
     // SAFETY: describes a live duplication.
     let description = unsafe { duplication.GetDesc() };
     Ok((duplication, description))
+}
+
+/// The error for a monitor that could not be duplicated when the session started; a monitor
+/// Windows will never duplicate reads as unsupported.
+fn first_duplication_failed(error: windows::core::Error) -> CaptureError {
+    if error.code() == DXGI_ERROR_UNSUPPORTED {
+        return CaptureError::Unsupported(
+            "Desktop Duplication is not available for this monitor; choose Windows Graphics Capture"
+                .to_owned(),
+        );
+    }
+    failed("duplicate the monitor")(error)
 }
 
 /// The duplicated monitor's size in pixels.

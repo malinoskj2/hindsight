@@ -690,31 +690,35 @@ impl Encoder {
 }
 
 impl Drop for Encoder {
+    // After this body, the fields release the slots' textures and events, and the library last.
     fn drop(&mut self) {
-        if !self.session.is_null() {
-            // Frames still in flight are abandoned; their buffers are released below. A
-            // stalled encoder is not waited for again.
-            if !self.stalled {
-                for &slot in &self.queue {
-                    if let Some(event) = self.slots.get(slot).map(|slot| *slot.event) {
-                        // SAFETY: the slot's event is open.
-                        let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
-                    }
-                }
-            }
-            let _locked = Locked::new(&self.device_lock);
-            if !self.stalled {
-                self.end_of_stream();
-            }
-            for slot in &self.slots {
-                self.release_slot(slot);
-            }
-            if let Some(destroy) = self.api.destroy_encoder {
-                // SAFETY: every buffer and registration of the session is gone.
-                let _ = unsafe { destroy(self.session) };
+        if self.session.is_null() {
+            return;
+        }
+        // Frames still in flight are abandoned; their buffers are released below. A stalled
+        // encoder is not waited for again.
+        if !self.stalled {
+            let events = self
+                .queue
+                .iter()
+                .filter_map(|&slot| self.slots.get(slot))
+                .map(|slot| *slot.event);
+            for event in events {
+                // SAFETY: the slot's event is open.
+                let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
             }
         }
-        // The fields then release the slots' textures and events, and the library last.
+        let _locked = Locked::new(&self.device_lock);
+        if !self.stalled {
+            self.end_of_stream();
+        }
+        for slot in &self.slots {
+            self.release_slot(slot);
+        }
+        if let Some(destroy) = self.api.destroy_encoder {
+            // SAFETY: every buffer and registration of the session is gone.
+            let _ = unsafe { destroy(self.session) };
+        }
     }
 }
 

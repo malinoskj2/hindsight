@@ -11,15 +11,15 @@ pub(super) fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
     let mut start = None;
     let mut index = 0;
     while index + START_CODE.len() <= stream.len() {
-        if stream[index..].starts_with(&START_CODE) {
-            if let Some(start) = start {
-                units.push(trim_trailing_zeros(&stream[start..index]));
-            }
-            index += START_CODE.len();
-            start = Some(index);
-        } else {
+        if !stream[index..].starts_with(&START_CODE) {
             index += 1;
+            continue;
         }
+        if let Some(start) = start {
+            units.push(trim_trailing_zeros(&stream[start..index]));
+        }
+        index += START_CODE.len();
+        start = Some(index);
     }
     if let Some(start) = start {
         units.push(trim_trailing_zeros(&stream[start..]));

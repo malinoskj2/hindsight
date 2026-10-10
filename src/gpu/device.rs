@@ -156,15 +156,16 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
         // SAFETY: reads the description of a live adapter.
         let description = unsafe { adapter.GetDesc1() }.map_err(DeviceError::Enumerate)?;
         let software = description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
-        if description.VendorId == NVIDIA_VENDOR_ID && !software {
-            let length = description
-                .Description
-                .iter()
-                .position(|unit| *unit == 0)
-                .unwrap_or(description.Description.len());
-            let name = String::from_utf16_lossy(&description.Description[..length]);
-            return Ok((adapter, name));
+        if description.VendorId != NVIDIA_VENDOR_ID || software {
+            continue;
         }
+        let length = description
+            .Description
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(description.Description.len());
+        let name = String::from_utf16_lossy(&description.Description[..length]);
+        return Ok((adapter, name));
     }
     Err(DeviceError::NoNvidiaAdapter)
 }

@@ -162,15 +162,19 @@ unsafe extern "system" fn on_event(
     _thread: u32,
     _time: u32,
 ) {
-    if event == EVENT_OBJECT_LOCATIONCHANGE {
-        // SAFETY: `GetForegroundWindow` takes no arguments and has no preconditions.
-        let foreground = unsafe { GetForegroundWindow() };
-        if object != OBJID_WINDOW.0 || child != CHILDID_SELF.cast_signed() || window != foreground {
-            return;
-        }
+    if event == EVENT_OBJECT_LOCATIONCHANGE && !is_foreground_window(window, object, child) {
+        return;
     }
     let handler = HANDLER.with(|handler| handler.borrow().clone());
     if let Some(handler) = handler {
         handler();
     }
+}
+
+/// Whether an event's object is the foreground window itself, rather than one of its controls
+/// or another window.
+fn is_foreground_window(window: HWND, object: i32, child: i32) -> bool {
+    // SAFETY: `GetForegroundWindow` takes no arguments and has no preconditions.
+    let foreground = unsafe { GetForegroundWindow() };
+    object == OBJID_WINDOW.0 && child == CHILDID_SELF.cast_signed() && window == foreground
 }

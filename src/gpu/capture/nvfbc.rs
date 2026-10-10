@@ -226,12 +226,10 @@ impl Nvfbc {
                 self.session = Some(session);
                 self.reopen_at = None;
             }
-            Err(status) => {
-                if let Some(error) = permanent(status) {
-                    return Err(error);
-                }
-                self.reopen_at = Some(now + REOPEN_INTERVAL);
-            }
+            Err(status) => match permanent(status) {
+                Some(error) => return Err(error),
+                None => self.reopen_at = Some(now + REOPEN_INTERVAL),
+            },
         }
         Ok(Frame::Unchanged)
     }
@@ -444,22 +442,24 @@ fn prepare(library: &Library, key: &[u8], adapter: u32) -> Result<ffi::CreateEx,
     unsafe { get_status(&raw mut status) }
         .ok()
         .map_err(nvfbc_failed("read the NvFBC status"))?;
-    if status.flags & ffi::STATUS_CAPTURE_POSSIBLE == 0 {
-        // SAFETY: a plain call into the loaded library.
-        let result = unsafe { enable(ffi::STATE_ENABLE) };
-        if result == Status::INSUFFICIENT_PRIVILEGES {
-            return Err(CaptureError::Unsupported(
-                "NvFBC is turned off in the NVIDIA driver; run hindsight once as administrator to turn it on"
-                    .to_owned(),
-            ));
-        }
-        if result != Status::SUCCESS {
-            return Err(CaptureError::Unsupported(format!(
-                "NvFBC is turned off in the NVIDIA driver and could not be turned on: {result}"
-            )));
-        }
-        log::info("NvFBC was off in the NVIDIA driver and has been turned on");
+    if status.flags & ffi::STATUS_CAPTURE_POSSIBLE != 0 {
+        return Ok(create);
     }
+
+    // SAFETY: a plain call into the loaded library.
+    let result = unsafe { enable(ffi::STATE_ENABLE) };
+    if result == Status::INSUFFICIENT_PRIVILEGES {
+        return Err(CaptureError::Unsupported(
+            "NvFBC is turned off in the NVIDIA driver; run hindsight once as administrator to turn it on"
+                .to_owned(),
+        ));
+    }
+    if result != Status::SUCCESS {
+        return Err(CaptureError::Unsupported(format!(
+            "NvFBC is turned off in the NVIDIA driver and could not be turned on: {result}"
+        )));
+    }
+    log::info("NvFBC was off in the NVIDIA driver and has been turned on");
     Ok(create)
 }
 

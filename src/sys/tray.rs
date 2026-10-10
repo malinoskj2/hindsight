@@ -64,18 +64,8 @@ impl Tray {
                 dispatch(action);
             }
         }));
-        TrayIconEvent::set_event_handler(Some(|event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                }
-            ) {
+        TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
+            if opens_window(&event) {
                 dispatch(TrayAction::Show);
             }
         }));
@@ -90,6 +80,22 @@ impl Drop for Tray {
         TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
         HANDLER.with(|handler| handler.borrow_mut().take());
     }
+}
+
+/// Whether a click on the icon shows the window: a left click once the button is released, or
+/// a left double click.
+fn opens_window(event: &TrayIconEvent) -> bool {
+    matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } | TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        }
+    )
 }
 
 /// The callback is cloned out first, so it may itself replace or drop the tray.

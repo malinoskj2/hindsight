@@ -34,43 +34,50 @@ fn length_field(bytes: usize) -> u32 {
 /// RGBA pixels, row-major from the top-left, with straight (unmultiplied) alpha.
 pub(crate) fn rgba(size: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
     for y in 0..size {
         for x in 0..size {
-            let mut tile = 0.0;
-            let mut glyph = 0.0;
-            let mut dot = 0.0;
-            for sy in 0..SUPERSAMPLE {
-                for sx in 0..SUPERSAMPLE {
-                    let px = (x as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-                    let py = (y as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-                    if inside_tile(px, py) {
-                        tile += 1.0;
-                        if inside_triangle(px, py) {
-                            glyph += 1.0;
-                        } else if inside_dot(px, py) {
-                            dot += 1.0;
-                        }
-                    }
-                }
-            }
-            let coverage = tile / samples;
-            let (glyph_share, dot_share) = if tile > 0.0 {
-                (glyph / tile, dot / tile)
-            } else {
-                (0.0, 0.0)
-            };
-            for channel in 0..3 {
-                let mixed = f32::from(BACKGROUND[channel]) * (1.0 - glyph_share - dot_share)
-                    + f32::from(GLYPH[channel]) * glyph_share
-                    + f32::from(DOT[channel]) * dot_share;
-                pixels.push(to_byte(mixed));
-            }
-            pixels.push(to_byte(coverage * 255.0));
+            pixels.extend_from_slice(&pixel(x, y, size));
+        }
+    }
+    pixels
+}
+
+/// One RGBA pixel: the share of its subsamples inside the tile is its alpha, and the shares of
+/// those on the glyph and the dot mix their colours into the background.
+fn pixel(x: u32, y: u32, size: u32) -> [u8; 4] {
+    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
+    let subsamples = (0..SUPERSAMPLE).flat_map(|sy| (0..SUPERSAMPLE).map(move |sx| (sx, sy)));
+    let mut tile = 0.0;
+    let mut glyph = 0.0;
+    let mut dot = 0.0;
+    for (sx, sy) in subsamples {
+        let px = (x as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
+        let py = (y as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
+        if !inside_tile(px, py) {
+            continue;
+        }
+        tile += 1.0;
+        if inside_triangle(px, py) {
+            glyph += 1.0;
+        } else if inside_dot(px, py) {
+            dot += 1.0;
         }
     }
 
-    pixels
+    let coverage = tile / samples;
+    let (glyph_share, dot_share) = if tile > 0.0 {
+        (glyph / tile, dot / tile)
+    } else {
+        (0.0, 0.0)
+    };
+    let mix = |channel: usize| {
+        to_byte(
+            f32::from(BACKGROUND[channel]) * (1.0 - glyph_share - dot_share)
+                + f32::from(GLYPH[channel]) * glyph_share
+                + f32::from(DOT[channel]) * dot_share,
+        )
+    };
+    [mix(0), mix(1), mix(2), to_byte(coverage * 255.0)]
 }
 
 /// The icon as a Windows `.ico` file with 32-bit BMP entries for every size in `ICO_SIZES`.
@@ -119,10 +126,12 @@ fn bmp_entry(size: u32) -> Vec<u8> {
     entry.extend_from_slice(&[0; 16]);
 
     let row_bytes = (size * 4) as usize;
-    for row in pixels.chunks_exact(row_bytes).rev() {
-        for pixel in row.as_chunks::<4>().0 {
-            entry.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
-        }
+    let bottom_up = pixels
+        .chunks_exact(row_bytes)
+        .rev()
+        .flat_map(|row| row.as_chunks::<4>().0);
+    for [red, green, blue, alpha] in bottom_up {
+        entry.extend_from_slice(&[*blue, *green, *red, *alpha]);
     }
     entry.resize(entry.len() + (mask_row_bytes * size) as usize, 0);
     entry

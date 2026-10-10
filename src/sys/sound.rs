@@ -49,25 +49,12 @@ fn play(_tones: &'static [(u32, u32)]) {}
 
 /// A mono 16-bit WAV of the `(frequency Hz, milliseconds)` tones, where a frequency of 0 is
 /// silence. Each tone fades in and out so it does not click.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the scaled sample is within the i16 range, and the rounding is intended"
-)]
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
-    let fade = SAMPLE_RATE * FADE_MS / 1000;
     let mut data = Vec::new();
     for &(frequency, milliseconds) in tones {
         let count = SAMPLE_RATE * milliseconds / 1000;
         for index in 0..count {
-            let value = if frequency == 0 {
-                0.0
-            } else {
-                let time = f64::from(index) / f64::from(SAMPLE_RATE);
-                let edge = index.min(count - 1 - index);
-                let envelope = (f64::from(edge) / f64::from(fade)).min(1.0);
-                envelope * AMPLITUDE * (TAU * f64::from(frequency) * time).sin()
-            };
-            data.extend_from_slice(&((value * f64::from(i16::MAX)).round() as i16).to_le_bytes());
+            data.extend_from_slice(&sample(frequency, index, count).to_le_bytes());
         }
     }
 
@@ -87,6 +74,24 @@ fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(&data);
     wav
+}
+
+/// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MS`; a frequency
+/// of 0 is silence.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the scaled sample is within the i16 range, and the rounding is intended"
+)]
+fn sample(frequency: u32, index: u32, count: u32) -> i16 {
+    if frequency == 0 {
+        return 0;
+    }
+    let fade = SAMPLE_RATE * FADE_MS / 1000;
+    let time = f64::from(index) / f64::from(SAMPLE_RATE);
+    let edge = index.min(count - 1 - index);
+    let envelope = (f64::from(edge) / f64::from(fade)).min(1.0);
+    let value = envelope * AMPLITUDE * (TAU * f64::from(frequency) * time).sin();
+    (value * f64::from(i16::MAX)).round() as i16
 }
 
 #[cfg(test)]

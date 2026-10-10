@@ -26,21 +26,22 @@ pub(crate) fn show_running() -> bool {
     for _ in 0..ATTEMPTS {
         if let Ok(Some(window)) =
             w::HWND::FindWindow(Some(w::AtomStr::from_str(WINDOW_CLASS)), None)
+            && bring_forward(&window)
         {
-            // This launch was started by the user, so it may let the other copy take the focus.
-            let (_, process) = window.GetWindowThreadProcessId();
-            let _ = w::AllowSetForegroundWindow(Some(process));
-            if post(&window) {
-                return true;
-            }
+            return true;
         }
         thread::sleep(WAIT);
     }
     false
 }
 
+/// Lets the running copy take the focus and asks its window to come forward. Reports whether
+/// the request was posted.
 #[expect(unsafe_code)]
-fn post(window: &w::HWND) -> bool {
+fn bring_forward(window: &w::HWND) -> bool {
+    // This launch was started by the user, so it may let the other copy take the focus.
+    let (_, process) = window.GetWindowThreadProcessId();
+    let _ = w::AllowSetForegroundWindow(Some(process));
     // SAFETY: the message carries no pointers, and the window answers it from its own state.
     unsafe { window.PostMessage(w::msg::Wm::new(show_message(), 0, 0)) }.is_ok()
 }

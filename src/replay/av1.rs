@@ -40,38 +40,35 @@ struct Obu<'a> {
 /// The OBUs of a low-overhead bitstream; stops at the first malformed one.
 fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
     let mut found = Vec::new();
-    while let Some(&first) = data.first() {
-        let header_length = if first & OBU_EXTENSION_FLAG == 0 {
-            1
-        } else {
-            2
-        };
-        let Some(after_header) = data.get(header_length..) else {
-            break;
-        };
-        let (payload_start, payload_length) = if first & OBU_HAS_SIZE_FIELD == 0 {
-            (header_length, after_header.len())
-        } else {
-            let Some((size, length)) = leb128(after_header) else {
-                break;
-            };
-            (header_length + length, size)
-        };
-        let Some(end) = payload_start.checked_add(payload_length) else {
-            break;
-        };
-        let Some(payload) = data.get(payload_start..end) else {
-            break;
-        };
-        found.push(Obu {
-            kind: obu_type(first),
-            header: &data[..header_length],
-            payload,
-            bytes: &data[..end],
-        });
-        data = &data[end..];
+    while let Some(obu) = first_obu(data) {
+        data = &data[obu.bytes.len()..];
+        found.push(obu);
     }
     found
+}
+
+/// The OBU at the start of `data`, unless `data` is empty or the OBU is malformed.
+fn first_obu(data: &[u8]) -> Option<Obu<'_>> {
+    let &first = data.first()?;
+    let header_length = if first & OBU_EXTENSION_FLAG == 0 {
+        1
+    } else {
+        2
+    };
+    let after_header = data.get(header_length..)?;
+    let (payload_start, payload_length) = if first & OBU_HAS_SIZE_FIELD == 0 {
+        (header_length, after_header.len())
+    } else {
+        let (size, length) = leb128(after_header)?;
+        (header_length + length, size)
+    };
+    let end = payload_start.checked_add(payload_length)?;
+    Some(Obu {
+        kind: obu_type(first),
+        header: &data[..header_length],
+        payload: data.get(payload_start..end)?,
+        bytes: &data[..end],
+    })
 }
 
 /// The `obu_type` in an OBU's first header byte.
@@ -190,42 +187,11 @@ impl SequenceHeader {
         let _still_picture = bits.flag()?;
         let reduced_still_picture_header = bits.flag()?;
 
-        let (level, tier);
-        if reduced_still_picture_header {
-            level = bits.read(5)?;
-            tier = false;
+        let (level, tier) = if reduced_still_picture_header {
+            (bits.read(5)?, false)
         } else {
-            let mut decoder_model_info_present = false;
-            let mut buffer_delay_length = 0;
-            if bits.flag()? {
-                // timing_info()
-                bits.skip(64)?;
-                if bits.flag()? {
-                    bits.uvlc()?;
-                }
-                decoder_model_info_present = bits.flag()?;
-                if decoder_model_info_present {
-                    buffer_delay_length = bits.read(5)? + 1;
-                    bits.skip(32 + 5 + 5)?;
-                }
-            }
-            let initial_display_delay_present = bits.flag()?;
-            let operating_points = bits.read(5)? + 1;
-            let mut first = None;
-            for _ in 0..operating_points {
-                let _idc = bits.read(12)?;
-                let point_level = bits.read(5)?;
-                let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.flag()?;
-                if decoder_model_info_present && bits.flag()? {
-                    bits.skip(2 * buffer_delay_length + 1)?;
-                }
-                if initial_display_delay_present && bits.flag()? {
-                    bits.skip(4)?;
-                }
-                first.get_or_insert((point_level, point_tier));
-            }
-            (level, tier) = first?;
-        }
+            Self::first_operating_point(&mut bits)?
+        };
 
         let width_bits = bits.read(4)? + 1;
         let height_bits = bits.read(4)? + 1;
@@ -263,6 +229,54 @@ impl SequenceHeader {
             colour,
         })
     }
+
+    /// Reads the optional timing and decoder model information, then every operating point,
+    /// and returns the first point's level and tier.
+    fn first_operating_point(bits: &mut Bits<'_>) -> Option<(u32, bool)> {
+        let timing_info_present = bits.flag()?;
+        if timing_info_present {
+            Self::skip_timing_info(bits)?;
+        }
+        let buffer_delay_length = if timing_info_present && bits.flag()? {
+            Some(Self::decoder_model_info(bits)?)
+        } else {
+            None
+        };
+        let initial_display_delay_present = bits.flag()?;
+        let operating_points = bits.read(5)? + 1;
+        let mut first = None;
+        for _ in 0..operating_points {
+            let _idc = bits.read(12)?;
+            let point_level = bits.read(5)?;
+            let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.flag()?;
+            if let Some(buffer_delay_length) = buffer_delay_length
+                && bits.flag()?
+            {
+                bits.skip(2 * buffer_delay_length + 1)?;
+            }
+            if initial_display_delay_present && bits.flag()? {
+                bits.skip(4)?;
+            }
+            first.get_or_insert((point_level, point_tier));
+        }
+        first
+    }
+
+    /// Skips `timing_info()`: the tick rate, then the picture interval if it is fixed.
+    fn skip_timing_info(bits: &mut Bits<'_>) -> Option<()> {
+        bits.skip(64)?;
+        if bits.flag()? {
+            bits.uvlc()?;
+        }
+        Some(())
+    }
+
+    /// Reads `decoder_model_info()` and returns its `buffer_delay_length`.
+    fn decoder_model_info(bits: &mut Bits<'_>) -> Option<u32> {
+        let buffer_delay_length = bits.read(5)? + 1;
+        bits.skip(32 + 5 + 5)?;
+        Some(buffer_delay_length)
+    }
 }
 
 /// The parts of `color_config()` the `av1C` record repeats.
@@ -288,28 +302,13 @@ impl ColourConfig {
         } else {
             UNSPECIFIED_COLOUR
         };
-        let (subsampling_x, subsampling_y, chroma_sample_position);
-        if monochrome {
-            (subsampling_x, subsampling_y, chroma_sample_position) = (true, true, 0);
+        let (subsampling_x, subsampling_y, chroma_sample_position) = if monochrome {
+            (true, true, 0)
         } else if colours == SRGB {
-            (subsampling_x, subsampling_y, chroma_sample_position) = (false, false, 0);
+            (false, false, 0)
         } else {
-            let _color_range = bits.flag()?;
-            (subsampling_x, subsampling_y) = match profile {
-                PROFILE_MAIN => (true, true),
-                PROFILE_HIGH => (false, false),
-                _ if twelve_bit => {
-                    let x = bits.flag()?;
-                    (x, x && bits.flag()?)
-                }
-                _ => (true, false),
-            };
-            chroma_sample_position = if subsampling_x && subsampling_y {
-                bits.read(2)?
-            } else {
-                0
-            };
-        }
+            Self::chroma(bits, profile, twelve_bit)?
+        };
         Some(Self {
             high_bitdepth,
             twelve_bit,
@@ -318,6 +317,27 @@ impl ColourConfig {
             subsampling_y,
             chroma_sample_position,
         })
+    }
+
+    /// Reads the colour range, the subsampling and the chroma sample position of a colour
+    /// image that is not sRGB.
+    fn chroma(bits: &mut Bits<'_>, profile: u32, twelve_bit: bool) -> Option<(bool, bool, u32)> {
+        let _color_range = bits.flag()?;
+        let (subsampling_x, subsampling_y) = match profile {
+            PROFILE_MAIN => (true, true),
+            PROFILE_HIGH => (false, false),
+            _ if twelve_bit => {
+                let x = bits.flag()?;
+                (x, x && bits.flag()?)
+            }
+            _ => (true, false),
+        };
+        let chroma_sample_position = if subsampling_x && subsampling_y {
+            bits.read(2)?
+        } else {
+            0
+        };
+        Some((subsampling_x, subsampling_y, chroma_sample_position))
     }
 }
 
