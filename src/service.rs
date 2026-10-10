@@ -23,8 +23,11 @@ use std::{
 
 mod text;
 
-/// The shortest span the rates are measured over; a publish sooner than that keeps the last rates.
-const MIN_RATE_SPAN: f64 = 0.5;
+/// The span the frame rate is measured over; a publish sooner than that keeps the last rate, so
+/// the figure changes about every ten seconds.
+const RATE_SPAN: f64 = 10.0;
+/// The span of the first measurement after recording starts, so the figure appears promptly.
+const FIRST_RATE_SPAN: f64 = 1.0;
 /// How long to wait before starting a session again after it failed (the display was turned
 /// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -122,8 +125,6 @@ pub(crate) struct Status {
     pub(crate) saved_bytes: Option<u64>,
     /// Bytes that went into the replay buffer in every run, this session's included.
     pub(crate) buffered_lifetime_bytes: Option<u64>,
-    /// Frames per second with new screen content, over the last refresh.
-    pub(crate) fresh_rate: Option<f64>,
     /// Frames per second encoded, over the last refresh.
     pub(crate) encode_rate: Option<f64>,
     /// Bytes that went into the replay buffer since the app started.
@@ -249,7 +250,6 @@ struct Saving {
 struct Sample {
     at: Instant,
     encoded: u64,
-    fresh: u64,
 }
 
 struct Machine {
@@ -654,32 +654,28 @@ impl Machine {
         });
 
         let now = Instant::now();
-        let (encoded, fresh) = live.as_ref().map_or((0, 0), |live| live.counters());
+        let (encoded, _) = live.as_ref().map_or((0, 0), |live| live.counters());
         let previous = self
             .sample
             .as_ref()
-            .map(|sample| (sample.at, sample.encoded, sample.fresh));
+            .map(|sample| (sample.at, sample.encoded));
         match previous {
-            Some((at, encoded_before, fresh_before)) if running => {
-                // A publish soon after the last one keeps its rates: a short span measures noise.
+            Some((at, encoded_before)) if running => {
+                // A publish soon after the last one keeps its rate: the figure moves slowly.
                 let elapsed = now.duration_since(at).as_secs_f64();
-                if elapsed >= MIN_RATE_SPAN {
+                let span = if self.status.encode_rate.is_some() {
+                    RATE_SPAN
+                } else {
+                    FIRST_RATE_SPAN
+                };
+                if elapsed >= span {
                     self.status.encode_rate = Some((encoded - encoded_before) as f64 / elapsed);
-                    self.status.fresh_rate = Some((fresh - fresh_before) as f64 / elapsed);
-                    self.sample = Some(Sample {
-                        at: now,
-                        encoded,
-                        fresh,
-                    });
+                    self.sample = Some(Sample { at: now, encoded });
                 }
             }
             _ => {
-                (self.status.encode_rate, self.status.fresh_rate) = (None, None);
-                self.sample = running.then_some(Sample {
-                    at: now,
-                    encoded,
-                    fresh,
-                });
+                self.status.encode_rate = None;
+                self.sample = running.then_some(Sample { at: now, encoded });
             }
         }
 

@@ -1,4 +1,0 @@
-[toolchain]
-# The app targets Windows with MSVC (see .cargo/config.toml), so pin the MSVC host toolchain.
-channel = "stable-x86_64-pc-windows-msvc"
-components = ["clippy", "rustfmt"]

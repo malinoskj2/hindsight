@@ -55,7 +55,7 @@ impl SettingsPage {
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
-        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 228);
+        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 234);
         let codec = choice_field(
             &page,
             text::CODEC,

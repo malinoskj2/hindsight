@@ -36,7 +36,6 @@ pub(super) struct StatusPage {
     last_clip: gui::Label,
     folder: gui::Label,
     pub(super) save: gui::Button,
-    hotkey_hint: gui::Label,
     pub(super) recording: gui::Button,
 }
 
@@ -50,7 +49,7 @@ impl StatusPage {
         let state = TintedLabel::new(&page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
         let _source_caption = caption(text::SOURCE, 48);
         let source = path_label(&page, VALUE_X, 48, VALUE_WIDTH);
-        let _capture_caption = caption(text::CAPTURE, 68);
+        let _capture_caption = caption(text::BACKEND, 68);
         let backend = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
         let _encoder_caption = caption(text::ENCODER, 88);
         let encoder = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
@@ -75,7 +74,6 @@ impl StatusPage {
         let folder_caption = caption(text::CLIP_FOLDER, 284);
         let folder = path_label(&page, VALUE_X, 284, VALUE_WIDTH);
         let save = button(&page, text::SAVE_REPLAY, INNER_X, 310, 120);
-        let hotkey_hint = label(&page, "", INNER_X + 128, 315, 140, 1);
         let recording = button(
             &page,
             text::STOP_RECORDING,
@@ -106,14 +104,12 @@ impl StatusPage {
             last_clip.clone(),
             folder_caption,
             folder.clone(),
-            hotkey_hint.clone(),
         ])
         .moving([save.clone(), recording.clone()]);
         let frames = vec![recording_frame, stats_frame, clips_frame];
 
-        // The tinted lines read their colour here; the hint is muted and every other label black.
+        // The tinted lines read their colour here; every other label is black.
         let tints = [state.clone(), notice.clone()];
-        let muted = hotkey_hint.clone();
         layout::draw(
             &page,
             page.on(),
@@ -123,7 +119,7 @@ impl StatusPage {
                 tints
                     .iter()
                     .find_map(|tint| tint.colour_of(hwnd))
-                    .unwrap_or(if *hwnd == *muted.hwnd() { GRAY } else { BLACK })
+                    .unwrap_or(BLACK)
             },
         );
 
@@ -144,7 +140,6 @@ impl StatusPage {
             last_clip,
             folder,
             save,
-            hotkey_hint,
             recording,
         }
     }
@@ -214,7 +209,6 @@ impl StatusPage {
             },
         );
         self.save.hwnd().EnableWindow(!status.saving);
-        layout::set_text(&self.hotkey_hint, &text::hotkey_hint(&config.hotkey));
         layout::set_text(
             &self.recording,
             if status.recording || status.state == DisplayStatus::Waiting {

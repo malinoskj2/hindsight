@@ -17,7 +17,6 @@ pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_STARTUP: &str = "Startup";
 
 pub(super) const SOURCE: &str = "Source";
-pub(super) const CAPTURE: &str = "Capture";
 pub(super) const GROUP_STATS: &str = "Stats";
 pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
 pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
@@ -156,20 +155,13 @@ pub(super) fn encoder(status: &Status) -> String {
 }
 
 pub(super) fn rates(status: &Status) -> String {
-    match (status.encode_rate, status.fresh_rate) {
-        (Some(encoded), Some(fresh)) => {
-            format!("{encoded:.1} fps encoded · {fresh:.1} fps of new frames")
-        }
-        _ => NO_VALUE.to_owned(),
-    }
+    status
+        .encode_rate
+        .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
 }
 
 pub(super) fn last_clip(path: Option<&Path>) -> String {
     path.map_or_else(|| NO_VALUE.to_owned(), |path| path.display().to_string())
-}
-
-pub(super) fn hotkey_hint(hotkey: &str) -> String {
-    format!("or press {hotkey}")
 }
 
 pub(super) fn buffer_estimate(megabytes: u64) -> String {

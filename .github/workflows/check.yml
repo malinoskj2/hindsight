@@ -44,7 +44,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: 1.99.0
-      - run: choco install nsis -y --no-progress
+      # The Chocolatey feed fails intermittently; retry, and fail here rather than in the build.
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds 30 }
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'choco could not install NSIS' }
       - run: ./scripts/build-windows.ps1
         shell: pwsh
       - name: Prepare downloadable build
