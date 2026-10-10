@@ -115,7 +115,7 @@ impl Main {
 
         let (start_with_windows, startup_error) = match startup::enabled() {
             Ok(enabled) => (enabled, None),
-            Err(error) => (false, Some(text::startup_setting_failed(&error))),
+            Err(error) => (false, Some(text::startup_setting_failed(error))),
         };
         let status = StatusPage::new(&wnd);
         let settings = SettingsPage::new(&wnd, &config, start_with_windows);
@@ -262,7 +262,7 @@ impl Main {
             Ok(tray) => self.shared.borrow_mut().tray = Some(tray),
             Err(error) => {
                 // Without a tray, closing quits; the footer row appears to say so.
-                let message = text::tray_unavailable(&error);
+                let message = text::tray_unavailable(error);
                 log::warning(&message);
                 self.footer.show_hint(&message);
                 self.shared.borrow_mut().heights.footer = footer::HEIGHT;
@@ -292,7 +292,7 @@ impl Main {
             TrayAction::Show => self.show(),
             TrayAction::Save => self.save(),
             TrayAction::Quit => {
-                log::info("Quit chosen from the tray menu");
+                log::info(text::QUIT_FROM_TRAY);
                 self.shared.borrow_mut().quitting = true;
                 self.on_close();
             }
@@ -310,7 +310,7 @@ impl Main {
         let shared = self.shared.borrow();
         if shared.tray.is_some() && !shared.quitting {
             drop(shared);
-            log::info("Window closed; recording continues from the tray");
+            log::info(text::CLOSED_TO_TRAY);
             self.wnd.hwnd().ShowWindow(co::SW::HIDE);
             return;
         }

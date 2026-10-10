@@ -40,13 +40,15 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
             | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
         StateMask: 0,
     };
+    let size = u32::try_from(size_of::<PROCESS_POWER_THROTTLING_STATE>())
+        .expect("the throttling state is a few bytes");
     // SAFETY: passes a correctly sized `PROCESS_POWER_THROTTLING_STATE` for the current process.
     unsafe {
         SetProcessInformation(
             GetCurrentProcess(),
             ProcessPowerThrottling,
             (&raw const state).cast(),
-            u32::try_from(size_of::<PROCESS_POWER_THROTTLING_STATE>()).unwrap_or(u32::MAX),
+            size,
         )
     }
 }
@@ -54,11 +56,13 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
 /// Raises the process's GPU scheduling class: realtime when elevated, else high. Returns the
 /// class it got, by name.
 pub(super) fn raise_gpu_class() -> Option<&'static str> {
-    // SAFETY: `gdi32.dll` is loaded in every GUI process; the export has this signature since
-    // Windows Vista.
+    // SAFETY: loads a system library by name; `gdi32.dll` is loaded in every GUI process.
+    let gdi =
+        unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    // SAFETY: looks a symbol up in the loaded library.
+    let export = unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) }?;
+    // SAFETY: the export has this signature since Windows Vista.
     let set_class = unsafe {
-        let gdi = LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
-        let export = GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass"))?;
         std::mem::transmute::<unsafe extern "system" fn() -> isize, SetSchedulingPriorityClass>(
             export,
         )

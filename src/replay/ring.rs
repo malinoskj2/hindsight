@@ -39,14 +39,8 @@ impl Ring {
         while let Some(&next) = self.keyframes.get(1)
             && latest - next + 1 >= self.span
         {
-            while self
-                .packets
-                .front()
-                .is_some_and(|packet| packet.index < next)
-            {
-                if let Some(dropped) = self.packets.pop_front() {
-                    self.bytes -= dropped.data.len();
-                }
+            while let Some(dropped) = self.packets.pop_front_if(|packet| packet.index < next) {
+                self.bytes -= dropped.data.len();
             }
             self.keyframes.pop_front();
         }

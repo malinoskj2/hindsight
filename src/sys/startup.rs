@@ -11,8 +11,9 @@ use winreg::{
 };
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-/// Starts hidden in the tray, since nobody is there to look at the window at logon.
-pub(crate) const TRAY_FLAG: &str = "--tray";
+/// The command-line flag, without its dashes, that starts hidden in the tray, since nobody is
+/// there to look at the window at logon. The command-line parser declares it from this too.
+pub(crate) const TRAY_FLAG_NAME: &str = "tray";
 
 pub(crate) fn enabled() -> io::Result<bool> {
     let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_READ)?;
@@ -40,8 +41,8 @@ pub(crate) fn set(enabled: bool) -> io::Result<()> {
 fn command(executable: &OsStr) -> OsString {
     let mut command = OsString::from("\"");
     command.push(executable);
-    command.push("\" ");
-    command.push(TRAY_FLAG);
+    command.push("\" --");
+    command.push(TRAY_FLAG_NAME);
     command
 }
 

@@ -123,6 +123,8 @@ const fn length_prefixed(codec: Codec) -> bool {
 fn file_type(codec: Codec) -> Vec<u8> {
     let codec_brand: &[u8] = match codec {
         Codec::H264 => b"avc1",
+        // There is no widely used HEVC-specific brand; `isom`, `iso2` and `mp41` are what
+        // players check.
         Codec::Hevc => b"",
         Codec::Av1 => b"av01",
     };
@@ -365,6 +367,7 @@ fn full_atom(kind: [u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
 pub(super) mod tests {
     use super::*;
     use crate::replay::{av1, h264, hevc};
+    use std::assert_matches;
 
     /// The atoms in `bytes`, as (kind, body) pairs.
     pub(in crate::replay) fn atoms(bytes: &[u8]) -> Vec<([u8; 4], &[u8])> {
@@ -492,50 +495,45 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn each_codec_gets_its_sample_entry_and_framing() {
-        for (codec, kind, record, brand, first_sample) in [
-            (
-                Codec::Hevc,
-                b"hvc1",
-                b"hvcC",
-                None,
-                hevc::tests::IDR.len() + 4,
-            ),
-            (Codec::Av1, b"av01", b"av1C", Some(b"av01"), 0),
-        ] {
-            let packets = [packet(codec, 0, true), packet(codec, 1, false)];
-            let file = mux(codec, &packets);
+    fn hevc_gets_an_hvc1_entry_and_length_prefixed_samples() {
+        let file = mux(
+            Codec::Hevc,
+            &[packet(Codec::Hevc, 0, true), packet(Codec::Hevc, 1, false)],
+        );
 
-            let file_type = atoms(&file)[0].1;
-            assert_eq!(
-                file_type.as_chunks::<4>().0.contains(b"av01"),
-                brand.is_some()
-            );
-            let table = sample_table(&file);
-            let visual = child(&child(table, *b"stsd")[8..], *kind);
-            child(&visual[78..], *record);
+        let table = sample_table(&file);
+        let visual = child(&child(table, *b"stsd")[8..], *b"hvc1");
+        child(&visual[78..], *b"hvcC");
+        let sizes = words(child(table, *b"stsz"));
+        assert_eq!(sizes[3] as usize, hevc::tests::IDR.len() + 4);
+    }
 
-            let sizes = words(child(table, *b"stsz"));
-            if codec == Codec::Hevc {
-                assert_eq!(sizes[3] as usize, first_sample);
-            } else {
-                // AV1 samples are the OBUs as they are, minus the temporal delimiter.
-                let kept: usize = av1::sample_obus(&packets[0].data)
-                    .iter()
-                    .map(|obu| obu.len())
-                    .sum();
-                assert_eq!(sizes[3] as usize, kept);
-                let offsets = child(table, *b"co64");
-                let offset =
-                    usize::try_from(u64::from_be_bytes(offsets[8..16].try_into().unwrap()))
-                        .unwrap();
-                assert_eq!(
-                    file[offset] >> 3,
-                    1,
-                    "the sample starts with the sequence header"
-                );
-            }
-        }
+    #[test]
+    fn av1_gets_its_brand_an_av01_entry_and_whole_obus_as_samples() {
+        let packets = [packet(Codec::Av1, 0, true), packet(Codec::Av1, 1, false)];
+        let file = mux(Codec::Av1, &packets);
+
+        let file_type = atoms(&file)[0].1;
+        assert!(file_type.as_chunks::<4>().0.contains(b"av01"));
+        let table = sample_table(&file);
+        let visual = child(&child(table, *b"stsd")[8..], *b"av01");
+        child(&visual[78..], *b"av1C");
+
+        // AV1 samples are the OBUs as they are, minus the temporal delimiter.
+        let kept: usize = av1::sample_obus(&packets[0].data)
+            .iter()
+            .map(|obu| obu.len())
+            .sum();
+        let sizes = words(child(table, *b"stsz"));
+        assert_eq!(sizes[3] as usize, kept);
+        let offsets = child(table, *b"co64");
+        let offset =
+            usize::try_from(u64::from_be_bytes(offsets[8..16].try_into().unwrap())).unwrap();
+        assert_eq!(
+            file[offset] >> 3,
+            1,
+            "the sample starts with the sequence header"
+        );
     }
 
     #[test]
@@ -560,16 +558,16 @@ pub(super) mod tests {
     #[test]
     fn refuses_streams_without_a_sequence_header() {
         let mut file = Vec::new();
-        for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
-            assert!(matches!(
+        for codec in Codec::ALL {
+            assert_matches!(
                 write(&mut file, &stream(codec), &[packet(codec, 0, false)]),
                 Err(MuxError::NoSequenceHeader)
-            ));
+            );
         }
-        assert!(matches!(
+        assert_matches!(
             write(&mut file, &stream(Codec::H264), &[]),
             Err(MuxError::NoSequenceHeader)
-        ));
+        );
         assert_eq!(file.len(), 0);
     }
 }

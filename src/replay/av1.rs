@@ -15,11 +15,12 @@ const KEY_FRAME: u32 = 0;
 /// sequence header codes without chroma subsampling.
 const SRGB: (u32, u32, u32) = (1, 13, 0);
 
-/// One OBU: its type, its bytes from the header on, and its payload.
+/// One OBU: its type, its header, its payload, and the whole of it from the header on.
 struct Obu<'a> {
     kind: u8,
     header: &'a [u8],
     payload: &'a [u8],
+    bytes: &'a [u8],
 }
 
 /// The OBUs of a low-overhead bitstream; stops at the first malformed one.
@@ -52,6 +53,7 @@ fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
             kind: (first >> 3) & 0x0F,
             header: &data[..header_length],
             payload,
+            bytes: &data[..end],
         });
         data = &data[end..];
     }
@@ -72,7 +74,7 @@ fn leb128(data: &[u8]) -> Option<(usize, usize)> {
 
 fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
     loop {
-        let byte = u8::try_from(value & 0x7F).unwrap_or(0);
+        let byte = u8::try_from(value & 0x7F).expect("a 7-bit value fits a byte");
         value >>= 7;
         if value == 0 {
             output.push(byte);
@@ -84,27 +86,25 @@ fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
 
 /// The OBUs a stored sample keeps, whole: everything but temporal delimiters and padding.
 pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
-    let start = temporal_unit.as_ptr() as usize;
     obus(temporal_unit)
         .into_iter()
         .filter(|obu| !matches!(obu.kind, OBU_TEMPORAL_DELIMITER | OBU_PADDING))
-        .map(|obu| {
-            let from = obu.header.as_ptr() as usize - start;
-            let to = obu.payload.as_ptr() as usize - start + obu.payload.len();
-            &temporal_unit[from..to]
-        })
+        .map(|obu| obu.bytes)
         .collect()
 }
 
 /// Splits a low-overhead bitstream into temporal units at their temporal delimiters.
 #[cfg(test)]
 pub(super) fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
-    let start = stream.as_ptr() as usize;
-    let mut starts: Vec<usize> = obus(stream)
-        .iter()
-        .filter(|obu| obu.kind == OBU_TEMPORAL_DELIMITER)
-        .map(|obu| obu.header.as_ptr() as usize - start)
-        .collect();
+    // OBUs follow one another without gaps, so each one starts where the previous ones end.
+    let mut offset = 0;
+    let mut starts = Vec::new();
+    for obu in obus(stream) {
+        if obu.kind == OBU_TEMPORAL_DELIMITER {
+            starts.push(offset);
+        }
+        offset += obu.bytes.len();
+    }
     starts.push(stream.len());
     starts
         .windows(2)
@@ -138,12 +138,12 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
         0x81,
         (u8::try_from(sequence.profile).ok()? << 5) | u8::try_from(sequence.level).ok()?,
         (u8::from(sequence.tier) << 7)
-            | (u8::from(sequence.high_bitdepth) << 6)
-            | (u8::from(sequence.twelve_bit) << 5)
-            | (u8::from(sequence.monochrome) << 4)
-            | (u8::from(sequence.subsampling_x) << 3)
-            | (u8::from(sequence.subsampling_y) << 2)
-            | u8::try_from(sequence.chroma_sample_position).ok()?,
+            | (u8::from(sequence.colour.high_bitdepth) << 6)
+            | (u8::from(sequence.colour.twelve_bit) << 5)
+            | (u8::from(sequence.colour.monochrome) << 4)
+            | (u8::from(sequence.colour.subsampling_x) << 3)
+            | (u8::from(sequence.colour.subsampling_y) << 2)
+            | u8::try_from(sequence.colour.chroma_sample_position).ok()?,
         // No initial presentation delay.
         0,
     ];
@@ -157,17 +157,11 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
 
 /// The fields of a sequence header the `av1C` record repeats; the flags mirror the bitstream's.
 #[derive(Debug, PartialEq, Eq)]
-#[expect(clippy::struct_excessive_bools)]
 struct SequenceHeader {
     profile: u32,
     level: u32,
     tier: bool,
-    high_bitdepth: bool,
-    twelve_bit: bool,
-    monochrome: bool,
-    subsampling_x: bool,
-    subsampling_y: bool,
-    chroma_sample_position: u32,
+    colour: ColourConfig,
 }
 
 impl SequenceHeader {
@@ -248,17 +242,13 @@ impl SequenceHeader {
             profile,
             level,
             tier,
-            high_bitdepth: colour.high_bitdepth,
-            twelve_bit: colour.twelve_bit,
-            monochrome: colour.monochrome,
-            subsampling_x: colour.subsampling_x,
-            subsampling_y: colour.subsampling_y,
-            chroma_sample_position: colour.chroma_sample_position,
+            colour,
         })
     }
 }
 
 /// The parts of `color_config()` the `av1C` record repeats.
+#[derive(Debug, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools)]
 struct ColourConfig {
     high_bitdepth: bool,
@@ -460,12 +450,14 @@ pub(super) mod tests {
                 profile: 0,
                 level: 8,
                 tier: true,
-                high_bitdepth: false,
-                twelve_bit: false,
-                monochrome: false,
-                subsampling_x: true,
-                subsampling_y: true,
-                chroma_sample_position: 1,
+                colour: ColourConfig {
+                    high_bitdepth: false,
+                    twelve_bit: false,
+                    monochrome: false,
+                    subsampling_x: true,
+                    subsampling_y: true,
+                    chroma_sample_position: 1,
+                },
             }
         );
         assert!(SequenceHeader::parse(&elaborate_sequence_header()[..20]).is_none());

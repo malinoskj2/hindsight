@@ -36,22 +36,25 @@ pub fn run() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         log::today()
     ));
-    let startup = (|| -> Result<_> {
-        let store = storage::Store::open().context("open application state")?;
-        let log_file = storage::state_directory().join(log::FILE_NAME);
-        if let Err(error) = log::mirror_to(&log_file) {
-            log::warning(format!(
-                "The log file {} could not be created: {error}",
-                log_file.display()
-            ));
-        }
-        let config = store.load_config().context("load configuration")?;
-        config.validate().context("check configuration")?;
-        let worker = service::Worker::spawn(store, config.clone());
-        Ok((worker, config))
-    })();
 
-    gui::run(startup, tray)
+    gui::run(startup(), tray)
+}
+
+/// Opens the state and log file, loads the configuration and starts the recording worker.
+#[cfg(windows)]
+fn startup() -> Result<(service::Worker, config::Config)> {
+    let store = storage::Store::open().context("open application state")?;
+    let log_file = storage::state_directory().join(log::FILE_NAME);
+    if let Err(error) = log::mirror_to(&log_file) {
+        log::warning(format!(
+            "The log file {} could not be created: {error}",
+            log_file.display()
+        ));
+    }
+    let config = store.load_config().context("load configuration")?;
+    config.validate().context("check configuration")?;
+    let worker = service::Worker::spawn(store, config.clone());
+    Ok((worker, config))
 }
 
 /// The recording application is available on Windows only.

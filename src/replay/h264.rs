@@ -7,7 +7,7 @@ const NAL_TYPE_MASK: u8 = 0x1F;
 const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
-const NAL_AUD: u8 = 9;
+pub(super) const NAL_AUD: u8 = 9;
 
 /// The `avcC` record for the first SPS and PPS in `access_unit`, if it carries both.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
@@ -46,7 +46,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
         .any(|unit| nal_type(unit) == NAL_IDR)
 }
 
-fn nal_type(unit: &[u8]) -> u8 {
+pub(super) fn nal_type(unit: &[u8]) -> u8 {
     unit[0] & NAL_TYPE_MASK
 }
 

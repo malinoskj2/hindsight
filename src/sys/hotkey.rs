@@ -35,7 +35,7 @@ const NAMED_KEYS: [(u16, &str); 11] = [
 /// Keys that may stand alone: pressing them never types text.
 const STANDALONE_KEYS: [u16; 3] = [0x2C, 0x13, 0x91];
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub(crate) enum ParseError {
     #[error("enter a hotkey such as Alt+F10")]
     Empty,
@@ -52,18 +52,6 @@ pub(crate) enum ParseError {
 pub(crate) struct Hotkey {
     modifiers: u16,
     key: u16,
-}
-
-impl Hotkey {
-    #[cfg(windows)]
-    pub(crate) const fn modifiers(self) -> u16 {
-        self.modifiers
-    }
-
-    #[cfg(windows)]
-    pub(crate) const fn key(self) -> u16 {
-        self.key
-    }
 }
 
 impl FromStr for Hotkey {
@@ -157,10 +145,10 @@ const fn is_function_key(key: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use windows::{SAVE_HOTKEY_ID, register};
+pub(crate) use native::{SAVE_HOTKEY_ID, register};
 
 #[cfg(windows)]
-mod windows {
+mod native {
     use super::Hotkey;
     use thiserror::Error;
     use winsafe::{self as w, co};
@@ -184,8 +172,8 @@ mod windows {
         // the parser produces is representable.
         let (modifiers, key) = unsafe {
             (
-                co::MOD::from_raw(hotkey.modifiers()) | co::MOD::NOREPEAT,
-                co::VK::from_raw(hotkey.key()),
+                co::MOD::from_raw(hotkey.modifiers) | co::MOD::NOREPEAT,
+                co::VK::from_raw(hotkey.key),
             )
         };
         // Nothing may be registered yet; that is not an error.

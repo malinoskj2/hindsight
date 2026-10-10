@@ -79,6 +79,9 @@ fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     });
 
     let mut output = |encoded: Encoded| {
+        // Parsing the bitstream is the authority for all three codecs, whatever the driver
+        // reports; the driver's IDR flag is a cheap fast path that skips the parse on most
+        // keyframes.
         let keyframe = encoded.is_idr() || replay::is_keyframe(settings.codec, &encoded.data);
         live.push(
             Packet {

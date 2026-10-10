@@ -1,7 +1,10 @@
 //! Command-line entry points: `--tray` starts hidden in the notification area (the Start with
 //! Windows entry uses it), and `icon <path>` writes the application icon for the build.
 
-use crate::{APP_NAME, sys::icon};
+use crate::{
+    APP_NAME,
+    sys::{icon, startup::TRAY_FLAG_NAME},
+};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -10,7 +13,7 @@ use std::path::PathBuf;
 #[command(name = APP_NAME, version, about)]
 struct Arguments {
     /// Start hidden in the notification area.
-    #[arg(long = "tray")]
+    #[arg(long = TRAY_FLAG_NAME)]
     tray: bool,
     #[command(subcommand)]
     command: Option<Command>,

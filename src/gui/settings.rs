@@ -50,7 +50,7 @@ impl SettingsPage {
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
-        let recording_group = Frame::new(&page, text::GROUP_ENCODING, 6, 200);
+        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 200);
         let _codec_caption = label(&page, text::CODEC, INNER_X, 30, FIELD_OFFSET - 4, 1);
         let codec_names: Vec<&str> = Codec::ALL.iter().map(|codec| codec.name()).collect();
         let codec = gui::ComboBox::new(
@@ -161,13 +161,8 @@ impl SettingsPage {
 
     /// The configuration as currently entered, or the problem with it.
     pub(super) fn configuration(&self) -> Result<Config, String> {
-        let number = |field: &gui::Edit| {
-            field
-                .text()
-                .ok()
-                .and_then(|value| value.trim().parse::<u32>().ok())
-                .ok_or_else(|| text::NUMBER_REQUIRED.to_owned())
-        };
+        let required =
+            |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
         let codec = self
             .codec
             .items()
@@ -181,9 +176,9 @@ impl SettingsPage {
 
         let mut config = Config {
             codec,
-            frame_rate: number(&self.frame_rate)?,
-            buffer_seconds: number(&self.buffer_seconds)?,
-            bitrate_mbps: number(&self.bitrate)?,
+            frame_rate: required(&self.frame_rate)?,
+            buffer_seconds: required(&self.buffer_seconds)?,
+            bitrate_mbps: required(&self.bitrate)?,
             hotkey: hotkey.trim().to_owned(),
             clip_directory: if folder == default_folder {
                 String::new()
@@ -212,12 +207,6 @@ impl SettingsPage {
 
     /// Shows how much memory the buffer takes at the entered bitrate and length.
     pub(super) fn update_estimate(&self) {
-        let number = |field: &gui::Edit| {
-            field
-                .text()
-                .ok()
-                .and_then(|value| value.trim().parse::<u32>().ok())
-        };
         let estimate = number(&self.buffer_seconds).zip(number(&self.bitrate)).map(
             |(buffer_seconds, bitrate_mbps)| {
                 Config {
@@ -247,14 +236,14 @@ impl SettingsPage {
         match startup::set(wanted) {
             Ok(()) => {
                 log::info(if wanted {
-                    "Start with Windows enabled"
+                    text::STARTUP_ENABLED
                 } else {
-                    "Start with Windows disabled"
+                    text::STARTUP_DISABLED
                 });
                 self.show_startup_error(None)
             }
             Err(error) => {
-                let message = text::startup_setting_failed(&error);
+                let message = text::startup_setting_failed(error);
                 log::error(&message);
                 self.start_with_windows.set_check(!wanted);
                 self.show_startup_error(Some(&message))
@@ -315,6 +304,14 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
         error: startup_error,
         group,
     }
+}
+
+/// The whole number in `field`, if it holds one.
+fn number(field: &gui::Edit) -> Option<u32> {
+    field
+        .text()
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// A caption, a numeric edit and its spin buttons.
