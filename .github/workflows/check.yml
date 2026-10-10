@@ -65,7 +65,8 @@ jobs:
 
   attest:
     needs: windows-package
-    if: github.event_name == 'push'
+    # GitHub stores build attestations for public repositories only (or organisation plans).
+    if: github.event_name == 'push' && !github.event.repository.private
     runs-on: ubuntu-24.04
     permissions:
       contents: read
