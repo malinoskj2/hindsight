@@ -50,7 +50,7 @@ impl SettingsPage {
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
-        let recording_group = Frame::new(&page, text::GROUP_ENCODING, 6, 196);
+        let recording_group = Frame::new(&page, text::GROUP_ENCODING, 6, 200);
         let _codec_caption = label(&page, text::CODEC, INNER_X, 30, FIELD_OFFSET - 4, 1);
         let codec_names: Vec<&str> = Codec::ALL.iter().map(|codec| codec.name()).collect();
         let codec = gui::ComboBox::new(
@@ -98,10 +98,10 @@ impl SettingsPage {
             INNER_WIDTH - FIELD_OFFSET,
             &config.clip_directory().display().to_string(),
         );
-        let estimate = label(&page, "", INNER_X, 138, INNER_WIDTH, 1);
-        let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 156, INNER_WIDTH, 1);
-        let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 176, 120);
-        let settings_error = label(&page, "", INNER_X + 128, 174, INNER_WIDTH - 128, 2);
+        let estimate = label(&page, "", INNER_X, 136, INNER_WIDTH, 1);
+        let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 154, INNER_WIDTH, 1);
+        let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 174, 120);
+        let settings_error = label(&page, "", INNER_X + 128, 172, INNER_WIDTH - 128, 2);
 
         let startup = startup_controls(&page, start_with_windows);
         let frames = vec![recording_group, startup.frame];
@@ -279,12 +279,14 @@ struct StartupControls {
 
 fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupControls {
     // Compact; the group adds a line for the error label when one occurs.
-    let startup_group = Frame::new(page, text::GROUP_STARTUP, 208, 78);
+    let startup_group = Frame::new(page, text::GROUP_STARTUP, 212, 78);
     let start_with_windows = gui::CheckBox::new(
         page,
         gui::CheckBoxOpts {
             text: text::START_WITH_WINDOWS,
-            position: gui::dpi(INNER_X, 228),
+            position: gui::dpi(INNER_X, 232),
+            // Wide enough for the label in any font, rather than measured once at creation.
+            size: gui::dpi(INNER_WIDTH, LINE),
             check_state: if start_with_windows {
                 co::BST::CHECKED
             } else {
@@ -297,11 +299,11 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
         page,
         text::START_WITH_WINDOWS_HELP,
         INNER_X,
-        248,
+        252,
         INNER_WIDTH,
         2,
     );
-    let startup_error = label(page, "", INNER_X, 248 + 2 * LINE, INNER_WIDTH, 1);
+    let startup_error = label(page, "", INNER_X, 252 + 2 * LINE, INNER_WIDTH, 1);
     let group = ExpandableGroup::new(
         startup_group.clone(),
         startup_error.clone(),
