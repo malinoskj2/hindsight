@@ -115,6 +115,9 @@ pub(super) fn draw(
         if erase_skin.is_themed() {
             match surface {
                 Surface::Dialog => erase_skin.fill_dialog(&p.hdc, erase_host.hwnd()),
+                // The page's own erase is left to its paint, which draws everything at once;
+                // a control asking for the background it sits on is given it here.
+                Surface::Page if p.hdc.WindowFromDC().as_ref() == Some(erase_host.hwnd()) => {}
                 Surface::Page => {
                     erase_skin.paint_backdrop(&p.hdc, erase_host.hwnd(), &erase_frames);
                 }
@@ -151,7 +154,7 @@ fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
         return;
     };
     if skin.is_themed() {
-        skin.paint_character(&paint, hwnd);
+        skin.paint_page(&paint, hwnd, frames);
     } else if let Some(theme) = hwnd.OpenThemeData("BUTTON") {
         for frame in frames {
             let _ = theme.DrawThemeBackground(

@@ -291,6 +291,19 @@ impl Skin {
         }
     }
 
+    /// Paints a whole tab page, backdrop and character, off-screen and then onto the window in
+    /// one go. Painting the two in separate steps shows the page without the character in
+    /// between.
+    pub(super) fn paint_page(&self, hdc: &w::HDC, page: &w::HWND, frames: &[Frame]) {
+        let Ok(client) = page.GetClientRect() else {
+            return;
+        };
+        buffered(hdc, (client.right, client.bottom), None, |target| {
+            self.paint_backdrop(target, page, frames);
+            self.paint_character(target, page);
+        });
+    }
+
     /// Paints the character over a tab page, bottom right.
     pub(super) fn paint_character(&self, hdc: &w::HDC, page: &w::HWND) {
         if !self.is_themed() {
@@ -421,99 +434,12 @@ impl Skin {
         let Ok(client) = hwnd.GetClientRect() else {
             return;
         };
-        let count = tab.items().count().unwrap_or(0);
-        let selected = selected_tab(hwnd);
-        let strip_bottom = (0..count)
-            .filter_map(|index| tab_rect(hwnd, index))
-            .map(|rect| rect.bottom)
-            .max()
-            .unwrap_or(0);
-
-        let Ok(pen) = w::HPEN::CreatePen(co::PS::SOLID, 1, colour(palette.border)) else {
-            return;
-        };
-        let Ok(background) = w::HBRUSH::CreateSolidBrush(colour(palette.background)) else {
-            return;
-        };
-        let _ = paint.FillRect(client, &background);
-
-        let font = control_font(hwnd);
-        let _font = font.as_ref().and_then(|font| paint.SelectObject(font).ok());
-        let _ = paint.SetBkMode(co::BKMODE::TRANSPARENT);
-
-        // The frame round the pages, which the pages cover but for this border.
-        {
-            let (Ok(_pen), Ok(_brush)) = (
-                paint.SelectObject(&*pen),
-                paint.SelectObject(
-                    &w::HBRUSH::GetStockObject(co::STOCK_BRUSH::NULL).unwrap_or(w::HBRUSH::NULL),
-                ),
-            ) else {
-                return;
-            };
-            let _ = paint.Rectangle(w::RECT {
-                left: client.left,
-                top: strip_bottom - 1,
-                right: client.right,
-                bottom: client.bottom,
-            });
-        }
-
-        // The pen stays selected for every tab's outline.
-        let _pen = paint.SelectObject(&*pen);
-        for index in 0..count {
-            let Some(rect) = tab_rect(hwnd, index) else {
-                continue;
-            };
-            let is_selected = selected == Some(index);
-            let fill = if is_selected {
-                palette.panel
-            } else {
-                palette.secondary_button
-            };
-            let Ok(brush) = w::HBRUSH::CreateSolidBrush(colour(fill)) else {
-                continue;
-            };
-            let _ = paint.FillRect(rect, &brush);
-            // Top and sides; the selected tab opens into its page below.
-            let _ = paint.MoveToEx(rect.left, rect.bottom, None);
-            let _ = paint.LineTo(rect.left, rect.top);
-            let _ = paint.LineTo(rect.right - 1, rect.top);
-            let _ = paint.LineTo(rect.right - 1, rect.bottom);
-            if is_selected {
-                let _ = paint.FillRect(
-                    w::RECT {
-                        left: rect.left + 1,
-                        top: rect.bottom - 1,
-                        right: rect.right - 1,
-                        bottom: rect.bottom + 1,
-                    },
-                    &brush,
-                );
-            } else {
-                let _ = paint.MoveToEx(rect.left, rect.bottom - 1, None);
-                let _ = paint.LineTo(rect.right, rect.bottom - 1);
-            }
-            let text = tab
-                .items()
-                .iter()
-                .ok()
-                .and_then(|mut items| items.nth(index as usize))
-                .and_then(|item| item.text().ok())
-                .unwrap_or_default();
-            let ink = if is_selected {
-                palette.accent
-            } else {
-                palette.text
-            };
-            let _ = paint.SetTextColor(colour(ink));
-            let mut bounds = rect;
-            let _ = paint.DrawText(
-                &text,
-                &mut bounds,
-                co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
-            );
-        }
+        // The pages sit over the tab control's display area and paint it themselves, so the
+        // tab control must not put anything there.
+        let pages = display_rect(hwnd, client);
+        buffered(&paint, (client.right, client.bottom), pages, |target| {
+            draw_tabs(target, tab, palette, client);
+        });
     }
 }
 
@@ -677,6 +603,136 @@ pub(super) fn title_bar_colours(skin: &Skin) -> Option<(w::COLORREF, w::COLORREF
     })
 }
 
+/// Draws the strip of tabs and the frame round the pages onto `paint`.
+fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT) {
+    let hwnd = tab.hwnd();
+    let count = tab.items().count().unwrap_or(0);
+    let selected = selected_tab(hwnd);
+    let strip_bottom = (0..count)
+        .filter_map(|index| tab_rect(hwnd, index))
+        .map(|rect| rect.bottom)
+        .max()
+        .unwrap_or(0);
+
+    let Ok(pen) = w::HPEN::CreatePen(co::PS::SOLID, 1, colour(palette.border)) else {
+        return;
+    };
+    let Ok(background) = w::HBRUSH::CreateSolidBrush(colour(palette.background)) else {
+        return;
+    };
+    let _ = paint.FillRect(client, &background);
+
+    let font = control_font(hwnd);
+    let _font = font.as_ref().and_then(|font| paint.SelectObject(font).ok());
+    let _ = paint.SetBkMode(co::BKMODE::TRANSPARENT);
+
+    // The frame round the pages, which the pages cover but for this border.
+    {
+        let (Ok(_pen), Ok(_brush)) = (
+            paint.SelectObject(&*pen),
+            paint.SelectObject(
+                &w::HBRUSH::GetStockObject(co::STOCK_BRUSH::NULL).unwrap_or(w::HBRUSH::NULL),
+            ),
+        ) else {
+            return;
+        };
+        let _ = paint.Rectangle(w::RECT {
+            left: client.left,
+            top: strip_bottom - 1,
+            right: client.right,
+            bottom: client.bottom,
+        });
+    }
+
+    // The pen stays selected for every tab's outline.
+    let _pen = paint.SelectObject(&*pen);
+    for index in 0..count {
+        let Some(rect) = tab_rect(hwnd, index) else {
+            continue;
+        };
+        let is_selected = selected == Some(index);
+        let fill = if is_selected {
+            palette.panel
+        } else {
+            palette.secondary_button
+        };
+        let Ok(brush) = w::HBRUSH::CreateSolidBrush(colour(fill)) else {
+            continue;
+        };
+        let _ = paint.FillRect(rect, &brush);
+        // Top and sides; the selected tab opens into its page below.
+        let _ = paint.MoveToEx(rect.left, rect.bottom, None);
+        let _ = paint.LineTo(rect.left, rect.top);
+        let _ = paint.LineTo(rect.right - 1, rect.top);
+        let _ = paint.LineTo(rect.right - 1, rect.bottom);
+        if is_selected {
+            let _ = paint.FillRect(
+                w::RECT {
+                    left: rect.left + 1,
+                    top: rect.bottom - 1,
+                    right: rect.right - 1,
+                    bottom: rect.bottom + 1,
+                },
+                &brush,
+            );
+        } else {
+            let _ = paint.MoveToEx(rect.left, rect.bottom - 1, None);
+            let _ = paint.LineTo(rect.right, rect.bottom - 1);
+        }
+        let text = tab
+            .items()
+            .iter()
+            .ok()
+            .and_then(|mut items| items.nth(index as usize))
+            .and_then(|item| item.text().ok())
+            .unwrap_or_default();
+        let ink = if is_selected {
+            palette.accent
+        } else {
+            palette.text
+        };
+        let _ = paint.SetTextColor(colour(ink));
+        let mut bounds = rect;
+        let _ = paint.DrawText(
+            &text,
+            &mut bounds,
+            co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
+        );
+    }
+}
+
+/// Runs `draw` on an off-screen surface `size` pixels across, then copies the result over
+/// `hdc` in one go, so the screen never shows a half-painted state. Nothing is copied into
+/// `keep_out`, which something else owns. Draws straight onto `hdc` when no off-screen surface
+/// can be made.
+fn buffered(
+    hdc: &w::HDC,
+    (width, height): (i32, i32),
+    keep_out: Option<w::RECT>,
+    draw: impl FnOnce(&w::HDC),
+) {
+    if width > 0
+        && height > 0
+        && let Ok(memory) = hdc.CreateCompatibleDC()
+        && let Ok(bitmap) = hdc.CreateCompatibleBitmap(width, height)
+        && let Ok(_selected) = memory.SelectObject(&*bitmap)
+    {
+        draw(&memory);
+        if let Some(rect) = keep_out {
+            let _ = hdc.ExcludeClipRect(rect);
+        }
+        let _ = hdc.BitBlt(
+            w::POINT::default(),
+            w::SIZE::with(width, height),
+            &memory,
+            w::POINT::default(),
+            co::ROP::SRCCOPY,
+        );
+    } else {
+        draw(hdc);
+    }
+}
+
 /// A copy of a handle that something else owns, for a call that wants the handle by value.
 #[expect(unsafe_code)]
 fn copy_handle<H: Handle>(handle: &H) -> H {
@@ -704,6 +760,20 @@ fn tab_rect(tab: &w::HWND, index: u32) -> Option<w::RECT> {
         })
     };
     found.ok().map(|()| rect)
+}
+
+/// The part of the tab control, in its client coordinates, that its pages occupy.
+#[expect(unsafe_code)]
+fn display_rect(tab: &w::HWND, client: w::RECT) -> Option<w::RECT> {
+    let mut rect = client;
+    // SAFETY: TCM_ADJUSTRECT turns the window rectangle in `rect` into the display rectangle.
+    unsafe {
+        tab.SendMessage(w::msg::TcmAdjustRect {
+            display_rect: false,
+            rect: &mut rect,
+        });
+    }
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
 }
 
 /// The index of the selected tab.
