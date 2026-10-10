@@ -50,6 +50,13 @@ pub(super) const STARTUP_DISABLED: &str = "Start with Windows disabled";
 pub(super) const QUIT_FROM_TRAY: &str = "Quit chosen from the tray menu";
 pub(super) const CLOSED_TO_TRAY: &str = "Window closed; recording continues from the tray";
 
+pub(super) const NVFBC_KEY_TITLE: &str = "NvFBC key";
+pub(super) const NVFBC_KEY_HELP: &str = "NvFBC capture is for vendors licensed by NVIDIA. Enter the key NVIDIA issued you, in hexadecimal; it is saved for this Windows account only.";
+pub(super) const NVFBC_KEY: &str = "Key";
+pub(super) const NVFBC_KEY_SAVE: &str = "Save";
+pub(super) const NVFBC_KEY_CANCEL: &str = "Cancel";
+pub(super) const NVFBC_KEY_SAVED: &str = "NvFBC key saved";
+
 pub(super) const STARTUP_FAILED_TITLE: &str = "hindsight could not start";
 pub(super) const STARTUP_FAILED_HELP: &str =
     "Close this window, resolve the error, then launch again.";
@@ -60,6 +67,18 @@ pub(super) fn tray_unavailable(error: impl Display) -> String {
 
 pub(super) fn startup_setting_failed(error: impl Display) -> String {
     format!("Could not update the Start with Windows entry: {error}")
+}
+
+pub(super) fn nvfbc_key_unreadable(error: impl Display) -> String {
+    format!("The saved NvFBC key could not be read: {error}")
+}
+
+pub(super) fn nvfbc_key_not_saved(error: impl Display) -> String {
+    format!("Could not save the NvFBC key: {error}")
+}
+
+pub(super) fn nvfbc_key_window_failed(error: impl Display) -> String {
+    format!("The NvFBC key window could not be shown: {error}")
 }
 
 pub(super) fn status(state: DisplayStatus) -> String {

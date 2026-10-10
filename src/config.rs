@@ -48,22 +48,25 @@ impl fmt::Display for Mode {
 }
 
 /// How frames are captured. Windows Graphics Capture can record one app's window; DXGI Desktop
-/// Duplication sees whole monitors only, so a full-screen app is recorded through its monitor.
+/// Duplication and NVIDIA's NvFBC see whole monitors only, so a full-screen app is recorded
+/// through its monitor. NvFBC is for licensed vendors: it needs the key NVIDIA issued them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
     #[default]
     Wgc,
     Dxgi,
+    Nvfbc,
 }
 
 impl Backend {
-    pub(crate) const ALL: [Self; 2] = [Self::Wgc, Self::Dxgi];
+    pub(crate) const ALL: [Self; 3] = [Self::Wgc, Self::Dxgi, Self::Nvfbc];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Wgc => "Windows Graphics Capture",
             Self::Dxgi => "DXGI Desktop Duplication",
+            Self::Nvfbc => "NVIDIA NvFBC (licensed)",
         }
     }
 }
@@ -245,6 +248,12 @@ mod tests {
                 .unwrap()
                 .backend,
             Backend::Dxgi
+        );
+        assert_eq!(
+            serde_json::from_str::<Config>(r#"{"backend":"nvfbc"}"#)
+                .unwrap()
+                .backend,
+            Backend::Nvfbc
         );
         assert!(serde_json::from_str::<Config>(r#"{"backend":"gdi"}"#).is_err());
         assert_eq!(

@@ -15,6 +15,7 @@ use crate::{
     log,
     sys::startup,
 };
+use std::{cell::Cell, rc::Rc};
 use winsafe::{co, gui, prelude::*};
 
 /// Height the Startup group gains while it shows a Run-key error line.
@@ -28,7 +29,9 @@ pub(super) struct SettingsPage {
     page: gui::TabPage,
     frames: Vec<Frame>,
     mode: gui::ComboBox,
-    backend: gui::ComboBox,
+    pub(super) backend: gui::ComboBox,
+    /// The capture choice last settled on, restored when the NvFBC key is not given.
+    settled_backend: Rc<Cell<Backend>>,
     codec: gui::ComboBox,
     frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
@@ -127,6 +130,7 @@ impl SettingsPage {
             frames,
             mode,
             backend,
+            settled_backend: Rc::new(Cell::new(config.backend)),
             codec,
             frame_rate,
             buffer_seconds,
@@ -191,6 +195,26 @@ impl SettingsPage {
             .map_err(|error| error.to_string())?
             .to_string();
         Ok(config)
+    }
+
+    /// The capture backend the drop-down list shows.
+    pub(super) fn chosen_backend(&self) -> Backend {
+        chosen(&self.backend, &Backend::ALL)
+    }
+
+    /// Accepts the backend now shown, or, when `accepted` is false, shows the previous one
+    /// again.
+    pub(super) fn settle_backend(&self, accepted: bool) {
+        if accepted {
+            self.settled_backend.set(self.chosen_backend());
+        } else {
+            let previous = self.settled_backend.get();
+            let index = Backend::ALL
+                .iter()
+                .position(|backend| *backend == previous)
+                .and_then(|index| u32::try_from(index).ok());
+            self.backend.items().select(index);
+        }
     }
 
     /// Shows the problem with the entered settings, or clears it.

@@ -172,23 +172,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "hindsight"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tray-icon",
- "windows",
- "winreg",
- "winresource",
- "winsafe",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -252,6 +235,23 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hindsight"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tray-icon",
+ "windows",
+ "winreg",
+ "winresource",
+ "winsafe",
+]
 
 [[package]]
 name = "indexmap"
