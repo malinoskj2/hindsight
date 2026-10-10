@@ -66,7 +66,7 @@ impl Backend {
         match self {
             Self::Wgc => "Windows Graphics Capture",
             Self::Dxgi => "DXGI Desktop Duplication",
-            Self::Nvfbc => "NVIDIA NvFBC (licensed)",
+            Self::Nvfbc => "NVIDIA NvFBC",
         }
     }
 }

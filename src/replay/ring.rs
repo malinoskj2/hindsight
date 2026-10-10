@@ -52,6 +52,7 @@ impl Ring {
     }
 
     /// Frames between the first buffered packet and the newest, inclusive.
+    #[cfg(test)]
     pub(crate) fn frames(&self) -> u64 {
         match (self.packets.front(), self.packets.back()) {
             (Some(first), Some(last)) => last.index - first.index + 1,
@@ -59,6 +60,7 @@ impl Ring {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn bytes(&self) -> usize {
         self.bytes
     }

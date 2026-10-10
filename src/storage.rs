@@ -10,7 +10,7 @@
 //! may be cleared.
 
 use crate::config::Config;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -23,7 +23,20 @@ const STATE_DIRECTORY_ENV: &str = "LOCALAPPDATA";
 const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
+const TOTALS_FILE: &str = "totals.json";
 const PENDING_EXTENSION: &str = "pending";
+
+/// Lifetime totals, kept across runs. `written_bytes` is the name the total had before it was
+/// split into these two, so files from that version still load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Totals {
+    /// Bytes that went into the replay buffer, in every run.
+    pub(crate) buffered_bytes: u64,
+    /// Bytes of the clips saved to disk, in every run.
+    #[serde(alias = "written_bytes")]
+    pub(crate) saved_bytes: u64,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
@@ -84,6 +97,14 @@ impl Store {
         self.write(CONFIG_FILE, config)
     }
 
+    pub(crate) fn load_totals(&self) -> Result<Totals, StorageError> {
+        Ok(self.read(TOTALS_FILE)?.unwrap_or_default())
+    }
+
+    pub(crate) fn save_totals(&self, totals: Totals) -> Result<(), StorageError> {
+        self.write(TOTALS_FILE, &totals)
+    }
+
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, StorageError> {
         let file = match File::open(self.root.join(name)) {
             Ok(file) => file,
@@ -130,6 +151,32 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::assert_matches;
+
+    #[test]
+    fn totals_survive_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        assert_eq!(store.load_totals().unwrap(), Totals::default());
+
+        store
+            .save_totals(Totals {
+                buffered_bytes: 9_000_000_000,
+                saved_bytes: 3_000_000_000,
+            })
+            .unwrap();
+        drop(store);
+
+        assert_eq!(
+            Store::at(directory.path().to_owned())
+                .unwrap()
+                .load_totals()
+                .unwrap(),
+            Totals {
+                buffered_bytes: 9_000_000_000,
+                saved_bytes: 3_000_000_000,
+            }
+        );
+    }
 
     #[test]
     fn configuration_round_trips_and_lock_excludes_second_instance() {

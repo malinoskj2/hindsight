@@ -28,7 +28,10 @@ pub(super) struct StatusPage {
     backend: gui::Label,
     encoder: gui::Label,
     rates: gui::Label,
-    buffered: gui::Label,
+    session_written: gui::Label,
+    session_saved: gui::Label,
+    lifetime_written: gui::Label,
+    lifetime_saved: gui::Label,
     notice: TintedLabel,
     last_clip: gui::Label,
     folder: gui::Label,
@@ -43,7 +46,7 @@ impl StatusPage {
         let caption = |text, y| label(&page, text, INNER_X, y, VALUE_X - INNER_X, 1);
 
         // Compact; the group adds two lines for the notice label when needed.
-        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 146);
+        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 126);
         let state = TintedLabel::new(&page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
         let _source_caption = caption(text::SOURCE, 48);
         let source = path_label(&page, VALUE_X, 48, VALUE_WIDTH);
@@ -53,22 +56,31 @@ impl StatusPage {
         let encoder = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
         let _rates_caption = caption(text::CAPTURE_RATE, 108);
         let rates = label(&page, "", VALUE_X, 108, VALUE_WIDTH, 1);
-        let _buffered_caption = caption(text::BUFFERED, 128);
-        let buffered = label(&page, "", VALUE_X, 128, VALUE_WIDTH, 1);
-        let notice = TintedLabel::new(&page, INNER_X, 150, INNER_WIDTH, 2, AMBER);
+        let notice = TintedLabel::new(&page, INNER_X, 130, INNER_WIDTH, 2, AMBER);
 
-        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 158, 100);
-        let last_clip_caption = caption(text::LAST_CLIP, 178);
-        let last_clip = path_label(&page, VALUE_X, 178, VALUE_WIDTH);
-        let folder_caption = caption(text::CLIP_FOLDER, 198);
-        let folder = path_label(&page, VALUE_X, 198, VALUE_WIDTH);
-        let save = button(&page, text::SAVE_REPLAY, INNER_X, 224, 120);
-        let hotkey_hint = label(&page, "", INNER_X + 128, 229, 140, 1);
+        // This run's figures, then the lifetime ones kept across runs.
+        let stats_frame = Frame::new(&page, text::GROUP_STATS, 138, 100);
+        let session_written_caption = caption(text::SESSION_WRITTEN, 158);
+        let session_written = label(&page, "", VALUE_X, 158, VALUE_WIDTH, 1);
+        let session_saved_caption = caption(text::SESSION_SAVED, 178);
+        let session_saved = label(&page, "", VALUE_X, 178, VALUE_WIDTH, 1);
+        let lifetime_written_caption = caption(text::LIFETIME_WRITTEN, 198);
+        let lifetime_written = label(&page, "", VALUE_X, 198, VALUE_WIDTH, 1);
+        let lifetime_saved_caption = caption(text::LIFETIME_SAVED, 218);
+        let lifetime_saved = label(&page, "", VALUE_X, 218, VALUE_WIDTH, 1);
+
+        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 244, 100);
+        let last_clip_caption = caption(text::LAST_CLIP, 264);
+        let last_clip = path_label(&page, VALUE_X, 264, VALUE_WIDTH);
+        let folder_caption = caption(text::CLIP_FOLDER, 284);
+        let folder = path_label(&page, VALUE_X, 284, VALUE_WIDTH);
+        let save = button(&page, text::SAVE_REPLAY, INNER_X, 310, 120);
+        let hotkey_hint = label(&page, "", INNER_X + 128, 315, 140, 1);
         let recording = button(
             &page,
             text::STOP_RECORDING,
             INNER_X + INNER_WIDTH - 120,
-            224,
+            310,
             120,
         );
 
@@ -77,6 +89,17 @@ impl StatusPage {
             notice.label().clone(),
             NOTICE_EXTRA,
         )
+        .moving_frame(stats_frame.clone())
+        .moving([
+            session_written_caption,
+            session_written.clone(),
+            session_saved_caption,
+            session_saved.clone(),
+            lifetime_written_caption,
+            lifetime_written.clone(),
+            lifetime_saved_caption,
+            lifetime_saved.clone(),
+        ])
         .moving_frame(clips_frame.clone())
         .moving([
             last_clip_caption,
@@ -86,7 +109,7 @@ impl StatusPage {
             hotkey_hint.clone(),
         ])
         .moving([save.clone(), recording.clone()]);
-        let frames = vec![recording_frame, clips_frame];
+        let frames = vec![recording_frame, stats_frame, clips_frame];
 
         // The tinted lines read their colour here; the hint is muted and every other label black.
         let tints = [state.clone(), notice.clone()];
@@ -113,7 +136,10 @@ impl StatusPage {
             backend,
             encoder,
             rates,
-            buffered,
+            session_written,
+            session_saved,
+            lifetime_written,
+            lifetime_saved,
             notice,
             last_clip,
             folder,
@@ -156,7 +182,10 @@ impl StatusPage {
         layout::set_text(&self.backend, &text::capture(status));
         layout::set_text(&self.encoder, &text::encoder(status));
         layout::set_text(&self.rates, &text::rates(status));
-        layout::set_text(&self.buffered, &text::buffered(status));
+        layout::set_text(&self.session_written, &text::session_written(status));
+        layout::set_text(&self.session_saved, &text::session_saved(status));
+        layout::set_text(&self.lifetime_written, &text::lifetime_written(status));
+        layout::set_text(&self.lifetime_saved, &text::saved(status));
 
         let notices: Vec<&str> = [
             hotkey_error,

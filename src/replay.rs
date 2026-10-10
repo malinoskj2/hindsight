@@ -55,6 +55,8 @@ pub(crate) struct Live {
     encoded: AtomicU64,
     /// Frames that brought new screen content.
     fresh: AtomicU64,
+    /// Encoded bytes that went into the buffer, including those since dropped from it.
+    bytes: AtomicU64,
     /// Called once the stream is recorded, so the owner learns of it without polling.
     on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
@@ -84,6 +86,7 @@ impl Live {
             ring: Mutex::new(Ring::new(span)),
             stream: OnceLock::new(),
             encoded: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
             fresh: AtomicU64::new(0),
             on_stream: OnceLock::new(),
         }
@@ -109,11 +112,18 @@ impl Live {
 
     /// Adds an encoded frame; `fresh` when it carried new screen content.
     pub(crate) fn push(&self, packet: Packet, fresh: bool) {
+        self.bytes
+            .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
         self.ring().push(packet);
         self.encoded.fetch_add(1, Ordering::Relaxed);
         if fresh {
             self.fresh.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Encoded bytes that went into the buffer since the session started.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     /// Frames encoded and frames with new content, since the session started.
@@ -125,6 +135,7 @@ impl Live {
     }
 
     /// Frames and bytes currently buffered.
+    #[cfg(test)]
     pub(crate) fn buffered(&self) -> (u64, usize) {
         let ring = self.ring();
         (ring.frames(), ring.bytes())

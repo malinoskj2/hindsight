@@ -58,6 +58,14 @@ pub(super) fn settings_applied(config: &Config) -> String {
     )
 }
 
+pub(super) fn totals_unreadable(error: impl Display) -> String {
+    format!("the lifetime totals could not be read, so they are not kept: {error}")
+}
+
+pub(super) fn totals_not_saved(error: impl Display) -> String {
+    format!("the lifetime totals could not be saved: {error}")
+}
+
 pub(super) fn save_settings_failed(error: impl Display) -> String {
     format!("Could not save the settings: {error}")
 }

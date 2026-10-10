@@ -18,9 +18,13 @@ pub(super) const GROUP_STARTUP: &str = "Startup";
 
 pub(super) const SOURCE: &str = "Source";
 pub(super) const CAPTURE: &str = "Capture";
+pub(super) const GROUP_STATS: &str = "Stats";
+pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
+pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
 pub(super) const ENCODER: &str = "Encoder";
 pub(super) const CAPTURE_RATE: &str = "Frame rate";
-pub(super) const BUFFERED: &str = "Buffered";
+pub(super) const SESSION_WRITTEN: &str = "Session Written";
+pub(super) const SESSION_SAVED: &str = "Session Saved";
 pub(super) const LAST_CLIP: &str = "Last clip";
 pub(super) const CLIP_FOLDER: &str = "Folder";
 pub(super) const SAVE_REPLAY: &str = "Save replay";
@@ -29,7 +33,7 @@ pub(super) const STOP_RECORDING: &str = "Stop recording";
 pub(super) const START_RECORDING: &str = "Start recording";
 
 pub(super) const MODE: &str = "Record";
-pub(super) const BACKEND: &str = "Capture";
+pub(super) const BACKEND: &str = "Backend";
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
 pub(super) const BUFFER_SECONDS: &str = "Buffer (s)";
@@ -98,6 +102,41 @@ pub(super) fn source(status: &Status) -> String {
     status.source.clone().unwrap_or_else(|| NO_VALUE.to_owned())
 }
 
+/// Bytes in a gigabyte here: 1024 cubed.
+const GIGABYTE: f64 = 1_073_741_824.0;
+
+/// A lifetime total in gigabytes, or a dash while it is not known.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "shown to two decimals, far coarser than the rounding of a byte count to f64"
+)]
+fn gigabytes(bytes: Option<u64>) -> String {
+    bytes.map_or_else(
+        || NO_VALUE.to_owned(),
+        |bytes| format!("{:.2} GB", bytes as f64 / GIGABYTE),
+    )
+}
+
+/// Everything that has gone into the replay buffer since the app started.
+pub(super) fn session_written(status: &Status) -> String {
+    gigabytes(Some(status.session_written_bytes))
+}
+
+/// Everything saved as clips since the app started.
+pub(super) fn session_saved(status: &Status) -> String {
+    gigabytes(Some(status.session_saved_bytes))
+}
+
+/// Everything that has gone into the replay buffer over every run of the app.
+pub(super) fn lifetime_written(status: &Status) -> String {
+    gigabytes(status.buffered_lifetime_bytes)
+}
+
+/// Everything saved to disk as clips over every run of the app.
+pub(super) fn saved(status: &Status) -> String {
+    gigabytes(status.saved_bytes)
+}
+
 pub(super) fn capture(status: &Status) -> String {
     status
         .backend
@@ -123,14 +162,6 @@ pub(super) fn rates(status: &Status) -> String {
         }
         _ => NO_VALUE.to_owned(),
     }
-}
-
-pub(super) fn buffered(status: &Status) -> String {
-    format!(
-        "{:.1} s · {:.1} MB",
-        status.buffered_seconds,
-        status.buffered_bytes as f64 / 1e6
-    )
 }
 
 pub(super) fn last_clip(path: Option<&Path>) -> String {

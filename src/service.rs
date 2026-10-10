@@ -6,7 +6,7 @@ use crate::{
     config::{Backend, Config, Mode},
     log,
     replay::{self, Live, SaveError, Stream},
-    storage::Store,
+    storage::{Store, Totals},
     sys,
 };
 use anyhow::Result;
@@ -117,12 +117,19 @@ pub(crate) struct Status {
     pub(crate) backend: Option<Backend>,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
+    /// Bytes of the clips saved to disk in every run; `None` when the totals cannot be read or
+    /// kept.
+    pub(crate) saved_bytes: Option<u64>,
+    /// Bytes that went into the replay buffer in every run, this session's included.
+    pub(crate) buffered_lifetime_bytes: Option<u64>,
     /// Frames per second with new screen content, over the last refresh.
     pub(crate) fresh_rate: Option<f64>,
     /// Frames per second encoded, over the last refresh.
     pub(crate) encode_rate: Option<f64>,
-    pub(crate) buffered_seconds: f64,
-    pub(crate) buffered_bytes: u64,
+    /// Bytes that went into the replay buffer since the app started.
+    pub(crate) session_written_bytes: u64,
+    /// Bytes of the clips saved since the app started.
+    pub(crate) session_saved_bytes: u64,
     pub(crate) saving: bool,
     pub(crate) last_clip: Option<PathBuf>,
     pub(crate) error: Option<String>,
@@ -249,6 +256,13 @@ struct Machine {
     recorder: Recorder,
     retry_interval: Duration,
     store: Option<Store>,
+    /// The lifetime totals, not counting the buffer of the latest session until it is banked;
+    /// `None` when they cannot be read, so nothing is written over them.
+    totals: Option<Totals>,
+    /// Bytes that went into the buffers of the sessions banked so far, since the app started.
+    session_buffered: u64,
+    /// Bytes of the clips saved since the app started.
+    session_saved: u64,
     config: Config,
     output: Arc<Mutex<Status>>,
     status: Status,
@@ -277,10 +291,23 @@ impl Machine {
         output: Arc<Mutex<Status>>,
         wake: Sender<Command>,
     ) -> Self {
+        let totals = match &store {
+            Some(store) => match store.load_totals() {
+                Ok(totals) => Some(totals),
+                Err(error) => {
+                    log::error(text::totals_unreadable(error));
+                    None
+                }
+            },
+            None => None,
+        };
         Self {
             recorder,
             retry_interval,
             store,
+            totals,
+            session_buffered: 0,
+            session_saved: 0,
             config,
             output,
             wake,
@@ -328,6 +355,7 @@ impl Machine {
         if let Some(saving) = self.saving.take() {
             self.finish_save(saving);
         }
+        self.bank_live();
         self.publish();
     }
 
@@ -380,6 +408,7 @@ impl Machine {
     }
 
     fn start_session(&mut self, target: Target) {
+        self.bank_live();
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         let wake = self.wake.clone();
         live.on_stream(move || {
@@ -548,6 +577,7 @@ impl Machine {
         match saving.join.join() {
             Ok(Ok(path)) => {
                 log::info(text::saved(saving.seconds, &path));
+                self.add_saved(&path);
                 self.status.last_clip = Some(path);
                 self.status.error = None;
                 sys::sound::saved();
@@ -560,6 +590,39 @@ impl Machine {
                 self.report_error(text::save_failed(text::SAVE_PANICKED));
                 sys::sound::failed();
             }
+        }
+    }
+
+    /// Adds a saved clip's size to the lifetime total and writes the totals to disk.
+    fn add_saved(&mut self, path: &std::path::Path) {
+        let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+        self.session_saved = self.session_saved.saturating_add(bytes);
+        if let Some(totals) = self.totals.as_mut() {
+            totals.saved_bytes = totals.saved_bytes.saturating_add(bytes);
+        }
+        self.persist_totals();
+    }
+
+    /// Adds the buffer of the latest session to the lifetime total and forgets the buffer.
+    /// Called before a new session replaces it, and when the worker stops.
+    fn bank_live(&mut self) {
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        self.session_buffered = self.session_buffered.saturating_add(live.bytes());
+        if let Some(totals) = self.totals.as_mut() {
+            totals.buffered_bytes = totals.buffered_bytes.saturating_add(live.bytes());
+        }
+        self.persist_totals();
+    }
+
+    /// Writes the totals to disk, if they were read; a failure is logged and the next write
+    /// tries again.
+    fn persist_totals(&self) {
+        if let (Some(store), Some(totals)) = (&self.store, self.totals)
+            && let Err(error) = store.save_totals(totals)
+        {
+            log::warning(text::totals_not_saved(error));
         }
     }
 
@@ -579,9 +642,16 @@ impl Machine {
         self.status.bitrate_mbps = self.config.bitrate_mbps;
         self.status.saving = self.saving.is_some();
 
-        let (frames, bytes) = live.as_ref().map_or((0, 0), |live| live.buffered());
-        self.status.buffered_seconds = frames as f64 / f64::from(self.config.frame_rate);
-        self.status.buffered_bytes = bytes as u64;
+        self.status.session_written_bytes = self
+            .session_buffered
+            .saturating_add(live.as_ref().map_or(0, |live| live.bytes()));
+        self.status.session_saved_bytes = self.session_saved;
+        self.status.saved_bytes = self.totals.map(|totals| totals.saved_bytes);
+        self.status.buffered_lifetime_bytes = self.totals.map(|totals| {
+            totals
+                .buffered_bytes
+                .saturating_add(live.as_ref().map_or(0, |live| live.bytes()))
+        });
 
         let now = Instant::now();
         let (encoded, fresh) = live.as_ref().map_or((0, 0), |live| live.counters());
@@ -743,7 +813,7 @@ mod tests {
         let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
 
         let status = wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.buffered_bytes > 0
+            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
         });
         assert!(status.recording);
         assert_eq!(status.stream.unwrap().frame_rate, 60);
@@ -757,10 +827,36 @@ mod tests {
     }
 
     #[test]
+    fn the_lifetime_totals_grow_and_survive_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let clips = directory.path().join("clips");
+        let config = config_in(&clips);
+        let store = Store::at(state.clone()).unwrap();
+        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, Some(store), config.clone());
+        let status = wait_for(&worker, |status| status.saved_bytes.is_some());
+        assert_eq!(status.saved_bytes, Some(0));
+
+        worker.save();
+        let status = wait_for(&worker, |status| status.last_clip.is_some());
+        let clip_bytes = std::fs::metadata(status.last_clip.unwrap()).unwrap().len();
+        assert_eq!(status.saved_bytes, Some(clip_bytes));
+        let buffered = status.buffered_lifetime_bytes.unwrap();
+        assert!(buffered > 0, "the recording went into the buffer");
+        drop(worker);
+
+        let store = Store::at(state).unwrap();
+        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, Some(store), config);
+        let status = wait_for(&worker, |status| status.saved_bytes.is_some());
+        assert_eq!(status.saved_bytes, Some(clip_bytes));
+        assert!(status.buffered_lifetime_bytes.unwrap() >= buffered);
+    }
+
+    #[test]
     fn stopping_ends_the_session_and_saving_then_reports_nothing_new() {
         let directory = tempfile::tempdir().unwrap();
         let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-        wait_for(&worker, |status| status.buffered_bytes > 0);
+        wait_for(&worker, |status| status.session_written_bytes > 0);
 
         worker.stop();
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Stopped);
@@ -823,7 +919,7 @@ mod tests {
         // A second app cannot be captured as a window, so its monitor is captured instead.
         worker.target(window(2));
         let status = wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.buffered_bytes > 0
+            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
         });
         assert_eq!(SESSIONS.load(Ordering::Relaxed), 3);
         assert_eq!(status.source.as_deref(), Some("game2.exe"));
