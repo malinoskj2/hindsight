@@ -41,6 +41,9 @@ The **Capture** setting chooses how frames are taken. All three keep every frame
 | Bitrate | 50 Mbps | 5–150 Mbps |
 | Save hotkey | Alt+F10 | Ctrl, Alt, Shift or Win with a key; F-keys may stand alone |
 | Clip folder | `Videos\hindsight` | Any absolute folder |
+| Theme | Classic Windows | Classic Windows, Ember, Selene or Nova |
+
+**Theme** (in the General group) dresses the window in one of three characters: their colours, rounded group panels, tab strip and buttons, and an illustration beside the controls. It applies the moment you choose it, without restarting recording, and is remembered. Classic Windows, the default, is the plain dialog of Windows' own controls, unchanged. The artwork is in `assets/themes`.
 
 The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 minutes. The Settings tab shows the estimate for what you enter. **Apply and restart** starts a new buffer, so save anything you want first.
 

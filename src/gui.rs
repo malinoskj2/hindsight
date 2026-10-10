@@ -15,13 +15,15 @@ use crate::{
 };
 use anyhow::Result;
 use footer::Footer;
-use layout::{MARGIN, WINDOW_WIDTH, resize_by, shift_by};
+use layout::{MARGIN, WINDOW_WIDTH, resize_by, resize_width_by, shift_by};
 use logs::LogsPage;
 use settings::SettingsPage;
 use status::StatusPage;
 use std::{cell::RefCell, rc::Rc};
+use theme::Skin;
 use winsafe::{self as w, co, gui, prelude::*};
 
+mod art;
 mod footer;
 mod layout;
 mod logs;
@@ -30,6 +32,7 @@ mod settings;
 mod startup_error;
 mod status;
 mod text;
+mod theme;
 
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
@@ -93,6 +96,7 @@ struct Main {
     settings: SettingsPage,
     logs: LogsPage,
     footer: Footer,
+    skin: Skin,
     shared: Rc<RefCell<Shared>>,
 }
 
@@ -104,9 +108,12 @@ impl Main {
         } else {
             co::WS::VISIBLE
         };
+        // The look chosen last time; a character theme widens the window for its artwork.
+        let skin = Skin::new(config.theme);
+        let width = WINDOW_WIDTH + skin.extra_width();
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: APP_NAME,
-            size: gui::dpi(WINDOW_WIDTH, WINDOW_HEIGHT),
+            size: gui::dpi(width, WINDOW_HEIGHT),
             class_icon: gui::Icon::Id(ICON_RESOURCE),
             style: co::WS::CAPTION
                 | co::WS::SYSMENU
@@ -121,14 +128,14 @@ impl Main {
             Ok(enabled) => (enabled, None),
             Err(error) => (false, Some(text::startup_setting_failed(error))),
         };
-        let status = StatusPage::new(&wnd);
-        let settings = SettingsPage::new(&wnd, &config, start_with_windows);
-        let logs = LogsPage::new(&wnd);
+        let status = StatusPage::new(&wnd, &skin);
+        let settings = SettingsPage::new(&wnd, &config, start_with_windows, &skin);
+        let logs = LogsPage::new(&wnd, &skin);
         let tab = gui::Tab::new(
             &wnd,
             gui::TabOpts {
                 position: gui::dpi(MARGIN, MARGIN),
-                size: gui::dpi(WINDOW_WIDTH - 2 * MARGIN, TAB_HEIGHT),
+                size: gui::dpi(width - 2 * MARGIN, TAB_HEIGHT),
                 pages: &[
                     (text::TAB_STATUS, status.page().clone()),
                     (text::TAB_SETTINGS, settings.page().clone()),
@@ -137,7 +144,17 @@ impl Main {
                 ..Default::default()
             },
         );
-        let footer = Footer::new(&wnd);
+        // A character theme draws the strip of tabs itself; classic leaves it to Windows.
+        let (tabs_skin, tabs) = (skin.clone(), tab.clone());
+        tab.on_subclass().wm_paint(move || {
+            if tabs_skin.is_themed() {
+                tabs_skin.paint_tabs(&tabs);
+            } else {
+                theme::paint_tabs_natively(tabs.hwnd());
+            }
+            Ok(())
+        });
+        let footer = Footer::new(&wnd, &skin);
 
         let main = Self {
             wnd,
@@ -146,6 +163,7 @@ impl Main {
             settings,
             logs,
             footer,
+            skin,
             shared: Rc::new(RefCell::new(Shared {
                 worker,
                 config,
@@ -239,6 +257,12 @@ impl Main {
             Ok(())
         });
 
+        let me = self.clone();
+        self.settings.theme.on().cbn_sel_change(move || {
+            me.on_theme_chosen();
+            Ok(())
+        });
+
         for field in self.settings.estimate_inputs() {
             let me = self.clone();
             field.on().en_change(move || {
@@ -257,7 +281,7 @@ impl Main {
     }
 
     fn on_create(&self) {
-        window::match_dialog_title_bar(self.wnd.hwnd());
+        self.apply_look();
         self.status.on_create();
         self.settings.on_create();
         self.logs.on_create();
@@ -407,6 +431,55 @@ impl Main {
         let accepted =
             self.settings.chosen_backend() != Backend::Nvfbc || nvfbc_key::ask(&self.wnd);
         self.settings.settle_backend(accepted);
+    }
+
+    /// A new look was chosen in the Settings tab: it shows at once and is remembered, and
+    /// recording carries on as it was.
+    fn on_theme_chosen(&self) {
+        let theme = self.settings.chosen_theme();
+        let before = self.skin.extra_width();
+        if theme == self.skin.theme() {
+            return;
+        }
+        self.skin.set(theme);
+        let delta = gui::dpi_x(self.skin.extra_width() - before);
+        if delta != 0 {
+            for window in [
+                self.tab.hwnd(),
+                self.status.page().hwnd(),
+                self.settings.page().hwnd(),
+                self.logs.page().hwnd(),
+            ] {
+                resize_width_by(window, delta);
+            }
+            resize_width_by(self.wnd.hwnd(), delta);
+        }
+        let mut shared = self.shared.borrow_mut();
+        shared.config.theme = theme;
+        shared.worker.set_theme(theme);
+        drop(shared);
+        self.apply_look();
+    }
+
+    /// Dresses the window in the chosen look: the title bar, the group titles, and a redraw of
+    /// everything.
+    fn apply_look(&self) {
+        match theme::title_bar_colours(&self.skin) {
+            Some((caption, text, _)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
+            None => window::match_dialog_title_bar(self.wnd.hwnd()),
+        }
+        // Classic shows the titles as labels; a character theme paints them on its panels.
+        let classic = !self.skin.is_themed();
+        for frame in self.status.frames().iter().chain(self.settings.frames()) {
+            frame.show_title_label(classic);
+        }
+        if let Ok(client) = self.wnd.hwnd().GetClientRect() {
+            let _ = self.wnd.hwnd().RedrawWindow(
+                client,
+                &w::HRGN::NULL,
+                co::RDW::INVALIDATE | co::RDW::ERASE | co::RDW::ALLCHILDREN,
+            );
+        }
     }
 
     /// Makes the configured hotkey save a clip; reports whether it could.

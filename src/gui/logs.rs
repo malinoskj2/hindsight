@@ -1,6 +1,9 @@
 //! The Logs tab: a read-only text box that receives journal entries as they are recorded.
 
-use super::layout::{self, BLACK, GROUP_WIDTH, GROUP_X};
+use super::{
+    layout::{self, BLACK, GROUP_WIDTH, GROUP_X},
+    theme::{Skin, Surface},
+};
 use crate::log;
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
@@ -28,7 +31,7 @@ struct Tail {
 }
 
 impl LogsPage {
-    pub(super) fn new(parent: &(impl GuiParent + 'static)) -> Self {
+    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
         let view = gui::Edit::new(
             &page,
@@ -45,7 +48,7 @@ impl LogsPage {
                 ..Default::default()
             },
         );
-        layout::draw(&page, page.on(), Vec::new(), co::COLOR::WINDOW, |_| BLACK);
+        layout::draw(&page, page.on(), Vec::new(), skin, Surface::Page, |_| BLACK);
 
         Self {
             page,

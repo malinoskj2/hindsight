@@ -14,3 +14,10 @@ pub(crate) fn match_dialog_title_bar(window: &w::HWND) {
     let _ = window.DwmSetWindowAttribute(w::DwmAttr::CaptionColor(CAPTION));
     let _ = window.DwmSetWindowAttribute(w::DwmAttr::TextColor(CAPTION_TEXT));
 }
+
+/// Applies a title bar of the given colours, for a window dressed in a theme.
+pub(crate) fn paint_title_bar(window: &w::HWND, caption: w::COLORREF, text: w::COLORREF) {
+    let _ = window.DwmSetWindowAttribute(w::DwmAttr::SystemBackdropType(co::DWMSBT::NONE));
+    let _ = window.DwmSetWindowAttribute(w::DwmAttr::CaptionColor(caption));
+    let _ = window.DwmSetWindowAttribute(w::DwmAttr::TextColor(text));
+}

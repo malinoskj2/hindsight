@@ -14,7 +14,7 @@ pub(super) const TAB_LOGS: &str = "Logs";
 pub(super) const GROUP_RECORDING: &str = "Recording";
 pub(super) const GROUP_CLIPS: &str = "Clips";
 pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
-pub(super) const GROUP_STARTUP: &str = "Startup";
+pub(super) const GROUP_GENERAL: &str = "General";
 
 pub(super) const SOURCE: &str = "Source";
 pub(super) const GROUP_STATS: &str = "Stats";
@@ -44,6 +44,7 @@ pub(super) const RESTART_NOTICE: &str =
     "Applying restarts recording; save any wanted replay first.";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";
+pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
 pub(super) const START_WITH_WINDOWS_HELP: &str =
     "Starts hidden in the notification area at sign-in, ready for the first full-screen app.";

@@ -4,10 +4,11 @@ use super::{
     ICON_RESOURCE,
     layout::{self, BLACK, Frame, INNER_WIDTH, INNER_X, LINE, RED, WINDOW_WIDTH, label},
     text,
+    theme::{Skin, Surface},
 };
-use crate::{APP_NAME, sys::window};
+use crate::{APP_NAME, config::Theme, sys::window};
 use anyhow::Result;
-use winsafe::{co, gui, prelude::*};
+use winsafe::{gui, prelude::*};
 
 /// Shows `message` with its explanation until the user closes the window.
 pub(super) fn show(message: &str) -> Result<()> {
@@ -36,9 +37,17 @@ pub(super) fn show(message: &str) -> Result<()> {
         Ok(0)
     });
     // The error itself is red; the title and the help line are black.
-    layout::draw(&wnd, wnd.on(), frames, co::COLOR::BTNFACE, move |hwnd| {
-        if *hwnd == *message.hwnd() { RED } else { BLACK }
-    });
+    let skin = Skin::new(Theme::Classic);
+    layout::draw(
+        &wnd,
+        wnd.on(),
+        frames,
+        &skin,
+        Surface::Dialog,
+        move |hwnd| {
+            if *hwnd == *message.hwnd() { RED } else { BLACK }
+        },
+    );
 
     wnd.run_main(None)
         .map(|_| ())

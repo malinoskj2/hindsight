@@ -4,13 +4,15 @@
 use super::{
     layout::{
         self, BLACK, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X, LINE, RED, button, label,
+        skin_button,
     },
     text,
+    theme::{Skin, Surface},
 };
 use crate::{
     config::{
         self, Backend, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
-        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Mode,
+        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Mode, Theme,
     },
     log,
     sys::startup,
@@ -30,6 +32,7 @@ pub(super) struct SettingsPage {
     frames: Vec<Frame>,
     mode: gui::ComboBox,
     pub(super) backend: gui::ComboBox,
+    pub(super) theme: gui::ComboBox,
     /// The capture choice last settled on, restored when the NvFBC key is not given.
     settled_backend: Rc<Cell<Backend>>,
     codec: gui::ComboBox,
@@ -52,6 +55,7 @@ impl SettingsPage {
         parent: &(impl GuiParent + 'static),
         config: &Config,
         start_with_windows: bool,
+        skin: &Skin,
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
@@ -101,9 +105,10 @@ impl SettingsPage {
         let estimate = label(&page, "", INNER_X, 164, INNER_WIDTH, 1);
         let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 182, INNER_WIDTH, 1);
         let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 202, 120);
+        skin_button(&apply, skin, true);
         let settings_error = label(&page, "", INNER_X + 128, 200, INNER_WIDTH - 128, 2);
 
-        let startup = startup_controls(&page, start_with_windows);
+        let startup = startup_controls(&page, config, start_with_windows);
         let frames = vec![recording_group, startup.frame];
 
         // The error lines are red and the estimate muted; every other label is black.
@@ -113,7 +118,8 @@ impl SettingsPage {
             &page,
             page.on(),
             frames.clone(),
-            co::COLOR::WINDOW,
+            skin,
+            Surface::Page,
             move |hwnd| {
                 if errors.iter().any(|error| *error.hwnd() == *hwnd) {
                     RED
@@ -130,6 +136,7 @@ impl SettingsPage {
             frames,
             mode,
             backend,
+            theme: startup.theme,
             settled_backend: Rc::new(Cell::new(config.backend)),
             codec,
             frame_rate,
@@ -148,6 +155,10 @@ impl SettingsPage {
 
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
+    }
+
+    pub(super) fn frames(&self) -> &[Frame] {
+        &self.frames
     }
 
     /// Finishes the parts that need the controls to exist.
@@ -169,6 +180,7 @@ impl SettingsPage {
         let mode = chosen(&self.mode, &Mode::ALL);
         let backend = chosen(&self.backend, &Backend::ALL);
         let codec = chosen(&self.codec, &Codec::ALL);
+        let theme = chosen(&self.theme, &Theme::ALL);
         let hotkey = self.hotkey.text().unwrap_or_default();
         let folder = self.folder.text().unwrap_or_default();
         let folder = folder.trim();
@@ -187,6 +199,7 @@ impl SettingsPage {
             } else {
                 folder.to_owned()
             },
+            theme,
         };
         config.validate().map_err(|error| error.to_string())?;
         // Stored in its canonical spelling, as the Status tab shows it.
@@ -200,6 +213,11 @@ impl SettingsPage {
     /// The capture backend the drop-down list shows.
     pub(super) fn chosen_backend(&self) -> Backend {
         chosen(&self.backend, &Backend::ALL)
+    }
+
+    /// The look the drop-down list shows.
+    pub(super) fn chosen_theme(&self) -> Theme {
+        chosen(&self.theme, &Theme::ALL)
     }
 
     /// Accepts the backend now shown, or, when `accepted` is false, shows the previous one
@@ -283,19 +301,33 @@ impl SettingsPage {
 /// The controls of the "Startup" group.
 struct StartupControls {
     frame: Frame,
+    theme: gui::ComboBox,
     check_box: gui::CheckBox,
     error: gui::Label,
     group: ExpandableGroup,
 }
 
-fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupControls {
+fn startup_controls(
+    page: &gui::TabPage,
+    config: &Config,
+    start_with_windows: bool,
+) -> StartupControls {
     // Compact; the group adds a line for the error label when one occurs.
-    let startup_group = Frame::new(page, text::GROUP_STARTUP, 240, 78);
+    let startup_group = Frame::new(page, text::GROUP_GENERAL, 240, 106);
+    let theme = choice_field(
+        page,
+        text::THEME,
+        INNER_X,
+        260,
+        190,
+        &Theme::ALL.map(Theme::name),
+        Theme::ALL.iter().position(|theme| *theme == config.theme),
+    );
     let start_with_windows = gui::CheckBox::new(
         page,
         gui::CheckBoxOpts {
             text: text::START_WITH_WINDOWS,
-            position: gui::dpi(INNER_X, 260),
+            position: gui::dpi(INNER_X, 288),
             // Wide enough for the label in any font, rather than measured once at creation.
             size: gui::dpi(INNER_WIDTH, LINE),
             check_state: if start_with_windows {
@@ -310,11 +342,11 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
         page,
         text::START_WITH_WINDOWS_HELP,
         INNER_X,
-        280,
+        308,
         INNER_WIDTH,
         2,
     );
-    let startup_error = label(page, "", INNER_X, 280 + 2 * LINE, INNER_WIDTH, 1);
+    let startup_error = label(page, "", INNER_X, 308 + 2 * LINE, INNER_WIDTH, 1);
     let group = ExpandableGroup::new(
         startup_group.clone(),
         startup_error.clone(),
@@ -322,6 +354,7 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
     );
     StartupControls {
         frame: startup_group,
+        theme,
         check_box: start_with_windows,
         error: startup_error,
         group,

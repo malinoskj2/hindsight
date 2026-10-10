@@ -4,15 +4,16 @@
 use super::{
     layout::{
         self, AMBER, BLACK, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, RED,
-        TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label,
+        TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label, skin_button,
     },
     text,
+    theme::{Skin, Surface},
 };
 use crate::{
     config::Config,
     service::{DisplayStatus, Status},
 };
-use winsafe::{co, gui, prelude::*};
+use winsafe::{gui, prelude::*};
 
 /// Height the Recording group gains while it shows notices or errors (two lines).
 const NOTICE_EXTRA: i32 = 2 * LINE + 4;
@@ -40,7 +41,7 @@ pub(super) struct StatusPage {
 }
 
 impl StatusPage {
-    pub(super) fn new(parent: &(impl GuiParent + 'static)) -> Self {
+    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
         let caption = |text, y| label(&page, text, INNER_X, y, VALUE_X - INNER_X, 1);
 
@@ -82,6 +83,9 @@ impl StatusPage {
             120,
         );
 
+        skin_button(&save, skin, true);
+        skin_button(&recording, skin, false);
+
         let recording_group = ExpandableGroup::new(
             recording_frame.clone(),
             notice.label().clone(),
@@ -114,7 +118,8 @@ impl StatusPage {
             &page,
             page.on(),
             frames.clone(),
-            co::COLOR::WINDOW,
+            skin,
+            Surface::Page,
             move |hwnd| {
                 tints
                     .iter()
@@ -146,6 +151,10 @@ impl StatusPage {
 
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
+    }
+
+    pub(super) fn frames(&self) -> &[Frame] {
+        &self.frames
     }
 
     /// Finishes the parts that need the controls to exist.

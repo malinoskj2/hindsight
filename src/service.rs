@@ -3,7 +3,7 @@
 //! which full-screen app is in front, and reads its status once a second.
 
 use crate::{
-    config::{Backend, Config, Mode},
+    config::{Backend, Config, Mode, Theme},
     log,
     replay::{self, Live, SaveError, Stream},
     storage::{Store, Totals},
@@ -144,6 +144,8 @@ enum Command {
     Target(Target),
     Stop,
     Save,
+    /// The window changed its look; remembered without touching the session.
+    Theme(Theme),
     /// Sent by a capture or save thread that has something to report, and by the stream
     /// listener once the encoder is configured: the worker looks at its sessions and publishes.
     Wake,
@@ -217,6 +219,11 @@ impl Worker {
 
     pub(crate) fn save(&self) {
         self.request(Command::Save);
+    }
+
+    /// Saves the chosen look in the settings; recording carries on undisturbed.
+    pub(crate) fn set_theme(&self, theme: Theme) {
+        self.request(Command::Theme(theme));
     }
 
     fn request(&self, command: Command) {
@@ -343,6 +350,7 @@ impl Machine {
                     log::info(text::RECORDING_STOPPED);
                 }
                 Ok(Command::Save) => self.save(),
+                Ok(Command::Theme(theme)) => self.remember_theme(theme),
                 Ok(Command::Wake | Command::Publish) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -371,6 +379,17 @@ impl Machine {
         self.stop_session();
         self.paused = false;
         self.begin();
+    }
+
+    /// Writes the new look to the settings file. The other settings stay as last applied, and
+    /// the session is not restarted.
+    fn remember_theme(&mut self, theme: Theme) {
+        self.config.theme = theme;
+        if let Some(store) = &self.store
+            && let Err(error) = store.save_config(&self.config)
+        {
+            self.report_error(text::save_settings_failed(error));
+        }
     }
 
     /// Starts recording as the mode says: the primary monitor at once, or nothing until a
@@ -973,5 +992,34 @@ mod tests {
             .load_config()
             .unwrap();
         assert_eq!(saved, config);
+    }
+
+    #[test]
+    fn choosing_a_look_is_saved_and_leaves_recording_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let config = config_in(directory.path());
+        let worker = Worker::spawn_with(
+            steady,
+            RETRY_INTERVAL,
+            Some(Store::at(state.clone()).unwrap()),
+            config.clone(),
+        );
+        wait_for(&worker, |status| status.session_written_bytes > 0);
+
+        worker.set_theme(Theme::Nova);
+        // Commands are handled in order, so by the time the worker has exited it has saved.
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Recording);
+        assert!(status.recording, "the session carries on");
+        drop(worker);
+
+        let saved = Store::at(state).unwrap().load_config().unwrap();
+        assert_eq!(
+            saved,
+            Config {
+                theme: Theme::Nova,
+                ..config
+            }
+        );
     }
 }

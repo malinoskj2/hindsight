@@ -1,6 +1,7 @@
 //! Geometry shared by the pages and the helpers that create, draw and move controls. Positions
 //! are hand-laid in logical pixels; `winsafe::gui::dpi` scales them when a control is created.
 
+use super::theme::{Skin, Surface};
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
@@ -29,6 +30,8 @@ pub(super) const RED: w::COLORREF = w::COLORREF::from_rgb(0xC4, 0x2B, 0x1C);
 #[derive(Clone)]
 pub(super) struct Frame {
     title: gui::Label,
+    /// The title as written, for the themed look that paints it itself.
+    text: String,
     /// In physical pixels; shared between the paint handler and the group that moves it.
     rect: Rc<Cell<w::RECT>>,
 }
@@ -43,6 +46,7 @@ impl Frame {
         let padded = format!(" {title} ");
         Self {
             title: label(parent, &padded, GROUP_X + 8, y, 0, 1),
+            text: title.to_owned(),
             rect: Rc::new(Cell::new(w::RECT {
                 left: gui::dpi_x(GROUP_X),
                 top: gui::dpi_y(y + LINE / 2),
@@ -50,6 +54,21 @@ impl Frame {
                 bottom: gui::dpi_y(y + height),
             })),
         }
+    }
+
+    /// The frame's rectangle, in physical pixels of its page.
+    pub(super) fn rect(&self) -> w::RECT {
+        self.rect.get()
+    }
+
+    pub(super) fn title(&self) -> &str {
+        &self.text
+    }
+
+    /// Shows the title label, which the classic look uses; the themed look paints the title
+    /// itself, so the label is hidden.
+    pub(super) fn show_title_label(&self, shown: bool) {
+        show(&self.title, shown);
     }
 
     /// Makes the frame `delta` physical pixels taller (shorter when negative).
@@ -78,34 +97,62 @@ pub(super) fn fit_titles(frames: &[Frame]) {
     }
 }
 
-/// Installs the handlers that draw a window's own parts: `frames`, if any, in `WM_PAINT`, and
-/// in `WM_CTLCOLORSTATIC` the colour `text_colour` chooses for each label over `background`.
+/// Installs the handlers that draw a window's own parts: its background, `frames`, if any, and
+/// in `WM_CTLCOLORSTATIC` the colour `text_colour` chooses for each label. Classic draws them
+/// as Windows would; a character theme in `skin` paints its backdrop, panels and artwork.
 pub(super) fn draw(
     host: &(impl GuiParent + 'static),
     events: &impl GuiEventsParent,
     frames: Vec<Frame>,
-    background: co::COLOR,
+    skin: &Skin,
+    surface: Surface,
     text_colour: impl Fn(&w::HWND) -> w::COLORREF + 'static,
 ) {
-    if !frames.is_empty() {
+    let erase_host = host.clone();
+    let erase_skin = skin.clone();
+    let erase_frames = frames.clone();
+    events.wm_erase_bkgnd(move |p| {
+        if erase_skin.is_themed() {
+            match surface {
+                Surface::Dialog => erase_skin.fill_dialog(&p.hdc, erase_host.hwnd()),
+                Surface::Page => {
+                    erase_skin.paint_backdrop(&p.hdc, erase_host.hwnd(), &erase_frames);
+                }
+            }
+        } else if let Ok(client) = erase_host.hwnd().GetClientRect()
+            && let Ok(brush) = w::HBRUSH::GetSysColorBrush(surface.classic())
+        {
+            let _ = p.hdc.FillRect(client, &brush);
+        }
+        Ok(1)
+    });
+    if surface == Surface::Page || !frames.is_empty() {
         let paint_host = host.clone();
+        let paint_skin = skin.clone();
         events.wm_paint(move || {
-            paint_frames(paint_host.hwnd(), &frames);
+            paint_page(paint_host.hwnd(), &paint_skin, &frames);
             Ok(())
         });
     }
+    let label_skin = skin.clone();
     events.wm_ctl_color_static(move |p| {
-        let _ = p.hdc.SetTextColor(text_colour(&p.hwnd));
+        let _ = p
+            .hdc
+            .SetTextColor(label_skin.text_colour(text_colour(&p.hwnd)));
         let _ = p.hdc.SetBkMode(co::BKMODE::TRANSPARENT);
-        Ok(w::HBRUSH::GetSysColorBrush(background).unwrap_or(w::HBRUSH::NULL))
+        Ok(label_skin.label_brush(surface))
     });
 }
 
-fn paint_frames(hwnd: &w::HWND, frames: &[Frame]) {
+/// Paints a tab page: the character over the page in a character theme, or else Windows'
+/// own group boxes.
+fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
     let Ok(paint) = hwnd.BeginPaint() else {
         return;
     };
-    if let Some(theme) = hwnd.OpenThemeData("BUTTON") {
+    if skin.is_themed() {
+        skin.paint_character(&paint, hwnd);
+    } else if let Some(theme) = hwnd.OpenThemeData("BUTTON") {
         for frame in frames {
             let _ = theme.DrawThemeBackground(
                 &paint,
@@ -299,6 +346,17 @@ pub(super) fn button(
     )
 }
 
+/// Makes a push button take the chosen theme's look; `primary` buttons take the accent colour.
+/// With no theme chosen Windows draws the button as it always did.
+pub(super) fn skin_button(button: &gui::Button, skin: &Skin, primary: bool) {
+    let skin = skin.clone();
+    let owner = button.clone();
+    button.on().nm_custom_draw(move |draw| {
+        let text = owner.hwnd().GetWindowText().unwrap_or_default();
+        Ok(skin.paint_button(draw, &text, primary))
+    });
+}
+
 pub(super) fn show(control: &impl GuiWindow, visible: bool) {
     control
         .hwnd()
@@ -328,6 +386,19 @@ pub(super) fn shift_by(window: &w::HWND, delta: i32) {
         w::POINT::with(rect.left, rect.top + delta),
         w::SIZE::default(),
         co::SWP::NOSIZE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
+    );
+}
+
+/// Makes a window `delta` physical pixels wider (narrower when negative), keeping its position.
+pub(super) fn resize_width_by(window: &w::HWND, delta: i32) {
+    let Ok(rect) = window.GetWindowRect() else {
+        return;
+    };
+    let _ = window.SetWindowPos(
+        w::HwndPlace::None,
+        w::POINT::default(),
+        w::SIZE::with(rect.right - rect.left + delta, rect.bottom - rect.top),
+        co::SWP::NOMOVE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
     );
 }
 

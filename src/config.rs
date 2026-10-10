@@ -106,6 +106,37 @@ impl fmt::Display for Codec {
     }
 }
 
+/// How the window looks. Classic is the plain Windows dialog; the others dress it in a
+/// character's colours and artwork.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Theme {
+    #[default]
+    Classic,
+    Ember,
+    Selene,
+    Nova,
+}
+
+impl Theme {
+    pub(crate) const ALL: [Self; 4] = [Self::Classic, Self::Ember, Self::Selene, Self::Nova];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic Windows",
+            Self::Ember => "Ember, dragon maid",
+            Self::Selene => "Selene, moon-moth archivist",
+            Self::Nova => "Nova, arcade pilot",
+        }
+    }
+}
+
+impl fmt::Display for Theme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
@@ -120,6 +151,8 @@ pub(crate) struct Config {
     pub(crate) hotkey: String,
     /// Where clips are saved; empty for the default folder.
     pub(crate) clip_directory: String,
+    /// The window's look; applied as soon as it is chosen, without restarting recording.
+    pub(crate) theme: Theme,
 }
 
 impl Default for Config {
@@ -133,6 +166,7 @@ impl Default for Config {
             bitrate_mbps: 50,
             hotkey: "Alt+F10".to_owned(),
             clip_directory: String::new(),
+            theme: Theme::Classic,
         }
     }
 }
@@ -265,6 +299,14 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"codec":"vp9"}"#).is_err());
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey, "Alt+F10");
+        assert_eq!(config.theme, Theme::Classic);
+        assert_eq!(
+            serde_json::from_str::<Config>(r#"{"theme":"selene"}"#)
+                .unwrap()
+                .theme,
+            Theme::Selene
+        );
+        assert!(serde_json::from_str::<Config>(r#"{"theme":"neon"}"#).is_err());
         assert!(serde_json::from_str::<Config>(r#"{"buffer_secs":120}"#).is_err());
         assert_eq!(
             serde_json::from_str::<Config>("{}").unwrap(),

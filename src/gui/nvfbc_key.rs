@@ -5,8 +5,10 @@
 use super::{
     layout::{self, BLACK, LINE, RED, label},
     text,
+    theme::{Skin, Surface},
 };
 use crate::{
+    config::Theme,
     log,
     sys::{nvfbc_key, window},
 };
@@ -118,7 +120,8 @@ pub(super) fn ask(parent: &impl GuiParent) -> bool {
         &wnd,
         wnd.on(),
         Vec::new(),
-        co::COLOR::BTNFACE,
+        &Skin::new(Theme::Classic),
+        Surface::Dialog,
         move |hwnd| {
             if *hwnd == *error.hwnd() { RED } else { BLACK }
         },
