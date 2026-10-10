@@ -1,3 +1,14 @@
+//! Application state on disk, in `%LOCALAPPDATA%\Dxgi`.
+//!
+//! Opening the store takes an exclusive lock on `instance.lock` there and holds it until the
+//! store is dropped, so a second copy of dxgi fails to start instead of two recorders saving
+//! over each other's settings. Each state file is capped at 64 KB, so a damaged file is
+//! reported rather than read without bound. Writes go to a `.pending` file that is then renamed
+//! over the original, so a crash part-way through leaves the previous state intact instead of a
+//! truncated file. Without `LOCALAPPDATA` the temporary directory stands in for building paths,
+//! but opening the store reports the missing variable rather than keeping state somewhere that
+//! may be cleared.
+
 use crate::config::Config;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -20,18 +31,19 @@ pub(crate) enum StorageError {
     Io(#[from] io::Error),
     #[error("invalid state JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("application state is larger than 64 KB")]
+    #[error("application state is larger than {} KB", MAX_STATE_BYTES / 1024)]
     Oversized,
     #[error("another dxgi instance is running, or the state directory cannot be locked")]
     Locked,
-    #[error("LOCALAPPDATA is unavailable")]
+    #[error("{} is unavailable", STATE_DIRECTORY_ENV)]
     NoDirectory,
 }
 
 #[derive(Debug)]
 pub(crate) struct Store {
     root: PathBuf,
-    lock: File,
+    /// Held only to keep the instance lock; closing the file releases it.
+    _lock: File,
 }
 
 /// The application state directory (`%LOCALAPPDATA%\Dxgi`). Without `LOCALAPPDATA` the
@@ -61,7 +73,7 @@ impl Store {
             .open(root.join(INSTANCE_LOCK_FILE))?;
         lock.try_lock().map_err(|_| StorageError::Locked)?;
 
-        Ok(Self { root, lock })
+        Ok(Self { root, _lock: lock })
     }
 
     pub(crate) fn load_config(&self) -> Result<Config, StorageError> {
@@ -97,13 +109,6 @@ impl Store {
 
         atomic_write(&self.root.join(name), &bytes)?;
         Ok(())
-    }
-}
-
-impl Drop for Store {
-    fn drop(&mut self) {
-        // Explicit unlock also releases an inherited lock during a concurrent fork/exec.
-        let _ = self.lock.unlock();
     }
 }
 

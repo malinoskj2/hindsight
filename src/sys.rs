@@ -1,3 +1,6 @@
+//! OS-level helpers. Hotkey parsing and the icon are portable; hotkey registration, the Start
+//! with Windows entry, the tray icon and the window chrome are Windows-only.
+
 pub(crate) mod hotkey;
 pub(crate) mod icon;
 #[cfg(windows)]

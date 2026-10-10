@@ -48,6 +48,7 @@ const RECORDER: Recorder = crate::gpu::record;
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _| anyhow::bail!("capture requires Windows");
 
+/// What the worker is doing, for the Status tab to put into words.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) enum DisplayStatus {
     #[default]
@@ -58,21 +59,9 @@ pub(crate) enum DisplayStatus {
     Unsupported,
 }
 
-impl DisplayStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Starting => "Starting capture…",
-            Self::Recording => "Recording to the replay buffer",
-            Self::Retrying => "Capture stopped · retrying shortly",
-            Self::Stopped => "Stopped · the replay buffer is off",
-            Self::Unsupported => "Cannot record with these settings",
-        }
-    }
-}
-
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Status {
-    pub(crate) message: DisplayStatus,
+    pub(crate) state: DisplayStatus,
     pub(crate) recording: bool,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
@@ -232,8 +221,8 @@ impl Machine {
                 Ok(Command::Stop) => {
                     self.stop_session();
                     self.retry_at = None;
-                    self.status.message = DisplayStatus::Stopped;
-                    log::info("Recording stopped");
+                    self.status.state = DisplayStatus::Stopped;
+                    log::info(text::RECORDING_STOPPED);
                 }
                 Ok(Command::Save) => self.save(),
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -255,9 +244,7 @@ impl Machine {
         if let Some(store) = &self.store
             && let Err(error) = store.save_config(&config)
         {
-            let message = text::save_settings_failed(&error);
-            log::error(&message);
-            self.status.error = Some(message);
+            self.report_error(text::save_settings_failed(error));
             return;
         }
         log::info(text::settings_applied(&config));
@@ -285,10 +272,10 @@ impl Machine {
             Ok(join) => {
                 self.session = Some(Session { stop, join });
                 self.live = Some(live);
-                self.status.message = DisplayStatus::Starting;
+                self.status.state = DisplayStatus::Starting;
                 self.status.error = None;
             }
-            Err(error) => self.fail(&format!("start the capture thread: {error}")),
+            Err(error) => self.fail(&text::capture_thread_failed(error)),
         }
     }
 
@@ -298,17 +285,21 @@ impl Machine {
             match session.join.join() {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => log::error(text::session_failed(&format!("{error:#}"))),
-                Err(_) => log::error(text::session_failed("the capture thread panicked")),
+                Err(_) => log::error(text::session_failed(text::CAPTURE_PANICKED)),
             }
         }
     }
 
     fn fail(&mut self, error: &str) {
-        let message = text::session_failed(error);
+        self.report_error(text::session_failed(error));
+        self.status.state = DisplayStatus::Retrying;
+        self.retry_at = Some(Instant::now() + self.retry_interval);
+    }
+
+    /// Logs `message` and shows it on the Status tab.
+    fn report_error(&mut self, message: String) {
         log::error(&message);
         self.status.error = Some(message);
-        self.status.message = DisplayStatus::Retrying;
-        self.retry_at = Some(Instant::now() + self.retry_interval);
     }
 
     /// Notices a session that ended by itself, a retry that is due and a save that finished.
@@ -325,21 +316,19 @@ impl Machine {
                     self.start_session();
                 }
                 Ok(Ok(Ended::Stopped)) => {
-                    self.status.message = DisplayStatus::Stopped;
+                    self.status.state = DisplayStatus::Stopped;
                 }
                 Ok(Ok(Ended::Unsupported(reason))) => {
-                    let message = text::session_failed(&reason);
-                    log::error(&message);
-                    self.status.error = Some(message);
-                    self.status.message = DisplayStatus::Unsupported;
+                    self.report_error(text::session_failed(&reason));
+                    self.status.state = DisplayStatus::Unsupported;
                 }
                 Ok(Err(error)) => self.fail(&format!("{error:#}")),
-                Err(_) => self.fail("the capture thread panicked"),
+                Err(_) => self.fail(text::CAPTURE_PANICKED),
             }
         }
 
         if self.retry_at.is_some_and(|due| Instant::now() >= due) {
-            log::info("Starting capture again");
+            log::info(text::RESTARTING);
             self.start_session();
         }
 
@@ -355,7 +344,7 @@ impl Machine {
 
     fn save(&mut self) {
         if self.saving.is_some() {
-            log::info("A clip is already being saved");
+            log::info(text::ALREADY_SAVING);
             return;
         }
         let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
@@ -374,11 +363,7 @@ impl Machine {
                 self.saving = Some(Saving { seconds, join });
                 self.status.notice = None;
             }
-            Err(error) => {
-                let message = text::save_failed(&error);
-                log::error(&message);
-                self.status.error = Some(message);
-            }
+            Err(error) => self.report_error(text::save_failed(error)),
         }
     }
 
@@ -389,16 +374,8 @@ impl Machine {
                 self.status.last_clip = Some(path);
                 self.status.error = None;
             }
-            Ok(Err(error)) => {
-                let message = text::save_failed(&error);
-                log::error(&message);
-                self.status.error = Some(message);
-            }
-            Err(_) => {
-                let message = text::save_failed(&"the save thread panicked");
-                log::error(&message);
-                self.status.error = Some(message);
-            }
+            Ok(Err(error)) => self.report_error(text::save_failed(error)),
+            Err(_) => self.report_error(text::save_failed(text::SAVE_PANICKED)),
         }
     }
 
@@ -407,9 +384,9 @@ impl Machine {
         let running = self.session.is_some();
         let stream = live.as_ref().and_then(|live| live.stream());
 
-        if running && stream.is_some() && self.status.message == DisplayStatus::Starting {
+        if running && stream.is_some() && self.status.state == DisplayStatus::Starting {
             log::info(text::recording(stream.as_ref(), &self.config));
-            self.status.message = DisplayStatus::Recording;
+            self.status.state = DisplayStatus::Recording;
         }
         self.status.recording = running;
         self.status.stream = stream;
@@ -523,7 +500,7 @@ mod tests {
         let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
 
         let status = wait_for(&worker, |status| {
-            status.message == DisplayStatus::Recording && status.buffered_bytes > 0
+            status.state == DisplayStatus::Recording && status.buffered_bytes > 0
         });
         assert!(status.recording);
         assert_eq!(status.stream.unwrap().frame_rate, 60);
@@ -542,7 +519,7 @@ mod tests {
         wait_for(&worker, |status| status.buffered_bytes > 0);
 
         worker.stop();
-        let status = wait_for(&worker, |status| status.message == DisplayStatus::Stopped);
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Stopped);
         assert!(!status.recording);
 
         // The stopped session's buffer can still be saved.
@@ -555,7 +532,7 @@ mod tests {
         let worker =
             Worker::spawn_with(failing, Duration::from_millis(50), None, Config::default());
 
-        let status = wait_for(&worker, |status| status.message == DisplayStatus::Retrying);
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
         assert!(status.error.unwrap().contains("no capture device"));
 
         worker.save();
@@ -572,13 +549,11 @@ mod tests {
             Config::default(),
         );
 
-        let status = wait_for(&worker, |status| {
-            status.message == DisplayStatus::Unsupported
-        });
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Unsupported);
         assert!(status.error.unwrap().contains("AV1"));
         assert!(!status.recording);
         thread::sleep(Duration::from_millis(100));
-        assert_eq!(worker.status().message, DisplayStatus::Unsupported);
+        assert_eq!(worker.status().state, DisplayStatus::Unsupported);
     }
 
     #[test]
@@ -591,7 +566,7 @@ mod tests {
             Some(store),
             config_in(directory.path()),
         );
-        wait_for(&worker, |status| status.message == DisplayStatus::Recording);
+        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
 
         let config = Config {
             frame_rate: 30,

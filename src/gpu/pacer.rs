@@ -13,6 +13,9 @@ use windows::{
     core::PCWSTR,
 };
 
+/// Nanoseconds in the 100 ns unit Windows measures timer due times and capture intervals in.
+pub(super) const HUNDRED_NANOSECONDS: u128 = 100;
+
 pub(super) struct Pacer {
     timer: HANDLE,
     start: Instant,
@@ -59,7 +62,8 @@ impl Pacer {
         );
         let remaining = due.saturating_sub(elapsed);
         // Relative due times are negative, in 100 ns units.
-        let relative = -i64::try_from(remaining.as_nanos() / 100).unwrap_or(i64::MAX);
+        let relative =
+            -i64::try_from(remaining.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
         // SAFETY: the timer is open; no completion routine.
         unsafe { SetWaitableTimer(self.timer, &raw const relative, 0, None, None, false) }?;
         // SAFETY: waits on the open timer.

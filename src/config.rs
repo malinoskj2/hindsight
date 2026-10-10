@@ -1,4 +1,10 @@
-use crate::sys::hotkey::Hotkey;
+//! The user's settings: codec, buffer length, frame rate, bitrate, the hotkey that saves a clip
+//! and the clip folder. They are stored as JSON and checked before use, since the file can be
+//! edited by hand: the buffer covers 5 to 600 seconds, capture runs at 24 to 240 fps and the
+//! bitrate is 5 to 150 Mbps. Clips go to `%USERPROFILE%\Videos\dxgi` unless another folder is
+//! chosen.
+
+use crate::sys::hotkey::{Hotkey, ParseError};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 use thiserror::Error;
@@ -70,16 +76,28 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub(crate) enum ConfigError {
-    #[error("buffer length must be between 5 and 600 seconds")]
+    #[error(
+        "buffer length must be between {} and {} seconds",
+        MIN_BUFFER_SECONDS,
+        MAX_BUFFER_SECONDS
+    )]
     Buffer,
-    #[error("frame rate must be between 24 and 240 fps")]
+    #[error(
+        "frame rate must be between {} and {} fps",
+        MIN_FRAME_RATE,
+        MAX_FRAME_RATE
+    )]
     FrameRate,
-    #[error("bitrate must be between 5 and 150 Mbps")]
+    #[error(
+        "bitrate must be between {} and {} Mbps",
+        MIN_BITRATE_MBPS,
+        MAX_BITRATE_MBPS
+    )]
     Bitrate,
-    #[error("{0}")]
-    Hotkey(String),
+    #[error(transparent)]
+    Hotkey(#[from] ParseError),
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
     ClipDirectory,
 }
@@ -103,9 +121,7 @@ impl Config {
     }
 
     pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
-        self.hotkey
-            .parse()
-            .map_err(|error: crate::sys::hotkey::ParseError| ConfigError::Hotkey(error.to_string()))
+        Ok(self.hotkey.parse()?)
     }
 
     pub(crate) const fn bitrate(&self) -> u32 {

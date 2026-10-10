@@ -9,7 +9,7 @@ use super::{
 const NAL_VPS: u8 = 32;
 const NAL_SPS: u8 = 33;
 const NAL_PPS: u8 = 34;
-const NAL_AUD: u8 = 35;
+pub(super) const NAL_AUD: u8 = 35;
 /// Intra random access points: BLA, IDR and CRA pictures.
 const IRAP: std::ops::RangeInclusive<u8> = 16..=21;
 /// Bytes of an SPS up to and including `general_level_idc`, after emulation prevention.
@@ -74,7 +74,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
         .any(|unit| IRAP.contains(&nal_type(unit)))
 }
 
-fn nal_type(unit: &[u8]) -> u8 {
+pub(super) fn nal_type(unit: &[u8]) -> u8 {
     (unit[0] >> 1) & 0x3F
 }
 

@@ -30,7 +30,9 @@ use windows::{
 
 mod ffi;
 
-use ffi::{Status, Zeroed};
+// Re-exported because `NvencError::Call` carries it.
+pub(super) use ffi::Status;
+use ffi::Zeroed;
 
 /// Frames in flight at once. Two would do while the GPU keeps up; the third absorbs a frame
 /// that NVENC finishes late because a game saturates the GPU.
@@ -45,10 +47,16 @@ pub(crate) enum NvencError {
     #[error("nvEncodeAPI64.dll was not found; install or update the NVIDIA driver")]
     Library,
     #[error(
-        "the NVIDIA driver supports NVENC API {0}.{1}; update the driver to use API 12.1 or newer"
+        "the NVIDIA driver supports NVENC API {0}.{1}; update the driver to use API {major}.{minor} or newer",
+        major = ffi::API_MAJOR,
+        minor = ffi::API_MINOR,
     )]
     DriverTooOld(u32, u32),
-    #[error("the NVIDIA driver rejected the NVENC API 12.1 structures; update the driver")]
+    #[error(
+        "the NVIDIA driver rejected the NVENC API {major}.{minor} structures; update the driver",
+        major = ffi::API_MAJOR,
+        minor = ffi::API_MINOR,
+    )]
     VersionRejected,
     #[error("this GPU's NVENC has no {0} encoder")]
     Unsupported(Codec),
@@ -65,9 +73,11 @@ pub(crate) enum NvencError {
     #[error("{call} failed with {status}{detail}")]
     Call {
         call: &'static str,
-        status: &'static str,
+        status: Status,
         detail: String,
     },
+    #[error("the NVIDIA driver does not provide {0}")]
+    MissingEntryPoint(&'static str),
     #[error("NVENC did not finish a frame within {ENCODE_TIMEOUT_MS} ms")]
     Timeout,
     #[error("{0}: {1}")]
@@ -186,21 +196,24 @@ impl Encoder {
     }
 
     fn connect(&mut self, device: &ID3D11Device) -> Result<(), NvencError> {
-        // SAFETY: both symbols are looked up in the loaded NVENC library and have the
-        // documented signatures.
-        let (max_version, create_instance) = unsafe {
-            let max_version = GetProcAddress(self.library, s!("NvEncodeAPIGetMaxSupportedVersion"))
+        // SAFETY: looks a symbol up in the loaded NVENC library.
+        let max_version =
+            unsafe { GetProcAddress(self.library, s!("NvEncodeAPIGetMaxSupportedVersion")) }
                 .ok_or(NvencError::Library)?;
-            let create_instance = GetProcAddress(self.library, s!("NvEncodeAPICreateInstance"))
+        // SAFETY: looks a symbol up in the loaded NVENC library.
+        let create_instance =
+            unsafe { GetProcAddress(self.library, s!("NvEncodeAPICreateInstance")) }
                 .ok_or(NvencError::Library)?;
-            (
-                std::mem::transmute::<
-                    unsafe extern "system" fn() -> isize,
-                    ffi::GetMaxSupportedVersion,
-                >(max_version),
-                std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::CreateInstance>(
-                    create_instance,
-                ),
+        // SAFETY: the export has the documented signature.
+        let max_version = unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::GetMaxSupportedVersion>(
+                max_version,
+            )
+        };
+        // SAFETY: the export has the documented signature.
+        let create_instance = unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::CreateInstance>(
+                create_instance,
             )
         };
 
@@ -302,7 +315,7 @@ impl Encoder {
                 &raw mut value,
             )
         })?;
-        Ok(value.unsigned_abs())
+        Ok(u32::try_from(value).expect("a capability value is a non-negative limit"))
     }
 
     fn initialize(&mut self) -> Result<(), NvencError> {
@@ -453,8 +466,7 @@ impl Encoder {
 
     /// Encodes the texture [`input`](Self::input) returned as frame `index`.
     pub(super) fn submit(&mut self, index: u64, fresh: bool) -> Result<(), NvencError> {
-        let lock = self.device_lock.clone();
-        let _locked = Locked::new(&lock);
+        let _locked = Locked::new(&self.device_lock);
         let slot = self.next;
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
@@ -692,11 +704,7 @@ fn load_library() -> Result<HMODULE, NvencError> {
 }
 
 fn function<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError> {
-    entry.ok_or(NvencError::Call {
-        call,
-        status: "a missing entry point",
-        detail: String::new(),
-    })
+    entry.ok_or(NvencError::MissingEntryPoint(call))
 }
 
 fn call_error(call: &'static str, status: Status, detail: String) -> NvencError {
@@ -705,7 +713,7 @@ fn call_error(call: &'static str, status: Status, detail: String) -> NvencError 
     }
     NvencError::Call {
         call,
-        status: status.name(),
+        status,
         detail,
     }
 }
@@ -728,49 +736,49 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
     config.frame_interval_p = 1;
     config.rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
     config.rc.average_bit_rate = settings.bitrate;
+    // Peak 1.5× the average; halving first keeps the product within `u32`.
     config.rc.max_bit_rate = settings.bitrate / 2 * 3;
     config.rc.flags &= !ffi::RC_ENABLE_LOOKAHEAD;
     config.rc.multi_pass = ffi::MULTI_PASS_DISABLED;
 
-    // SAFETY: each arm writes the member of the union that belongs to the configured codec,
-    // which the preset filled in.
-    unsafe {
-        match settings.codec {
-            Codec::H264 => {
-                config.profile_guid = ffi::PROFILE_H264_HIGH;
-                let h264 = &mut config.codec.h264;
-                h264.flags |= ffi::H264_REPEAT_SPS_PPS;
-                h264.idr_period = gop;
-                h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
-                h264.vui.signal_bt709();
-            }
-            Codec::Hevc => {
-                config.profile_guid = ffi::PROFILE_HEVC_MAIN;
-                let hevc = &mut config.codec.hevc;
-                hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
-                hevc.flags |= ffi::HEVC_REPEAT_SPS_PPS
-                    | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
-                hevc.idr_period = gop;
-                hevc.vui.signal_bt709();
-            }
-            Codec::Av1 => {
-                config.profile_guid = ffi::PROFILE_AV1_MAIN;
-                let av1 = &mut config.codec.av1;
-                av1.flags &= !(ffi::AV1_ANNEX_B
-                    | ffi::AV1_TIMING_INFO
-                    | ffi::AV1_DECODER_MODEL_INFO
-                    | ffi::AV1_FRAME_ID_NUMBERS
-                    | ffi::AV1_DISABLE_SEQUENCE_HEADER
-                    | ffi::AV1_CHROMA_FORMAT_MASK
-                    | ffi::AV1_BIT_DEPTH_MASK);
-                av1.flags |= ffi::AV1_REPEAT_SEQUENCE_HEADER
-                    | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
-                av1.idr_period = gop;
-                av1.color_primaries = ffi::BT709;
-                av1.transfer_characteristics = ffi::BT709;
-                av1.matrix_coefficients = ffi::BT709;
-                av1.color_range = 0;
-            }
+    match settings.codec {
+        Codec::H264 => {
+            config.profile_guid = ffi::PROFILE_H264_HIGH;
+            // SAFETY: the preset filled the union member for the configured codec.
+            let h264 = unsafe { &mut config.codec.h264 };
+            h264.flags |= ffi::H264_REPEAT_SPS_PPS;
+            h264.idr_period = gop;
+            h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
+            h264.vui.signal_bt709();
+        }
+        Codec::Hevc => {
+            config.profile_guid = ffi::PROFILE_HEVC_MAIN;
+            // SAFETY: the preset filled the union member for the configured codec.
+            let hevc = unsafe { &mut config.codec.hevc };
+            hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
+            hevc.flags |= ffi::HEVC_REPEAT_SPS_PPS
+                | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
+            hevc.idr_period = gop;
+            hevc.vui.signal_bt709();
+        }
+        Codec::Av1 => {
+            config.profile_guid = ffi::PROFILE_AV1_MAIN;
+            // SAFETY: the preset filled the union member for the configured codec.
+            let av1 = unsafe { &mut config.codec.av1 };
+            av1.flags &= !(ffi::AV1_ANNEX_B
+                | ffi::AV1_TIMING_INFO
+                | ffi::AV1_DECODER_MODEL_INFO
+                | ffi::AV1_FRAME_ID_NUMBERS
+                | ffi::AV1_DISABLE_SEQUENCE_HEADER
+                | ffi::AV1_CHROMA_FORMAT_MASK
+                | ffi::AV1_BIT_DEPTH_MASK);
+            av1.flags |= ffi::AV1_REPEAT_SEQUENCE_HEADER
+                | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
+            av1.idr_period = gop;
+            av1.color_primaries = ffi::BT709;
+            av1.transfer_characteristics = ffi::BT709;
+            av1.matrix_coefficients = ffi::BT709;
+            av1.color_range = 0;
         }
     }
 }

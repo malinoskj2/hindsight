@@ -140,7 +140,7 @@ impl StatusPage {
         self.notice
             .set_colour(if status.error.is_some() { RED } else { AMBER });
 
-        self.state.set_text(&text::status(status.message.as_str()));
+        self.state.set_text(&text::status(status.state));
         layout::set_text(&self.encoder, &text::encoder(status));
         layout::set_text(&self.rates, &text::rates(status));
         layout::set_text(&self.buffered, &text::buffered(status));

@@ -8,6 +8,7 @@
 
 use std::{
     ffi::{c_char, c_void},
+    fmt,
     mem::{offset_of, size_of},
 };
 use windows::core::GUID;
@@ -125,7 +126,7 @@ pub(super) const BT709: u32 = 1;
 /// know.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Status(pub(super) i32);
+pub(in crate::gpu) struct Status(pub(super) i32);
 
 impl Status {
     pub(super) const SUCCESS: Self = Self(0);
@@ -162,6 +163,13 @@ impl Status {
             26 => "NV_ENC_ERR_NEED_MORE_OUTPUT",
             _ => "unknown NVENC status",
         }
+    }
+}
+
+/// The name with the raw code, which stays meaningful for codes newer than this program.
+impl fmt::Display for Status {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} ({})", self.name(), self.0)
     }
 }
 

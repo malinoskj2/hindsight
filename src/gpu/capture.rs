@@ -2,7 +2,7 @@
 //! on each tick the capture thread takes the newest one, copies it into the encoder's input
 //! texture on the GPU and hands the pool's buffer straight back to Windows.
 
-use super::device::Device;
+use super::{device::Device, pacer::HUNDRED_NANOSECONDS};
 use std::{
     sync::{
         Arc,
@@ -127,7 +127,8 @@ impl Capture {
         let _ = session.SetIsCursorCaptureEnabled(true);
         let _ = session.SetIsBorderRequired(false);
         let _ = session.SetMinUpdateInterval(TimeSpan {
-            Duration: i64::try_from(period.as_nanos() / 200).unwrap_or(i64::MAX),
+            Duration: i64::try_from((period / 2).as_nanos() / HUNDRED_NANOSECONDS)
+                .unwrap_or(i64::MAX),
         });
         session.StartCapture().map_err(failed("start capturing"))?;
 
@@ -143,10 +144,8 @@ impl Capture {
 
     /// The monitor's size in pixels.
     pub(super) fn size(&self) -> (u32, u32) {
-        (
-            self.size.Width.unsigned_abs(),
-            self.size.Height.unsigned_abs(),
-        )
+        let pixels = |length| u32::try_from(length).expect("a monitor size is never negative");
+        (pixels(self.size.Width), pixels(self.size.Height))
     }
 
     /// Copies the newest captured frame into the top-left `width` × `height` of `target`, if

@@ -21,7 +21,7 @@ mod hevc;
 mod mp4;
 mod ring;
 
-pub(crate) use mp4::MuxError;
+use mp4::MuxError;
 use ring::Ring;
 
 const CLIP_PREFIX: &str = "dxgi";
@@ -160,32 +160,23 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
 
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
-    #[error("create the clip folder {}: {source}", path.display())]
-    Directory {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("create {}: {source}", path.display())]
-    Create {
+    /// A file system call failed; `step` says which, in words for the log.
+    #[error("{step} {}: {source}", path.display())]
+    Io {
+        step: &'static str,
         path: PathBuf,
         #[source]
         source: io::Error,
     },
     #[error(transparent)]
     Mux(#[from] MuxError),
-    #[error("finish {}: {source}", path.display())]
-    Finish {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
 }
 
 /// Writes `clip` into `directory` as `dxgi_<date>_<time>.mp4` and returns its path. The file
 /// appears under its final name only once it is complete.
 pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
-    fs::create_dir_all(directory).map_err(|source| SaveError::Directory {
+    fs::create_dir_all(directory).map_err(|source| SaveError::Io {
+        step: "create the clip folder",
         path: directory.to_owned(),
         source,
     })?;
@@ -193,7 +184,8 @@ pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> 
     let partial = path.with_extension(PARTIAL_EXTENSION);
 
     let result = write_file(clip, &partial).and_then(|()| {
-        fs::rename(&partial, &path).map_err(|source| SaveError::Finish {
+        fs::rename(&partial, &path).map_err(|source| SaveError::Io {
+            step: "finish",
             path: path.clone(),
             source,
         })
@@ -205,17 +197,20 @@ pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> 
 }
 
 fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
-    let file = File::create(path).map_err(|source| SaveError::Create {
+    let file = File::create(path).map_err(|source| SaveError::Io {
+        step: "create",
         path: path.to_owned(),
         source,
     })?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     mp4::write(&mut output, &clip.stream, &clip.packets)?;
-    let file = output.into_inner().map_err(|error| SaveError::Finish {
+    let file = output.into_inner().map_err(|error| SaveError::Io {
+        step: "finish",
         path: path.to_owned(),
         source: error.into_error(),
     })?;
-    file.sync_all().map_err(|source| SaveError::Finish {
+    file.sync_all().map_err(|source| SaveError::Io {
+        step: "finish",
         path: path.to_owned(),
         source,
     })
@@ -240,6 +235,7 @@ fn unused_path(directory: &Path, stamp: &str) -> PathBuf {
 mod tests {
     use super::*;
     use h264::tests::{inter_frame, keyframe};
+    use std::assert_matches;
 
     const STREAM: Stream = Stream {
         codec: Codec::H264,
@@ -301,12 +297,12 @@ mod tests {
         let units: Vec<&[u8]> = match codec {
             Codec::H264 => {
                 annexb::access_units(include_bytes!("../tests/fixtures/h264.264"), |unit| {
-                    unit[0] & 0x1F == 9
+                    h264::nal_type(unit) == h264::NAL_AUD
                 })
             }
             Codec::Hevc => {
                 annexb::access_units(include_bytes!("../tests/fixtures/hevc.265"), |unit| {
-                    (unit[0] >> 1) & 0x3F == 35
+                    hevc::nal_type(unit) == hevc::NAL_AUD
                 })
             }
             Codec::Av1 => av1::temporal_units(include_bytes!("../tests/fixtures/av1.obu")),
@@ -405,10 +401,10 @@ mod tests {
             })],
         };
 
-        assert!(matches!(
+        assert_matches!(
             save(&clip, directory.path()),
             Err(SaveError::Mux(MuxError::NoSequenceHeader))
-        ));
+        );
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }
