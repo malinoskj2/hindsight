@@ -1,0 +1,87 @@
+name: Draft release from build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Check push run ID containing the tested build
+        required: true
+        type: string
+      tag:
+        description: New version tag (for example v0.1.0 or v0.2.0-beta.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: draft-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN_ID: ${{ inputs.run_id }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      # Do not check out or execute code from the selected build.
+      - name: Validate build and verify downloaded assets
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid run ID" >&2; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]] || { echo "Invalid version tag" >&2; exit 1; }
+
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID" > run.json
+          jq -e --arg repo "$GH_REPO" '
+            .event == "push" and .status == "completed" and .conclusion == "success"
+            and .path == ".github/workflows/check.yml"
+            and .head_repository.full_name == $repo
+          ' run.json > /dev/null
+          build_sha=$(jq -r '.head_sha' run.json)
+          [[ "$build_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          gh run download "$BUILD_RUN_ID" --name dxgi-windows-x64 --dir release
+          for asset in dxgi-setup-x64.exe dxgi-windows-x64.zip SHA256SUMS.txt; do
+            gh attestation verify "release/$asset" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/check.yml" \
+              --source-digest "$build_sha" --deny-self-hosted-runners
+          done
+
+          echo "sha=$build_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "Built from commit $build_sha."
+            echo
+            echo "Build: https://github.com/$GH_REPO/actions/runs/$BUILD_RUN_ID"
+            echo
+            echo 'Verify the installer with GitHub CLI:'
+            echo '```bash'
+            printf 'gh attestation verify dxgi-setup-x64.exe --repo %s --signer-workflow %s/.github/workflows/check.yml --source-digest %s\n' "$GH_REPO" "$GH_REPO" "$build_sha"
+            echo '```'
+          } > release-notes.md
+
+      - name: Tag the build commit and create a draft
+        env:
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Creating a new ref fails if the tag exists; never move an existing tag.
+          gh api --method POST "repos/$GH_REPO/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$BUILD_SHA"
+
+          gh release create "$RELEASE_TAG" \
+            release/dxgi-setup-x64.exe \
+            release/dxgi-windows-x64.zip \
+            release/SHA256SUMS.txt \
+            --verify-tag --draft --title "dxgi $RELEASE_TAG" \
+            --notes-file release-notes.md

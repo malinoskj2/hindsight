@@ -1,0 +1,236 @@
+use crate::sys::hotkey::Hotkey;
+use serde::{Deserialize, Serialize};
+use std::{fmt, path::PathBuf};
+use thiserror::Error;
+
+pub(crate) const MIN_BUFFER_SECONDS: u32 = 5;
+pub(crate) const MAX_BUFFER_SECONDS: u32 = 600;
+pub(crate) const MIN_FRAME_RATE: u32 = 24;
+pub(crate) const MAX_FRAME_RATE: u32 = 240;
+pub(crate) const MIN_BITRATE_MBPS: u32 = 5;
+pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
+/// Clips go to `%USERPROFILE%\Videos\dxgi` unless a folder is chosen.
+const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
+const VIDEOS_DIRECTORY: &str = "Videos";
+const CLIP_DIRECTORY: &str = "dxgi";
+
+/// The video codecs NVENC offers, as Instant Replay does. AV1 needs an RTX 40 series GPU or
+/// newer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Codec {
+    #[default]
+    H264,
+    Hevc,
+    Av1,
+}
+
+impl Codec {
+    pub(crate) const ALL: [Self; 3] = [Self::H264, Self::Hevc, Self::Av1];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::H264 => "H.264",
+            Self::Hevc => "HEVC",
+            Self::Av1 => "AV1",
+        }
+    }
+}
+
+impl fmt::Display for Codec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Config {
+    pub(crate) codec: Codec,
+    /// Seconds of gameplay a saved clip covers, at least.
+    pub(crate) buffer_seconds: u32,
+    pub(crate) frame_rate: u32,
+    pub(crate) bitrate_mbps: u32,
+    /// The chord that saves a clip, such as `Alt+F10`.
+    pub(crate) hotkey: String,
+    /// Where clips are saved; empty for the default folder.
+    pub(crate) clip_directory: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            codec: Codec::H264,
+            buffer_seconds: 30,
+            frame_rate: 60,
+            bitrate_mbps: 50,
+            hotkey: "Alt+F10".to_owned(),
+            clip_directory: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum ConfigError {
+    #[error("buffer length must be between 5 and 600 seconds")]
+    Buffer,
+    #[error("frame rate must be between 24 and 240 fps")]
+    FrameRate,
+    #[error("bitrate must be between 5 and 150 Mbps")]
+    Bitrate,
+    #[error("{0}")]
+    Hotkey(String),
+    #[error("the clip folder must be an absolute path such as D:\\Clips")]
+    ClipDirectory,
+}
+
+impl Config {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if !(MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&self.buffer_seconds) {
+            return Err(ConfigError::Buffer);
+        }
+        if !(MIN_FRAME_RATE..=MAX_FRAME_RATE).contains(&self.frame_rate) {
+            return Err(ConfigError::FrameRate);
+        }
+        if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
+            return Err(ConfigError::Bitrate);
+        }
+        self.parsed_hotkey()?;
+        if !self.clip_directory.is_empty() && !is_absolute_directory(&self.clip_directory) {
+            return Err(ConfigError::ClipDirectory);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
+        self.hotkey
+            .parse()
+            .map_err(|error: crate::sys::hotkey::ParseError| ConfigError::Hotkey(error.to_string()))
+    }
+
+    pub(crate) const fn bitrate(&self) -> u32 {
+        self.bitrate_mbps * 1_000_000
+    }
+
+    /// Frames the buffer keeps, at least: the clip length at the capture rate.
+    pub(crate) const fn buffer_frames(&self) -> u64 {
+        self.buffer_seconds as u64 * self.frame_rate as u64
+    }
+
+    pub(crate) fn clip_directory(&self) -> PathBuf {
+        if self.clip_directory.is_empty() {
+            default_clip_directory()
+        } else {
+            PathBuf::from(&self.clip_directory)
+        }
+    }
+
+    /// Encoded bytes the buffer holds at the configured bitrate, for the Settings estimate.
+    pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
+        self.buffer_seconds as u64 * self.bitrate() as u64 / 8
+    }
+}
+
+/// `%USERPROFILE%\Videos\dxgi`, or the temporary directory when there is no profile.
+pub(crate) fn default_clip_directory() -> PathBuf {
+    std::env::var_os(CLIP_DIRECTORY_ENV)
+        .map_or_else(std::env::temp_dir, |profile| {
+            PathBuf::from(profile).join(VIDEOS_DIRECTORY)
+        })
+        .join(CLIP_DIRECTORY)
+}
+
+/// A drive-rooted Windows path (`C:\Clips`) or a UNC share (`\\server\share\Clips`).
+fn is_absolute_directory(value: &str) -> bool {
+    let mut chars = value.chars();
+    let on_drive = matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(letter), Some(':'), Some('\\')) if letter.is_ascii_alphabetic()
+    );
+    let on_share = value.starts_with(r"\\") && value.len() > 2;
+
+    (on_drive || on_share) && !value.contains('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::assert_matches;
+
+    #[test]
+    fn defaults_fill_missing_settings_without_accepting_unknown_ones() {
+        let config: Config =
+            serde_json::from_str(r#"{"buffer_seconds":120,"codec":"av1"}"#).unwrap();
+
+        assert_eq!(config.buffer_seconds, 120);
+        assert_eq!(config.codec, Codec::Av1);
+        assert!(serde_json::from_str::<Config>(r#"{"codec":"vp9"}"#).is_err());
+        assert_eq!(config.frame_rate, 60);
+        assert_eq!(config.hotkey, "Alt+F10");
+        assert!(serde_json::from_str::<Config>(r#"{"buffer_secs":120}"#).is_err());
+        assert_eq!(
+            serde_json::from_str::<Config>("{}").unwrap(),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_settings() {
+        let mut config = Config::default();
+        assert!(config.validate().is_ok());
+
+        config.buffer_seconds = MAX_BUFFER_SECONDS + 1;
+        assert_matches!(config.validate(), Err(ConfigError::Buffer));
+        config.buffer_seconds = 30;
+
+        config.frame_rate = MIN_FRAME_RATE - 1;
+        assert_matches!(config.validate(), Err(ConfigError::FrameRate));
+        config.frame_rate = 60;
+
+        config.bitrate_mbps = 0;
+        assert_matches!(config.validate(), Err(ConfigError::Bitrate));
+        config.bitrate_mbps = 50;
+
+        config.hotkey = "F".to_owned();
+        assert_matches!(config.validate(), Err(ConfigError::Hotkey(_)));
+        config.hotkey = "Ctrl+Shift+S".to_owned();
+
+        config.clip_directory = r"Clips\here".to_owned();
+        assert_matches!(config.validate(), Err(ConfigError::ClipDirectory));
+        config.clip_directory = r"D:\Clips".to_owned();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn clip_folders_are_drive_rooted_or_shares() {
+        for path in [
+            r"C:\Clips",
+            r"d:\Videos\Replays",
+            r"\\nas\clips",
+            r"C:\影像",
+        ] {
+            assert!(is_absolute_directory(path), "{path}");
+        }
+        for path in ["", "C:", r"C:Clips", "C:/Clips", r"\Clips", r"\\", "Clips"] {
+            assert!(!is_absolute_directory(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn derived_values_follow_the_settings() {
+        let config = Config::default();
+
+        assert_eq!(config.bitrate(), 50_000_000);
+        assert_eq!(config.buffer_frames(), 1800);
+        assert_eq!(config.estimated_buffer_bytes(), 187_500_000);
+        assert!(config.clip_directory().ends_with(CLIP_DIRECTORY));
+        assert_eq!(
+            Config {
+                clip_directory: r"D:\Clips".to_owned(),
+                ..Config::default()
+            }
+            .clip_directory(),
+            PathBuf::from(r"D:\Clips")
+        );
+    }
+}

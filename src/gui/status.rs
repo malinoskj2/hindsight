@@ -1,0 +1,186 @@
+//! The Status tab: what is being recorded, how much of it is buffered, and the last saved clip,
+//! with buttons to save a replay and to stop or start recording.
+
+use super::{
+    layout::{
+        self, AMBER, BLACK, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, RED,
+        TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label,
+    },
+    text,
+};
+use crate::{config::Config, service::Status};
+use winsafe::{co, gui, prelude::*};
+
+/// Height the Recording group gains while it shows notices or errors (two lines).
+const NOTICE_EXTRA: i32 = 2 * LINE + 4;
+
+#[derive(Clone)]
+pub(super) struct StatusPage {
+    page: gui::TabPage,
+    frames: Vec<Frame>,
+    /// The Recording group; it grows while the notice label has something to show.
+    recording_group: ExpandableGroup,
+    state: TintedLabel,
+    encoder: gui::Label,
+    rates: gui::Label,
+    buffered: gui::Label,
+    notice: TintedLabel,
+    last_clip: gui::Label,
+    folder: gui::Label,
+    pub(super) save: gui::Button,
+    hotkey_hint: gui::Label,
+    pub(super) recording: gui::Button,
+}
+
+impl StatusPage {
+    pub(super) fn new(parent: &(impl GuiParent + 'static)) -> Self {
+        let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
+        let caption = |text, y| label(&page, text, INNER_X, y, VALUE_X - INNER_X, 1);
+
+        // Compact; the group adds two lines for the notice label when needed.
+        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 106);
+        let state = TintedLabel::new(&page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
+        let _encoder_caption = caption(text::ENCODER, 48);
+        let encoder = label(&page, "", VALUE_X, 48, VALUE_WIDTH, 1);
+        let _rates_caption = caption(text::CAPTURE_RATE, 68);
+        let rates = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
+        let _buffered_caption = caption(text::BUFFERED, 88);
+        let buffered = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
+        let notice = TintedLabel::new(&page, INNER_X, 110, INNER_WIDTH, 2, AMBER);
+
+        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 118, 100);
+        let last_clip_caption = caption(text::LAST_CLIP, 138);
+        let last_clip = path_label(&page, VALUE_X, 138, VALUE_WIDTH);
+        let folder_caption = caption(text::CLIP_FOLDER, 158);
+        let folder = path_label(&page, VALUE_X, 158, VALUE_WIDTH);
+        let save = button(&page, text::SAVE_REPLAY, INNER_X, 184, 120);
+        let hotkey_hint = label(&page, "", INNER_X + 128, 189, 140, 1);
+        let recording = button(
+            &page,
+            text::STOP_RECORDING,
+            INNER_X + INNER_WIDTH - 120,
+            184,
+            120,
+        );
+
+        let recording_group = ExpandableGroup::new(
+            recording_frame.clone(),
+            notice.label().clone(),
+            NOTICE_EXTRA,
+        )
+        .moving_frame(clips_frame.clone())
+        .moving([
+            last_clip_caption,
+            last_clip.clone(),
+            folder_caption,
+            folder.clone(),
+            hotkey_hint.clone(),
+        ])
+        .moving([save.clone(), recording.clone()]);
+        let frames = vec![recording_frame, clips_frame];
+
+        // The tinted lines read their colour here; the hint is muted and every other label black.
+        let tints = [state.clone(), notice.clone()];
+        let muted = hotkey_hint.clone();
+        layout::draw(
+            &page,
+            page.on(),
+            frames.clone(),
+            co::COLOR::WINDOW,
+            move |hwnd| {
+                tints
+                    .iter()
+                    .find_map(|tint| tint.colour_of(hwnd))
+                    .unwrap_or(if *hwnd == *muted.hwnd() { GRAY } else { BLACK })
+            },
+        );
+
+        Self {
+            page,
+            frames,
+            recording_group,
+            state,
+            encoder,
+            rates,
+            buffered,
+            notice,
+            last_clip,
+            folder,
+            save,
+            hotkey_hint,
+            recording,
+        }
+    }
+
+    pub(super) fn page(&self) -> &gui::TabPage {
+        &self.page
+    }
+
+    /// Finishes the parts that need the controls to exist.
+    pub(super) fn on_create(&self) {
+        layout::fit_titles(&self.frames);
+        self.recording_group.on_create();
+    }
+
+    /// The extra height the page currently needs for its expanded group, in logical pixels.
+    pub(super) fn extra(&self) -> i32 {
+        self.recording_group.extra()
+    }
+
+    /// Shows `status`, with the clip settings of `config` and `hotkey_error` if the hotkey
+    /// could not be registered, and reports whether the Recording group changed height.
+    pub(super) fn update(
+        &self,
+        status: &Status,
+        config: &Config,
+        hotkey_error: Option<&str>,
+    ) -> bool {
+        let live = status.recording && status.stream.is_some();
+        self.state.set_colour(if live { GREEN } else { GRAY });
+        self.notice
+            .set_colour(if status.error.is_some() { RED } else { AMBER });
+
+        self.state.set_text(&text::status(status.message.as_str()));
+        layout::set_text(&self.encoder, &text::encoder(status));
+        layout::set_text(&self.rates, &text::rates(status));
+        layout::set_text(&self.buffered, &text::buffered(status));
+
+        let notices: Vec<&str> = [
+            hotkey_error,
+            status.notice.as_deref(),
+            status.error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let notice = notices.join("\r\n");
+        let grown = self
+            .recording_group
+            .set_message((!notice.is_empty()).then_some(notice.as_str()));
+
+        layout::set_text(
+            &self.last_clip,
+            &text::last_clip(status.last_clip.as_deref()),
+        );
+        layout::set_text(&self.folder, &config.clip_directory().display().to_string());
+        layout::set_text(
+            &self.save,
+            if status.saving {
+                text::SAVING
+            } else {
+                text::SAVE_REPLAY
+            },
+        );
+        self.save.hwnd().EnableWindow(!status.saving);
+        layout::set_text(&self.hotkey_hint, &text::hotkey_hint(&config.hotkey));
+        layout::set_text(
+            &self.recording,
+            if status.recording {
+                text::STOP_RECORDING
+            } else {
+                text::START_RECORDING
+            },
+        );
+        grown
+    }
+}
