@@ -26,39 +26,17 @@ const SHELL_CLASSES: [&str; 2] = ["Progman", "WorkerW"];
 pub(crate) fn fullscreen_app() -> Option<Target> {
     let window = w::HWND::GetForegroundWindow()?;
     let (_, process) = window.GetWindowThreadProcessId();
-    let is_shell = [Some(w::HWND::GetDesktopWindow()), w::HWND::GetShellWindow()]
-        .into_iter()
-        .flatten()
-        .any(|shell| shell == window);
-    if is_shell
+    if is_shell(&window)
         || process == w::GetCurrentProcessId()
         || window.IsIconic()
         || !window.IsWindowVisible()
-    {
-        return None;
-    }
-    if let Ok(class) = window.GetClassName()
-        && SHELL_CLASSES.contains(&class.as_str())
-    {
-        return None;
-    }
-    // A cloaked window is kept around but not shown: a suspended UWP app, a window on another
-    // virtual desktop.
-    if let Ok(w::DwmAttr::Cloaked(flags)) = window.DwmGetWindowAttribute(co::DWMWA::CLOAKED)
-        && flags.raw() != 0
+        || is_cloaked(&window)
     {
         return None;
     }
 
     let monitor = window.MonitorFromWindow(co::MONITOR::DEFAULTTONEAREST);
-    let bounds = monitor.GetMonitorInfo().ok()?.rcMonitor;
-    let client = window.GetClientRect().ok()?;
-    let origin = window.ClientToScreen(w::POINT::default()).ok()?;
-    let covers = origin.x <= bounds.left
-        && origin.y <= bounds.top
-        && origin.x + client.right >= bounds.right
-        && origin.y + client.bottom >= bounds.bottom;
-    if !covers {
+    if !covers(&window, &monitor)? {
         return None;
     }
 
@@ -67,6 +45,42 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
         monitor: monitor.ptr() as isize,
         name: process_name(process),
     })
+}
+
+/// Whether the window is the desktop or the shell's: the desktop window, the shell window, or
+/// one of the classes in `SHELL_CLASSES`.
+fn is_shell(window: &w::HWND) -> bool {
+    let is_shell_window = [Some(w::HWND::GetDesktopWindow()), w::HWND::GetShellWindow()]
+        .into_iter()
+        .flatten()
+        .any(|shell| shell == *window);
+    is_shell_window
+        || window
+            .GetClassName()
+            .is_ok_and(|class| SHELL_CLASSES.contains(&class.as_str()))
+}
+
+/// Whether the window is cloaked: kept around but not shown, like a suspended UWP app or a
+/// window on another virtual desktop.
+fn is_cloaked(window: &w::HWND) -> bool {
+    matches!(
+        window.DwmGetWindowAttribute(co::DWMWA::CLOAKED),
+        Ok(w::DwmAttr::Cloaked(flags)) if flags.raw() != 0
+    )
+}
+
+/// Whether the window's client area covers the whole of `monitor`; `None` when the geometry of
+/// either cannot be read.
+fn covers(window: &w::HWND, monitor: &w::HMONITOR) -> Option<bool> {
+    let bounds = monitor.GetMonitorInfo().ok()?.rcMonitor;
+    let client = window.GetClientRect().ok()?;
+    let origin = window.ClientToScreen(w::POINT::default()).ok()?;
+    Some(
+        origin.x <= bounds.left
+            && origin.y <= bounds.top
+            && origin.x + client.right >= bounds.right
+            && origin.y + client.bottom >= bounds.bottom,
+    )
 }
 
 /// The executable's file name, or a stand-in when the process cannot be opened.

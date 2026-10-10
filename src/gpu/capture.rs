@@ -13,7 +13,10 @@ mod wgc;
 
 use super::device::Device;
 use crate::{config::Backend, service::Target};
-use std::{ffi::c_void, time::Duration};
+use std::{
+    ffi::c_void,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use windows::Win32::{
     Foundation::{HWND, POINT},
@@ -40,6 +43,32 @@ pub(crate) enum CaptureError {
     Windows(&'static str, windows::core::Error),
     #[error("{0} failed with {1}")]
     Nvfbc(&'static str, nvfbc::Status),
+}
+
+/// Paces a backend's attempts to open its capture again after Windows or the driver took it
+/// away, so a refusal is retried every [`REOPEN_INTERVAL`] rather than on every tick.
+#[derive(Default)]
+struct ReopenThrottle {
+    /// When the next attempt is due, after a refusal.
+    due: Option<Instant>,
+}
+
+impl ReopenThrottle {
+    /// The current time if an attempt is due now, `None` while waiting out a refusal.
+    fn attempt(&self) -> Option<Instant> {
+        let now = Instant::now();
+        self.due.is_none_or(|due| now >= due).then_some(now)
+    }
+
+    /// Lets the next attempt, after a successful one, go ahead at once.
+    fn succeeded(&mut self) {
+        self.due = None;
+    }
+
+    /// Holds the next attempt back after the one started at `now` was refused.
+    fn refused(&mut self, now: Instant) {
+        self.due = Some(now + REOPEN_INTERVAL);
+    }
 }
 
 /// Wraps a Windows error with the step that failed, for `map_err`.

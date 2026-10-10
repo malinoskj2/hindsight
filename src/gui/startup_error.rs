@@ -10,21 +10,33 @@ use crate::{APP_NAME, config::Theme, sys::window};
 use anyhow::Result;
 use winsafe::{gui, prelude::*};
 
+const HEIGHT: i32 = 170;
+const MESSAGE_Y: i32 = 28;
+/// Lines the error message may take before it is cut off.
+const MESSAGE_LINES: i32 = 4;
+
 /// Shows `message` with its explanation until the user closes the window.
 pub(super) fn show(message: &str) -> Result<()> {
     let wnd = gui::WindowMain::new(gui::WindowMainOpts {
         title: APP_NAME,
-        size: gui::dpi(WINDOW_WIDTH, 170),
+        size: gui::dpi(WINDOW_WIDTH, HEIGHT),
         class_icon: gui::Icon::Id(ICON_RESOURCE),
         ..Default::default()
     });
     let group = Frame::new(&wnd, text::STARTUP_FAILED_TITLE, 6, 140);
-    let message = label(&wnd, message, INNER_X, 28, INNER_WIDTH, 4);
+    let message = label(
+        &wnd,
+        message,
+        INNER_X,
+        MESSAGE_Y,
+        INNER_WIDTH,
+        MESSAGE_LINES,
+    );
     let _help = label(
         &wnd,
         text::STARTUP_FAILED_HELP,
         INNER_X,
-        28 + 4 * LINE + 6,
+        MESSAGE_Y + MESSAGE_LINES * LINE + 6,
         INNER_WIDTH,
         1,
     );
@@ -37,12 +49,11 @@ pub(super) fn show(message: &str) -> Result<()> {
         Ok(0)
     });
     // The error itself is red; the title and the help line are black.
-    let skin = Skin::new(Theme::Classic);
     layout::draw(
         &wnd,
         wnd.on(),
         frames,
-        &skin,
+        &Skin::new(Theme::Classic),
         Surface::Dialog,
         move |hwnd| {
             if *hwnd == *message.hwnd() { RED } else { BLACK }

@@ -41,7 +41,12 @@ impl Footer {
         footer
     }
 
-    /// Hidden until the row is shown, and moved when the tab grows.
+    /// Hides the row until it has something to say; only possible once the controls exist.
+    pub(super) fn on_create(&self) {
+        show(&self.hint, false);
+    }
+
+    /// The row's one control, which moves when the tab grows.
     pub(super) fn control(&self) -> &gui::Label {
         &self.hint
     }

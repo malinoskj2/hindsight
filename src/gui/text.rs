@@ -12,12 +12,12 @@ pub(super) const TAB_SETTINGS: &str = "Settings";
 pub(super) const TAB_LOGS: &str = "Logs";
 
 pub(super) const GROUP_RECORDING: &str = "Recording";
+pub(super) const GROUP_STATS: &str = "Stats";
 pub(super) const GROUP_CLIPS: &str = "Clips";
 pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_GENERAL: &str = "General";
 
 pub(super) const SOURCE: &str = "Source";
-pub(super) const GROUP_STATS: &str = "Stats";
 pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
 pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
 pub(super) const ENCODER: &str = "Encoder";
@@ -129,11 +129,11 @@ pub(super) fn lifetime_written(status: &Status) -> String {
 }
 
 /// Everything saved to disk as clips over every run of the app.
-pub(super) fn saved(status: &Status) -> String {
+pub(super) fn lifetime_saved(status: &Status) -> String {
     gigabytes(status.saved_bytes)
 }
 
-pub(super) fn capture(status: &Status) -> String {
+pub(super) fn backend(status: &Status) -> String {
     status
         .backend
         .map_or_else(|| NO_VALUE.to_owned(), |backend| backend.to_string())

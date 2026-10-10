@@ -63,6 +63,21 @@ struct Sample<'a> {
     keyframe: bool,
 }
 
+/// What the index describes: the stream, its decoder configuration record and its samples.
+struct Track<'a> {
+    stream: &'a Stream,
+    decoder: &'a [u8],
+    samples: &'a [Sample<'a>],
+}
+
+/// The track's lengths in time: its media time scale, and its duration in that scale and in the
+/// movie's.
+struct Durations {
+    timescale: u32,
+    media: u32,
+    movie: u32,
+}
+
 /// Writes `packets`, oldest first and starting on a keyframe, as a complete MP4 file.
 pub(crate) fn write(
     output: &mut impl io::Write,
@@ -77,17 +92,39 @@ pub(crate) fn write(
     if samples.is_empty() {
         return Err(MuxError::Empty);
     }
+    let track = Track {
+        stream,
+        decoder: &decoder,
+        samples: &samples,
+    };
 
-    let file_type = file_type(stream.codec);
+    output.write_all(&header(&track)?)?;
+    write_media(output, stream.codec, &samples)?;
+    output.flush()?;
+    Ok(())
+}
+
+/// The `ftyp` and `moov` atoms, with the chunk offset pointing just past them and the `mdat`
+/// header, where the media starts.
+fn header(track: &Track<'_>) -> Result<Vec<u8>, MuxError> {
+    let file_type = file_type(track.stream.codec);
     // Offsets are 64-bit whatever their value, so the index has the same length either way.
-    let index_length = movie(stream, &decoder, &samples, 0)?.len();
+    let index_length = movie(track, 0)?.len();
     let media_offset = (file_type.len() + index_length) as u64 + MDAT_HEADER_BYTES;
-    let index = movie(stream, &decoder, &samples, media_offset)?;
-    let prefixed = length_prefixed(stream.codec);
+    let index = movie(track, media_offset)?;
+    Ok([file_type, index].concat())
+}
+
+/// Writes the `mdat` atom: its 64-bit size, then every sample's parts, each behind its length
+/// when the codec stores lengths.
+fn write_media(
+    output: &mut impl io::Write,
+    codec: Codec,
+    samples: &[Sample<'_>],
+) -> Result<(), MuxError> {
+    let prefixed = length_prefixed(codec);
     let media_bytes: u64 = samples.iter().map(|sample| u64::from(sample.size)).sum();
 
-    output.write_all(&file_type)?;
-    output.write_all(&index)?;
     output.write_all(&LARGE_SIZE.to_be_bytes())?;
     output.write_all(b"mdat")?;
     output.write_all(&(MDAT_HEADER_BYTES + media_bytes).to_be_bytes())?;
@@ -98,7 +135,6 @@ pub(crate) fn write(
         }
         output.write_all(part)?;
     }
-    output.flush()?;
     Ok(())
 }
 
@@ -115,15 +151,9 @@ fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, Mux
         if parts.is_empty() {
             continue;
         }
-        let size = parts
-            .iter()
-            .map(|part| fit::<u32, _>(part.len() + prefix))
-            .sum::<Result<u32, _>>()?;
+        let size = stored_size(&parts, prefix)?;
         if let Some(last) = samples.last_mut() {
-            let frames: u32 = fit(packet.index.saturating_sub(last.index).max(1))?;
-            last.duration = frames
-                .checked_mul(TICKS_PER_FRAME)
-                .ok_or(MuxError::TooLarge)?;
+            last.duration = duration_between(last.index, packet.index)?;
         }
         samples.push(Sample {
             index: packet.index,
@@ -134,6 +164,22 @@ fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, Mux
         });
     }
     Ok(samples)
+}
+
+/// The bytes `parts` take in the media data, each with a `prefix`-byte length in front.
+fn stored_size(parts: &[&[u8]], prefix: usize) -> Result<u32, MuxError> {
+    parts
+        .iter()
+        .map(|part| fit::<u32, _>(part.len() + prefix))
+        .sum()
+}
+
+/// The media ticks a sample at frame `from` lasts until the one at frame `to`, at least a frame.
+fn duration_between(from: u64, to: u64) -> Result<u32, MuxError> {
+    let frames: u32 = fit(to.saturating_sub(from).max(1))?;
+    frames
+        .checked_mul(TICKS_PER_FRAME)
+        .ok_or(MuxError::TooLarge)
 }
 
 /// `value` as the narrower integer an MP4 field holds, or [`MuxError::TooLarge`].
@@ -165,30 +211,51 @@ fn file_type(codec: Codec) -> Vec<u8> {
     atom(*b"ftyp", &body)
 }
 
-fn movie(
-    stream: &Stream,
-    decoder: &[u8],
-    samples: &[Sample<'_>],
-    media_offset: u64,
-) -> Result<Vec<u8>, MuxError> {
-    let timescale = stream
-        .frame_rate
-        .checked_mul(TICKS_PER_FRAME)
-        .ok_or(MuxError::TooLarge)?;
-    let media_duration: u64 = samples
-        .iter()
-        .map(|sample| u64::from(sample.duration))
-        .sum();
-    let movie_duration = media_duration * u64::from(MOVIE_TIMESCALE) / u64::from(timescale);
-    let media_duration: u32 = fit(media_duration)?;
-    let movie_duration: u32 = fit(movie_duration)?;
+/// The `moov` atom: the movie header and the one track, whose chunk starts at `media_offset`.
+fn movie(track: &Track<'_>, media_offset: u64) -> Result<Vec<u8>, MuxError> {
+    let durations = Durations::of(track)?;
+    let track_atoms = [
+        track_header(track.stream, durations.movie),
+        media(track, &durations, media_offset)?,
+    ]
+    .concat();
+    Ok(atom(
+        *b"moov",
+        &[movie_header(durations.movie), atom(*b"trak", &track_atoms)].concat(),
+    ))
+}
 
-    let mut header = Vec::new();
-    header
+impl Durations {
+    /// The time scale from the frame rate, and the sum of the sample durations in it and in
+    /// milliseconds.
+    fn of(track: &Track<'_>) -> Result<Self, MuxError> {
+        let timescale = track
+            .stream
+            .frame_rate
+            .checked_mul(TICKS_PER_FRAME)
+            .ok_or(MuxError::TooLarge)?;
+        let media: u64 = track
+            .samples
+            .iter()
+            .map(|sample| u64::from(sample.duration))
+            .sum();
+        let movie = media * u64::from(MOVIE_TIMESCALE) / u64::from(timescale);
+        Ok(Self {
+            timescale,
+            media: fit(media)?,
+            movie: fit(movie)?,
+        })
+    }
+}
+
+/// The `mvhd` atom: the movie's time scale and duration, and the next free track id.
+fn movie_header(duration: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body
         // Creation and modification times.
         .put_zeros(8)
         .put_u32(MOVIE_TIMESCALE)
-        .put_u32(movie_duration)
+        .put_u32(duration)
         .put_u32(FIXED_ONE)
         .put_u16(FULL_VOLUME)
         .put_zeros(10)
@@ -196,33 +263,7 @@ fn movie(
         // Pre-defined fields.
         .put_zeros(24)
         .put_u32(TRACK_ID + 1);
-
-    let track = [
-        track_header(stream, movie_duration),
-        atom(
-            *b"mdia",
-            &[
-                media_header(timescale, media_duration),
-                handler(),
-                atom(
-                    *b"minf",
-                    &[
-                        full_atom(*b"vmhd", 0, VIDEO_MEDIA_HEADER_FLAGS, &[0; 8]),
-                        data_information(),
-                        sample_table(stream, decoder, samples, media_offset)?,
-                    ]
-                    .concat(),
-                ),
-            ]
-            .concat(),
-        ),
-    ]
-    .concat();
-
-    Ok(atom(
-        *b"moov",
-        &[full_atom(*b"mvhd", 0, 0, &header), atom(*b"trak", &track)].concat(),
-    ))
+    full_atom(*b"mvhd", 0, 0, &body)
 }
 
 fn track_header(stream: &Stream, duration: u32) -> Vec<u8> {
@@ -240,6 +281,32 @@ fn track_header(stream: &Stream, duration: u32) -> Vec<u8> {
         .put_u32(stream.width << 16)
         .put_u32(stream.height << 16);
     full_atom(*b"tkhd", 0, TRACK_ENABLED_IN_MOVIE, &body)
+}
+
+/// The `mdia` atom: the media's timing, its handler and the media information.
+fn media(track: &Track<'_>, durations: &Durations, media_offset: u64) -> Result<Vec<u8>, MuxError> {
+    Ok(atom(
+        *b"mdia",
+        &[
+            media_header(durations.timescale, durations.media),
+            handler(),
+            media_information(track, media_offset)?,
+        ]
+        .concat(),
+    ))
+}
+
+/// The `minf` atom: the video media header, where the data is, and the sample table.
+fn media_information(track: &Track<'_>, media_offset: u64) -> Result<Vec<u8>, MuxError> {
+    Ok(atom(
+        *b"minf",
+        &[
+            full_atom(*b"vmhd", 0, VIDEO_MEDIA_HEADER_FLAGS, &[0; 8]),
+            data_information(),
+            sample_table(track, media_offset)?,
+        ]
+        .concat(),
+    ))
 }
 
 fn media_header(timescale: u32, duration: u32) -> Vec<u8> {
@@ -272,19 +339,34 @@ fn data_information() -> Vec<u8> {
     atom(*b"dinf", &full_atom(*b"dref", 0, 0, &table))
 }
 
-fn sample_table(
-    stream: &Stream,
-    decoder: &[u8],
-    samples: &[Sample<'_>],
-    media_offset: u64,
-) -> Result<Vec<u8>, MuxError> {
-    let count: u32 = fit(samples.len())?;
+/// The `stbl` atom: the sample description, then where each sample sits in time and in the file.
+/// All samples sit in one chunk, which starts at `media_offset`.
+fn sample_table(track: &Track<'_>, media_offset: u64) -> Result<Vec<u8>, MuxError> {
+    let count: u32 = fit(track.samples.len())?;
+    Ok(atom(
+        *b"stbl",
+        &[
+            sample_description(track)?,
+            time_to_sample(track.samples)?,
+            sync_samples(track.samples, count)?,
+            sample_to_chunk(count),
+            sample_sizes(track.samples, count),
+            chunk_offsets(media_offset),
+        ]
+        .concat(),
+    ))
+}
 
-    // One sample description.
-    let mut description = Vec::new();
-    description.put_u32(1).put(&visual_entry(stream, decoder)?);
+/// The `stsd` atom, holding the one sample description.
+fn sample_description(track: &Track<'_>) -> Result<Vec<u8>, MuxError> {
+    let mut body = Vec::new();
+    body.put_u32(1)
+        .put(&visual_entry(track.stream, track.decoder)?);
+    Ok(full_atom(*b"stsd", 0, 0, &body))
+}
 
-    // Durations, as runs of equal ones.
+/// The `stts` atom: the sample durations, as runs of equal ones.
+fn time_to_sample(samples: &[Sample<'_>]) -> Result<Vec<u8>, MuxError> {
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for sample in samples {
         match runs.last_mut() {
@@ -292,48 +374,49 @@ fn sample_table(
             _ => runs.push((1, sample.duration)),
         }
     }
-    let mut times = Vec::new();
-    times.put_u32(fit(runs.len())?);
+    let mut body = Vec::new();
+    body.put_u32(fit(runs.len())?);
     for (run, duration) in runs {
-        times.put_u32(run).put_u32(duration);
+        body.put_u32(run).put_u32(duration);
     }
+    Ok(full_atom(*b"stts", 0, 0, &body))
+}
 
-    // Keyframes, by sample number from 1.
+/// The `stss` atom: the keyframes among the `count` samples, by sample number from 1.
+fn sync_samples(samples: &[Sample<'_>], count: u32) -> Result<Vec<u8>, MuxError> {
     let keyframes: Vec<u32> = (1..=count)
         .zip(samples)
         .filter(|(_, sample)| sample.keyframe)
         .map(|(number, _)| number)
         .collect();
-    let mut sync = Vec::new();
-    sync.put_u32(fit(keyframes.len())?).put_u32s(&keyframes);
+    let mut body = Vec::new();
+    body.put_u32(fit(keyframes.len())?).put_u32s(&keyframes);
+    Ok(full_atom(*b"stss", 0, 0, &body))
+}
 
-    // One entry: from the first chunk on, every sample sits in one chunk with description 1.
-    let mut chunks = Vec::new();
-    chunks.put_u32s(&[1, 1, count, 1]);
+/// The `stsc` atom, with one entry: from the first chunk on, every one of the `count` samples
+/// sits in one chunk with description 1.
+fn sample_to_chunk(count: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.put_u32s(&[1, 1, count, 1]);
+    full_atom(*b"stsc", 0, 0, &body)
+}
 
-    // A default size of 0, so each sample's size is listed.
-    let mut sizes = Vec::new();
-    sizes.put_u32(0).put_u32(count);
+/// The `stsz` atom: a default size of 0, so each of the `count` samples' sizes is listed.
+fn sample_sizes(samples: &[Sample<'_>], count: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.put_u32(0).put_u32(count);
     for sample in samples {
-        sizes.put_u32(sample.size);
+        body.put_u32(sample.size);
     }
+    full_atom(*b"stsz", 0, 0, &body)
+}
 
-    // The one chunk's offset.
-    let mut offsets = Vec::new();
-    offsets.put_u32(1).put_u64(media_offset);
-
-    Ok(atom(
-        *b"stbl",
-        &[
-            full_atom(*b"stsd", 0, 0, &description),
-            full_atom(*b"stts", 0, 0, &times),
-            full_atom(*b"stss", 0, 0, &sync),
-            full_atom(*b"stsc", 0, 0, &chunks),
-            full_atom(*b"stsz", 0, 0, &sizes),
-            full_atom(*b"co64", 0, 0, &offsets),
-        ]
-        .concat(),
-    ))
+/// The `co64` atom: the one chunk's offset in the file.
+fn chunk_offsets(media_offset: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.put_u32(1).put_u64(media_offset);
+    full_atom(*b"co64", 0, 0, &body)
 }
 
 /// The sample description: a visual sample entry with the decoder configuration record.

@@ -1,7 +1,7 @@
 //! Geometry shared by the pages and the helpers that create, draw and move controls. Positions
 //! are hand-laid in logical pixels; `winsafe::gui::dpi` scales them when a control is created.
 
-use super::theme::{Skin, Surface};
+use super::theme::{ButtonRole, Skin, Surface};
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
@@ -9,14 +9,23 @@ pub(super) const WINDOW_WIDTH: i32 = 470;
 pub(super) const MARGIN: i32 = 8;
 /// Pitch of a row of text.
 pub(super) const LINE: i32 = 18;
-const BUTTON_HEIGHT: i32 = 24;
-const PAGE_WIDTH: i32 = WINDOW_WIDTH - 2 * MARGIN - 8;
+pub(super) const BUTTON_WIDTH: i32 = 120;
+pub(super) const BUTTON_HEIGHT: i32 = 24;
+/// What the tab control's frame takes from the width of its pages, both sides together.
+const TAB_FRAME: i32 = 8;
+const PAGE_WIDTH: i32 = WINDOW_WIDTH - 2 * MARGIN - TAB_FRAME;
 pub(super) const GROUP_X: i32 = 8;
 pub(super) const GROUP_WIDTH: i32 = PAGE_WIDTH - 2 * GROUP_X;
-pub(super) const INNER_X: i32 = GROUP_X + 12;
-pub(super) const INNER_WIDTH: i32 = GROUP_WIDTH - 24;
-pub(super) const VALUE_X: i32 = INNER_X + 108;
-pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - 108;
+/// Gap between a group's frame and the controls inside it, either side.
+const GROUP_PADDING: i32 = 12;
+pub(super) const INNER_X: i32 = GROUP_X + GROUP_PADDING;
+pub(super) const INNER_WIDTH: i32 = GROUP_WIDTH - 2 * GROUP_PADDING;
+/// Width of the caption column that a value sits to the right of.
+const CAPTION_WIDTH: i32 = 108;
+pub(super) const VALUE_X: i32 = INNER_X + CAPTION_WIDTH;
+pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
+/// How far a classic group title sits from the frame's left edge.
+const TITLE_INDENT: i32 = 8;
 
 pub(super) const BLACK: w::COLORREF = w::COLORREF::from_rgb(0x00, 0x00, 0x00);
 pub(super) const GRAY: w::COLORREF = w::COLORREF::from_rgb(0x6D, 0x6D, 0x6D);
@@ -45,7 +54,7 @@ impl Frame {
     ) -> Self {
         let padded = format!(" {title} ");
         Self {
-            title: label(parent, &padded, GROUP_X + 8, y, 0, 1),
+            title: label(parent, &padded, GROUP_X + TITLE_INDENT, y, 0, 1),
             text: title.to_owned(),
             rect: Rc::new(Cell::new(w::RECT {
                 left: gui::dpi_x(GROUP_X),
@@ -112,21 +121,13 @@ pub(super) fn draw(
     let erase_skin = skin.clone();
     let erase_frames = frames.clone();
     events.wm_erase_bkgnd(move |p| {
-        if erase_skin.is_themed() {
-            match surface {
-                Surface::Dialog => erase_skin.fill_dialog(&p.hdc, erase_host.hwnd()),
-                // The page's own erase is left to its paint, which draws everything at once;
-                // a control asking for the background it sits on is given it here.
-                Surface::Page if p.hdc.WindowFromDC().as_ref() == Some(erase_host.hwnd()) => {}
-                Surface::Page => {
-                    erase_skin.paint_backdrop(&p.hdc, erase_host.hwnd(), &erase_frames);
-                }
-            }
-        } else if let Ok(client) = erase_host.hwnd().GetClientRect()
-            && let Ok(brush) = w::HBRUSH::GetSysColorBrush(surface.classic())
-        {
-            let _ = p.hdc.FillRect(client, &brush);
-        }
+        erase(
+            &p.hdc,
+            erase_host.hwnd(),
+            &erase_skin,
+            surface,
+            &erase_frames,
+        );
         Ok(1)
     });
     if surface == Surface::Page || !frames.is_empty() {
@@ -147,6 +148,26 @@ pub(super) fn draw(
     });
 }
 
+/// Erases `host`'s background on `hdc` during `WM_ERASEBKGND`: in the system colour of
+/// `surface` in classic, or in a character theme with its backdrop and `frames`.
+fn erase(hdc: &w::HDC, host: &w::HWND, skin: &Skin, surface: Surface, frames: &[Frame]) {
+    if !skin.is_themed() {
+        if let Ok(client) = host.GetClientRect()
+            && let Ok(brush) = w::HBRUSH::GetSysColorBrush(surface.classic())
+        {
+            let _ = hdc.FillRect(client, &brush);
+        }
+        return;
+    }
+    match surface {
+        Surface::Dialog => skin.fill_dialog(hdc, host),
+        // The page's own erase is left to its paint, which draws everything at once; a control
+        // asking for the background it sits on is given it here.
+        Surface::Page if hdc.WindowFromDC().as_ref() == Some(host) => {}
+        Surface::Page => skin.paint_backdrop(hdc, host, frames),
+    }
+}
+
 /// Paints a tab page: the character over the page in a character theme, or else Windows'
 /// own group boxes.
 fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
@@ -155,15 +176,14 @@ fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
     };
     if skin.is_themed() {
         skin.paint_page(&paint, hwnd, frames);
-    } else if let Some(theme) = hwnd.OpenThemeData("BUTTON") {
-        for frame in frames {
-            let _ = theme.DrawThemeBackground(
-                &paint,
-                co::VS::BUTTON_GROUPBOX_NORMAL,
-                frame.rect.get(),
-                None,
-            );
-        }
+        return;
+    }
+    let Some(theme) = hwnd.OpenThemeData("BUTTON") else {
+        return;
+    };
+    for frame in frames {
+        let _ =
+            theme.DrawThemeBackground(&paint, co::VS::BUTTON_GROUPBOX_NORMAL, frame.rect(), None);
     }
 }
 
@@ -349,14 +369,14 @@ pub(super) fn button(
     )
 }
 
-/// Makes a push button take the chosen theme's look; `primary` buttons take the accent colour.
-/// With no theme chosen Windows draws the button as it always did.
-pub(super) fn skin_button(button: &gui::Button, skin: &Skin, primary: bool) {
+/// Makes a push button take the chosen theme's look in its `role`. With no theme chosen
+/// Windows draws the button as it always did.
+pub(super) fn skin_button(button: &gui::Button, skin: &Skin, role: ButtonRole) {
     let skin = skin.clone();
     let owner = button.clone();
     button.on().nm_custom_draw(move |draw| {
         let text = owner.hwnd().GetWindowText().unwrap_or_default();
-        Ok(skin.paint_button(draw, &text, primary))
+        Ok(skin.paint_button(draw, &text, role))
     });
 }
 
@@ -394,26 +414,26 @@ pub(super) fn shift_by(window: &w::HWND, delta: i32) {
 
 /// Makes a window `delta` physical pixels wider (narrower when negative), keeping its position.
 pub(super) fn resize_width_by(window: &w::HWND, delta: i32) {
-    let Ok(rect) = window.GetWindowRect() else {
-        return;
-    };
-    let _ = window.SetWindowPos(
-        w::HwndPlace::None,
-        w::POINT::default(),
-        w::SIZE::with(rect.right - rect.left + delta, rect.bottom - rect.top),
-        co::SWP::NOMOVE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
-    );
+    add_to_size(window, delta, 0);
 }
 
 /// Makes a window `delta` physical pixels taller (shorter when negative), keeping its position.
 pub(super) fn resize_by(window: &w::HWND, delta: i32) {
+    add_to_size(window, 0, delta);
+}
+
+/// Adds `width` and `height` physical pixels to a window's size, keeping its position.
+fn add_to_size(window: &w::HWND, width: i32, height: i32) {
     let Ok(rect) = window.GetWindowRect() else {
         return;
     };
     let _ = window.SetWindowPos(
         w::HwndPlace::None,
         w::POINT::default(),
-        w::SIZE::with(rect.right - rect.left, rect.bottom - rect.top + delta),
+        w::SIZE::with(
+            rect.right - rect.left + width,
+            rect.bottom - rect.top + height,
+        ),
         co::SWP::NOMOVE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
     );
 }

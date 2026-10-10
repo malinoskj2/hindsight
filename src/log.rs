@@ -109,25 +109,30 @@ fn record(level: Level, message: impl Display) {
     let time = timestamp();
     let message = message.to_string();
     let mut file = file_lock();
-    let line = {
-        let mut journal = journal();
+    let line = journal().append(time, level, message);
+    if let Some(file) = file.as_mut() {
+        // A full disk must not take the application down with it.
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+impl Journal {
+    /// Adds an entry under the next sequence number, forgetting the oldest one past
+    /// [`CAPACITY`], and returns the entry's line.
+    fn append(&mut self, time: String, level: Level, message: String) -> String {
         let entry = Entry {
-            sequence: journal.next_sequence,
+            sequence: self.next_sequence,
             time,
             level,
             message,
         };
         let line = entry.line();
-        journal.next_sequence += 1;
-        journal.entries.push_back(entry);
-        if journal.entries.len() > CAPACITY {
-            journal.entries.pop_front();
+        self.next_sequence += 1;
+        self.entries.push_back(entry);
+        if self.entries.len() > CAPACITY {
+            self.entries.pop_front();
         }
         line
-    };
-    if let Some(file) = file.as_mut() {
-        // A full disk must not take the application down with it.
-        let _ = writeln!(file, "{line}");
     }
 }
 

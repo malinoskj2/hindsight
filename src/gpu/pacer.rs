@@ -63,10 +63,17 @@ impl Pacer {
         let due = Duration::from_nanos(
             u64::try_from(self.period.as_nanos() * u128::from(self.next)).unwrap_or(u64::MAX),
         );
-        let remaining = due.saturating_sub(elapsed);
+        self.sleep(due.saturating_sub(elapsed))?;
+        let index = self.next;
+        self.next += 1;
+        Ok(index)
+    }
+
+    /// Arms the timer to fire once after `duration` and sleeps until it does.
+    fn sleep(&self, duration: Duration) -> windows::core::Result<()> {
         // Relative due times are negative, in 100 ns units.
         let relative =
-            -i64::try_from(remaining.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
+            -i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
         // SAFETY: the timer is open; `relative` outlives the call; a one-shot timer (period 0)
         // with no completion routine.
         unsafe { SetWaitableTimer(*self.timer, &raw const relative, 0, None, None, false) }?;
@@ -74,10 +81,7 @@ impl Pacer {
         if unsafe { WaitForSingleObject(*self.timer, INFINITE) } != WAIT_OBJECT_0 {
             return Err(windows::core::Error::from_thread());
         }
-
-        let index = self.next;
-        self.next += 1;
-        Ok(index)
+        Ok(())
     }
 }
 

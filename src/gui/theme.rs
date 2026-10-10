@@ -9,10 +9,13 @@
 
 use super::{
     art::{Image, Layer},
-    layout::Frame,
+    layout::{self, Frame},
 };
 use crate::config::Theme;
-use std::{cell::Cell, cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use winsafe::{self as w, co, guard::DeleteObjectGuard, gui, prelude::*};
 
 /// Width of the column the artwork gets beside the controls, in logical pixels.
@@ -23,6 +26,22 @@ const ART_MARGIN: i32 = 8;
 const DECORATION_OPACITY: u8 = 166;
 /// Corner radius of panels and buttons, in logical pixels.
 const CORNER: i32 = 4;
+/// How far a pressed primary button darkens its accent towards black, out of 255.
+const PRESSED_PRIMARY: u32 = 40;
+/// How far a hovered primary button lightens its accent towards its text, out of 255.
+const HOT_PRIMARY: u32 = 28;
+/// How far a pressed secondary button moves its fill towards the border colour, out of 255.
+const PRESSED_SECONDARY: u32 = 150;
+/// Gap between a button's edge and its keyboard-focus rectangle, in logical pixels.
+const FOCUS_INSET: i32 = 3;
+/// How far a painted group title sits from its panel's left edge, in logical pixels.
+const TITLE_INDENT: i32 = 12;
+/// The break in the border either side of a painted group title, in logical pixels.
+const TITLE_GAP: i32 = 4;
+/// The group titles' font size, as a percentage of the dialog font's.
+const TITLE_FONT_PERCENT: i32 = 118;
+/// Black, as `0xRRGGBB`.
+const BLACK_RGB: u32 = 0x0000_0000;
 
 /// A theme's colours.
 pub(super) struct Palette {
@@ -141,6 +160,15 @@ impl Surface {
     }
 }
 
+/// How much a push button stands out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ButtonRole {
+    /// The page's main action, which takes the accent colour.
+    Primary,
+    /// Any other action, on a quiet fill.
+    Secondary,
+}
+
 /// The look currently chosen, shared by every handler that paints.
 #[derive(Clone)]
 pub(super) struct Skin(Rc<Inner>);
@@ -150,8 +178,8 @@ struct Inner {
     resources: RefCell<Resources>,
 }
 
-/// What painting needs besides the palette, made when first wanted and dropped when the theme
-/// changes.
+/// What painting needs besides the palette, made when first wanted. Everything drawn in the
+/// theme's colours or artwork is dropped when the theme changes; the title font is not.
 #[derive(Default)]
 struct Resources {
     brushes: Option<Brushes>,
@@ -167,9 +195,30 @@ struct Brushes {
     panel: DeleteObjectGuard<w::HBRUSH>,
 }
 
+impl Brushes {
+    /// The brush `surface` is filled with.
+    fn of(&self, surface: Surface) -> &w::HBRUSH {
+        match surface {
+            Surface::Dialog => &self.background,
+            Surface::Page => &self.panel,
+        }
+    }
+}
+
 struct Pictures {
     character: Image,
     decoration: Image,
+}
+
+impl Pictures {
+    /// The artwork of `theme`, decoded; `None` in classic or when either picture is unreadable.
+    fn decode(theme: Theme) -> Option<Self> {
+        let artwork = artwork(theme)?;
+        Some(Self {
+            character: Image::decode(artwork.character)?,
+            decoration: Image::decode(artwork.decoration)?,
+        })
+    }
 }
 
 struct Scaled {
@@ -219,41 +268,46 @@ impl Skin {
         let Some(palette) = self.palette() else {
             return classic;
         };
-        let known = |hex: u32| classic == colour_of_classic(hex);
-        if known(CLASSIC_BLACK) {
+        if classic == layout::BLACK {
             colour(palette.text)
-        } else if known(CLASSIC_GRAY) {
+        } else if classic == layout::GRAY {
             colour(palette.muted)
-        } else if known(CLASSIC_GREEN) {
+        } else if classic == layout::GREEN {
             colour(palette.status)
         } else {
             classic
         }
     }
 
-    /// The brush labels erase themselves with, so that they blend into what is behind them.
-    pub(super) fn label_brush(&self, surface: Surface) -> w::HBRUSH {
-        if self.is_themed() {
-            let mut resources = self.0.resources.borrow_mut();
-            if let Some(brushes) = resources.ensure_brushes(self.palette()) {
-                let brush = match surface {
-                    Surface::Dialog => &brushes.background,
-                    Surface::Page => &brushes.panel,
-                };
-                return copy_handle(&**brush);
-            }
-        }
-        w::HBRUSH::GetSysColorBrush(surface.classic()).unwrap_or(w::HBRUSH::NULL)
+    /// The window's own title bar in the theme's colours, caption then text, or `None` for
+    /// the classic dialog's.
+    pub(super) fn title_bar_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
+        self.palette()
+            .map(|palette| (colour(palette.background), colour(palette.text)))
     }
 
-    /// Fills `hdc`'s whole window with the theme's background.
+    /// The brush labels erase themselves with, so that they blend into what is behind them.
+    pub(super) fn label_brush(&self, surface: Surface) -> w::HBRUSH {
+        self.brush(surface).unwrap_or_else(|| {
+            w::HBRUSH::GetSysColorBrush(surface.classic()).unwrap_or(w::HBRUSH::NULL)
+        })
+    }
+
+    /// A copy of the theme's brush for `surface`, made if need be; `None` in classic.
+    fn brush(&self, surface: Surface) -> Option<w::HBRUSH> {
+        let mut resources = self.0.resources.borrow_mut();
+        resources
+            .ensure_brushes(self.palette())
+            .map(|brushes| copy_handle(brushes.of(surface)))
+    }
+
+    /// Fills `window`'s client area on `hdc` with the theme's background.
     pub(super) fn fill_dialog(&self, hdc: &w::HDC, window: &w::HWND) {
         let Ok(client) = window.GetClientRect() else {
             return;
         };
-        let mut resources = self.0.resources.borrow_mut();
-        if let Some(brushes) = resources.ensure_brushes(self.palette()) {
-            let _ = hdc.FillRect(client, &brushes.background);
+        if let Some(background) = self.brush(Surface::Dialog) {
+            let _ = hdc.FillRect(client, &background);
         }
     }
 
@@ -269,11 +323,20 @@ impl Skin {
         let mut resources = self.0.resources.borrow_mut();
         resources.ensure_title_font(page);
         resources.ensure_scaled(theme, client.bottom - client.top);
-        let Some(brushes) = resources.ensure_brushes(Some(palette)) else {
+        if resources.ensure_brushes(Some(palette)).is_none() {
+            return;
+        }
+        let Resources {
+            brushes: Some(brushes),
+            scaled,
+            title_font,
+            ..
+        } = &*resources
+        else {
             return;
         };
         let _ = hdc.FillRect(client, &brushes.background);
-        if let Some(scaled) = &resources.scaled {
+        if let Some(scaled) = scaled {
             let (width, height) = scaled.decoration.size();
             scaled.decoration.draw(
                 hdc,
@@ -282,12 +345,8 @@ impl Skin {
                 DECORATION_OPACITY,
             );
         }
-        let Some(brushes) = &resources.brushes else {
-            return;
-        };
-        let font = resources.title_font.as_deref();
         for frame in frames {
-            paint_frame(hdc, palette, &brushes.panel, font, frame);
+            paint_frame(hdc, palette, &brushes.panel, title_font.as_deref(), frame);
         }
     }
 
@@ -328,12 +387,11 @@ impl Skin {
     }
 
     /// Draws a push button in the theme during `NM_CUSTOMDRAW`, or lets Windows draw it.
-    /// `primary` buttons take the accent colour.
     pub(super) fn paint_button(
         &self,
         draw: &w::NMCUSTOMDRAW,
         text: &str,
-        primary: bool,
+        role: ButtonRole,
     ) -> co::CDRF {
         let Some(palette) = self.palette() else {
             return co::CDRF::DODEFAULT;
@@ -342,76 +400,23 @@ impl Skin {
             return co::CDRF::DODEFAULT;
         }
         let state = draw.uItemState;
-        let disabled = state.has(co::CDIS::DISABLED);
-        let pressed = state.has(co::CDIS::SELECTED);
-        let hot = state.has(co::CDIS::HOT);
-        let (fill, edge, ink) = if primary && !disabled {
-            let fill = if pressed {
-                mix(palette.accent, 0, 40)
-            } else if hot {
-                mix(palette.accent, palette.on_accent, 28)
-            } else {
-                palette.accent
-            };
-            (fill, palette.accent, palette.on_accent)
-        } else {
-            let fill = if disabled {
-                palette.secondary_button
-            } else if pressed {
-                mix(palette.secondary_button, palette.border, 150)
-            } else if hot {
-                palette.panel
-            } else {
-                palette.secondary_button
-            };
-            let edge = if hot && !disabled {
-                palette.accent
-            } else {
-                palette.border
-            };
-            let ink = if disabled {
-                palette.muted
-            } else {
-                palette.text
-            };
-            (fill, edge, ink)
-        };
+        let (fill, edge, ink) = button_colours(palette, role, state);
 
         let hdc = &draw.hdc;
-        let (Ok(brush), Ok(pen)) = (
-            w::HBRUSH::CreateSolidBrush(colour(fill)),
-            w::HPEN::CreatePen(co::PS::SOLID, 1, colour(edge)),
-        ) else {
+        let (Ok(brush), Ok(pen)) = (solid_brush(fill), solid_pen(edge)) else {
             return co::CDRF::DODEFAULT;
         };
         // The corners show what is behind the button, not the button's own background.
-        let _ = hdc.FillRect(draw.rc, &brush_of(&self.0.resources, palette, false));
-        {
-            let (Ok(_brush), Ok(_pen)) = (hdc.SelectObject(&*brush), hdc.SelectObject(&*pen))
-            else {
-                return co::CDRF::DODEFAULT;
-            };
-            let corner = gui::dpi_x(CORNER) * 2;
-            let _ = hdc.RoundRect(
-                w::RECT {
-                    left: draw.rc.left,
-                    top: draw.rc.top,
-                    right: draw.rc.right,
-                    bottom: draw.rc.bottom,
-                },
-                w::SIZE::with(corner, corner),
-            );
+        let behind = self.brush(Surface::Dialog).unwrap_or(w::HBRUSH::NULL);
+        let _ = hdc.FillRect(draw.rc, &behind);
+        if !round_rect(hdc, draw.rc, &pen, &brush) {
+            return co::CDRF::DODEFAULT;
         }
         let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
         let _ = hdc.SetTextColor(colour(ink));
-        let mut bounds = draw.rc;
-        let _ = hdc.DrawText(
-            text,
-            &mut bounds,
-            co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
-        );
+        draw_centred(hdc, text, draw.rc);
         if state.has(co::CDIS::FOCUS) && state.has(co::CDIS::SHOWKEYBOARDCUES) {
-            let inset = gui::dpi_x(3);
+            let inset = gui::dpi_x(FOCUS_INSET);
             let _ = hdc.DrawFocusRect(w::RECT {
                 left: draw.rc.left + inset,
                 top: draw.rc.top + inset,
@@ -443,22 +448,14 @@ impl Skin {
     }
 }
 
-// Classic colours the labels are given, which the theme answers with its own.
-const CLASSIC_BLACK: u32 = 0x0000_0000;
-const CLASSIC_GRAY: u32 = 0x006D_6D6D;
-const CLASSIC_GREEN: u32 = 0x0010_7C10;
-
-const fn colour_of_classic(hex: u32) -> w::COLORREF {
-    colour(hex)
-}
-
 impl Resources {
+    /// The theme's brushes, made from `palette` if need be; `None` in classic.
     fn ensure_brushes(&mut self, palette: Option<&Palette>) -> Option<&Brushes> {
         if self.brushes.is_none() {
             let palette = palette?;
             self.brushes = Some(Brushes {
-                background: w::HBRUSH::CreateSolidBrush(colour(palette.background)).ok()?,
-                panel: w::HBRUSH::CreateSolidBrush(colour(palette.panel)).ok()?,
+                background: solid_brush(palette.background).ok()?,
+                panel: solid_brush(palette.panel).ok()?,
             });
         }
         self.brushes.as_ref()
@@ -473,7 +470,7 @@ impl Resources {
             return;
         };
         let mut font = base;
-        font.lfHeight = font.lfHeight * 118 / 100;
+        font.lfHeight = font.lfHeight * TITLE_FONT_PERCENT / 100;
         font.lfWeight = co::FW::SEMIBOLD;
         self.title_font = w::HFONT::CreateFontIndirect(&font).ok();
     }
@@ -491,19 +488,7 @@ impl Resources {
             return;
         }
         if self.pictures.is_none() {
-            let Some(artwork) = artwork(theme) else {
-                return;
-            };
-            let (Some(character), Some(decoration)) = (
-                Image::decode(artwork.character),
-                Image::decode(artwork.decoration),
-            ) else {
-                return;
-            };
-            self.pictures = Some(Pictures {
-                character,
-                decoration,
-            });
+            self.pictures = Pictures::decode(theme);
         }
         let Some(pictures) = &self.pictures else {
             return;
@@ -526,18 +511,76 @@ impl Resources {
     }
 }
 
-/// A brush of the palette's background or panel colour, for painting a button's corners.
-fn brush_of(resources: &RefCell<Resources>, palette: &Palette, panel: bool) -> w::HBRUSH {
-    let mut resources = resources.borrow_mut();
-    resources
-        .ensure_brushes(Some(palette))
-        .map_or(w::HBRUSH::NULL, |brushes| {
-            copy_handle(&**if panel {
-                &brushes.panel
-            } else {
-                &brushes.background
-            })
-        })
+/// A push button's fill, border and text colours, as `0xRRGGBB`, for its `role` in `state`.
+/// A disabled button looks the same whatever its role.
+fn button_colours(palette: &Palette, role: ButtonRole, state: co::CDIS) -> (u32, u32, u32) {
+    let disabled = state.has(co::CDIS::DISABLED);
+    let pressed = state.has(co::CDIS::SELECTED);
+    let hot = state.has(co::CDIS::HOT);
+    if disabled {
+        return (palette.secondary_button, palette.border, palette.muted);
+    }
+    if role == ButtonRole::Primary {
+        let fill = if pressed {
+            mix(palette.accent, BLACK_RGB, PRESSED_PRIMARY)
+        } else if hot {
+            mix(palette.accent, palette.on_accent, HOT_PRIMARY)
+        } else {
+            palette.accent
+        };
+        return (fill, palette.accent, palette.on_accent);
+    }
+    let fill = if pressed {
+        mix(palette.secondary_button, palette.border, PRESSED_SECONDARY)
+    } else if hot {
+        palette.panel
+    } else {
+        palette.secondary_button
+    };
+    let edge = if hot { palette.accent } else { palette.border };
+    (fill, edge, palette.text)
+}
+
+/// A brush of one colour, given as `0xRRGGBB`.
+fn solid_brush(hex: u32) -> w::SysResult<DeleteObjectGuard<w::HBRUSH>> {
+    w::HBRUSH::CreateSolidBrush(colour(hex))
+}
+
+/// A hairline pen of one colour, given as `0xRRGGBB`.
+fn solid_pen(hex: u32) -> w::SysResult<DeleteObjectGuard<w::HPEN>> {
+    w::HPEN::CreatePen(co::PS::SOLID, 1, colour(hex))
+}
+
+/// Draws `rect` with rounded corners, outlined with `pen` and filled with `brush`; reports
+/// whether the two could be selected to draw it.
+fn round_rect(hdc: &w::HDC, rect: w::RECT, pen: &w::HPEN, brush: &w::HBRUSH) -> bool {
+    let (Ok(_pen), Ok(_brush)) = (hdc.SelectObject(pen), hdc.SelectObject(brush)) else {
+        return false;
+    };
+    let corner = gui::dpi_x(CORNER) * 2;
+    let _ = hdc.RoundRect(rect, w::SIZE::with(corner, corner));
+    true
+}
+
+/// Outlines `rect` with `pen`, leaving its inside alone: the frame round a tab control's pages,
+/// which the pages cover but for this border. Reports whether the pen and the hollow brush could
+/// be selected to draw it.
+fn outline_rect(hdc: &w::HDC, rect: w::RECT, pen: &w::HPEN) -> bool {
+    let hollow = w::HBRUSH::GetStockObject(co::STOCK_BRUSH::NULL).unwrap_or(w::HBRUSH::NULL);
+    let (Ok(_pen), Ok(_brush)) = (hdc.SelectObject(pen), hdc.SelectObject(&hollow)) else {
+        return false;
+    };
+    let _ = hdc.Rectangle(rect);
+    true
+}
+
+/// Draws `text` on one line, centred in `rect`.
+fn draw_centred(hdc: &w::HDC, text: &str, mut rect: w::RECT) {
+    let _ = hdc.DrawText(
+        text,
+        &mut rect,
+        co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
+    );
 }
 
 /// A group box: a panel with a hairline border and its title sitting on the border.
@@ -549,15 +592,11 @@ fn paint_frame(
     frame: &Frame,
 ) {
     let rect = frame.rect();
-    let Ok(pen) = w::HPEN::CreatePen(co::PS::SOLID, 1, colour(palette.border)) else {
+    let Ok(pen) = solid_pen(palette.border) else {
         return;
     };
-    {
-        let (Ok(_pen), Ok(_brush)) = (hdc.SelectObject(&*pen), hdc.SelectObject(panel)) else {
-            return;
-        };
-        let corner = gui::dpi_x(CORNER) * 2;
-        let _ = hdc.RoundRect(rect, w::SIZE::with(corner, corner));
+    if !round_rect(hdc, rect, &pen, panel) {
+        return;
     }
 
     let _font = title_font.and_then(|font| hdc.SelectObject(font).ok());
@@ -565,14 +604,15 @@ fn paint_frame(
     let Ok(size) = hdc.GetTextExtentPoint32(title) else {
         return;
     };
-    let left = rect.left + gui::dpi_x(12);
+    let left = rect.left + gui::dpi_x(TITLE_INDENT);
     let top = rect.top - size.cy / 2;
     // The border breaks where the title sits.
+    let gap = gui::dpi_x(TITLE_GAP);
     let _ = hdc.FillRect(
         w::RECT {
-            left: left - gui::dpi_x(4),
+            left: left - gap,
             top: rect.top - 1,
-            right: left + size.cx + gui::dpi_x(4),
+            right: left + size.cx + gap,
             bottom: rect.top + 2,
         },
         panel,
@@ -592,32 +632,22 @@ fn paint_frame(
     );
 }
 
-/// The window's own title bar and border in the theme's colours, or the classic dialog's.
-pub(super) fn title_bar_colours(skin: &Skin) -> Option<(w::COLORREF, w::COLORREF, w::COLORREF)> {
-    skin.palette().map(|palette| {
-        (
-            colour(palette.background),
-            colour(palette.text),
-            colour(palette.border),
-        )
-    })
-}
-
 /// Draws the strip of tabs and the frame round the pages onto `paint`.
 fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT) {
     let hwnd = tab.hwnd();
-    let count = tab.items().count().unwrap_or(0);
-    let selected = selected_tab(hwnd);
+    let items = tab.items();
+    let count = items.count().unwrap_or(0);
+    let selected = items.selected().map(|item| item.index());
     let strip_bottom = (0..count)
         .filter_map(|index| tab_rect(hwnd, index))
         .map(|rect| rect.bottom)
         .max()
         .unwrap_or(0);
 
-    let Ok(pen) = w::HPEN::CreatePen(co::PS::SOLID, 1, colour(palette.border)) else {
+    let Ok(pen) = solid_pen(palette.border) else {
         return;
     };
-    let Ok(background) = w::HBRUSH::CreateSolidBrush(colour(palette.background)) else {
+    let Ok(background) = solid_brush(palette.background) else {
         return;
     };
     let _ = paint.FillRect(client, &background);
@@ -626,22 +656,12 @@ fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT)
     let _font = font.as_ref().and_then(|font| paint.SelectObject(font).ok());
     let _ = paint.SetBkMode(co::BKMODE::TRANSPARENT);
 
-    // The frame round the pages, which the pages cover but for this border.
-    {
-        let (Ok(_pen), Ok(_brush)) = (
-            paint.SelectObject(&*pen),
-            paint.SelectObject(
-                &w::HBRUSH::GetStockObject(co::STOCK_BRUSH::NULL).unwrap_or(w::HBRUSH::NULL),
-            ),
-        ) else {
-            return;
-        };
-        let _ = paint.Rectangle(w::RECT {
-            left: client.left,
-            top: strip_bottom - 1,
-            right: client.right,
-            bottom: client.bottom,
-        });
+    let frame = w::RECT {
+        top: strip_bottom - 1,
+        ..client
+    };
+    if !outline_rect(paint, frame, &pen) {
+        return;
     }
 
     // The pen stays selected for every tab's outline.
@@ -656,7 +676,7 @@ fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT)
         } else {
             palette.secondary_button
         };
-        let Ok(brush) = w::HBRUSH::CreateSolidBrush(colour(fill)) else {
+        let Ok(brush) = solid_brush(fill) else {
             continue;
         };
         let _ = paint.FillRect(rect, &brush);
@@ -679,25 +699,14 @@ fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT)
             let _ = paint.MoveToEx(rect.left, rect.bottom - 1, None);
             let _ = paint.LineTo(rect.right, rect.bottom - 1);
         }
-        let text = tab
-            .items()
-            .iter()
-            .ok()
-            .and_then(|mut items| items.nth(index as usize))
-            .and_then(|item| item.text().ok())
-            .unwrap_or_default();
+        let text = items.get(index).text().unwrap_or_default();
         let ink = if is_selected {
             palette.accent
         } else {
             palette.text
         };
         let _ = paint.SetTextColor(colour(ink));
-        let mut bounds = rect;
-        let _ = paint.DrawText(
-            &text,
-            &mut bounds,
-            co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
-        );
+        draw_centred(paint, &text, rect);
     }
 }
 
@@ -776,18 +785,61 @@ fn display_rect(tab: &w::HWND, client: w::RECT) -> Option<w::RECT> {
     (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
 }
 
-/// The index of the selected tab.
-#[expect(unsafe_code)]
-fn selected_tab(tab: &w::HWND) -> Option<u32> {
-    // SAFETY: TCM_GETCURSEL takes no parameters.
-    unsafe { tab.SendMessage(w::msg::TcmGetCurSel {}) }
-}
-
 /// Lets the tab control paint itself, as when no theme is chosen.
 #[expect(unsafe_code)]
 pub(super) fn paint_tabs_natively(tab: &w::HWND) {
     // SAFETY: passes WM_PAINT on to the control's own window procedure, which `BeginPaint`s.
     unsafe {
         tab.DefSubclassProc(w::msg::Wm::new(co::WM::PAINT, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disabled_button_looks_the_same_in_either_role() {
+        let state = co::CDIS::DISABLED | co::CDIS::HOT | co::CDIS::SELECTED;
+        let quiet = (EMBER.secondary_button, EMBER.border, EMBER.muted);
+        assert_eq!(button_colours(&EMBER, ButtonRole::Primary, state), quiet);
+        assert_eq!(button_colours(&EMBER, ButtonRole::Secondary, state), quiet);
+    }
+
+    #[test]
+    fn a_primary_button_keeps_its_accent_edge_and_darkens_when_pressed() {
+        let pressed = co::CDIS::SELECTED | co::CDIS::HOT;
+        assert_eq!(
+            button_colours(&EMBER, ButtonRole::Primary, pressed),
+            (
+                mix(EMBER.accent, BLACK_RGB, PRESSED_PRIMARY),
+                EMBER.accent,
+                EMBER.on_accent
+            )
+        );
+        assert_eq!(
+            button_colours(&EMBER, ButtonRole::Primary, co::CDIS::HOT),
+            (
+                mix(EMBER.accent, EMBER.on_accent, HOT_PRIMARY),
+                EMBER.accent,
+                EMBER.on_accent
+            )
+        );
+    }
+
+    #[test]
+    fn a_secondary_button_takes_the_accent_edge_only_while_hovered() {
+        assert_eq!(
+            button_colours(&EMBER, ButtonRole::Secondary, co::CDIS::HOT),
+            (EMBER.panel, EMBER.accent, EMBER.text)
+        );
+        assert_eq!(
+            button_colours(&EMBER, ButtonRole::Secondary, co::CDIS::SELECTED),
+            (
+                mix(EMBER.secondary_button, EMBER.border, PRESSED_SECONDARY),
+                EMBER.border,
+                EMBER.text
+            )
+        );
     }
 }

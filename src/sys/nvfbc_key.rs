@@ -50,6 +50,11 @@ pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     if tokens.iter().any(|token| strip_hex_prefix(token).is_some()) {
         return parse_dwords(&tokens);
     }
+    parse_hex(text)
+}
+
+/// The key's bytes from hexadecimal digits, two per byte, with whitespace ignored.
+fn parse_hex(text: &str) -> Result<Vec<u8>, ParseError> {
     let digits = text
         .chars()
         .filter(|character| !character.is_whitespace())

@@ -31,7 +31,20 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
     let (vps, sps, pps) = (of_type(NAL_VPS)?, of_type(NAL_SPS)?, of_type(NAL_PPS)?);
+    let mut body = record_fields(sps)?;
+    for unit in [vps, sps, pps] {
+        body.push(ARRAY_COMPLETE | nal_type(unit));
+        // One parameter set in the array.
+        body.extend_from_slice(&1_u16.to_be_bytes());
+        body.extend_from_slice(&u16::try_from(unit.len()).ok()?.to_be_bytes());
+        body.extend_from_slice(unit);
+    }
+    Some(atom(*b"hvcC", &body))
+}
 
+/// The `hvcC` record's fields before its parameter set arrays: the profile, tier and level and
+/// the sub-layers, copied from `sps`, and the stream format the encoder is configured for.
+fn record_fields(sps: &[u8]) -> Option<Vec<u8>> {
     // After the two-byte NAL header: VPS id (4 bits), max sub-layers minus one (3) and temporal
     // id nesting (1), then `profile_tier_level`.
     let header = unescape(sps, SPS_PROFILE_BYTES);
@@ -62,14 +75,7 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
         // One array per parameter set type.
         3,
     ]);
-    for unit in [vps, sps, pps] {
-        body.push(ARRAY_COMPLETE | nal_type(unit));
-        // One parameter set in the array.
-        body.extend_from_slice(&1_u16.to_be_bytes());
-        body.extend_from_slice(&u16::try_from(unit.len()).ok()?.to_be_bytes());
-        body.extend_from_slice(unit);
-    }
-    Some(atom(*b"hvcC", &body))
+    Some(body)
 }
 
 /// The NAL units a stored sample keeps: parameter sets travel in the sample description and

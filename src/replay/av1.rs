@@ -148,26 +148,17 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
         .into_iter()
         .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload)?;
-
-    let mut body = vec![
-        AV1C_MARKER_AND_VERSION,
-        (u8::try_from(sequence.profile).ok()? << 5) | u8::try_from(sequence.level).ok()?,
-        (u8::from(sequence.tier) << 7)
-            | (u8::from(sequence.colour.high_bitdepth) << 6)
-            | (u8::from(sequence.colour.twelve_bit) << 5)
-            | (u8::from(sequence.colour.monochrome) << 4)
-            | (u8::from(sequence.colour.subsampling_x) << 3)
-            | (u8::from(sequence.colour.subsampling_y) << 2)
-            | u8::try_from(sequence.colour.chroma_sample_position).ok()?,
-        // No initial presentation delay.
-        0,
-    ];
-    // The sequence header OBU itself, always with its size field.
-    body.push(obu.header[0] | OBU_HAS_SIZE_FIELD);
-    body.extend_from_slice(&obu.header[1..]);
-    write_leb128(&mut body, obu.payload.len());
-    body.extend_from_slice(obu.payload);
+    let mut body = sequence.record_fields()?.to_vec();
+    write_sized_obu(&mut body, &obu);
     Some(atom(*b"av1C", &body))
+}
+
+/// Appends `obu` to `output` with a size field, whether or not it came with one.
+fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
+    output.push(obu.header[0] | OBU_HAS_SIZE_FIELD);
+    output.extend_from_slice(&obu.header[1..]);
+    write_leb128(output, obu.payload.len());
+    output.extend_from_slice(obu.payload);
 }
 
 /// The fields of a sequence header the `av1C` record repeats; the flags mirror the bitstream's.
@@ -192,7 +183,40 @@ impl SequenceHeader {
         } else {
             Self::first_operating_point(&mut bits)?
         };
+        Self::skip_frame_size_and_tools(&mut bits, reduced_still_picture_header)?;
+        let colour = ColourConfig::parse(&mut bits, profile)?;
+        Some(Self {
+            profile,
+            level,
+            tier,
+            colour,
+        })
+    }
 
+    /// The `av1C` record's fields before the sequence header OBU: its marker and version, the
+    /// profile, level, tier and colour format, and no initial presentation delay.
+    fn record_fields(&self) -> Option<[u8; 4]> {
+        let colour = &self.colour;
+        Some([
+            AV1C_MARKER_AND_VERSION,
+            (u8::try_from(self.profile).ok()? << 5) | u8::try_from(self.level).ok()?,
+            (u8::from(self.tier) << 7)
+                | (u8::from(colour.high_bitdepth) << 6)
+                | (u8::from(colour.twelve_bit) << 5)
+                | (u8::from(colour.monochrome) << 4)
+                | (u8::from(colour.subsampling_x) << 3)
+                | (u8::from(colour.subsampling_y) << 2)
+                | u8::try_from(colour.chroma_sample_position).ok()?,
+            0,
+        ])
+    }
+
+    /// Skips the frame size, the frame id lengths and the coding tool flags, which lie between
+    /// the operating points and `color_config()` and which the `av1C` record does not repeat.
+    fn skip_frame_size_and_tools(
+        bits: &mut Bits<'_>,
+        reduced_still_picture_header: bool,
+    ) -> Option<()> {
         let width_bits = bits.read(4)? + 1;
         let height_bits = bits.read(4)? + 1;
         bits.skip(width_bits + height_bits)?;
@@ -203,31 +227,30 @@ impl SequenceHeader {
         // 128×128 superblocks, filter intra, intra edge filter.
         bits.skip(3)?;
         if !reduced_still_picture_header {
-            // Inter-intra, masked compound, warped motion, dual filter.
-            bits.skip(4)?;
-            let order_hint = bits.flag()?;
-            if order_hint {
-                // Joint compound, reference frame motion vectors.
-                bits.skip(2)?;
-            }
-            let force_screen_content_tools = if bits.flag()? { 2 } else { bits.read(1)? };
-            if force_screen_content_tools > 0 && !bits.flag()? {
-                bits.skip(1)?;
-            }
-            if order_hint {
-                bits.skip(3)?;
-            }
+            Self::skip_inter_tools(bits)?;
         }
         // Superres, CDEF, loop restoration.
-        bits.skip(3)?;
+        bits.skip(3)
+    }
 
-        let colour = ColourConfig::parse(&mut bits, profile)?;
-        Some(Self {
-            profile,
-            level,
-            tier,
-            colour,
-        })
+    /// Skips the inter prediction tool flags, which only a sequence header that is not reduced
+    /// to still pictures carries.
+    fn skip_inter_tools(bits: &mut Bits<'_>) -> Option<()> {
+        // Inter-intra, masked compound, warped motion, dual filter.
+        bits.skip(4)?;
+        let order_hint = bits.flag()?;
+        if order_hint {
+            // Joint compound, reference frame motion vectors.
+            bits.skip(2)?;
+        }
+        let force_screen_content_tools = if bits.flag()? { 2 } else { bits.read(1)? };
+        if force_screen_content_tools > 0 && !bits.flag()? {
+            bits.skip(1)?;
+        }
+        if order_hint {
+            bits.skip(3)?;
+        }
+        Some(())
     }
 
     /// Reads the optional timing and decoder model information, then every operating point,

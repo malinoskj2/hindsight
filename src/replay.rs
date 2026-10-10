@@ -211,26 +211,37 @@ impl SaveError {
 pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let path = unused_path(directory, &log::file_stamp());
-    let partial = path.with_extension(PARTIAL_EXTENSION);
+    write_then_rename(clip, &path)?;
+    Ok(path)
+}
 
+/// Writes `clip` next to `path` under a partial name and renames it to `path` once complete,
+/// removing the partial file if either step fails.
+fn write_then_rename(clip: &Clip, path: &Path) -> Result<(), SaveError> {
+    let partial = path.with_extension(PARTIAL_EXTENSION);
     let result = write_file(clip, &partial)
-        .and_then(|()| fs::rename(&partial, &path).map_err(SaveError::io("finish", &path)));
+        .and_then(|()| fs::rename(&partial, path).map_err(SaveError::io("finish", path)));
     if result.is_err() {
         // The save already failed; a leftover partial file is all that is lost here.
         let _ = fs::remove_file(&partial);
     }
-    result.map(|()| path)
+    result
 }
 
+/// Muxes `clip` into a new file at `path` and waits until it is on the disk.
 fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     mp4::write(&mut output, &clip.stream, &clip.packets)?;
+    sync(output).map_err(SaveError::io("finish", path))
+}
+
+/// Flushes `output`'s buffer into its file, then the file's contents to the disk.
+fn sync(output: BufWriter<File>) -> io::Result<()> {
     let file = output
         .into_inner()
-        .map_err(io::IntoInnerError::into_error)
-        .map_err(SaveError::io("finish", path))?;
-    file.sync_all().map_err(SaveError::io("finish", path))
+        .map_err(io::IntoInnerError::into_error)?;
+    file.sync_all()
 }
 
 /// `hindsight_<stamp>.mp4`, or with `-2`, `-3`, … when a clip was already saved that second.

@@ -13,8 +13,8 @@ use windows::{
                 ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
             },
             Dxgi::{
-                CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
-                IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+                CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
+                DXGI_ERROR_NOT_FOUND, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
             },
         },
     },
@@ -47,34 +47,9 @@ impl Device {
     pub(super) fn create() -> Result<Self, DeviceError> {
         let (adapter, name) = nvidia_adapter()?;
         let created = |error| DeviceError::Create(name.clone(), error);
-
-        let mut device = None;
-        let mut context = None;
-        // BGRA support is what Windows Graphics Capture requires of the device.
-        // SAFETY: the adapter is live and the out-parameters outlive the call, which writes
-        // them on success.
-        unsafe {
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&raw mut device),
-                None,
-                Some(&raw mut context),
-            )
-        }
-        .map_err(created)?;
-        let (Some(device), Some(context)) = (device, context) else {
-            return Err(created(windows::core::Error::empty()));
-        };
-
+        let (device, context) = create_device(&adapter).map_err(created)?;
         // The capture frame pool works on the device from its own threads.
-        let multithread: ID3D11Multithread = context.cast().map_err(created)?;
-        // SAFETY: switches on the device's internal locking; returns the previous setting.
-        let _ = unsafe { multithread.SetMultithreadProtected(true) };
+        protect_multithreaded(&context).map_err(created)?;
 
         Ok(Self {
             d3d: device,
@@ -142,6 +117,43 @@ impl Device {
     }
 }
 
+/// A Direct3D 11 device on `adapter` with BGRA support, which Windows Graphics Capture
+/// requires of it, and its immediate context.
+fn create_device(
+    adapter: &IDXGIAdapter1,
+) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: the adapter is live and the out-parameters outlive the call, which writes
+    // them on success.
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&raw mut device),
+            None,
+            Some(&raw mut context),
+        )
+    }?;
+    match (device, context) {
+        (Some(device), Some(context)) => Ok((device, context)),
+        _ => Err(windows::core::Error::empty()),
+    }
+}
+
+/// Switches on the internal locking of the device behind `context`, so threads other than the
+/// capture thread may use it too.
+fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result<()> {
+    let multithread: ID3D11Multithread = context.cast()?;
+    // SAFETY: switches on the device's internal locking; returns the previous setting.
+    let _ = unsafe { multithread.SetMultithreadProtected(true) };
+    Ok(())
+}
+
 /// The first hardware adapter from NVIDIA, and its name.
 fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     // SAFETY: creates a factory; no other preconditions.
@@ -155,17 +167,25 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
         };
         // SAFETY: reads the description of a live adapter.
         let description = unsafe { adapter.GetDesc1() }.map_err(DeviceError::Enumerate)?;
-        let software = description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
-        if description.VendorId != NVIDIA_VENDOR_ID || software {
-            continue;
+        if is_nvidia_hardware(&description) {
+            return Ok((adapter, adapter_name(&description)));
         }
-        let length = description
-            .Description
-            .iter()
-            .position(|unit| *unit == 0)
-            .unwrap_or(description.Description.len());
-        let name = String::from_utf16_lossy(&description.Description[..length]);
-        return Ok((adapter, name));
     }
     Err(DeviceError::NoNvidiaAdapter)
+}
+
+/// Whether an adapter is an NVIDIA GPU rather than another vendor's or a software renderer.
+fn is_nvidia_hardware(description: &DXGI_ADAPTER_DESC1) -> bool {
+    let software = description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
+    description.VendorId == NVIDIA_VENDOR_ID && !software
+}
+
+/// An adapter's name, which its description holds as nul-terminated UTF-16.
+fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
+    let length = description
+        .Description
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(description.Description.len());
+    String::from_utf16_lossy(&description.Description[..length])
 }

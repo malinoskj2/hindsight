@@ -78,14 +78,7 @@ impl Store {
 
     pub(crate) fn at(root: PathBuf) -> Result<Self, StorageError> {
         fs::create_dir_all(&root)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.join(INSTANCE_LOCK_FILE))?;
-        lock.try_lock().map_err(|_| StorageError::Locked)?;
-
+        let lock = lock_instance(&root)?;
         Ok(Self { root, _lock: lock })
     }
 
@@ -106,19 +99,10 @@ impl Store {
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, StorageError> {
-        let file = match File::open(self.root.join(name)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(file) = open_if_present(&self.root.join(name))? else {
+            return Ok(None);
         };
-
-        let mut bytes = Vec::new();
-        file.take(MAX_STATE_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > MAX_STATE_BYTES {
-            return Err(StorageError::Oversized);
-        }
-
+        let bytes = read_capped(file)?;
         Ok(Some(serde_json::from_slice(&bytes)?))
     }
 
@@ -133,6 +117,42 @@ impl Store {
     }
 }
 
+/// Opens `root`'s instance lock file and locks it exclusively, failing with
+/// [`StorageError::Locked`] while another instance holds it.
+fn lock_instance(root: &Path) -> Result<File, StorageError> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(INSTANCE_LOCK_FILE))?;
+    lock.try_lock().map_err(|_| StorageError::Locked)?;
+    Ok(lock)
+}
+
+/// Opens the file at `path` for reading, or `None` if there is none yet.
+fn open_if_present(path: &Path) -> io::Result<Option<File>> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the whole of `file`, or reports [`StorageError::Oversized`] once it passes the cap
+/// without reading further.
+fn read_capped(file: File) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::new();
+    file.take(MAX_STATE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(StorageError::Oversized);
+    }
+    Ok(bytes)
+}
+
+/// Replaces the file at `path` with `bytes` by way of a synced `.pending` file, so a crash
+/// leaves either the old contents or the new.
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(PENDING_EXTENSION);
     let mut file = File::create(&temporary)?;

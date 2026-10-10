@@ -50,14 +50,7 @@ fn play(_tones: &'static [(u32, u32)]) {}
 /// A mono 16-bit WAV of the `(frequency Hz, milliseconds)` tones, where a frequency of 0 is
 /// silence. Each tone fades in and out so it does not click.
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
-    let mut data = Vec::new();
-    for &(frequency, milliseconds) in tones {
-        let count = SAMPLE_RATE * milliseconds / 1000;
-        for index in 0..count {
-            data.extend_from_slice(&sample(frequency, index, count).to_le_bytes());
-        }
-    }
-
+    let data = pcm(tones);
     let data_len = u32::try_from(data.len()).expect("a tone is a few hundred milliseconds");
     let mut wav = Vec::with_capacity(44 + data.len());
     wav.extend_from_slice(b"RIFF");
@@ -74,6 +67,18 @@ fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(&data);
     wav
+}
+
+/// The tones' samples one after another, as little-endian 16-bit PCM.
+fn pcm(tones: &[(u32, u32)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for &(frequency, milliseconds) in tones {
+        let count = SAMPLE_RATE * milliseconds / 1000;
+        for index in 0..count {
+            data.extend_from_slice(&sample(frequency, index, count).to_le_bytes());
+        }
+    }
+    data
 }
 
 /// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MS`; a frequency

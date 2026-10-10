@@ -85,25 +85,27 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
 /// left alone: it could starve the game and the desktop compositor of the GPU. Reports whether
 /// the class was set.
 pub(super) fn raise_gpu_class() -> bool {
-    // The reference is never released, so the entry point read from it stays valid;
-    // `gdi32.dll` is loaded in every GUI process anyway.
-    // SAFETY: loads a system library by name.
-    let Ok(gdi) = (unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) })
-    else {
+    let Some(set_class) = scheduling_class_setter() else {
         return false;
-    };
-    // SAFETY: looks a symbol up in the loaded library.
-    let Some(export) =
-        (unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) })
-    else {
-        return false;
-    };
-    // SAFETY: the export has this signature since Windows Vista.
-    let set_class = unsafe {
-        std::mem::transmute::<unsafe extern "system" fn() -> isize, SetSchedulingPriorityClass>(
-            export,
-        )
     };
     // SAFETY: changes the scheduling class of the current process only.
     unsafe { set_class(GetCurrentProcess(), SCHEDULING_HIGH) }.is_ok()
+}
+
+/// `D3DKMTSetProcessSchedulingPriorityClass`, looked up in `gdi32.dll`, or `None` where it
+/// cannot be found.
+fn scheduling_class_setter() -> Option<SetSchedulingPriorityClass> {
+    // The reference is never released, so the entry point read from it stays valid;
+    // `gdi32.dll` is loaded in every GUI process anyway.
+    // SAFETY: loads a system library by name.
+    let gdi =
+        unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    // SAFETY: looks a symbol up in the loaded library.
+    let export = unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) }?;
+    // SAFETY: the export has this signature since Windows Vista.
+    Some(unsafe {
+        std::mem::transmute::<unsafe extern "system" fn() -> isize, SetSchedulingPriorityClass>(
+            export,
+        )
+    })
 }

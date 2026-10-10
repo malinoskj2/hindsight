@@ -63,6 +63,17 @@ fn already_running(error: &anyhow::Error) -> bool {
 #[cfg(windows)]
 fn startup() -> Result<(service::Worker, config::Config)> {
     let store = storage::Store::open().context("open application state")?;
+    mirror_log();
+    let config = store.load_config().context("load configuration")?;
+    config.validate().context("check configuration")?;
+    let worker = service::Worker::spawn(store, config.clone());
+    Ok((worker, config))
+}
+
+/// Mirrors the log to a file in the state directory; without one it is still kept in memory
+/// for the Logs tab.
+#[cfg(windows)]
+fn mirror_log() {
     let log_file = storage::state_directory().join(log::FILE_NAME);
     if let Err(error) = log::mirror_to(&log_file) {
         log::warning(format!(
@@ -70,10 +81,6 @@ fn startup() -> Result<(service::Worker, config::Config)> {
             log_file.display()
         ));
     }
-    let config = store.load_config().context("load configuration")?;
-    config.validate().context("check configuration")?;
-    let worker = service::Worker::spawn(store, config.clone());
-    Ok((worker, config))
 }
 
 /// The recording application is available on Windows only.

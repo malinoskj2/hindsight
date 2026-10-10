@@ -7,7 +7,7 @@ use std::{cell::RefCell, rc::Rc};
 use thiserror::Error;
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 
 #[derive(Debug, Error)]
@@ -54,24 +54,28 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
-        let actions = [
+        route_events([
             (show.id().clone(), TrayAction::Show),
             (save.id().clone(), TrayAction::Save),
             (quit.id().clone(), TrayAction::Quit),
-        ];
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if let Some(&(_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
-                dispatch(action);
-            }
-        }));
-        TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
-            if opens_window(&event) {
-                dispatch(TrayAction::Show);
-            }
-        }));
-
+        ]);
         Ok(Self { _icon: icon })
     }
+}
+
+/// Sends a choice from the menu, whose items' ids map to `actions`, and a click that opens the
+/// window to the callback.
+fn route_events(actions: [(MenuId, TrayAction); 3]) {
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if let Some(&(_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
+            dispatch(action);
+        }
+    }));
+    TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
+        if opens_window(&event) {
+            dispatch(TrayAction::Show);
+        }
+    }));
 }
 
 impl Drop for Tray {

@@ -1,13 +1,13 @@
-//! The Settings tab: what to record and how, codec, frame rate, buffer length, bitrate, the save hotkey and clip folder,
-//! and the Start-with-Windows entry.
+//! The Settings tab: what to record and how, codec, frame rate, buffer length, bitrate, the
+//! save hotkey and clip folder, the theme and the Start-with-Windows entry.
 
 use super::{
     layout::{
-        self, BLACK, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X, LINE, RED, button, label,
-        skin_button,
+        self, BLACK, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X, LINE, RED,
+        button, label, skin_button,
     },
     text,
-    theme::{Skin, Surface},
+    theme::{ButtonRole, Skin, Surface},
 };
 use crate::{
     config::{
@@ -24,7 +24,12 @@ use winsafe::{co, gui, prelude::*};
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
 /// Where the second column of fields starts.
 const COLUMN_X: i32 = INNER_X + 204;
+/// How far a field sits to the right of the start of its caption.
 const FIELD_OFFSET: i32 = 88;
+/// Width of a numeric field, spin buttons included.
+const NUMBER_WIDTH: i32 = 52;
+/// Bytes in a megabyte, as the memory estimate counts them.
+const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 
 #[derive(Clone)]
 pub(super) struct SettingsPage {
@@ -67,7 +72,7 @@ impl SettingsPage {
             26,
             90,
             &Codec::ALL.map(Codec::name),
-            Codec::ALL.iter().position(|codec| *codec == config.codec),
+            index_of(&Codec::ALL, config.codec),
         );
         let (frame_rate, frame_rate_spin) = number_field(
             &page,
@@ -103,9 +108,11 @@ impl SettingsPage {
             &config.clip_directory().display().to_string(),
         );
         let estimate = label(&page, "", INNER_X, 164, INNER_WIDTH, 1);
-        let apply = button(&page, text::APPLY, INNER_X, 182, 120);
-        skin_button(&apply, skin, true);
-        let settings_error = label(&page, "", INNER_X + 128, 180, INNER_WIDTH - 128, 2);
+        let apply = button(&page, text::APPLY, INNER_X, 182, BUTTON_WIDTH);
+        skin_button(&apply, skin, ButtonRole::Primary);
+        // The error line starts just right of the button.
+        let error_x = BUTTON_WIDTH + 8;
+        let settings_error = label(&page, "", INNER_X + error_x, 180, INNER_WIDTH - error_x, 2);
 
         let startup = startup_controls(&page, config, start_with_windows);
         let frames = vec![recording_group, startup.frame];
@@ -225,12 +232,8 @@ impl SettingsPage {
         if accepted {
             self.settled_backend.set(self.chosen_backend());
         } else {
-            let previous = self.settled_backend.get();
-            let index = Backend::ALL
-                .iter()
-                .position(|backend| *backend == previous)
-                .and_then(|index| u32::try_from(index).ok());
-            self.backend.items().select(index);
+            let previous = index_of(&Backend::ALL, self.settled_backend.get());
+            self.backend.items().select(previous);
         }
     }
 
@@ -254,7 +257,7 @@ impl SettingsPage {
                     ..Config::default()
                 }
                 .estimated_buffer_bytes()
-                    / 1_000_000
+                    / BYTES_PER_MEGABYTE
             },
         );
         layout::set_text(
@@ -297,7 +300,8 @@ impl SettingsPage {
     }
 }
 
-/// The controls of the "Startup" group.
+/// The controls of the group titled "General": the theme, and the Start-with-Windows entry
+/// with the line that reports a Run-key error.
 struct StartupControls {
     frame: Frame,
     theme: gui::ComboBox,
@@ -320,7 +324,7 @@ fn startup_controls(
         240,
         190,
         &Theme::ALL.map(Theme::name),
-        Theme::ALL.iter().position(|theme| *theme == config.theme),
+        index_of(&Theme::ALL, config.theme),
     );
     let start_with_windows = gui::CheckBox::new(
         page,
@@ -361,7 +365,7 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         82,
         INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
         &Mode::ALL.map(Mode::name),
-        Mode::ALL.iter().position(|mode| *mode == config.mode),
+        index_of(&Mode::ALL, config.mode),
     );
     let backend = choice_field(
         page,
@@ -370,9 +374,7 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         110,
         INNER_WIDTH - FIELD_OFFSET,
         &Backend::ALL.map(Backend::name),
-        Backend::ALL
-            .iter()
-            .position(|backend| *backend == config.backend),
+        index_of(&Backend::ALL, config.backend),
     );
     (mode, backend)
 }
@@ -394,14 +396,14 @@ fn number_field(
     (minimum, maximum): (u32, u32),
     value: u32,
 ) -> (gui::Edit, gui::UpDown) {
-    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+    field_caption(page, caption, x, y);
     let initial = value.to_string();
     let edit = gui::Edit::new(
         page,
         gui::EditOpts {
             text: &initial,
             position: gui::dpi(x + FIELD_OFFSET, y),
-            width: gui::dpi_x(52),
+            width: gui::dpi_x(NUMBER_WIDTH),
             control_style: co::ES::NUMBER | co::ES::AUTOHSCROLL | co::ES::NOHIDESEL,
             ..Default::default()
         },
@@ -427,7 +429,7 @@ fn number_field(
     (edit, spin)
 }
 
-/// A caption and a drop-down list of `items`, with `selected` chosen.
+/// A caption and a drop-down list of `items`, with the one at `selected` chosen.
 fn choice_field(
     page: &gui::TabPage,
     caption: &str,
@@ -435,19 +437,26 @@ fn choice_field(
     y: i32,
     width: i32,
     items: &[&str],
-    selected: Option<usize>,
+    selected: Option<u32>,
 ) -> gui::ComboBox {
-    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+    field_caption(page, caption, x, y);
     gui::ComboBox::new(
         page,
         gui::ComboBoxOpts {
             position: gui::dpi(x + FIELD_OFFSET, y),
             width: gui::dpi_x(width),
             items,
-            selected_item: selected.and_then(|index| u32::try_from(index).ok()),
+            selected_item: selected,
             ..Default::default()
         },
     )
+}
+
+/// Where `value` stands in `all`, as a drop-down list counts its items.
+fn index_of<T: Copy + PartialEq>(all: &[T], value: T) -> Option<u32> {
+    all.iter()
+        .position(|item| *item == value)
+        .and_then(|index| u32::try_from(index).ok())
 }
 
 /// The choice a drop-down list shows, out of `all`, or the first when none is selected.
@@ -459,9 +468,15 @@ fn chosen<T: Copy + Default>(field: &gui::ComboBox, all: &[T]) -> T {
         .unwrap_or_default()
 }
 
+/// A field's caption, at the left of the field it names.
+fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
+    // The caption sits a little lower than the field so their text lines up.
+    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+}
+
 /// A caption and a free-text edit.
 fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &str) -> gui::Edit {
-    let _caption = label(page, caption, INNER_X, y + 4, FIELD_OFFSET - 4, 1);
+    field_caption(page, caption, INNER_X, y);
     gui::Edit::new(
         page,
         gui::EditOpts {

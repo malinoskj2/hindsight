@@ -1,9 +1,10 @@
 //! The modal window that asks for the NvFBC key when NvFBC is chosen as the capture backend.
-//! The key NVIDIA issued is entered as hexadecimal or as four 0x-prefixed dwords, masked like a password, and saved to the
-//! user's registry; the capture backend reads it from there each time it starts.
+//! The key NVIDIA issued is entered as hexadecimal or as four 0x-prefixed dwords, masked like
+//! a password, and saved to the user's registry; the capture backend reads it from there each
+//! time it starts.
 
 use super::{
-    layout::{self, BLACK, LINE, RED, label},
+    layout::{self, BLACK, BUTTON_HEIGHT, LINE, RED, label},
     text,
     theme::{Skin, Surface},
 };
@@ -17,12 +18,17 @@ use winsafe::{co, gui, prelude::*};
 
 const WIDTH: i32 = 400;
 const HEIGHT: i32 = 170;
-const X: i32 = 12;
-const INNER_WIDTH: i32 = WIDTH - 2 * X;
-const FIELD_Y: i32 = 12 + 3 * LINE + 10;
+/// Gap between the window's edges and what it holds.
+const PADDING: i32 = 12;
+const INNER_WIDTH: i32 = WIDTH - 2 * PADDING;
+/// Lines the explanation above the field takes.
+const HELP_LINES: i32 = 3;
+const FIELD_Y: i32 = PADDING + HELP_LINES * LINE + 10;
+/// How far the field sits to the right of the start of its caption.
 const FIELD_OFFSET: i32 = 76;
 const BUTTON_WIDTH: i32 = 84;
-const BUTTON_Y: i32 = HEIGHT - 12 - 24;
+const BUTTON_GAP: i32 = 8;
+const BUTTON_Y: i32 = HEIGHT - PADDING - BUTTON_HEIGHT;
 
 /// Asks for the key over `parent` until it is saved or the user cancels; reports whether a
 /// key was saved.
@@ -40,81 +46,71 @@ pub(super) fn ask(parent: &impl GuiParent) -> bool {
         size: gui::dpi(WIDTH, HEIGHT),
         ..Default::default()
     });
-    let _help = label(&wnd, text::NVFBC_KEY_HELP, X, 12, INNER_WIDTH, 3);
-    let _caption = label(&wnd, text::NVFBC_KEY, X, FIELD_Y + 4, FIELD_OFFSET - 4, 1);
+    let _help = label(
+        &wnd,
+        text::NVFBC_KEY_HELP,
+        PADDING,
+        PADDING,
+        INNER_WIDTH,
+        HELP_LINES,
+    );
+    let _caption = label(
+        &wnd,
+        text::NVFBC_KEY,
+        PADDING,
+        FIELD_Y + 4,
+        FIELD_OFFSET - 4,
+        1,
+    );
     let field = gui::Edit::new(
         &wnd,
         gui::EditOpts {
             text: &saved,
-            position: gui::dpi(X + FIELD_OFFSET, FIELD_Y),
+            position: gui::dpi(PADDING + FIELD_OFFSET, FIELD_Y),
             width: gui::dpi_x(INNER_WIDTH - FIELD_OFFSET),
             control_style: co::ES::AUTOHSCROLL | co::ES::NOHIDESEL | co::ES::PASSWORD,
             ..Default::default()
         },
     );
-    let error = label(&wnd, "", X, FIELD_Y + 30, INNER_WIDTH, 1);
-    // The dialog IDs let Enter and Escape press the buttons.
-    let save = gui::Button::new(
+    let error = label(&wnd, "", PADDING, FIELD_Y + 30, INNER_WIDTH, 1);
+    let save = dialog_button(
         &wnd,
-        gui::ButtonOpts {
-            text: text::NVFBC_KEY_SAVE,
-            position: gui::dpi(WIDTH - X - 2 * BUTTON_WIDTH - 8, BUTTON_Y),
-            width: gui::dpi_x(BUTTON_WIDTH),
-            height: gui::dpi_y(24),
-            control_style: co::BS::DEFPUSHBUTTON,
-            ctrl_id: co::DLGID::OK.raw(),
-            ..Default::default()
-        },
+        text::NVFBC_KEY_SAVE,
+        WIDTH - PADDING - 2 * BUTTON_WIDTH - BUTTON_GAP,
+        co::DLGID::OK,
+        co::BS::DEFPUSHBUTTON,
     );
-    let cancel = gui::Button::new(
+    let cancel = dialog_button(
         &wnd,
-        gui::ButtonOpts {
-            text: text::NVFBC_KEY_CANCEL,
-            position: gui::dpi(WIDTH - X - BUTTON_WIDTH, BUTTON_Y),
-            width: gui::dpi_x(BUTTON_WIDTH),
-            height: gui::dpi_y(24),
-            ctrl_id: co::DLGID::CANCEL.raw(),
-            ..Default::default()
-        },
+        text::NVFBC_KEY_CANCEL,
+        WIDTH - PADDING - BUTTON_WIDTH,
+        co::DLGID::CANCEL,
+        co::BS::PUSHBUTTON,
     );
 
     let accepted = Rc::new(Cell::new(false));
-    {
-        let (wnd, field, error, accepted) =
-            (wnd.clone(), field.clone(), error.clone(), accepted.clone());
-        save.on().bn_clicked(move || {
-            let entered = field.text().unwrap_or_default();
-            match nvfbc_key::parse(&entered).map(|key| nvfbc_key::save(&key)) {
-                Err(problem) => layout::set_text(&error, &problem.to_string()),
-                Ok(Err(problem)) => {
-                    let message = text::nvfbc_key_not_saved(problem);
-                    log::error(&message);
-                    layout::set_text(&error, &message);
-                }
-                Ok(Ok(())) => {
-                    log::info(text::NVFBC_KEY_SAVED);
-                    accepted.set(true);
-                    wnd.close();
-                }
-            }
-            Ok(())
-        });
-    }
-    {
-        let wnd = wnd.clone();
-        cancel.on().bn_clicked(move || {
-            wnd.close();
-            Ok(())
-        });
-    }
-    {
-        let (created, field) = (wnd.clone(), field.clone());
-        wnd.on().wm_create(move |_| {
-            window::match_dialog_title_bar(created.hwnd());
-            let _ = field.focus();
-            Ok(0)
-        });
-    }
+    let (save_wnd, save_field, save_error, save_accepted) =
+        (wnd.clone(), field.clone(), error.clone(), accepted.clone());
+    save.on().bn_clicked(move || {
+        if let Err(message) = save_entered(&save_field.text().unwrap_or_default()) {
+            layout::set_text(&save_error, &message);
+            return Ok(());
+        }
+        save_accepted.set(true);
+        save_wnd.close();
+        Ok(())
+    });
+    let cancel_wnd = wnd.clone();
+    cancel.on().bn_clicked(move || {
+        cancel_wnd.close();
+        Ok(())
+    });
+    let created = wnd.clone();
+    wnd.on().wm_create(move |_| {
+        window::match_dialog_title_bar(created.hwnd());
+        let _ = field.focus();
+        Ok(0)
+    });
     // The error line is red; every other label is black.
     layout::draw(
         &wnd,
@@ -131,4 +127,38 @@ pub(super) fn ask(parent: &impl GuiParent) -> bool {
         log::error(text::nvfbc_key_window_failed(problem));
     }
     accepted.get()
+}
+
+/// A push button on the bottom row at `x`. Its dialog `id` lets Enter or Escape press it.
+fn dialog_button(
+    wnd: &gui::WindowModal,
+    text: &str,
+    x: i32,
+    id: co::DLGID,
+    style: co::BS,
+) -> gui::Button {
+    gui::Button::new(
+        wnd,
+        gui::ButtonOpts {
+            text,
+            position: gui::dpi(x, BUTTON_Y),
+            width: gui::dpi_x(BUTTON_WIDTH),
+            height: gui::dpi_y(BUTTON_HEIGHT),
+            control_style: style,
+            ctrl_id: id.raw(),
+            ..Default::default()
+        },
+    )
+}
+
+/// Saves the key in `entered`, or gives the problem to show under the field.
+fn save_entered(entered: &str) -> Result<(), String> {
+    let key = nvfbc_key::parse(entered).map_err(|problem| problem.to_string())?;
+    nvfbc_key::save(&key).map_err(|problem| {
+        let message = text::nvfbc_key_not_saved(problem);
+        log::error(&message);
+        message
+    })?;
+    log::info(text::NVFBC_KEY_SAVED);
+    Ok(())
 }

@@ -36,37 +36,53 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            pixels.extend_from_slice(&pixel(x, y, size));
+            pixels.extend_from_slice(&shade(&Coverage::of(x, y, size)));
         }
     }
     pixels
 }
 
+/// How many of a pixel's subsamples fall inside the tile, and how many of those land on the
+/// glyph and on the dot.
+struct Coverage {
+    tile: f32,
+    glyph: f32,
+    dot: f32,
+}
+
+impl Coverage {
+    /// Counts the subsamples of the pixel at `x`, `y` in a tile `size` pixels square.
+    fn of(x: u32, y: u32, size: u32) -> Self {
+        let subsamples = (0..SUPERSAMPLE).flat_map(|sy| (0..SUPERSAMPLE).map(move |sx| (sx, sy)));
+        let mut coverage = Self {
+            tile: 0.0,
+            glyph: 0.0,
+            dot: 0.0,
+        };
+        for (sx, sy) in subsamples {
+            let px = (x as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
+            let py = (y as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
+            if !inside_tile(px, py) {
+                continue;
+            }
+            coverage.tile += 1.0;
+            if inside_triangle(px, py) {
+                coverage.glyph += 1.0;
+            } else if inside_dot(px, py) {
+                coverage.dot += 1.0;
+            }
+        }
+        coverage
+    }
+}
+
 /// One RGBA pixel: the share of its subsamples inside the tile is its alpha, and the shares of
 /// those on the glyph and the dot mix their colours into the background.
-fn pixel(x: u32, y: u32, size: u32) -> [u8; 4] {
+fn shade(coverage: &Coverage) -> [u8; 4] {
     let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
-    let subsamples = (0..SUPERSAMPLE).flat_map(|sy| (0..SUPERSAMPLE).map(move |sx| (sx, sy)));
-    let mut tile = 0.0;
-    let mut glyph = 0.0;
-    let mut dot = 0.0;
-    for (sx, sy) in subsamples {
-        let px = (x as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-        let py = (y as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-        if !inside_tile(px, py) {
-            continue;
-        }
-        tile += 1.0;
-        if inside_triangle(px, py) {
-            glyph += 1.0;
-        } else if inside_dot(px, py) {
-            dot += 1.0;
-        }
-    }
-
-    let coverage = tile / samples;
-    let (glyph_share, dot_share) = if tile > 0.0 {
-        (glyph / tile, dot / tile)
+    let alpha = coverage.tile / samples;
+    let (glyph_share, dot_share) = if coverage.tile > 0.0 {
+        (coverage.glyph / coverage.tile, coverage.dot / coverage.tile)
     } else {
         (0.0, 0.0)
     };
@@ -77,7 +93,7 @@ fn pixel(x: u32, y: u32, size: u32) -> [u8; 4] {
                 + f32::from(DOT[channel]) * dot_share,
         )
     };
-    [mix(0), mix(1), mix(2), to_byte(coverage * 255.0)]
+    [mix(0), mix(1), mix(2), to_byte(alpha * 255.0)]
 }
 
 /// The icon as a Windows `.ico` file with 32-bit BMP entries for every size in `ICO_SIZES`.
@@ -92,16 +108,7 @@ pub(crate) fn ico() -> Vec<u8> {
     for size in ICO_SIZES {
         let image = bmp_entry(size);
         let offset = header_bytes + images.len();
-        // 256 is stored as 0 in the one-byte dimension fields.
-        let dimension = u8::try_from(size).unwrap_or(0);
-        directory.push(dimension);
-        directory.push(dimension);
-        directory.push(0);
-        directory.push(0);
-        directory.extend_from_slice(&1_u16.to_le_bytes());
-        directory.extend_from_slice(&32_u16.to_le_bytes());
-        directory.extend_from_slice(&length_field(image.len()).to_le_bytes());
-        directory.extend_from_slice(&length_field(offset).to_le_bytes());
+        directory.extend_from_slice(&directory_entry(size, image.len(), offset));
         images.extend_from_slice(&image);
     }
 
@@ -109,22 +116,47 @@ pub(crate) fn ico() -> Vec<u8> {
     directory
 }
 
+/// The `ICONDIRENTRY` of a 32-bit image `size` pixels square, `length` bytes long and starting
+/// `offset` bytes into the file.
+fn directory_entry(size: u32, length: usize, offset: usize) -> [u8; ICO_ENTRY_BYTES] {
+    // 256 is stored as 0 in the one-byte dimension fields.
+    let dimension = u8::try_from(size).unwrap_or(0);
+    let mut entry = [0; ICO_ENTRY_BYTES];
+    entry[0] = dimension;
+    entry[1] = dimension;
+    entry[4..6].copy_from_slice(&1_u16.to_le_bytes());
+    entry[6..8].copy_from_slice(&32_u16.to_le_bytes());
+    entry[8..12].copy_from_slice(&length_field(length).to_le_bytes());
+    entry[12..16].copy_from_slice(&length_field(offset).to_le_bytes());
+    entry
+}
+
 /// A `BITMAPINFOHEADER` followed by bottom-up BGRA rows and an empty 1-bit mask.
 fn bmp_entry(size: u32) -> Vec<u8> {
     let pixels = rgba(size);
-    let mask_row_bytes = size.div_ceil(32) * 4;
-    let mut entry = Vec::with_capacity(
-        BITMAP_HEADER_BYTES as usize + pixels.len() + (mask_row_bytes * size) as usize,
-    );
+    let mask_bytes = (size.div_ceil(32) * 4 * size) as usize;
+    let mut entry = Vec::with_capacity(BITMAP_HEADER_BYTES as usize + pixels.len() + mask_bytes);
+    push_bitmap_header(&mut entry, size, mask_bytes);
+    push_bottom_up_bgra(&mut entry, &pixels, size);
+    entry.resize(entry.len() + mask_bytes, 0);
+    entry
+}
+
+/// Appends the `BITMAPINFOHEADER` of a 32-bit image `size` pixels square followed by a mask of
+/// `mask_bytes`; the height counts the mask's rows too, as icons require.
+fn push_bitmap_header(entry: &mut Vec<u8>, size: u32, mask_bytes: usize) {
     entry.extend_from_slice(&BITMAP_HEADER_BYTES.to_le_bytes());
     entry.extend_from_slice(&size.to_le_bytes());
     entry.extend_from_slice(&(size * 2).to_le_bytes());
     entry.extend_from_slice(&1_u16.to_le_bytes());
     entry.extend_from_slice(&32_u16.to_le_bytes());
     entry.extend_from_slice(&0_u32.to_le_bytes());
-    entry.extend_from_slice(&(size * size * 4 + mask_row_bytes * size).to_le_bytes());
+    entry.extend_from_slice(&(size * size * 4 + length_field(mask_bytes)).to_le_bytes());
     entry.extend_from_slice(&[0; 16]);
+}
 
+/// Appends the RGBA `pixels` of a `size`-wide image as BGRA rows, bottom row first.
+fn push_bottom_up_bgra(entry: &mut Vec<u8>, pixels: &[u8], size: u32) {
     let row_bytes = (size * 4) as usize;
     let bottom_up = pixels
         .chunks_exact(row_bytes)
@@ -133,8 +165,6 @@ fn bmp_entry(size: u32) -> Vec<u8> {
     for [red, green, blue, alpha] in bottom_up {
         entry.extend_from_slice(&[*blue, *green, *red, *alpha]);
     }
-    entry.resize(entry.len() + (mask_row_bytes * size) as usize, 0);
-    entry
 }
 
 fn inside_tile(x: f32, y: f32) -> bool {

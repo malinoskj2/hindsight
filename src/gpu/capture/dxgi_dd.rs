@@ -11,7 +11,7 @@
 //! change, or the secure desktop of a UAC prompt or the lock screen. It is opened again in
 //! place, keeping the buffer, unless the monitor's size changed.
 
-use super::{CaptureError, Frame, REOPEN_INTERVAL, Source, failed, monitor_of, window_closed};
+use super::{CaptureError, Frame, ReopenThrottle, Source, failed, monitor_of, window_closed};
 use crate::{gpu::device::Device, service::Target};
 use std::time::Instant;
 use windows::{
@@ -50,8 +50,18 @@ pub(super) struct DesktopDuplication {
     window: Option<HWND>,
     /// Whether the current duplication has delivered a picture; its first one is always new.
     primed: bool,
-    /// When a lost duplication is tried again.
-    reopen_at: Option<Instant>,
+    /// Paces the attempts to open a lost duplication again.
+    reopen: ReopenThrottle,
+}
+
+/// What asking Windows for the next desktop image came to.
+enum Acquired {
+    /// A frame is held until it is released: its description, and its surface when it has one.
+    Frame(DXGI_OUTDUPL_FRAME_INFO, Option<IDXGIResource>),
+    /// Nothing changed since the last frame.
+    Nothing,
+    /// Windows took the duplication away.
+    Lost,
 }
 
 impl DesktopDuplication {
@@ -73,17 +83,16 @@ impl DesktopDuplication {
             size: size(&description),
             window,
             primed: false,
-            reopen_at: None,
+            reopen: ReopenThrottle::default(),
         })
     }
 
     /// Opens the duplication again after Windows took it away. While Windows refuses, the
     /// last picture is repeated; a new size or orientation ends the session.
     fn reopen(&mut self, device: &Device) -> Result<Frame, CaptureError> {
-        let now = Instant::now();
-        if self.reopen_at.is_some_and(|due| now < due) {
+        let Some(now) = self.reopen.attempt() else {
             return Ok(Frame::Unchanged);
-        }
+        };
         let (duplication, description) = match duplicate(&self.output, device) {
             Ok(opened) => opened,
             Err(error) if PASSING_REFUSALS.contains(&error.code()) => {
@@ -91,7 +100,7 @@ impl DesktopDuplication {
             }
             Err(error) => return Err(failed("duplicate the monitor again")(error)),
         };
-        self.reopen_at = None;
+        self.reopen.succeeded();
         if size(&description) != self.size || is_rotated(&description) {
             return Ok(Frame::Resized);
         }
@@ -109,7 +118,7 @@ impl DesktopDuplication {
         if !attached {
             return Err(CaptureError::Closed);
         }
-        self.reopen_at = Some(now + REOPEN_INTERVAL);
+        self.reopen.refused(now);
         Ok(Frame::Unchanged)
     }
 }
@@ -137,18 +146,14 @@ impl Source for DesktopDuplication {
             return self.reopen(device);
         };
 
-        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource: Option<IDXGIResource> = None;
-        // SAFETY: out-parameters are written on success; a zero timeout never blocks.
-        match unsafe { duplication.AcquireNextFrame(0, &raw mut info, &raw mut resource) } {
-            Ok(()) => {}
-            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(Frame::Unchanged),
-            Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
+        let (info, resource) = match acquire(duplication)? {
+            Acquired::Frame(info, resource) => (info, resource),
+            Acquired::Nothing => return Ok(Frame::Unchanged),
+            Acquired::Lost => {
                 self.duplication = None;
                 return self.reopen(device);
             }
-            Err(error) => return Err(failed("take the desktop image")(error)),
-        }
+        };
 
         // A frame that only moved the cursor keeps the previous picture.
         let frame = if info.LastPresentTime != 0 || !self.primed {
@@ -168,6 +173,20 @@ impl Source for DesktopDuplication {
         // SAFETY: releases the frame acquired above.
         let _ = unsafe { duplication.ReleaseFrame() };
         frame
+    }
+}
+
+/// Takes the next desktop image from `duplication` without waiting; a frame it returns is held
+/// until it is released.
+fn acquire(duplication: &IDXGIOutputDuplication) -> Result<Acquired, CaptureError> {
+    let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+    let mut resource: Option<IDXGIResource> = None;
+    // SAFETY: out-parameters are written on success; a zero timeout never blocks.
+    match unsafe { duplication.AcquireNextFrame(0, &raw mut info, &raw mut resource) } {
+        Ok(()) => Ok(Acquired::Frame(info, resource)),
+        Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => Ok(Acquired::Nothing),
+        Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => Ok(Acquired::Lost),
+        Err(error) => Err(failed("take the desktop image")(error)),
     }
 }
 

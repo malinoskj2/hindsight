@@ -3,11 +3,12 @@
 
 use super::{
     layout::{
-        self, AMBER, BLACK, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, RED,
-        TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label, skin_button,
+        self, AMBER, BLACK, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH,
+        INNER_X, LINE, RED, TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label,
+        skin_button,
     },
     text,
-    theme::{Skin, Surface},
+    theme::{ButtonRole, Skin, Surface},
 };
 use crate::{
     config::Config,
@@ -74,17 +75,17 @@ impl StatusPage {
         let last_clip = path_label(&page, VALUE_X, 264, VALUE_WIDTH);
         let folder_caption = caption(text::CLIP_FOLDER, 284);
         let folder = path_label(&page, VALUE_X, 284, VALUE_WIDTH);
-        let save = button(&page, text::SAVE_REPLAY, INNER_X, 310, 120);
+        let save = button(&page, text::SAVE_REPLAY, INNER_X, 310, BUTTON_WIDTH);
         let recording = button(
             &page,
             text::STOP_RECORDING,
-            INNER_X + INNER_WIDTH - 120,
+            INNER_X + INNER_WIDTH - BUTTON_WIDTH,
             310,
-            120,
+            BUTTON_WIDTH,
         );
 
-        skin_button(&save, skin, true);
-        skin_button(&recording, skin, false);
+        skin_button(&save, skin, ButtonRole::Primary);
+        skin_button(&recording, skin, ButtonRole::Secondary);
 
         let recording_group = ExpandableGroup::new(
             recording_frame.clone(),
@@ -183,13 +184,13 @@ impl StatusPage {
 
         self.state.set_text(&text::status(status.state));
         layout::set_text(&self.source, &text::source(status));
-        layout::set_text(&self.backend, &text::capture(status));
+        layout::set_text(&self.backend, &text::backend(status));
         layout::set_text(&self.encoder, &text::encoder(status));
         layout::set_text(&self.rates, &text::rates(status));
         layout::set_text(&self.session_written, &text::session_written(status));
         layout::set_text(&self.session_saved, &text::session_saved(status));
         layout::set_text(&self.lifetime_written, &text::lifetime_written(status));
-        layout::set_text(&self.lifetime_saved, &text::saved(status));
+        layout::set_text(&self.lifetime_saved, &text::lifetime_saved(status));
 
         let notices: Vec<&str> = [
             hotkey_error,
@@ -220,7 +221,7 @@ impl StatusPage {
         self.save.hwnd().EnableWindow(!status.saving);
         layout::set_text(
             &self.recording,
-            if status.recording || status.state == DisplayStatus::Waiting {
+            if is_on(status) {
                 text::STOP_RECORDING
             } else {
                 text::START_RECORDING
@@ -228,4 +229,9 @@ impl StatusPage {
         );
         grown
     }
+}
+
+/// Whether recording is switched on: capturing, or waiting for a full-screen app to capture.
+pub(super) fn is_on(status: &Status) -> bool {
+    status.recording || status.state == DisplayStatus::Waiting
 }

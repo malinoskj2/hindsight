@@ -2,11 +2,20 @@
 //! as bitmaps GDI can blend. Everything here is plain arithmetic on pixels; only the bitmap
 //! itself is a Windows object.
 
-use winsafe::{self as w};
+use winsafe as w;
 
-/// Bytes in a pixel: blue, green, red, assert!(alphas.iter().any(|alpha| *alpha >= 250), "{name}");, with the colour premultiplied by the alpha as
+/// Bytes in a pixel: blue, green, red and alpha, with the colour premultiplied by the alpha as
 /// `AlphaBlend` expects.
 const PIXEL: usize = 4;
+
+/// The direction [`resample`] works along.
+#[derive(Clone, Copy)]
+enum Axis {
+    /// Along each row, changing the width.
+    Horizontal,
+    /// Down each column, changing the height.
+    Vertical,
+}
 
 /// A decoded picture, top row first.
 pub(super) struct Image {
@@ -53,13 +62,16 @@ impl Image {
         // Rows first, then columns: each pass averages a run of source pixels per target pixel.
         let across = resample(
             &self.pixels,
-            self.width,
-            self.height,
-            width,
-            self.height,
-            true,
+            (self.width, self.height),
+            (width, self.height),
+            Axis::Horizontal,
         );
-        let pixels = resample(&across, width, self.height, width, height, false);
+        let pixels = resample(
+            &across,
+            (width, self.height),
+            (width, height),
+            Axis::Vertical,
+        );
         Self {
             width,
             height,
@@ -74,57 +86,73 @@ impl Image {
 }
 
 /// Averages `source` (`from_width` by `from_height`) down to `to_width` by `to_height` along
-/// one axis: horizontally when `horizontal`, else vertically; the other axis must not change.
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+/// `axis`; the other axis must not change.
 fn resample(
     source: &[u8],
-    from_width: usize,
-    from_height: usize,
-    to_width: usize,
-    to_height: usize,
-    horizontal: bool,
+    (from_width, from_height): (usize, usize),
+    (to_width, to_height): (usize, usize),
+    axis: Axis,
 ) -> Vec<u8> {
-    let (from_len, to_len) = if horizontal {
-        (from_width, to_width)
+    let horizontal = matches!(axis, Axis::Horizontal);
+    let (from_len, to_len, lines) = if horizontal {
+        (from_width, to_width, from_height)
     } else {
-        (from_height, to_height)
+        (from_height, to_height, from_width)
     };
-    let lines = if horizontal { from_height } else { from_width };
+    // Where pixel `position` of `line` starts in a picture `width` pixels wide.
+    let offset = |width: usize, line: usize, position: usize| {
+        if horizontal {
+            (line * width + position) * PIXEL
+        } else {
+            (position * width + line) * PIXEL
+        }
+    };
     let mut target = vec![0; to_width * to_height * PIXEL];
     let scale = from_len as f32 / to_len as f32;
     for index in 0..to_len {
-        let start = index as f32 * scale;
-        let end = start + scale;
-        // The source pixels this target pixel covers, and how much of each.
-        let first = start.floor() as usize;
-        let last = (end.ceil() as usize).min(from_len);
+        let covered = coverage(index, scale, from_len);
         for line in 0..lines {
-            let mut sum = [0.0_f32; PIXEL];
-            let mut weight = 0.0;
-            for position in first..last {
-                let overlap =
-                    (end.min(position as f32 + 1.0) - start.max(position as f32)).max(0.0);
-                let offset = if horizontal {
-                    (line * from_width + position) * PIXEL
-                } else {
-                    (position * from_width + line) * PIXEL
-                };
-                for (channel, total) in sum.iter_mut().enumerate() {
-                    *total += f32::from(source[offset + channel]) * overlap;
-                }
-                weight += overlap;
-            }
-            let offset = if horizontal {
-                (line * to_width + index) * PIXEL
-            } else {
-                (index * to_width + line) * PIXEL
-            };
-            for (channel, total) in sum.iter().enumerate() {
-                target[offset + channel] = (total / weight.max(f32::EPSILON)).round() as u8;
-            }
+            let pixels = covered
+                .clone()
+                .map(|(position, share)| (offset(from_width, line, position), share));
+            let at = offset(to_width, line, index);
+            target[at..at + PIXEL].copy_from_slice(&weighted_average(source, pixels));
         }
     }
     target
+}
+
+/// The source pixels that target pixel `index` covers along a line `from_len` pixels long, when
+/// each target pixel spans `scale` source pixels, with how much of each it covers.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn coverage(
+    index: usize,
+    scale: f32,
+    from_len: usize,
+) -> impl Iterator<Item = (usize, f32)> + Clone {
+    let start = index as f32 * scale;
+    let end = start + scale;
+    let first = start.floor() as usize;
+    let last = (end.ceil() as usize).min(from_len);
+    (first..last).map(move |position| {
+        let overlap = (end.min(position as f32 + 1.0) - start.max(position as f32)).max(0.0);
+        (position, overlap)
+    })
+}
+
+/// The average of the pixels of `source` starting at each offset in `pixels`, each weighted by
+/// its share.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -> [u8; PIXEL] {
+    let mut sum = [0.0_f32; PIXEL];
+    let mut weight = 0.0_f32;
+    for (offset, share) in pixels {
+        for (channel, total) in sum.iter_mut().enumerate() {
+            *total += f32::from(source[offset + channel]) * share;
+        }
+        weight += share;
+    }
+    sum.map(|total| (total / weight.max(f32::EPSILON)).round() as u8)
 }
 
 /// A picture ready to be blended onto a window.

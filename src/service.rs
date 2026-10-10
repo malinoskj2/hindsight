@@ -5,12 +5,13 @@
 use crate::{
     config::{Backend, Config, Mode, Theme},
     log,
-    replay::{self, Live, SaveError, Stream},
+    replay::{self, Clip, Live, SaveError, Stream},
     storage::{Store, Totals},
     sys,
 };
 use anyhow::Result;
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
@@ -260,6 +261,15 @@ struct Sample {
     encoded: u64,
 }
 
+/// The session and its buffer as one publish sees them.
+struct Reading {
+    running: bool,
+    stream: Option<Stream>,
+    /// Bytes in the current buffer, read once so the session and lifetime figures agree.
+    live_bytes: u64,
+    sample: Sample,
+}
+
 struct Machine {
     recorder: Recorder,
     retry_interval: Duration,
@@ -299,12 +309,7 @@ impl Machine {
         output: Arc<Mutex<Status>>,
         wake: Sender<Command>,
     ) -> Self {
-        let totals = store.as_ref().and_then(|store| {
-            store
-                .load_totals()
-                .inspect_err(|error| log::error(text::totals_unreadable(error)))
-                .ok()
-        });
+        let totals = store.as_ref().and_then(load_totals);
         Self {
             recorder,
             retry_interval,
@@ -330,13 +335,7 @@ impl Machine {
         self.begin();
         self.publish();
         loop {
-            // Nothing wakes the worker while it is idle: it sleeps until a command or a thread
-            // wakes it, or until a failed session is due to be tried again.
-            let received = match self.retry_at {
-                Some(due) => commands.recv_timeout(due.saturating_duration_since(Instant::now())),
-                None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match received {
+            match self.receive(commands) {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Stop) => self.pause(),
@@ -348,7 +347,21 @@ impl Machine {
             self.poll();
             self.publish();
         }
+        self.shut_down();
+    }
 
+    /// Waits for the next command. Nothing wakes the worker while it is idle: it sleeps until a
+    /// command or a thread wakes it, or until a failed session is due to be tried again.
+    fn receive(&self, commands: &Receiver<Command>) -> Result<Command, RecvTimeoutError> {
+        match self.retry_at {
+            Some(due) => commands.recv_timeout(due.saturating_duration_since(Instant::now())),
+            None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        }
+    }
+
+    /// Ends the session, finishes a clip being written and banks the buffer before the worker
+    /// exits.
+    fn shut_down(&mut self) {
         self.stop_session();
         // A clip being written is finished before the application goes away.
         if let Some(saving) = self.saving.take() {
@@ -426,29 +439,13 @@ impl Machine {
         self.start_session(target);
     }
 
+    /// Banks the previous buffer and starts a capture session of `target` into a fresh one.
     fn start_session(&mut self, target: Target) {
         self.bank_live();
         let live = Arc::new(Live::new(self.config.buffer_frames()));
-        let wake = self.wake.clone();
-        live.on_stream(move || {
-            let _ = wake.send(Command::Wake);
-        });
+        live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let (recorder, config, session_target, session_live, session_stop) = (
-            self.recorder,
-            self.config.clone(),
-            target.clone(),
-            Arc::clone(&live),
-            Arc::clone(&stop),
-        );
-        let wake = self.wake.clone();
-        let spawned = thread::Builder::new()
-            .name("capture".to_owned())
-            .spawn(move || {
-                let ended = recorder(&config, &session_target, &session_live, &session_stop);
-                let _ = wake.send(Command::Wake);
-                ended
-            });
+        let spawned = self.spawn_capture(&target, &live, &stop);
 
         self.retry_at = None;
         self.sample = None;
@@ -461,6 +458,40 @@ impl Machine {
                 self.status.error = None;
             }
             Err(error) => self.fail(&text::capture_thread_failed(error)),
+        }
+    }
+
+    /// Starts a thread that records `target` into `live` until `stop` is set, and wakes the
+    /// worker when the session ends.
+    fn spawn_capture(
+        &self,
+        target: &Target,
+        live: &Arc<Live>,
+        stop: &Arc<AtomicBool>,
+    ) -> io::Result<JoinHandle<Result<Ended>>> {
+        let (recorder, config, target, live, stop) = (
+            self.recorder,
+            self.config.clone(),
+            target.clone(),
+            Arc::clone(live),
+            Arc::clone(stop),
+        );
+        let wake = self.waker();
+        thread::Builder::new()
+            .name("capture".to_owned())
+            .spawn(move || {
+                let ended = recorder(&config, &target, &live, &stop);
+                wake();
+                ended
+            })
+    }
+
+    /// A callback that wakes the worker, for the capture and save threads and the stream
+    /// listener; once the worker is gone it does nothing.
+    fn waker(&self) -> impl Fn() + Send + Sync + 'static {
+        let wake = self.wake.clone();
+        move || {
+            let _ = wake.send(Command::Wake);
         }
     }
 
@@ -506,18 +537,24 @@ impl Machine {
         }
 
         if self.retry_at.is_some_and(|due| Instant::now() >= due) {
-            match self.config.mode {
-                Mode::Desktop => {
-                    log::info(text::RESTARTING);
-                    self.restart_session();
-                }
-                // The window may be gone; the next report of a full-screen app starts again.
-                Mode::Fullscreen => self.begin(),
-            }
+            self.retry();
         }
 
         if let Some(saving) = self.saving.take_if(|saving| saving.join.is_finished()) {
             self.finish_save(saving);
+        }
+    }
+
+    /// Ends the wait after a failure: whole-desktop recording starts again, and full-screen mode
+    /// accepts targets again.
+    fn retry(&mut self) {
+        match self.config.mode {
+            Mode::Desktop => {
+                log::info(text::RESTARTING);
+                self.restart_session();
+            }
+            // The window may be gone; the next report of a full-screen app starts again.
+            Mode::Fullscreen => self.begin(),
         }
     }
 
@@ -559,6 +596,8 @@ impl Machine {
         self.start_session(monitor);
     }
 
+    /// Starts writing the buffer to a clip, unless a clip is already being written or there is
+    /// nothing to save.
     fn save(&mut self) {
         if self.saving.is_some() {
             log::info(text::ALREADY_SAVING);
@@ -572,19 +611,7 @@ impl Machine {
         };
 
         let seconds = clip.seconds();
-        let directory = self.config.clip_directory();
-        let wake = self.wake.clone();
-        let spawned = thread::Builder::new()
-            .name("save".to_owned())
-            .spawn(move || {
-                if let Err(error) = sys::thread::enter_background_mode() {
-                    log::warning(text::background_save_failed(error));
-                }
-                let saved = replay::save(&clip, &directory);
-                let _ = wake.send(Command::Wake);
-                saved
-            });
-        match spawned {
+        match self.spawn_save(clip) {
             Ok(join) => {
                 self.saving = Some(Saving { seconds, join });
                 self.status.notice = None;
@@ -593,24 +620,45 @@ impl Machine {
         }
     }
 
+    /// Starts a background thread that writes `clip` to the clip directory, and wakes the worker
+    /// when it is done.
+    fn spawn_save(&self, clip: Clip) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
+        let directory = self.config.clip_directory();
+        let wake = self.waker();
+        thread::Builder::new()
+            .name("save".to_owned())
+            .spawn(move || {
+                if let Err(error) = sys::thread::enter_background_mode() {
+                    log::warning(text::background_save_failed(error));
+                }
+                let saved = replay::save(&clip, &directory);
+                wake();
+                saved
+            })
+    }
+
+    /// Waits for a clip being written and reports how it went.
     fn finish_save(&mut self, saving: Saving) {
         match saving.join.join() {
-            Ok(Ok(path)) => {
-                log::info(text::saved(saving.seconds, &path));
-                self.add_saved(&path);
-                self.status.last_clip = Some(path);
-                self.status.error = None;
-                sys::sound::saved();
-            }
-            Ok(Err(error)) => {
-                self.report_error(text::save_failed(error));
-                sys::sound::failed();
-            }
-            Err(_) => {
-                self.report_error(text::save_failed(text::SAVE_PANICKED));
-                sys::sound::failed();
-            }
+            Ok(Ok(path)) => self.clip_saved(saving.seconds, path),
+            Ok(Err(error)) => self.report_failed_save(text::save_failed(error)),
+            Err(_) => self.report_failed_save(text::save_failed(text::SAVE_PANICKED)),
         }
+    }
+
+    /// Logs a clip written to `path`, counts it and plays the saved sound.
+    fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
+        log::info(text::saved(seconds, &path));
+        self.add_saved(&path);
+        self.status.last_clip = Some(path);
+        self.status.error = None;
+        sys::sound::saved();
+    }
+
+    /// Reports a clip that could not be written and plays the failed sound.
+    fn report_failed_save(&mut self, message: String) {
+        self.report_error(message);
+        sys::sound::failed();
     }
 
     /// Adds a saved clip's size to the lifetime total and writes the totals to disk.
@@ -647,44 +695,64 @@ impl Machine {
         }
     }
 
+    /// Brings the status up to date and hands a copy to the window.
     fn publish(&mut self) {
+        let reading = self.read_live();
+        self.mark_recording(&reading);
+        self.describe_session(&reading);
+        self.count_bytes(reading.live_bytes);
+        self.measure_rate(reading.running, reading.sample);
+        *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
+    }
+
+    /// Reads the session and its buffer once, so every figure of a publish agrees.
+    fn read_live(&self) -> Reading {
         let live = self.live.as_deref();
         let running = self.session.is_some();
         let stream = live.and_then(Live::stream);
+        let live_bytes = live.map_or(0, Live::bytes);
+        let (encoded, _) = live.map_or((0, 0), Live::counters);
+        Reading {
+            running,
+            stream,
+            live_bytes,
+            sample: Sample {
+                at: Instant::now(),
+                encoded,
+            },
+        }
+    }
 
-        if let Some(stream) = &stream
-            && running
+    /// Logs a starting session as recording once its encoder has reported the stream.
+    fn mark_recording(&mut self, reading: &Reading) {
+        if let Some(stream) = &reading.stream
+            && reading.running
             && self.status.state == DisplayStatus::Starting
         {
             log::info(text::recording(stream, &self.config));
             self.status.state = DisplayStatus::Recording;
         }
-        self.status.recording = running;
+    }
+
+    /// Fills in what is being recorded, how, and whether a clip is being written.
+    fn describe_session(&mut self, reading: &Reading) {
+        self.status.recording = reading.running;
         self.status.source = self.target.as_ref().map(|target| target.name().to_owned());
-        self.status.backend = running.then_some(self.config.backend);
-        self.status.stream = stream;
+        self.status.backend = reading.running.then_some(self.config.backend);
+        self.status.stream = reading.stream;
         self.status.bitrate_mbps = self.config.bitrate_mbps;
         self.status.saving = self.saving.is_some();
+    }
 
-        // Read once, so the session and lifetime figures agree.
-        let live_bytes = live.map_or(0, Live::bytes);
+    /// Fills in the bytes buffered and saved, since the app started and in every run, counting
+    /// `live_bytes` in the current buffer.
+    fn count_bytes(&mut self, live_bytes: u64) {
         self.status.session_written_bytes = self.session_buffered.saturating_add(live_bytes);
         self.status.session_saved_bytes = self.session_saved;
         self.status.saved_bytes = self.totals.map(|totals| totals.saved_bytes);
         self.status.buffered_lifetime_bytes = self
             .totals
             .map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
-
-        let (encoded, _) = live.map_or((0, 0), Live::counters);
-        self.measure_rate(
-            running,
-            Sample {
-                at: Instant::now(),
-                encoded,
-            },
-        );
-
-        *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
     }
 
     /// Updates the encode rate from the counters at `current`. It is cleared while nothing
@@ -709,6 +777,14 @@ impl Machine {
             Some((current.encoded - previous.encoded) as f64 / elapsed.as_secs_f64());
         self.sample = Some(current);
     }
+}
+
+/// The lifetime totals kept in `store`; unreadable ones are logged and not kept.
+fn load_totals(store: &Store) -> Option<Totals> {
+    store
+        .load_totals()
+        .inspect_err(|error| log::error(text::totals_unreadable(error)))
+        .ok()
 }
 
 #[cfg(test)]

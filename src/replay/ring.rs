@@ -35,7 +35,12 @@ impl Ring {
         self.bytes += packet.data.len();
         let latest = packet.index;
         self.packets.push_back(Arc::new(packet));
+        self.drop_covered_groups(latest);
+    }
 
+    /// Drops the oldest group of pictures while the groups after it still cover the span up to
+    /// frame `latest`.
+    fn drop_covered_groups(&mut self, latest: u64) {
         while let Some(&next) = self.keyframes.get(1)
             && latest - next + 1 >= self.span
         {

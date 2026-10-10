@@ -213,7 +213,7 @@ impl Main {
 
         let me = self.clone();
         self.wnd.on().wm(co::WM::HOTKEY, move |message| {
-            if message.wparam == hotkey::SAVE_HOTKEY_ID.unsigned_abs() as usize {
+            if usize::try_from(hotkey::SAVE_HOTKEY_ID) == Ok(message.wparam) {
                 me.save();
             }
             Ok(0)
@@ -294,7 +294,7 @@ impl Main {
         self.status.on_create();
         self.settings.on_create();
         self.logs.on_create();
-        self.footer.control().hwnd().ShowWindow(co::SW::HIDE);
+        self.footer.on_create();
         let initial_error = self.shared.borrow_mut().initial_startup_error.take();
         if let Some(error) = initial_error
             && self.settings.show_startup_error(Some(&error))
@@ -302,8 +302,9 @@ impl Main {
             self.fit_window();
         }
 
+        // A hotkey that cannot be registered is logged and shown on the Status tab.
         let configured = self.shared.borrow().config.clone();
-        self.register_hotkey(&configured);
+        let _ = self.register_hotkey(&configured);
 
         let me = self.clone();
         let hook = ForegroundHook::install(move || me.watch_foreground());
@@ -363,15 +364,16 @@ impl Main {
     /// Closing hides to the tray; quitting (or closing without a tray) destroys the window,
     /// and with it the worker, which stops recording first.
     fn on_close(&self) {
-        let shared = self.shared.borrow();
-        if shared.tray.is_some() && !shared.quitting {
-            drop(shared);
+        let to_tray = {
+            let shared = self.shared.borrow();
+            shared.tray.is_some() && !shared.quitting
+        };
+        if to_tray {
             log::info(text::CLOSED_TO_TRAY);
             self.wnd.hwnd().ShowWindow(co::SW::HIDE);
-            return;
+        } else {
+            let _ = self.wnd.hwnd().DestroyWindow();
         }
-        drop(shared);
-        let _ = self.wnd.hwnd().DestroyWindow();
     }
 
     /// Tells the worker about the full-screen app in front, if the mode records those. The
@@ -394,8 +396,7 @@ impl Main {
 
     fn toggle_recording(&self) {
         let shared = self.shared.borrow();
-        let status = shared.worker.status();
-        if status.recording || status.state == crate::service::DisplayStatus::Waiting {
+        if status::is_on(&shared.worker.status()) {
             shared.worker.stop();
         } else {
             shared.worker.start(shared.config.clone());
@@ -412,17 +413,11 @@ impl Main {
                 return;
             }
         };
-        if !self.register_hotkey(&config) {
-            let error = self
-                .shared
-                .borrow()
-                .hotkey_error
-                .clone()
-                .unwrap_or_default();
+        if let Err(error) = self.register_hotkey(&config) {
             self.settings.show_settings_error(&error);
             // The previous hotkey stays in effect.
             let previous = self.shared.borrow().config.clone();
-            self.register_hotkey(&previous);
+            let _ = self.register_hotkey(&previous);
             return;
         }
         self.settings.show_settings_error("");
@@ -446,19 +441,14 @@ impl Main {
     /// recording carries on as it was.
     fn on_theme_chosen(&self) {
         let theme = self.settings.chosen_theme();
-        let before = self.skin.extra_width();
         if theme == self.skin.theme() {
             return;
         }
+        let before = self.skin.extra_width();
         self.skin.set(theme);
         let delta = gui::dpi_x(self.skin.extra_width() - before);
         if delta != 0 {
-            for window in [
-                self.tab.hwnd(),
-                self.status.page().hwnd(),
-                self.settings.page().hwnd(),
-                self.logs.page().hwnd(),
-            ] {
+            for window in self.tab_and_pages() {
                 resize_width_by(window, delta);
             }
             resize_width_by(self.wnd.hwnd(), delta);
@@ -473,8 +463,8 @@ impl Main {
     /// Dresses the window in the chosen look: the title bar, the group titles, and a redraw of
     /// everything.
     fn apply_look(&self) {
-        match theme::title_bar_colours(&self.skin) {
-            Some((caption, text, _)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
+        match self.skin.title_bar_colours() {
+            Some((caption, text)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
             None => window::match_dialog_title_bar(self.wnd.hwnd()),
         }
         // Classic shows the titles as labels; a character theme paints them on its panels.
@@ -482,29 +472,22 @@ impl Main {
         for frame in self.status.frames().iter().chain(self.settings.frames()) {
             frame.show_title_label(classic);
         }
-        if let Ok(client) = self.wnd.hwnd().GetClientRect() {
-            let _ = self.wnd.hwnd().RedrawWindow(
-                client,
-                &w::HRGN::NULL,
-                co::RDW::INVALIDATE | co::RDW::ERASE | co::RDW::ALLCHILDREN,
-            );
-        }
+        self.redraw();
     }
 
-    /// Makes the configured hotkey save a clip; reports whether it could.
-    fn register_hotkey(&self, config: &Config) -> bool {
+    /// Makes the configured hotkey save a clip, or logs and remembers why it could not.
+    fn register_hotkey(&self, config: &Config) -> Result<(), String> {
         let result = config
             .parsed_hotkey()
             .map_err(|error| error.to_string())
             .and_then(|parsed| {
                 hotkey::register(self.wnd.hwnd(), parsed).map_err(|error| error.to_string())
             });
-        let registered = result.is_ok();
         if let Err(error) = &result {
             log::warning(error);
         }
-        self.shared.borrow_mut().hotkey_error = result.err();
-        registered
+        self.shared.borrow_mut().hotkey_error = result.clone().err();
+        result
     }
 
     fn refresh(&self) {
@@ -532,21 +515,31 @@ impl Main {
         let (page_delta, window_delta) = self.shared.borrow_mut().heights.fit(pages);
         let (page_delta, window_delta) = (gui::dpi_y(page_delta), gui::dpi_y(window_delta));
         if page_delta != 0 {
-            for window in [
-                self.tab.hwnd(),
-                self.status.page().hwnd(),
-                self.settings.page().hwnd(),
-                self.logs.page().hwnd(),
-                self.logs.view().hwnd(),
-            ] {
+            for window in self.tab_and_pages() {
                 resize_by(window, page_delta);
             }
+            resize_by(self.logs.view().hwnd(), page_delta);
             shift_by(self.footer.control().hwnd(), page_delta);
         }
         if window_delta != 0 {
             resize_by(self.wnd.hwnd(), window_delta);
         }
         // Moved controls and the strip a shorter window uncovers keep stale pixels otherwise.
+        self.redraw();
+    }
+
+    /// The tab control and its pages, which share one size.
+    fn tab_and_pages(&self) -> [&w::HWND; 4] {
+        [
+            self.tab.hwnd(),
+            self.status.page().hwnd(),
+            self.settings.page().hwnd(),
+            self.logs.page().hwnd(),
+        ]
+    }
+
+    /// Repaints the whole window, every control included.
+    fn redraw(&self) {
         if let Ok(client) = self.wnd.hwnd().GetClientRect() {
             let _ = self.wnd.hwnd().RedrawWindow(
                 client,

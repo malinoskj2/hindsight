@@ -70,22 +70,32 @@ impl FromStr for Hotkey {
             .filter(|name| !name.is_empty())
             .ok_or(ParseError::Empty)?;
 
-        let mut modifiers = 0;
-        for part in parts {
-            let flag = modifier(part).ok_or_else(|| ParseError::UnknownKey(part.to_owned()))?;
-            if modifiers & flag != 0 {
-                return Err(ParseError::Repeated(part.to_owned()));
-            }
-            modifiers |= flag;
-        }
-
+        let modifiers = parse_modifiers(parts)?;
         let key = key_code(key_name).ok_or_else(|| ParseError::UnknownKey(key_name.to_owned()))?;
-        if modifiers == 0 && !(is_function_key(key) || STANDALONE_KEYS.contains(&key)) {
+        if modifiers == 0 && !may_stand_alone(key) {
             return Err(ParseError::NeedsModifier(key_label(key)));
         }
 
         Ok(Self { modifiers, key })
     }
+}
+
+/// The `MOD_*` flags of the modifier names, each of which may appear once.
+fn parse_modifiers<'a>(names: impl Iterator<Item = &'a str>) -> Result<u16, ParseError> {
+    let mut modifiers = 0;
+    for name in names {
+        let flag = modifier(name).ok_or_else(|| ParseError::UnknownKey(name.to_owned()))?;
+        if modifiers & flag != 0 {
+            return Err(ParseError::Repeated(name.to_owned()));
+        }
+        modifiers |= flag;
+    }
+    Ok(modifiers)
+}
+
+/// Whether a key may be the hotkey without a modifier: pressing it never types text.
+fn may_stand_alone(key: u16) -> bool {
+    is_function_key(key) || STANDALONE_KEYS.contains(&key)
 }
 
 impl fmt::Display for Hotkey {
@@ -109,26 +119,46 @@ fn modifier(name: &str) -> Option<u16> {
     }
 }
 
+/// The virtual-key code of a key name, in any case.
 fn key_code(name: &str) -> Option<u16> {
     let upper = name.to_ascii_uppercase();
+    letter_or_digit(&upper)
+        .or_else(|| function_key(&upper))
+        .or_else(|| numpad_digit(&upper))
+        .or_else(|| named_key(name))
+}
+
+/// The code of a single letter or digit, which is its upper-case character.
+fn letter_or_digit(upper: &str) -> Option<u16> {
     let mut chars = upper.chars();
-    if let (Some(single), None) = (chars.next(), chars.next())
-        && single.is_ascii_alphanumeric()
-    {
-        return u16::try_from(u32::from(single)).ok();
+    match (chars.next(), chars.next()) {
+        (Some(single), None) if single.is_ascii_alphanumeric() => {
+            u16::try_from(u32::from(single)).ok()
+        }
+        _ => None,
     }
-    if let Some(number) = upper.strip_prefix('F').and_then(|n| n.parse::<u16>().ok())
-        && (1..=FUNCTION_KEY_COUNT).contains(&number)
-    {
-        return Some(VK_F1 + number - 1);
-    }
-    if let Some(digit) = upper
+}
+
+/// The code of `F1` to `F24`.
+fn function_key(upper: &str) -> Option<u16> {
+    upper
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u16>().ok())
+        .filter(|number| (1..=FUNCTION_KEY_COUNT).contains(number))
+        .map(|number| VK_F1 + number - 1)
+}
+
+/// The code of `Numpad0` to `Numpad9`.
+fn numpad_digit(upper: &str) -> Option<u16> {
+    upper
         .strip_prefix("NUMPAD")
         .and_then(|n| n.parse::<u16>().ok())
-        && digit < NUMPAD_DIGIT_COUNT
-    {
-        return Some(VK_NUMPAD0 + digit);
-    }
+        .filter(|digit| *digit < NUMPAD_DIGIT_COUNT)
+        .map(|digit| VK_NUMPAD0 + digit)
+}
+
+/// The code of one of `NAMED_KEYS`.
+fn named_key(name: &str) -> Option<u16> {
     NAMED_KEYS
         .iter()
         .find(|(_, named)| named.eq_ignore_ascii_case(name))
@@ -174,16 +204,8 @@ mod native {
 
     /// Makes `hotkey` save a clip, replacing the hotkey registered before. Held keys do not
     /// repeat it.
-    #[expect(unsafe_code)]
     pub(crate) fn register(window: &w::HWND, hotkey: Hotkey) -> Result<(), RegisterError> {
-        // SAFETY: `MOD` and `VK` are plain newtypes over the flag and key values; every value
-        // the parser produces is representable.
-        let (modifiers, key) = unsafe {
-            (
-                co::MOD::from_raw(hotkey.modifiers) | co::MOD::NOREPEAT,
-                co::VK::from_raw(hotkey.key),
-            )
-        };
+        let (modifiers, key) = system_codes(hotkey);
         // Nothing may be registered yet; that is not an error.
         let _ = window.UnregisterHotKey(SAVE_HOTKEY_ID);
         window
@@ -195,6 +217,20 @@ mod native {
                     RegisterError::System(hotkey, error)
                 }
             })
+    }
+
+    /// The hotkey's modifiers, with `NOREPEAT` added, and key as the types `RegisterHotKey`
+    /// takes.
+    #[expect(unsafe_code)]
+    fn system_codes(hotkey: Hotkey) -> (co::MOD, co::VK) {
+        // SAFETY: `MOD` and `VK` are plain newtypes over the flag and key values; every value
+        // the parser produces is representable.
+        unsafe {
+            (
+                co::MOD::from_raw(hotkey.modifiers) | co::MOD::NOREPEAT,
+                co::VK::from_raw(hotkey.key),
+            )
+        }
     }
 }
 
