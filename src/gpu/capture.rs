@@ -4,8 +4,11 @@
 //! - [`wgc`], Windows Graphics Capture, records a monitor or a single window.
 //! - [`dxgi_dd`], DXGI Desktop Duplication, records whole monitors only; a window target is
 //!   recorded through the monitor it fills.
+//! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
+//!   cursor included, for licensed vendors holding the key NVIDIA issues.
 
 mod dxgi_dd;
+mod nvfbc;
 mod wgc;
 
 use super::device::Device;
@@ -30,6 +33,8 @@ pub(crate) enum CaptureError {
     Closed,
     #[error("{0}: {1}")]
     Windows(&'static str, windows::core::Error),
+    #[error("{0} failed with {1}")]
+    Nvfbc(&'static str, nvfbc::Status),
 }
 
 /// What a tick found.
@@ -73,6 +78,7 @@ pub(super) fn start(
     Ok(match backend {
         Backend::Wgc => Box::new(wgc::Capture::start(device, period, target)?),
         Backend::Dxgi => Box::new(dxgi_dd::DesktopDuplication::start(device, target)?),
+        Backend::Nvfbc => Box::new(nvfbc::Nvfbc::start(device, target)?),
     })
 }
 

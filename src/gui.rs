@@ -3,7 +3,7 @@
 
 use crate::{
     APP_NAME,
-    config::{Config, Mode},
+    config::{Backend, Config, Mode},
     log,
     service::Worker,
     sys::{
@@ -25,6 +25,7 @@ use winsafe::{self as w, co, gui, prelude::*};
 mod footer;
 mod layout;
 mod logs;
+mod nvfbc_key;
 mod settings;
 mod startup_error;
 mod status;
@@ -241,6 +242,12 @@ impl Main {
             Ok(())
         });
 
+        let me = self.clone();
+        self.settings.backend.on().cbn_sel_change(move || {
+            me.on_backend_chosen();
+            Ok(())
+        });
+
         for field in self.settings.estimate_inputs() {
             let me = self.clone();
             field.on().en_change(move || {
@@ -405,6 +412,14 @@ impl Main {
         shared.worker.start(config);
         drop(shared);
         self.watch_foreground();
+    }
+
+    /// Choosing NvFBC asks for the key NVIDIA issued, as NVIDIA's own setup does; without one
+    /// the previous choice comes back. The choice takes effect on Apply, like every setting.
+    fn on_backend_chosen(&self) {
+        let accepted =
+            self.settings.chosen_backend() != Backend::Nvfbc || nvfbc_key::ask(&self.wnd);
+        self.settings.settle_backend(accepted);
     }
 
     /// Makes the configured hotkey save a clip; reports whether it could.

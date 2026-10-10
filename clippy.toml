@@ -1,0 +1,2 @@
+# Product names that are words in prose, not code.
+doc-valid-idents = ["NvFBC", "GeForce", ".."]

@@ -5,7 +5,7 @@
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::HMODULE,
+        Foundation::{HMODULE, LUID},
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
@@ -116,6 +116,14 @@ impl Device {
                 Some(&raw const region),
             );
         }
+    }
+
+    /// The locally unique id of the device's adapter, which other graphics APIs report too.
+    pub(super) fn luid(&self) -> windows::core::Result<LUID> {
+        let device: IDXGIDevice = self.d3d.cast()?;
+        // SAFETY: reads the adapter of a live device and then its description.
+        let description = unsafe { device.GetAdapter()?.GetDesc() }?;
+        Ok(description.AdapterLuid)
     }
 
     /// Lets the device's copies run ahead of a game that keeps the GPU busy.
