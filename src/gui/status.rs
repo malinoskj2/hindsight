@@ -8,7 +8,10 @@ use super::{
     },
     text,
 };
-use crate::{config::Config, service::Status};
+use crate::{
+    config::Config,
+    service::{DisplayStatus, Status},
+};
 use winsafe::{co, gui, prelude::*};
 
 /// Height the Recording group gains while it shows notices or errors (two lines).
@@ -21,6 +24,7 @@ pub(super) struct StatusPage {
     /// The Recording group; it grows while the notice label has something to show.
     recording_group: ExpandableGroup,
     state: TintedLabel,
+    source: gui::Label,
     encoder: gui::Label,
     rates: gui::Label,
     buffered: gui::Label,
@@ -38,28 +42,30 @@ impl StatusPage {
         let caption = |text, y| label(&page, text, INNER_X, y, VALUE_X - INNER_X, 1);
 
         // Compact; the group adds two lines for the notice label when needed.
-        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 106);
+        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 126);
         let state = TintedLabel::new(&page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
-        let _encoder_caption = caption(text::ENCODER, 48);
-        let encoder = label(&page, "", VALUE_X, 48, VALUE_WIDTH, 1);
-        let _rates_caption = caption(text::CAPTURE_RATE, 68);
-        let rates = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
-        let _buffered_caption = caption(text::BUFFERED, 88);
-        let buffered = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
-        let notice = TintedLabel::new(&page, INNER_X, 110, INNER_WIDTH, 2, AMBER);
+        let _source_caption = caption(text::SOURCE, 48);
+        let source = path_label(&page, VALUE_X, 48, VALUE_WIDTH);
+        let _encoder_caption = caption(text::ENCODER, 68);
+        let encoder = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
+        let _rates_caption = caption(text::CAPTURE_RATE, 88);
+        let rates = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
+        let _buffered_caption = caption(text::BUFFERED, 108);
+        let buffered = label(&page, "", VALUE_X, 108, VALUE_WIDTH, 1);
+        let notice = TintedLabel::new(&page, INNER_X, 130, INNER_WIDTH, 2, AMBER);
 
-        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 118, 100);
-        let last_clip_caption = caption(text::LAST_CLIP, 138);
-        let last_clip = path_label(&page, VALUE_X, 138, VALUE_WIDTH);
-        let folder_caption = caption(text::CLIP_FOLDER, 158);
-        let folder = path_label(&page, VALUE_X, 158, VALUE_WIDTH);
-        let save = button(&page, text::SAVE_REPLAY, INNER_X, 184, 120);
-        let hotkey_hint = label(&page, "", INNER_X + 128, 189, 140, 1);
+        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 138, 100);
+        let last_clip_caption = caption(text::LAST_CLIP, 158);
+        let last_clip = path_label(&page, VALUE_X, 158, VALUE_WIDTH);
+        let folder_caption = caption(text::CLIP_FOLDER, 178);
+        let folder = path_label(&page, VALUE_X, 178, VALUE_WIDTH);
+        let save = button(&page, text::SAVE_REPLAY, INNER_X, 204, 120);
+        let hotkey_hint = label(&page, "", INNER_X + 128, 209, 140, 1);
         let recording = button(
             &page,
             text::STOP_RECORDING,
             INNER_X + INNER_WIDTH - 120,
-            184,
+            204,
             120,
         );
 
@@ -100,6 +106,7 @@ impl StatusPage {
             frames,
             recording_group,
             state,
+            source,
             encoder,
             rates,
             buffered,
@@ -141,6 +148,7 @@ impl StatusPage {
             .set_colour(if status.error.is_some() { RED } else { AMBER });
 
         self.state.set_text(&text::status(status.state));
+        layout::set_text(&self.source, &text::source(status));
         layout::set_text(&self.encoder, &text::encoder(status));
         layout::set_text(&self.rates, &text::rates(status));
         layout::set_text(&self.buffered, &text::buffered(status));
@@ -175,7 +183,7 @@ impl StatusPage {
         layout::set_text(&self.hotkey_hint, &text::hotkey_hint(&config.hotkey));
         layout::set_text(
             &self.recording,
-            if status.recording {
+            if status.recording || status.state == DisplayStatus::Waiting {
                 text::STOP_RECORDING
             } else {
                 text::START_RECORDING

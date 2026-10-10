@@ -13,16 +13,25 @@ use crate::{
     config::Config,
     log,
     replay::{self, Live, Packet, Stream},
-    service::Ended,
+    service::{Ended, Target},
 };
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Records the primary monitor into `live` until `stop` is set, the display changes size or
+/// How long a window capture may go without a first frame before it is judged unable to see
+/// the window (exclusive full screen, which DWM does not compose), in seconds.
+const FIRST_FRAME_TIMEOUT_SECONDS: u64 = 2;
+
+/// Records `target` into `live` until `stop` is set, the target changes size or goes away, or
 /// something fails.
-pub(crate) fn record(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+pub(crate) fn record(
+    config: &Config,
+    target: &Target,
+    live: &Live,
+    stop: &AtomicBool,
+) -> Result<Ended> {
     let _scheduling = prepare_thread();
-    match run(config, live, stop) {
+    match run(config, target, live, stop) {
         Err(error) if is_permanent(&error) => Ok(Ended::Unsupported(format!("{error:#}"))),
         result => result,
     }
@@ -48,7 +57,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
     )
 }
 
-fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     let device = Device::create()?;
     log::info(format!("Capturing on {}", device.adapter));
     if let Err(error) = device.raise_priority() {
@@ -58,7 +67,7 @@ fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     }
 
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
-    let capture = Capture::primary_monitor(&device, pacer.period())?;
+    let capture = Capture::start(&device, pacer.period(), target)?;
     let (width, height) = encodable(capture.size());
     let mut encoder = Encoder::open(
         &device.d3d,
@@ -101,6 +110,8 @@ fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         );
     };
 
+    let first_frame_deadline = matches!(target, Target::Window { .. })
+        .then(|| u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS);
     let ended = loop {
         if stop.load(Ordering::Relaxed) {
             break Ended::Stopped;
@@ -108,18 +119,23 @@ fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         let index = pacer.wait().context("wait for the frame timer")?;
         encoder.collect(&mut output)?;
 
-        let target = encoder.input(&mut output)?.clone();
-        let fresh = match capture.take(&device, &target, width, height)? {
-            Frame::Fresh => true,
-            Frame::Unchanged => match encoder.latest() {
-                Some(latest) => {
-                    device.copy(&target, latest);
-                    false
-                }
-                // Nothing has been captured yet; there is no picture to repeat.
-                None => continue,
-            },
-            Frame::Resized => break Ended::Resized,
+        let input = encoder.input(&mut output)?.clone();
+        let fresh = match capture.take(&device, &input, width, height) {
+            Ok(Frame::Fresh) => true,
+            Ok(Frame::Unchanged) => {
+                let Some(latest) = encoder.latest() else {
+                    // Nothing has been captured yet; there is no picture to repeat.
+                    if first_frame_deadline.is_some_and(|deadline| index >= deadline) {
+                        break Ended::NoFrames;
+                    }
+                    continue;
+                };
+                device.copy(&input, latest);
+                false
+            }
+            Ok(Frame::Resized) => break Ended::Resized,
+            Err(CaptureError::Closed) => break Ended::Closed,
+            Err(error) => return Err(error.into()),
         };
         encoder.submit(index, fresh)?;
     };

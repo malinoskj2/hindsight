@@ -3,10 +3,11 @@
 
 use crate::{
     APP_NAME,
-    config::Config,
+    config::{Config, Mode},
     log,
     service::Worker,
     sys::{
+        foreground::{self, ForegroundHook},
         hotkey, startup,
         tray::{Tray, TrayAction},
         window,
@@ -31,6 +32,11 @@ mod text;
 
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
+/// Looks at the foreground window once a second as well as on every change: an app that was
+/// already in front when it went full screen changes nothing the hook reports. The look is a
+/// handful of system calls.
+const FOREGROUND_TIMER: usize = 2;
+const FOREGROUND_INTERVAL_MS: u32 = 1000;
 /// Resource id of the icon embedded by `build.rs`.
 const ICON_RESOURCE: u16 = 1;
 
@@ -52,6 +58,8 @@ struct Shared {
     worker: Worker,
     config: Config,
     tray: Option<Tray>,
+    /// Reports foreground changes while it lives.
+    foreground_hook: Option<ForegroundHook>,
     quitting: bool,
     /// Why the save hotkey is not registered, while it is not.
     hotkey_error: Option<String>,
@@ -146,6 +154,7 @@ impl Main {
                 worker,
                 config,
                 tray: None,
+                foreground_hook: None,
                 quitting: false,
                 hotkey_error: None,
                 initial_startup_error: startup_error,
@@ -185,6 +194,12 @@ impl Main {
         });
 
         let me = self.clone();
+        self.wnd.on().wm_timer(FOREGROUND_TIMER, move || {
+            me.watch_foreground();
+            Ok(())
+        });
+
+        let me = self.clone();
         self.wnd.on().wm(co::WM::HOTKEY, move |message| {
             if message.wparam == hotkey::SAVE_HOTKEY_ID.unsigned_abs() as usize {
                 me.save();
@@ -200,9 +215,11 @@ impl Main {
 
         let me = self.clone();
         self.wnd.on().wm_destroy(move || {
-            // Breaks the reference cycle through the tray's callback so the worker is dropped,
-            // which stops recording and finishes a clip being saved.
-            me.shared.borrow_mut().tray = None;
+            // Breaks the reference cycles through the tray's and the hook's callbacks so the
+            // worker is dropped, which stops recording and finishes a clip being saved.
+            let mut shared = me.shared.borrow_mut();
+            shared.tray = None;
+            shared.foreground_hook = None;
             Ok(())
         });
 
@@ -256,6 +273,18 @@ impl Main {
 
         let configured = self.shared.borrow().config.clone();
         self.register_hotkey(&configured);
+
+        let me = self.clone();
+        let hook = ForegroundHook::install(move || me.watch_foreground());
+        if hook.is_none() {
+            log::warning(text::FOREGROUND_WATCH_FAILED);
+        }
+        self.shared.borrow_mut().foreground_hook = hook;
+        let _ = self
+            .wnd
+            .hwnd()
+            .SetTimer(FOREGROUND_TIMER, FOREGROUND_INTERVAL_MS, None);
+        self.watch_foreground();
 
         let me = self.clone();
         match Tray::new(move |action| me.on_tray(action)) {
@@ -318,6 +347,17 @@ impl Main {
         let _ = self.wnd.hwnd().DestroyWindow();
     }
 
+    /// Tells the worker about the full-screen app in front, if the mode records those. The
+    /// worker ignores an app it is already recording.
+    fn watch_foreground(&self) {
+        let shared = self.shared.borrow();
+        if shared.config.mode == Mode::Fullscreen
+            && let Some(target) = foreground::fullscreen_app()
+        {
+            shared.worker.target(target);
+        }
+    }
+
     fn save(&self) {
         self.shared.borrow().worker.save();
         if self.wnd.hwnd().IsWindowVisible() {
@@ -327,10 +367,13 @@ impl Main {
 
     fn toggle_recording(&self) {
         let shared = self.shared.borrow();
-        if shared.worker.status().recording {
+        let status = shared.worker.status();
+        if status.recording || status.state == crate::service::DisplayStatus::Waiting {
             shared.worker.stop();
         } else {
             shared.worker.start(shared.config.clone());
+            drop(shared);
+            self.watch_foreground();
         }
     }
 
@@ -360,6 +403,8 @@ impl Main {
         let mut shared = self.shared.borrow_mut();
         shared.config = config.clone();
         shared.worker.start(config);
+        drop(shared);
+        self.watch_foreground();
     }
 
     /// Makes the configured hotkey save a clip; reports whether it could.

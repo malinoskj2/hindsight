@@ -1,9 +1,11 @@
-//! Windows Graphics Capture of the primary monitor. Frames land in a free-threaded frame pool;
+//! Windows Graphics Capture of a monitor or a window. Frames land in a free-threaded frame pool;
 //! on each tick the capture thread takes the newest one, copies it into the encoder's input
 //! texture on the GPU and hands the pool's buffer straight back to Windows.
 
 use super::{device::Device, pacer::HUNDRED_NANOSECONDS};
+use crate::service::Target;
 use std::{
+    ffi::c_void,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -19,11 +21,11 @@ use windows::{
         SizeInt32,
     },
     Win32::{
-        Foundation::POINT,
+        Foundation::{HWND, POINT},
         Graphics::{
             Direct3D11::{D3D11_BOX, ID3D11Texture2D},
             Dxgi::IDXGIDevice,
-            Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
+            Gdi::{HMONITOR, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
         },
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
@@ -43,7 +45,7 @@ pub(crate) enum CaptureError {
         "Windows Graphics Capture is not available; Windows 10 version 1903 or newer is needed"
     )]
     Unsupported,
-    #[error("the captured display went away")]
+    #[error("the captured display or window went away")]
     Closed,
     #[error("{0}: {1}")]
     Windows(&'static str, windows::core::Error),
@@ -55,7 +57,7 @@ pub(super) enum Frame {
     Fresh,
     /// The screen has not changed since the last tick.
     Unchanged,
-    /// The monitor's resolution changed.
+    /// The monitor's resolution, or the window's size, changed.
     Resized,
 }
 
@@ -71,29 +73,50 @@ pub(super) struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
-    /// Set when Windows ends the capture: the monitor was unplugged or the device was lost.
+    /// Set when Windows ends the capture: the monitor was unplugged, the window closed or the
+    /// device was lost.
     closed: Arc<AtomicBool>,
     closed_token: i64,
 }
 
 impl Capture {
-    /// Starts capturing the primary monitor, with the cursor, at most twice per `period`: the
-    /// display delivers frames only on its own refresh, so a limit of exactly one period would
-    /// skip to every other refresh whenever the two rates do not divide evenly.
-    pub(super) fn primary_monitor(device: &Device, period: Duration) -> Result<Self, CaptureError> {
+    /// Starts capturing `target`, with the cursor, at most twice per `period`: the display
+    /// delivers frames only on its own refresh, so a limit of exactly one period would skip to
+    /// every other refresh whenever the two rates do not divide evenly.
+    pub(super) fn start(
+        device: &Device,
+        period: Duration,
+        target: &Target,
+    ) -> Result<Self, CaptureError> {
         let failed = |step| move |error| CaptureError::Windows(step, error);
         if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
             return Err(CaptureError::Unsupported);
         }
 
-        // SAFETY: (0, 0) always lies on the primary monitor.
-        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
             .map_err(failed("open the capture interop"))?;
-        // SAFETY: `monitor` is a live monitor handle.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }
-            .map_err(failed("capture the primary monitor"))?;
-        let size = item.Size().map_err(failed("read the monitor size"))?;
+        let item: GraphicsCaptureItem = match *target {
+            Target::Monitor { handle: 0, .. } => {
+                // SAFETY: (0, 0) always lies on the primary monitor.
+                let monitor =
+                    unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+                // SAFETY: `monitor` is a live monitor handle.
+                unsafe { interop.CreateForMonitor(monitor) }
+                    .map_err(failed("capture the primary monitor"))?
+            }
+            Target::Monitor { handle, .. } => {
+                // SAFETY: the handle was read from the window being captured moments ago; a
+                // stale one makes the call fail, not misbehave.
+                unsafe { interop.CreateForMonitor(HMONITOR(handle as *mut c_void)) }
+                    .map_err(failed("capture the monitor"))?
+            }
+            Target::Window { window, .. } => {
+                // SAFETY: as above, for a window handle.
+                unsafe { interop.CreateForWindow(HWND(window as *mut c_void)) }
+                    .map_err(failed("capture the window"))?
+            }
+        };
+        let size = item.Size().map_err(failed("read the capture size"))?;
         let closed = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&closed);
         let closed_token = item
@@ -142,9 +165,9 @@ impl Capture {
         })
     }
 
-    /// The monitor's size in pixels.
+    /// The captured monitor's or window's size in pixels.
     pub(super) fn size(&self) -> (u32, u32) {
-        let pixels = |length| u32::try_from(length).expect("a monitor size is never negative");
+        let pixels = |length| u32::try_from(length).expect("a capture size is never negative");
         (pixels(self.size.Width), pixels(self.size.Height))
     }
 

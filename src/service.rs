@@ -1,9 +1,9 @@
 //! The recording worker: a thread that keeps one capture session running, starts it again when
-//! it ends on its own, and saves clips from its buffer. The window sends it commands and reads
-//! its status once a second.
+//! it ends on its own, and saves clips from its buffer. The window sends it commands, tells it
+//! which full-screen app is in front, and reads its status once a second.
 
 use crate::{
-    config::Config,
+    config::{Config, Mode},
     log,
     replay::{self, Live, SaveError, Stream},
     storage::Store,
@@ -29,31 +29,78 @@ const TICK: Duration = Duration::from_secs(1);
 /// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
+/// What a session captures. Handles are the OS's, carried as integers so the worker stays
+/// portable; a stale one makes capture fail, which the worker treats like any other failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// A whole monitor; handle 0 is the primary one.
+    Monitor { handle: isize, name: String },
+    /// One app's window, and the monitor it is on, to fall back to.
+    Window {
+        window: isize,
+        monitor: isize,
+        name: String,
+    },
+}
+
+impl Target {
+    pub(crate) fn primary_monitor() -> Self {
+        Self::Monitor {
+            handle: 0,
+            name: "the primary monitor".to_owned(),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Monitor { name, .. } | Self::Window { name, .. } => name,
+        }
+    }
+
+    /// The window's monitor, for when the window itself cannot be captured.
+    fn monitor(&self) -> Self {
+        match self {
+            Self::Monitor { .. } => self.clone(),
+            Self::Window { monitor, name, .. } => Self::Monitor {
+                handle: *monitor,
+                name: name.clone(),
+            },
+        }
+    }
+}
+
 /// Why a capture session ended without an error worth retrying.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     /// It was asked to stop.
     Stopped,
-    /// The captured display changed size; the encoder needs a new session.
+    /// The captured display or window changed size; the encoder needs a new session.
     Resized,
+    /// The captured window closed or the display went away.
+    Closed,
+    /// A window capture delivered no frame at all: the app presents in a way Windows cannot
+    /// compose, so its monitor must be captured instead.
+    NoFrames,
     /// This machine cannot record with these settings (no NVIDIA GPU, a driver too old, a
     /// codec the GPU lacks); trying again would fail the same way.
     Unsupported(String),
 }
 
-/// Runs a capture session into `live` until `stop` is set or it fails.
-pub(crate) type Recorder = fn(&Config, &Live, &AtomicBool) -> Result<Ended>;
+/// Runs a capture session of a target into `live` until `stop` is set or it fails.
+pub(crate) type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 
 #[cfg(windows)]
 const RECORDER: Recorder = crate::gpu::record;
 #[cfg(not(windows))]
-const RECORDER: Recorder = |_, _, _| anyhow::bail!("capture requires Windows");
+const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
 /// What the worker is doing, for the Status tab to put into words.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) enum DisplayStatus {
     #[default]
     Starting,
+    /// No full-screen app is in front.
+    Waiting,
     Recording,
     Retrying,
     Stopped,
@@ -64,6 +111,8 @@ pub(crate) enum DisplayStatus {
 pub(crate) struct Status {
     pub(crate) state: DisplayStatus,
     pub(crate) recording: bool,
+    /// What the current or latest session captures.
+    pub(crate) source: Option<String>,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
     /// Frames per second with new screen content, over the last refresh.
@@ -81,6 +130,8 @@ pub(crate) struct Status {
 #[derive(Debug)]
 enum Command {
     Start(Config),
+    /// A full-screen app is in front; recorded in that mode, unless it already is.
+    Target(Target),
     Stop,
     Save,
     Exit,
@@ -133,6 +184,11 @@ impl Worker {
         self.request(Command::Start(config));
     }
 
+    /// Tells the worker which full-screen app is in front.
+    pub(crate) fn target(&self, target: Target) {
+        self.request(Command::Target(target));
+    }
+
     pub(crate) fn stop(&self) {
         self.request(Command::Stop);
     }
@@ -183,9 +239,15 @@ struct Machine {
     output: Arc<Mutex<Status>>,
     status: Status,
     session: Option<Session>,
+    /// What the current or latest session captures.
+    target: Option<Target>,
     /// The latest session's buffer; it stays saveable after the session fails.
     live: Option<Arc<Live>>,
+    /// When a failed session is tried again (whole-desktop mode), or when targets are accepted
+    /// again (full-screen mode).
     retry_at: Option<Instant>,
+    /// Stopped by the user; targets are ignored until the settings are applied again.
+    paused: bool,
     saving: Option<Saving>,
     sample: Option<Sample>,
 }
@@ -206,22 +268,26 @@ impl Machine {
             output,
             status: Status::default(),
             session: None,
+            target: None,
             live: None,
             retry_at: None,
+            paused: false,
             saving: None,
             sample: None,
         }
     }
 
     fn run(&mut self, commands: &Receiver<Command>) {
-        self.start_session();
+        self.begin();
         self.publish();
         loop {
             match commands.recv_timeout(TICK) {
                 Ok(Command::Start(config)) => self.apply(config),
+                Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Stop) => {
                     self.stop_session();
                     self.retry_at = None;
+                    self.paused = true;
                     self.status.state = DisplayStatus::Stopped;
                     log::info(text::RECORDING_STOPPED);
                 }
@@ -251,24 +317,61 @@ impl Machine {
         log::info(text::settings_applied(&config));
         self.config = config;
         self.stop_session();
-        self.start_session();
+        self.paused = false;
+        self.begin();
     }
 
-    fn start_session(&mut self) {
+    /// Starts recording as the mode says: the primary monitor at once, or nothing until a
+    /// full-screen app is reported.
+    fn begin(&mut self) {
+        self.retry_at = None;
+        match self.config.mode {
+            Mode::Desktop => self.start_session(Target::primary_monitor()),
+            Mode::Fullscreen => {
+                self.target = None;
+                self.status.state = DisplayStatus::Waiting;
+                self.status.error = None;
+            }
+        }
+    }
+
+    /// A full-screen app is in front. In full-screen mode it becomes the target, unless it
+    /// already is, the user has stopped recording, a failure is cooling down, or the settings
+    /// cannot work on this machine.
+    fn offer(&mut self, target: Target) {
+        if self.config.mode != Mode::Fullscreen
+            || self.paused
+            || self.retry_at.is_some()
+            || self.status.state == DisplayStatus::Unsupported
+        {
+            return;
+        }
+        let same = self.session.is_some() && self.target.as_ref() == Some(&target);
+        if same {
+            return;
+        }
+        self.stop_session();
+        log::info(text::target_found(target.name()));
+        self.start_session(target);
+    }
+
+    fn start_session(&mut self, target: Target) {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (recorder, config, session_live, session_stop) = (
+        let (recorder, config, session_target, session_live, session_stop) = (
             self.recorder,
             self.config.clone(),
+            target.clone(),
             Arc::clone(&live),
             Arc::clone(&stop),
         );
         let spawned = thread::Builder::new()
             .name("capture".to_owned())
-            .spawn(move || recorder(&config, &session_live, &session_stop));
+            .spawn(move || recorder(&config, &session_target, &session_live, &session_stop));
 
         self.retry_at = None;
         self.sample = None;
+        self.target = Some(target);
         match spawned {
             Ok(join) => {
                 self.session = Some(Session { stop, join });
@@ -277,6 +380,14 @@ impl Machine {
                 self.status.error = None;
             }
             Err(error) => self.fail(&text::capture_thread_failed(error)),
+        }
+    }
+
+    /// Starts the current target again, after a resize or a retry.
+    fn restart_session(&mut self) {
+        match self.target.clone() {
+            Some(target) => self.start_session(target),
+            None => self.begin(),
         }
     }
 
@@ -291,6 +402,8 @@ impl Machine {
         }
     }
 
+    /// Reports a failed session. Whole-desktop recording is tried again after a while; in
+    /// full-screen mode the worker waits that long before it accepts a target again.
     fn fail(&mut self, error: &str) {
         self.report_error(text::session_failed(error));
         self.status.state = DisplayStatus::Retrying;
@@ -314,11 +427,26 @@ impl Machine {
             match session.join.join() {
                 Ok(Ok(Ended::Resized)) => {
                     log::info(text::RESIZED);
-                    self.start_session();
+                    self.restart_session();
                 }
                 Ok(Ok(Ended::Stopped)) => {
                     self.status.state = DisplayStatus::Stopped;
                 }
+                Ok(Ok(Ended::Closed)) => match self.config.mode {
+                    Mode::Fullscreen => {
+                        let name = self.target.as_ref().map_or("", Target::name).to_owned();
+                        log::info(text::target_closed(&name));
+                        self.status.state = DisplayStatus::Waiting;
+                    }
+                    Mode::Desktop => self.fail(text::DISPLAY_GONE),
+                },
+                Ok(Ok(Ended::NoFrames)) => match self.target.clone() {
+                    Some(target @ Target::Window { .. }) => {
+                        log::info(text::falling_back_to_monitor(target.name()));
+                        self.start_session(target.monitor());
+                    }
+                    _ => self.fail(text::NO_FRAMES),
+                },
                 Ok(Ok(Ended::Unsupported(reason))) => {
                     self.report_error(text::session_failed(&reason));
                     self.status.state = DisplayStatus::Unsupported;
@@ -329,8 +457,14 @@ impl Machine {
         }
 
         if self.retry_at.is_some_and(|due| Instant::now() >= due) {
-            log::info(text::RESTARTING);
-            self.start_session();
+            match self.config.mode {
+                Mode::Desktop => {
+                    log::info(text::RESTARTING);
+                    self.restart_session();
+                }
+                // The window may be gone; the next report of a full-screen app starts again.
+                Mode::Fullscreen => self.begin(),
+            }
         }
 
         if self
@@ -395,6 +529,7 @@ impl Machine {
             self.status.state = DisplayStatus::Recording;
         }
         self.status.recording = running;
+        self.status.source = self.target.as_ref().map(|target| target.name().to_owned());
         self.status.stream = stream;
         self.status.bitrate_mbps = self.config.bitrate_mbps;
         self.status.saving = self.saving.is_some();
@@ -433,10 +568,11 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::replay::Packet;
+    use std::sync::atomic::AtomicUsize;
 
     /// Encodes a fake keyframe every 10 frames until stopped.
     #[expect(clippy::unnecessary_wraps)]
-    fn steady(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+    fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         live.set_stream(Stream {
             codec: config.codec,
             width: 64,
@@ -467,15 +603,46 @@ mod tests {
         Ok(Ended::Stopped)
     }
 
-    fn failing(_: &Config, _: &Live, _: &AtomicBool) -> Result<Ended> {
+    fn failing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
         anyhow::bail!("no capture device")
     }
 
     #[expect(clippy::unnecessary_wraps)]
-    fn unsupported(_: &Config, _: &Live, _: &AtomicBool) -> Result<Ended> {
+    fn unsupported(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
         Ok(Ended::Unsupported(
             "this GPU's NVENC has no AV1 encoder".to_owned(),
         ))
+    }
+
+    /// Sessions in order: the first window ends as if its app closed, a second window yields
+    /// no frames, and a monitor records steadily.
+    static SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+    fn scripted(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+        SESSIONS.fetch_add(1, Ordering::Relaxed);
+        match target {
+            Target::Window { window: 1, .. } => {
+                // Long enough for the status tick to see it recording.
+                steady_until(config, live, stop, Duration::from_millis(1500));
+                Ok(Ended::Closed)
+            }
+            Target::Window { .. } => Ok(Ended::NoFrames),
+            Target::Monitor { .. } => steady(config, target, live, stop),
+        }
+    }
+
+    fn steady_until(config: &Config, live: &Live, stop: &AtomicBool, span: Duration) {
+        let ended = AtomicBool::new(false);
+        let deadline = Instant::now() + span;
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                ended.store(true, Ordering::Relaxed);
+            });
+            let _ = steady(config, &Target::primary_monitor(), live, &ended);
+        });
     }
 
     fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
@@ -493,10 +660,25 @@ mod tests {
         }
     }
 
+    fn desktop() -> Config {
+        Config {
+            mode: Mode::Desktop,
+            ..Config::default()
+        }
+    }
+
     fn config_in(directory: &std::path::Path) -> Config {
         Config {
             clip_directory: directory.display().to_string(),
-            ..Config::default()
+            ..desktop()
+        }
+    }
+
+    fn window(window: isize) -> Target {
+        Target::Window {
+            window,
+            monitor: 7,
+            name: format!("game{window}.exe"),
         }
     }
 
@@ -510,6 +692,7 @@ mod tests {
         });
         assert!(status.recording);
         assert_eq!(status.stream.unwrap().frame_rate, 60);
+        assert_eq!(status.source.as_deref(), Some("the primary monitor"));
 
         worker.save();
         let status = wait_for(&worker, |status| status.last_clip.is_some());
@@ -535,8 +718,7 @@ mod tests {
 
     #[test]
     fn a_failed_session_is_retried() {
-        let worker =
-            Worker::spawn_with(failing, Duration::from_millis(50), None, Config::default());
+        let worker = Worker::spawn_with(failing, Duration::from_millis(50), None, desktop());
 
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
         assert!(status.error.unwrap().contains("no capture device"));
@@ -548,18 +730,73 @@ mod tests {
 
     #[test]
     fn an_unsupported_configuration_is_not_retried() {
-        let worker = Worker::spawn_with(
-            unsupported,
-            Duration::from_millis(10),
-            None,
-            Config::default(),
-        );
+        let worker = Worker::spawn_with(unsupported, Duration::from_millis(10), None, desktop());
 
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Unsupported);
         assert!(status.error.unwrap().contains("AV1"));
         assert!(!status.recording);
         thread::sleep(Duration::from_millis(100));
         assert_eq!(worker.status().state, DisplayStatus::Unsupported);
+    }
+
+    #[test]
+    fn full_screen_mode_waits_for_an_app_and_follows_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            mode: Mode::Fullscreen,
+            ..config_in(directory.path())
+        };
+        SESSIONS.store(0, Ordering::Relaxed);
+        let worker = Worker::spawn_with(scripted, RETRY_INTERVAL, None, config);
+
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+        assert!(!status.recording);
+        assert!(status.source.is_none());
+
+        // The app comes to the front; reporting it again does not restart the session.
+        worker.target(window(1));
+        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
+        worker.target(window(1));
+        worker.target(window(1));
+        // Its session ends as if it closed; the buffer stays saveable.
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+        assert_eq!(SESSIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(status.source.as_deref(), Some("game1.exe"));
+        worker.save();
+        wait_for(&worker, |status| status.last_clip.is_some());
+
+        // A second app cannot be captured as a window, so its monitor is captured instead.
+        worker.target(window(2));
+        let status = wait_for(&worker, |status| {
+            status.state == DisplayStatus::Recording && status.buffered_bytes > 0
+        });
+        assert_eq!(SESSIONS.load(Ordering::Relaxed), 3);
+        assert_eq!(status.source.as_deref(), Some("game2.exe"));
+    }
+
+    #[test]
+    fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
+        let config = Config {
+            mode: Mode::Fullscreen,
+            ..Config::default()
+        };
+        let worker = Worker::spawn_with(failing, Duration::from_millis(100), None, config);
+        wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+
+        worker.target(window(1));
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
+        assert!(status.error.is_some());
+        // During the cooldown the same app is not tried again; afterwards it is.
+        worker.target(window(1));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(worker.status().state, DisplayStatus::Retrying);
+        wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+
+        worker.stop();
+        wait_for(&worker, |status| status.state == DisplayStatus::Stopped);
+        worker.target(window(1));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(worker.status().state, DisplayStatus::Stopped);
     }
 
     #[test]

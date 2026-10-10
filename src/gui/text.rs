@@ -16,6 +16,7 @@ pub(super) const GROUP_CLIPS: &str = "Clips";
 pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_STARTUP: &str = "Startup";
 
+pub(super) const SOURCE: &str = "Source";
 pub(super) const ENCODER: &str = "Encoder";
 pub(super) const CAPTURE_RATE: &str = "Frame rate";
 pub(super) const BUFFERED: &str = "Buffered";
@@ -26,6 +27,7 @@ pub(super) const SAVING: &str = "Saving…";
 pub(super) const STOP_RECORDING: &str = "Stop recording";
 pub(super) const START_RECORDING: &str = "Start recording";
 
+pub(super) const MODE: &str = "Record";
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
 pub(super) const BUFFER_SECONDS: &str = "Buffer (s)";
@@ -39,7 +41,8 @@ pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
 pub(super) const START_WITH_WINDOWS_HELP: &str =
-    "Starts hidden in the notification area at sign-in and begins recording right away.";
+    "Starts hidden in the notification area at sign-in, ready for the first full-screen app.";
+pub(super) const FOREGROUND_WATCH_FAILED: &str = "Full-screen apps are noticed every second rather than at once: the foreground hook could not be installed";
 
 pub(super) const STARTUP_ENABLED: &str = "Start with Windows enabled";
 pub(super) const STARTUP_DISABLED: &str = "Start with Windows disabled";
@@ -61,12 +64,17 @@ pub(super) fn startup_setting_failed(error: impl Display) -> String {
 pub(super) fn status(state: DisplayStatus) -> String {
     let message = match state {
         DisplayStatus::Starting => "Starting capture…",
+        DisplayStatus::Waiting => "Waiting for a full-screen app",
         DisplayStatus::Recording => "Recording to the replay buffer",
         DisplayStatus::Retrying => "Capture stopped · retrying shortly",
         DisplayStatus::Stopped => "Stopped · the replay buffer is off",
         DisplayStatus::Unsupported => "Cannot record with these settings",
     };
     format!("●  {message}")
+}
+
+pub(super) fn source(status: &Status) -> String {
+    status.source.clone().unwrap_or_else(|| NO_VALUE.to_owned())
 }
 
 pub(super) fn encoder(status: &Status) -> String {
