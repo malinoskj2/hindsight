@@ -39,15 +39,11 @@ pub(super) const BUFFER_SECONDS: &str = "Buffer (s)";
 pub(super) const BITRATE: &str = "Bitrate (Mbps)";
 pub(super) const HOTKEY: &str = "Save hotkey";
 pub(super) const FOLDER: &str = "Clip folder";
-pub(super) const APPLY_AND_RESTART: &str = "Apply and restart";
-pub(super) const RESTART_NOTICE: &str =
-    "Applying restarts recording; save any wanted replay first.";
+pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
-pub(super) const START_WITH_WINDOWS_HELP: &str =
-    "Starts hidden in the notification area at sign-in, ready for the first full-screen app.";
 pub(super) const FOREGROUND_WATCH_FAILED: &str = "Full-screen apps are noticed every second rather than at once: the foreground hook could not be installed";
 
 pub(super) const STARTUP_ENABLED: &str = "Start with Windows enabled";

@@ -59,7 +59,7 @@ impl SettingsPage {
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
-        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 234);
+        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 214);
         let codec = choice_field(
             &page,
             text::CODEC,
@@ -103,10 +103,9 @@ impl SettingsPage {
             &config.clip_directory().display().to_string(),
         );
         let estimate = label(&page, "", INNER_X, 164, INNER_WIDTH, 1);
-        let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 182, INNER_WIDTH, 1);
-        let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 202, 120);
+        let apply = button(&page, text::APPLY, INNER_X, 182, 120);
         skin_button(&apply, skin, true);
-        let settings_error = label(&page, "", INNER_X + 128, 200, INNER_WIDTH - 128, 2);
+        let settings_error = label(&page, "", INNER_X + 128, 180, INNER_WIDTH - 128, 2);
 
         let startup = startup_controls(&page, config, start_with_windows);
         let frames = vec![recording_group, startup.frame];
@@ -313,12 +312,12 @@ fn startup_controls(
     start_with_windows: bool,
 ) -> StartupControls {
     // Compact; the group adds a line for the error label when one occurs.
-    let startup_group = Frame::new(page, text::GROUP_GENERAL, 240, 106);
+    let startup_group = Frame::new(page, text::GROUP_GENERAL, 220, 72);
     let theme = choice_field(
         page,
         text::THEME,
         INNER_X,
-        260,
+        240,
         190,
         &Theme::ALL.map(Theme::name),
         Theme::ALL.iter().position(|theme| *theme == config.theme),
@@ -327,7 +326,7 @@ fn startup_controls(
         page,
         gui::CheckBoxOpts {
             text: text::START_WITH_WINDOWS,
-            position: gui::dpi(INNER_X, 288),
+            position: gui::dpi(INNER_X, 268),
             // Wide enough for the label in any font, rather than measured once at creation.
             size: gui::dpi(INNER_WIDTH, LINE),
             check_state: if start_with_windows {
@@ -338,15 +337,7 @@ fn startup_controls(
             ..Default::default()
         },
     );
-    let _startup_help = label(
-        page,
-        text::START_WITH_WINDOWS_HELP,
-        INNER_X,
-        308,
-        INNER_WIDTH,
-        2,
-    );
-    let startup_error = label(page, "", INNER_X, 308 + 2 * LINE, INNER_WIDTH, 1);
+    let startup_error = label(page, "", INNER_X, 290, INNER_WIDTH, 1);
     let group = ExpandableGroup::new(
         startup_group.clone(),
         startup_error.clone(),

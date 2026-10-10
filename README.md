@@ -45,7 +45,7 @@ The **Capture** setting chooses how frames are taken. All three keep every frame
 
 **Theme** (in the General group) dresses the window in one of three characters: their colours, rounded group panels, tab strip and buttons, and an illustration beside the controls. It applies the moment you choose it, without restarting recording, and is remembered. Classic Windows, the default, is the plain dialog of Windows' own controls, unchanged. The artwork is in `assets/themes`.
 
-The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 minutes. The Settings tab shows the estimate for what you enter. **Apply and restart** starts a new buffer, so save anything you want first.
+The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 minutes. The Settings tab shows the estimate for what you enter. **Apply** starts a new buffer, so save anything you want first.
 
 ## While you play
 
@@ -53,7 +53,7 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 - The **Logs** tab lists what the app did and any errors. The same lines are written to `%LOCALAPPDATA%\Hindsight\hindsight.log`, replaced on each launch; attach it to a bug report.
 - **Close the window** to keep recording from the tray. Click the tray icon to reopen it; right-click it for **Save replay** and **Quit**.
 - **Start with Windows** (Settings tab) starts the app hidden in the tray at sign-in, ready for the first full-screen app.
-- **Stop recording** pauses everything, including noticing full-screen apps, until **Start recording** or **Apply and restart**.
+- **Stop recording** pauses everything, including noticing full-screen apps, until **Start recording** or **Apply**.
 - Saving never pauses recording: the clip is written from a snapshot of the buffer while capture carries on.
 
 ## How it stays light
