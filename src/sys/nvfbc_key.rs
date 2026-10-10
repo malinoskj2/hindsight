@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(parse(""), Err(ParseError::Empty));
         assert_eq!(parse("  \n"), Err(ParseError::Empty));
         assert_eq!(parse("abc"), Err(ParseError::OddLength));
-        assert_eq!(parse("0x12"), Err(ParseError::NotHex));
+        assert_eq!(parse("0x12"), Err(ParseError::DwordCount));
         assert_eq!(parse("12-34"), Err(ParseError::NotHex));
         assert_eq!(
             parse(&"00".repeat(MAX_BYTES)).map(|key| key.len()),
