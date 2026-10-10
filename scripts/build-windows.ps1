@@ -9,7 +9,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
 if (Test-Path dist) { Remove-Item dist -Recurse -Force }
 New-Item -ItemType Directory -Force dist | Out-Null
 
-Copy-Item target\x86_64-pc-windows-msvc\release\dxgi.exe dist\
+Copy-Item target\x86_64-pc-windows-msvc\release\hindsight.exe dist\
 Copy-Item README.md, LICENSE dist\
 
 if (!$SkipInstaller) {
@@ -45,7 +45,7 @@ if (!$SkipInstaller) {
 
     Write-Host "Using NSIS compiler: $compiler"
 
-    & $compiler /WX installer\dxgi.nsi
+    & $compiler /WX installer\hindsight.nsi
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
 }
 

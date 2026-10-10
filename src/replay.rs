@@ -24,7 +24,7 @@ mod ring;
 use mp4::MuxError;
 use ring::Ring;
 
-const CLIP_PREFIX: &str = "dxgi";
+const CLIP_PREFIX: &str = "hindsight";
 const CLIP_EXTENSION: &str = "mp4";
 const PARTIAL_EXTENSION: &str = "partial";
 const WRITE_BUFFER_BYTES: usize = 1 << 20;
@@ -172,7 +172,7 @@ pub(crate) enum SaveError {
     Mux(#[from] MuxError),
 }
 
-/// Writes `clip` into `directory` as `dxgi_<date>_<time>.mp4` and returns its path. The file
+/// Writes `clip` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The file
 /// appears under its final name only once it is complete.
 pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
     fs::create_dir_all(directory).map_err(|source| SaveError::Io {
@@ -216,7 +216,7 @@ fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
     })
 }
 
-/// `dxgi_<stamp>.mp4`, or with `-2`, `-3`, … when a clip was already saved that second.
+/// `hindsight_<stamp>.mp4`, or with `-2`, `-3`, … when a clip was already saved that second.
 fn unused_path(directory: &Path, stamp: &str) -> PathBuf {
     (1..=u32::MAX)
         .map(|attempt| {
@@ -318,7 +318,7 @@ mod tests {
             .collect()
     }
 
-    /// Set `DXGI_MUX_OUTPUT` to a directory to keep the files, e.g. to check them with ffprobe.
+    /// Set `HINDSIGHT_MUX_OUTPUT` to a directory to keep the files, e.g. to check them with ffprobe.
     #[test]
     fn real_encoder_output_muxes_for_every_codec() {
         for codec in Codec::ALL {
@@ -350,7 +350,7 @@ mod tests {
             mp4::write(&mut file, &clip.stream, &clip.packets).unwrap();
             let top = mp4::tests::atoms(&file);
             assert_eq!(top.len(), 3, "{codec}");
-            if let Some(directory) = std::env::var_os("DXGI_MUX_OUTPUT") {
+            if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
                 let name = format!("{}.mp4", codec.name().replace('.', "").to_lowercase());
                 fs::write(Path::new(&directory).join(name), &file).unwrap();
             }
@@ -381,7 +381,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap()
-                .starts_with("dxgi_")
+                .starts_with("hindsight_")
         );
         assert_eq!(first.extension().unwrap(), "mp4");
         assert_eq!(&fs::read(&first).unwrap()[4..8], b"ftyp");

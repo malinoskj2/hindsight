@@ -1,5 +1,5 @@
 //! The application icon, rendered from one description so that the tray, the window and the
-//! executable's icon resource (`assets/dxgi.ico`) always match.
+//! executable's icon resource (`assets/hindsight.ico`) always match.
 //!
 //! A rounded blue square with a white play triangle and a red recording dot.
 
@@ -197,10 +197,10 @@ mod tests {
 
     #[test]
     fn committed_ico_matches_the_renderer() {
-        let committed: &[u8] = include_bytes!("../../assets/dxgi.ico");
+        let committed: &[u8] = include_bytes!("../../assets/hindsight.ico");
         assert!(
             committed == ico().as_slice(),
-            "regenerate assets/dxgi.ico with `dxgi icon assets/dxgi.ico`"
+            "regenerate assets/hindsight.ico with `hindsight icon assets/hindsight.ico`"
         );
     }
 }

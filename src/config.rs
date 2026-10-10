@@ -1,7 +1,7 @@
 //! The user's settings: what to record, how it is captured, codec, buffer length, frame rate,
 //! bitrate, the hotkey that saves a clip and the clip folder. They are stored as JSON and checked before use, since the file can be
 //! edited by hand: the buffer covers 5 to 600 seconds, capture runs at 24 to 240 fps and the
-//! bitrate is 5 to 150 Mbps. Clips go to `%USERPROFILE%\Videos\dxgi` unless another folder is
+//! bitrate is 5 to 150 Mbps. Clips go to `%USERPROFILE%\Videos\hindsight` unless another folder is
 //! chosen.
 
 use crate::sys::hotkey::{Hotkey, ParseError};
@@ -15,10 +15,10 @@ pub(crate) const MIN_FRAME_RATE: u32 = 24;
 pub(crate) const MAX_FRAME_RATE: u32 = 240;
 pub(crate) const MIN_BITRATE_MBPS: u32 = 5;
 pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
-/// Clips go to `%USERPROFILE%\Videos\dxgi` unless a folder is chosen.
+/// Clips go to `%USERPROFILE%\Videos\hindsight` unless a folder is chosen.
 const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
 const VIDEOS_DIRECTORY: &str = "Videos";
-const CLIP_DIRECTORY: &str = "dxgi";
+const CLIP_DIRECTORY: &str = "hindsight";
 
 /// What is recorded: any app that fills its monitor, while one is in front, or the primary
 /// monitor the whole time.
@@ -205,7 +205,7 @@ impl Config {
     }
 }
 
-/// `%USERPROFILE%\Videos\dxgi`, or the temporary directory when there is no profile.
+/// `%USERPROFILE%\Videos\hindsight`, or the temporary directory when there is no profile.
 pub(crate) fn default_clip_directory() -> PathBuf {
     std::env::var_os(CLIP_DIRECTORY_ENV)
         .map_or_else(std::env::temp_dir, |profile| {

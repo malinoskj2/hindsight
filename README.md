@@ -1,25 +1,25 @@
-# dxgi
+# hindsight
 
 ![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4)
 ![NVIDIA NVENC](https://img.shields.io/badge/NVIDIA-NVENC-76B900)
 ![BSD-2-Clause license](https://img.shields.io/badge/license-BSD--2--Clause-555555)
 
 **Instant replay for Windows, captured and encoded on the GPU.**  
-dxgi keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. The aim is the same cost to your game as Instant Replay: well under 1% of one CPU core and no measurable frame-rate loss.
+hindsight keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. The aim is the same cost to your game as Instant Replay: well under 1% of one CPU core and no measurable frame-rate loss.
 
 You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with a current driver (531 or newer).
 
 ## Get started
 
-1. Download **`dxgi-setup-x64.exe`** from the Releases page and run it.
-2. Launch **dxgi** from the Start menu. It waits for a full-screen app, then records it.
-3. Press **Alt+F10** (or the hotkey you set) to save the last 30 seconds. Clips go to `Videos\dxgi` as `dxgi_<date>_<time>.mp4`.
+1. Download **`hindsight-setup-x64.exe`** from the Releases page and run it.
+2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
+3. Press **Alt+F10** (or the hotkey you set) to save the last 30 seconds. Clips go to `Videos\hindsight` as `hindsight_<date>_<time>.mp4`.
 
 ## What gets recorded
 
-By default dxgi records **full-screen apps**: whatever app is in front with a window that fills its monitor, which is how games present whether in exclusive or borderless full screen. A maximized window doesn't count, since the taskbar still shows. Recording starts when such an app comes to the front and follows it if you alt-tab away; only the app's own window goes into the buffer, so nothing you switch to appears in a clip. When the app exits, its last 30 seconds stay saveable until the next one starts, so a crash to desktop can still be clipped. Between apps nothing runs: no capture, no encoder, no timer.
+By default hindsight records **full-screen apps**: whatever app is in front with a window that fills its monitor, which is how games present whether in exclusive or borderless full screen. A maximized window doesn't count, since the taskbar still shows. Recording starts when such an app comes to the front and follows it if you alt-tab away; only the app's own window goes into the buffer, so nothing you switch to appears in a clip. When the app exits, its last 30 seconds stay saveable until the next one starts, so a crash to desktop can still be clipped. Between apps nothing runs: no capture, no encoder, no timer.
 
-The other mode, **Whole desktop, always**, records the primary monitor from the moment dxgi starts, everything on it included.
+The other mode, **Whole desktop, always**, records the primary monitor from the moment hindsight starts, everything on it included.
 
 ## Capture backends
 
@@ -39,14 +39,14 @@ The **Capture** setting chooses how frames are taken from Windows. Both keep eve
 | Buffer | 30 s | 5–600 s |
 | Bitrate | 50 Mbps | 5–150 Mbps |
 | Save hotkey | Alt+F10 | Ctrl, Alt, Shift or Win with a key; F-keys may stand alone |
-| Clip folder | `Videos\dxgi` | Any absolute folder |
+| Clip folder | `Videos\hindsight` | Any absolute folder |
 
 The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 minutes. The Settings tab shows the estimate for what you enter. **Apply and restart** starts a new buffer, so save anything you want first.
 
 ## While you play
 
 - The **Status** tab shows which app or monitor is being recorded, the frame rate (frames encoded, and how many of them brought new pictures), how much is buffered, and the last saved clip.
-- The **Logs** tab lists what the app did and any errors. The same lines are written to `%LOCALAPPDATA%\Dxgi\dxgi.log`, replaced on each launch; attach it to a bug report.
+- The **Logs** tab lists what the app did and any errors. The same lines are written to `%LOCALAPPDATA%\Hindsight\hindsight.log`, replaced on each launch; attach it to a bug report.
 - **Close the window** to keep recording from the tray. Click the tray icon to reopen it; right-click it for **Save replay** and **Quit**.
 - **Start with Windows** (Settings tab) starts the app hidden in the tray at sign-in, ready for the first full-screen app.
 - **Stop recording** pauses everything, including noticing full-screen apps, until **Start recording** or **Apply and restart**.
@@ -64,7 +64,7 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 - **The GPU scheduler favours the copies.** The capture device raises its GPU thread priority and the process its GPU scheduling class (realtime when run as administrator, high otherwise), so a game holding the GPU at 100% does not starve capture. Windows power throttling is turned off for the process.
 - **One keyframe per second**, with the sequence header on every keyframe, so a clip can start at any second and the buffer trims to within a second of its length.
 
-Run as administrator for the highest GPU priority. To check parity yourself, compare CPU use and frame times (PresentMon or CapFrameX) with dxgi, with Instant Replay and with neither; PresentMon's present mode should stay *Hardware: Independent Flip*.
+Run as administrator for the highest GPU priority. To check parity yourself, compare CPU use and frame times (PresentMon or CapFrameX) with hindsight, with Instant Replay and with neither; PresentMon's present mode should stay *Hardware: Independent Flip*.
 
 ## Quick fixes
 
@@ -74,8 +74,8 @@ Run as administrator for the highest GPU priority. To check parity yourself, com
 - **The monitor was unplugged or the driver reset**: capture starts again by itself within ten seconds.
 - **The hotkey does nothing**: another application holds it; the Status tab says so. Choose another in Settings.
 - **The display or the app's window changed size** (a game switched modes): capture restarts by itself and the buffer starts over.
-- **An app in exclusive full screen** can't be captured as a window; dxgi notices within two seconds and captures its monitor instead.
-- On Windows 10 a yellow border marks the captured screen; Windows 11 lets dxgi turn it off.
+- **An app in exclusive full screen** can't be captured as a window; hindsight notices within two seconds and captures its monitor instead.
+- On Windows 10 a yellow border marks the captured screen; Windows 11 lets hindsight turn it off.
 
 HDR displays are captured as SDR for now, and audio is not recorded yet.
 
@@ -83,7 +83,7 @@ HDR displays are captured as SDR for now, and audio is not recorded yet.
 
 ```powershell
 cargo build --release
-./scripts/build-windows.ps1   # dist\dxgi.exe and, with NSIS installed, the installer
+./scripts/build-windows.ps1   # dist\hindsight.exe and, with NSIS installed, the installer
 ```
 
 The capture and encoding code is Windows-only; everything else (the replay buffer, the MP4 writer for all three codecs, settings, hotkeys) builds and tests on any platform with `cargo test`. The MP4 writer is tested against real H.264, HEVC and AV1 encoder output in `tests/fixtures`.

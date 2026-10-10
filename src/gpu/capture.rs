@@ -2,10 +2,10 @@
 //! [`Source`]; the pipeline drives whichever one the settings choose without knowing which:
 //!
 //! - [`wgc`], Windows Graphics Capture, records a monitor or a single window.
-//! - [`duplication`], DXGI Desktop Duplication, records whole monitors only; a window target is
+//! - [`dxgi_dd`], DXGI Desktop Duplication, records whole monitors only; a window target is
 //!   recorded through the monitor it fills.
 
-mod duplication;
+mod dxgi_dd;
 mod wgc;
 
 use super::device::Device;
@@ -72,7 +72,7 @@ pub(super) fn start(
 ) -> Result<Box<dyn Source>, CaptureError> {
     Ok(match backend {
         Backend::Wgc => Box::new(wgc::Capture::start(device, period, target)?),
-        Backend::Dxgi => Box::new(duplication::DesktopDuplication::start(device, target)?),
+        Backend::Dxgi => Box::new(dxgi_dd::DesktopDuplication::start(device, target)?),
     })
 }
 

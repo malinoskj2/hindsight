@@ -50,7 +50,7 @@ pub(super) const STARTUP_DISABLED: &str = "Start with Windows disabled";
 pub(super) const QUIT_FROM_TRAY: &str = "Quit chosen from the tray menu";
 pub(super) const CLOSED_TO_TRAY: &str = "Window closed; recording continues from the tray";
 
-pub(super) const STARTUP_FAILED_TITLE: &str = "dxgi could not start";
+pub(super) const STARTUP_FAILED_TITLE: &str = "hindsight could not start";
 pub(super) const STARTUP_FAILED_HELP: &str =
     "Close this window, resolve the error, then launch again.";
 

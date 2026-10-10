@@ -53,8 +53,8 @@ mod tests {
     #[test]
     fn startup_command_quotes_the_path_and_starts_in_the_tray() {
         assert_eq!(
-            command(OsStr::new(r"C:\Program Files\dxgi\dxgi.exe")),
-            r#""C:\Program Files\dxgi\dxgi.exe" --tray"#
+            command(OsStr::new(r"C:\Program Files\hindsight\hindsight.exe")),
+            r#""C:\Program Files\hindsight\hindsight.exe" --tray"#
         );
     }
 }
