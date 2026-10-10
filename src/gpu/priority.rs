@@ -21,8 +21,7 @@ use windows::{
     core::{s, w},
 };
 
-/// `D3DKMT_SCHEDULINGPRIORITYCLASS`: realtime needs an elevated process; high does not.
-const SCHEDULING_REALTIME: i32 = 5;
+/// `D3DKMT_SCHEDULINGPRIORITYCLASS` high.
 const SCHEDULING_HIGH: i32 = 4;
 
 type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTSTATUS;
@@ -78,23 +77,27 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
     }
 }
 
-/// Raises the process's GPU scheduling class: realtime when elevated, else high. Returns the
-/// class it got, by name.
-pub(super) fn raise_gpu_class() -> Option<&'static str> {
+/// Raises the process's GPU scheduling class to high, which needs no elevation. Realtime is
+/// left alone: it could starve the game and the desktop compositor of the GPU. Reports whether
+/// the class was set.
+pub(super) fn raise_gpu_class() -> bool {
     // SAFETY: loads a system library by name; `gdi32.dll` is loaded in every GUI process.
-    let gdi =
-        unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    let Ok(gdi) = (unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) })
+    else {
+        return false;
+    };
     // SAFETY: looks a symbol up in the loaded library.
-    let export = unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) }?;
+    let Some(export) =
+        (unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) })
+    else {
+        return false;
+    };
     // SAFETY: the export has this signature since Windows Vista.
     let set_class = unsafe {
         std::mem::transmute::<unsafe extern "system" fn() -> isize, SetSchedulingPriorityClass>(
             export,
         )
     };
-    [(SCHEDULING_REALTIME, "realtime"), (SCHEDULING_HIGH, "high")]
-        .into_iter()
-        // SAFETY: changes the scheduling class of the current process only.
-        .find(|(class, _)| unsafe { set_class(GetCurrentProcess(), *class) }.is_ok())
-        .map(|(_, name)| name)
+    // SAFETY: changes the scheduling class of the current process only.
+    unsafe { set_class(GetCurrentProcess(), SCHEDULING_HIGH) }.is_ok()
 }

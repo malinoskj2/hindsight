@@ -174,9 +174,10 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
             "Windows power throttling could not be turned off: {error}"
         ));
     }
-    match priority::raise_gpu_class() {
-        Some(class) => log::info(format!("GPU scheduling priority: {class}")),
-        None => log::warning("The GPU scheduling priority could not be raised"),
+    if priority::raise_gpu_class() {
+        log::info("GPU scheduling priority: high");
+    } else {
+        log::warning("The GPU scheduling priority could not be raised");
     }
     multimedia
 }

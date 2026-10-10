@@ -98,11 +98,12 @@ pub(super) const PIC_STRUCT_FRAME: u32 = 1;
 pub(super) const PIC_TYPE_IDR: u32 = 3;
 pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 
-/// `NV_ENC_RC_PARAMS` flag: rate control looks ahead (and holds frames back).
-pub(super) const RC_ENABLE_LOOKAHEAD: u32 = 1 << 5;
-/// `NV_ENC_RC_PARAMS` flag: temporal adaptive quantization, a compute pass on the GPU's
-/// shader cores rather than the encoder, which a game would feel.
-pub(super) const RC_ENABLE_TEMPORAL_AQ: u32 = 1 << 8;
+/// `NV_ENC_HEVC_CUSIZE` 16×16 and 32×32.
+pub(super) const HEVC_CU_SIZE_16: u32 = 2;
+pub(super) const HEVC_CU_SIZE_32: u32 = 3;
+/// `NV_ENC_AV1_PART_SIZE` 16×16 and 32×32.
+pub(super) const AV1_PART_SIZE_16: u32 = 3;
+pub(super) const AV1_PART_SIZE_32: u32 = 4;
 /// `NV_ENC_CONFIG_H264` flag: SPS and PPS before every IDR frame.
 pub(super) const H264_REPEAT_SPS_PPS: u32 = 1 << 12;
 /// `NV_ENC_CONFIG_HEVC` flags and fields.
@@ -312,8 +313,9 @@ pub(super) struct RcParams {
     _const_qp: [u32; 3],
     pub(super) average_bit_rate: u32,
     pub(super) max_bit_rate: u32,
-    _vbv: [u32; 2],
-    /// Bit fields, `enableMinQP` first; see [`RC_ENABLE_LOOKAHEAD`].
+    pub(super) vbv_buffer_size: u32,
+    _vbv_initial_delay: u32,
+    /// Bit fields, `enableMinQP` first: lookahead, adaptive quantization and the like.
     pub(super) flags: u32,
     _qp_to_qp_map_mode: [u32; 15],
     pub(super) multi_pass: u32,
@@ -322,6 +324,7 @@ pub(super) struct RcParams {
 
 const _: () = assert!(size_of::<RcParams>() == 128);
 const _: () = assert!(offset_of!(RcParams, average_bit_rate) == 20);
+const _: () = assert!(offset_of!(RcParams, vbv_buffer_size) == 28);
 const _: () = assert!(offset_of!(RcParams, flags) == 36);
 const _: () = assert!(offset_of!(RcParams, multi_pass) == 100);
 
@@ -381,7 +384,10 @@ const _: () = assert!(offset_of!(H264Config, chroma_format_idc) == 192);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct HevcConfig {
-    _level_to_cu_sizes: [u32; 4],
+    _level: u32,
+    _tier: u32,
+    pub(super) min_cu_size: u32,
+    pub(super) max_cu_size: u32,
     /// Bit fields, `useConstrainedIntraPred` first; see [`HEVC_REPEAT_SPS_PPS`].
     pub(super) flags: u32,
     pub(super) idr_period: u32,
@@ -392,6 +398,7 @@ pub(super) struct HevcConfig {
 }
 
 const _: () = assert!(size_of::<HevcConfig>() == 1560);
+const _: () = assert!(offset_of!(HevcConfig, min_cu_size) == 8);
 const _: () = assert!(offset_of!(HevcConfig, idr_period) == 20);
 const _: () = assert!(offset_of!(HevcConfig, vui) == 64);
 
@@ -399,7 +406,10 @@ const _: () = assert!(offset_of!(HevcConfig, vui) == 64);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct Av1Config {
-    _level_to_part_sizes: [u32; 4],
+    _level: u32,
+    _tier: u32,
+    pub(super) min_part_size: u32,
+    pub(super) max_part_size: u32,
     /// Bit fields, `outputAnnexBFormat` first; see [`AV1_REPEAT_SEQUENCE_HEADER`].
     pub(super) flags: u32,
     pub(super) idr_period: u32,
@@ -419,6 +429,7 @@ pub(super) struct Av1Config {
 }
 
 const _: () = assert!(size_of::<Av1Config>() == 1552);
+const _: () = assert!(offset_of!(Av1Config, min_part_size) == 8);
 const _: () = assert!(offset_of!(Av1Config, idr_period) == 20);
 const _: () = assert!(offset_of!(Av1Config, color_primaries) == 68);
 const _: () = assert!(offset_of!(Av1Config, color_range) == 80);

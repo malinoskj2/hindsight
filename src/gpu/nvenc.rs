@@ -39,8 +39,9 @@ use ffi::Zeroed;
 const SLOTS: usize = 3;
 /// How long to wait for a frame before deciding NVENC has stopped responding.
 const ENCODE_TIMEOUT_MS: u32 = 2000;
-/// One keyframe per second keeps saved clips within a second of the requested length.
-const GOP_SECONDS: u32 = 1;
+/// Frames between keyframes, as in NVIDIA's Instant Replay at any frame rate. Saved clips start
+/// within this many frames of the requested length.
+const GOP_FRAMES: u32 = 30;
 
 #[derive(Debug, Error)]
 pub(crate) enum NvencError {
@@ -728,19 +729,22 @@ const fn codec_guid(codec: Codec) -> GUID {
     }
 }
 
-/// Adapts the preset's configuration: one keyframe per second, no B-frames, single-pass VBR
-/// without lookahead or temporal AQ (frames leave the encoder in order, one per input, and
-/// nothing runs on the shader cores), 8-bit 4:2:0 with BT.709 signalled, and the sequence
-/// header repeated on every keyframe so any of them can start a clip.
+/// Adapts the preset's configuration the way NVIDIA's Instant Replay sets up its encoder: a
+/// keyframe every 30 frames, no B-frames, single-pass VBR peaking at twice the average with a
+/// buffer of the same size, and no rate-control extras (lookahead, adaptive quantization:
+/// frames leave the encoder in order, one per input, and nothing runs on the shader cores).
+/// HEVC and AV1 are held to 16×16 to 32×32 blocks, which keeps the encoder fast. The picture
+/// is 8-bit 4:2:0 with BT.709 signalled, and the sequence header repeats on every keyframe so
+/// any of them can start a clip.
 fn configure(config: &mut ffi::Config, settings: Settings) {
-    let gop = settings.frame_rate * GOP_SECONDS;
+    let gop = GOP_FRAMES;
     config.gop_length = gop;
     config.frame_interval_p = 1;
     config.rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
     config.rc.average_bit_rate = settings.bitrate;
-    // Peak 1.5× the average; halving first keeps the product within `u32`.
-    config.rc.max_bit_rate = settings.bitrate / 2 * 3;
-    config.rc.flags &= !(ffi::RC_ENABLE_LOOKAHEAD | ffi::RC_ENABLE_TEMPORAL_AQ);
+    config.rc.max_bit_rate = settings.bitrate.saturating_mul(2);
+    config.rc.vbv_buffer_size = config.rc.max_bit_rate;
+    config.rc.flags = 0;
     config.rc.multi_pass = ffi::MULTI_PASS_DISABLED;
 
     match settings.codec {
@@ -761,6 +765,8 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
             hevc.flags |= ffi::HEVC_REPEAT_SPS_PPS
                 | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
             hevc.idr_period = gop;
+            hevc.min_cu_size = ffi::HEVC_CU_SIZE_16;
+            hevc.max_cu_size = ffi::HEVC_CU_SIZE_32;
             hevc.vui.signal_bt709();
         }
         Codec::Av1 => {
@@ -777,6 +783,8 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
             av1.flags |= ffi::AV1_REPEAT_SEQUENCE_HEADER
                 | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
             av1.idr_period = gop;
+            av1.min_part_size = ffi::AV1_PART_SIZE_16;
+            av1.max_part_size = ffi::AV1_PART_SIZE_32;
             av1.color_primaries = ffi::BT709;
             av1.transfer_characteristics = ffi::BT709;
             av1.matrix_coefficients = ffi::BT709;
