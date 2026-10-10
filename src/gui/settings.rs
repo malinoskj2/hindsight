@@ -10,7 +10,7 @@ use super::{
 use crate::{
     config::{
         self, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
-        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE,
+        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Mode,
     },
     log,
     sys::startup,
@@ -27,6 +27,7 @@ const FIELD_OFFSET: i32 = 88;
 pub(super) struct SettingsPage {
     page: gui::TabPage,
     frames: Vec<Frame>,
+    mode: gui::ComboBox,
     codec: gui::ComboBox,
     frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
@@ -51,20 +52,14 @@ impl SettingsPage {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
         let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 200);
-        let _codec_caption = label(&page, text::CODEC, INNER_X, 30, FIELD_OFFSET - 4, 1);
-        let codec_names: Vec<&str> = Codec::ALL.iter().map(|codec| codec.name()).collect();
-        let codec = gui::ComboBox::new(
+        let codec = choice_field(
             &page,
-            gui::ComboBoxOpts {
-                position: gui::dpi(INNER_X + FIELD_OFFSET, 26),
-                width: gui::dpi_x(90),
-                items: &codec_names,
-                selected_item: Codec::ALL
-                    .iter()
-                    .position(|codec| *codec == config.codec)
-                    .and_then(|index| u32::try_from(index).ok()),
-                ..Default::default()
-            },
+            text::CODEC,
+            INNER_X,
+            26,
+            90,
+            &Codec::ALL.map(Codec::name),
+            Codec::ALL.iter().position(|codec| *codec == config.codec),
         );
         let (frame_rate, frame_rate_spin) = number_field(
             &page,
@@ -91,6 +86,15 @@ impl SettingsPage {
             config.bitrate_mbps,
         );
         let hotkey = text_field(&page, text::HOTKEY, 82, 110, &config.hotkey);
+        let mode = choice_field(
+            &page,
+            text::MODE,
+            COLUMN_X,
+            82,
+            INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
+            &Mode::ALL.map(Mode::name),
+            Mode::ALL.iter().position(|mode| *mode == config.mode),
+        );
         let folder = text_field(
             &page,
             text::FOLDER,
@@ -128,6 +132,7 @@ impl SettingsPage {
         Self {
             page,
             frames,
+            mode,
             codec,
             frame_rate,
             buffer_seconds,
@@ -163,18 +168,15 @@ impl SettingsPage {
     pub(super) fn configuration(&self) -> Result<Config, String> {
         let required =
             |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
-        let codec = self
-            .codec
-            .items()
-            .selected_index()
-            .and_then(|index| Codec::ALL.get(index as usize).copied())
-            .unwrap_or_default();
+        let mode = chosen(&self.mode, &Mode::ALL);
+        let codec = chosen(&self.codec, &Codec::ALL);
         let hotkey = self.hotkey.text().unwrap_or_default();
         let folder = self.folder.text().unwrap_or_default();
         let folder = folder.trim();
         let default_folder = config::default_clip_directory().display().to_string();
 
         let mut config = Config {
+            mode,
             codec,
             frame_rate: required(&self.frame_rate)?,
             buffer_seconds: required(&self.buffer_seconds)?,
@@ -354,6 +356,38 @@ fn number_field(
         },
     );
     (edit, spin)
+}
+
+/// A caption and a drop-down list of `items`, with `selected` chosen.
+fn choice_field(
+    page: &gui::TabPage,
+    caption: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    items: &[&str],
+    selected: Option<usize>,
+) -> gui::ComboBox {
+    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+    gui::ComboBox::new(
+        page,
+        gui::ComboBoxOpts {
+            position: gui::dpi(x + FIELD_OFFSET, y),
+            width: gui::dpi_x(width),
+            items,
+            selected_item: selected.and_then(|index| u32::try_from(index).ok()),
+            ..Default::default()
+        },
+    )
+}
+
+/// The choice a drop-down list shows, out of `all`, or the first when none is selected.
+fn chosen<T: Copy + Default>(field: &gui::ComboBox, all: &[T]) -> T {
+    field
+        .items()
+        .selected_index()
+        .and_then(|index| all.get(index as usize).copied())
+        .unwrap_or_default()
 }
 
 /// A caption and a free-text edit.

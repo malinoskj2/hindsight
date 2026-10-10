@@ -7,7 +7,9 @@ use std::{fmt::Display, path::Path};
 pub(super) const NOTHING_TO_SAVE: &str =
     "Nothing to save yet; the replay buffer fills once capture starts.";
 pub(super) const RESIZED: &str =
-    "The display changed size; capture restarted and the replay buffer starts over.";
+    "The display or window changed size; capture restarted and the replay buffer starts over.";
+pub(super) const DISPLAY_GONE: &str = "the display went away";
+pub(super) const NO_FRAMES: &str = "no frames arrived from the display";
 pub(super) const RECORDING_STOPPED: &str = "Recording stopped";
 pub(super) const RESTARTING: &str = "Starting capture again";
 pub(super) const ALREADY_SAVING: &str = "A clip is already being saved";
@@ -31,10 +33,27 @@ pub(super) fn recording(stream: Option<&Stream>, config: &Config) -> String {
     )
 }
 
+pub(super) fn target_found(name: &str) -> String {
+    format!("{name} is full screen; recording it")
+}
+
+pub(super) fn target_closed(name: &str) -> String {
+    format!("{name} closed; the replay buffer stays until the next full-screen app")
+}
+
+pub(super) fn falling_back_to_monitor(name: &str) -> String {
+    format!("{name} cannot be captured as a window; capturing its monitor instead")
+}
+
 pub(super) fn settings_applied(config: &Config) -> String {
     format!(
-        "Settings applied: {}, {} s buffer, {} fps, {} Mbps, hotkey {}",
-        config.codec, config.buffer_seconds, config.frame_rate, config.bitrate_mbps, config.hotkey
+        "Settings applied: {}, {}, {} s buffer, {} fps, {} Mbps, hotkey {}",
+        config.mode,
+        config.codec,
+        config.buffer_seconds,
+        config.frame_rate,
+        config.bitrate_mbps,
+        config.hotkey
     )
 }
 

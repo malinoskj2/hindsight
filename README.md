@@ -5,20 +5,27 @@
 ![BSD-2-Clause license](https://img.shields.io/badge/license-BSD--2--Clause-555555)
 
 **Instant replay for Windows, captured and encoded on the GPU.**  
-dxgi keeps the last stretch of your screen in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. The aim is the same cost to your game as Instant Replay: well under 1% of one CPU core and no measurable frame-rate loss.
+dxgi keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. The aim is the same cost to your game as Instant Replay: well under 1% of one CPU core and no measurable frame-rate loss.
 
 You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with a current driver (531 or newer).
 
 ## Get started
 
 1. Download **`dxgi-setup-x64.exe`** from the Releases page and run it.
-2. Launch **dxgi** from the Start menu. It starts recording the primary monitor straight away.
+2. Launch **dxgi** from the Start menu. It waits for a full-screen app, then records it.
 3. Press **Alt+F10** (or the hotkey you set) to save the last 30 seconds. Clips go to `Videos\dxgi` as `dxgi_<date>_<time>.mp4`.
+
+## What gets recorded
+
+By default dxgi records **full-screen apps**: whatever app is in front with a window that fills its monitor, which is how games present whether in exclusive or borderless full screen. A maximized window doesn't count, since the taskbar still shows. Recording starts when such an app comes to the front and follows it if you alt-tab away; only the app's own window goes into the buffer, so nothing you switch to appears in a clip. When the app exits, its last 30 seconds stay saveable until the next one starts, so a crash to desktop can still be clipped. Between apps nothing runs: no capture, no encoder, no timer.
+
+The other mode, **Whole desktop, always**, records the primary monitor from the moment dxgi starts, everything on it included.
 
 ## Settings
 
 | Setting | Default | Range |
 | --- | --- | --- |
+| Record | Full-screen apps | Full-screen apps, or the whole desktop always |
 | Codec | H.264 | H.264, HEVC, AV1 (AV1 needs an RTX 40 series GPU or newer) |
 | Frame rate | 60 fps | 24–240 fps |
 | Buffer | 30 s | 5–600 s |
@@ -30,10 +37,11 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 
 ## While you play
 
-- The **Status** tab shows what is being recorded, the frame rate (frames encoded, and how many of them brought new pictures), how much is buffered, and the last saved clip.
+- The **Status** tab shows which app or monitor is being recorded, the frame rate (frames encoded, and how many of them brought new pictures), how much is buffered, and the last saved clip.
 - The **Logs** tab lists what the app did and any errors. The same lines are written to `%LOCALAPPDATA%\Dxgi\dxgi.log`, replaced on each launch; attach it to a bug report.
 - **Close the window** to keep recording from the tray. Click the tray icon to reopen it; right-click it for **Save replay** and **Quit**.
-- **Start with Windows** (Settings tab) starts the app hidden in the tray at sign-in.
+- **Start with Windows** (Settings tab) starts the app hidden in the tray at sign-in, ready for the first full-screen app.
+- **Stop recording** pauses everything, including noticing full-screen apps, until **Start recording** or **Apply and restart**.
 - Saving never pauses recording: the clip is written from a snapshot of the buffer while capture carries on.
 
 ## How it stays light
@@ -57,7 +65,8 @@ Run as administrator for the highest GPU priority. To check parity yourself, com
 - **"the display is … larger than … this GPU's H.264 encoder accepts"**: H.264 stops at 4096 pixels across; choose HEVC or AV1 for super-ultrawide and 8K displays.
 - **The monitor was unplugged or the driver reset**: capture starts again by itself within ten seconds.
 - **The hotkey does nothing**: another application holds it; the Status tab says so. Choose another in Settings.
-- **The display changed resolution** (a game switched modes): capture restarts by itself and the buffer starts over.
+- **The display or the app's window changed size** (a game switched modes): capture restarts by itself and the buffer starts over.
+- **An app in exclusive full screen** can't be captured as a window; dxgi notices within two seconds and captures its monitor instead.
 - On Windows 10 a yellow border marks the captured screen; Windows 11 lets dxgi turn it off.
 
 HDR displays are captured as SDR for now, and audio is not recorded yet.

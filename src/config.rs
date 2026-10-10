@@ -1,5 +1,5 @@
-//! The user's settings: codec, buffer length, frame rate, bitrate, the hotkey that saves a clip
-//! and the clip folder. They are stored as JSON and checked before use, since the file can be
+//! The user's settings: what to record, codec, buffer length, frame rate, bitrate, the hotkey
+//! that saves a clip and the clip folder. They are stored as JSON and checked before use, since the file can be
 //! edited by hand: the buffer covers 5 to 600 seconds, capture runs at 24 to 240 fps and the
 //! bitrate is 5 to 150 Mbps. Clips go to `%USERPROFILE%\Videos\dxgi` unless another folder is
 //! chosen.
@@ -19,6 +19,33 @@ pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
 const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
 const VIDEOS_DIRECTORY: &str = "Videos";
 const CLIP_DIRECTORY: &str = "dxgi";
+
+/// What is recorded: any app that fills its monitor, while one is in front, or the primary
+/// monitor the whole time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Mode {
+    #[default]
+    Fullscreen,
+    Desktop,
+}
+
+impl Mode {
+    pub(crate) const ALL: [Self; 2] = [Self::Fullscreen, Self::Desktop];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Fullscreen => "Full-screen apps",
+            Self::Desktop => "Whole desktop, always",
+        }
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
 
 /// The video codecs NVENC offers, as Instant Replay does. AV1 needs an RTX 40 series GPU or
 /// newer.
@@ -52,6 +79,7 @@ impl fmt::Display for Codec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
+    pub(crate) mode: Mode,
     pub(crate) codec: Codec,
     /// Seconds of gameplay a saved clip covers, at least.
     pub(crate) buffer_seconds: u32,
@@ -66,6 +94,7 @@ pub(crate) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            mode: Mode::Fullscreen,
             codec: Codec::H264,
             buffer_seconds: 30,
             frame_rate: 60,
@@ -180,6 +209,13 @@ mod tests {
 
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.codec, Codec::Av1);
+        assert_eq!(config.mode, Mode::Fullscreen);
+        assert_eq!(
+            serde_json::from_str::<Config>(r#"{"mode":"desktop"}"#)
+                .unwrap()
+                .mode,
+            Mode::Desktop
+        );
         assert!(serde_json::from_str::<Config>(r#"{"codec":"vp9"}"#).is_err());
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey, "Alt+F10");
