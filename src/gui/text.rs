@@ -28,6 +28,7 @@ pub(super) const STOP_RECORDING: &str = "Stop recording";
 pub(super) const START_RECORDING: &str = "Start recording";
 
 pub(super) const MODE: &str = "Record";
+pub(super) const BACKEND: &str = "Capture";
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
 pub(super) const BUFFER_SECONDS: &str = "Buffer (s)";

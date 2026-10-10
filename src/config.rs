@@ -1,5 +1,5 @@
-//! The user's settings: what to record, codec, buffer length, frame rate, bitrate, the hotkey
-//! that saves a clip and the clip folder. They are stored as JSON and checked before use, since the file can be
+//! The user's settings: what to record, how it is captured, codec, buffer length, frame rate,
+//! bitrate, the hotkey that saves a clip and the clip folder. They are stored as JSON and checked before use, since the file can be
 //! edited by hand: the buffer covers 5 to 600 seconds, capture runs at 24 to 240 fps and the
 //! bitrate is 5 to 150 Mbps. Clips go to `%USERPROFILE%\Videos\dxgi` unless another folder is
 //! chosen.
@@ -47,6 +47,33 @@ impl fmt::Display for Mode {
     }
 }
 
+/// How frames are captured. Windows Graphics Capture can record one app's window; DXGI Desktop
+/// Duplication sees whole monitors only, so a full-screen app is recorded through its monitor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Backend {
+    #[default]
+    Wgc,
+    Dxgi,
+}
+
+impl Backend {
+    pub(crate) const ALL: [Self; 2] = [Self::Wgc, Self::Dxgi];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Wgc => "Windows Graphics Capture",
+            Self::Dxgi => "DXGI Desktop Duplication",
+        }
+    }
+}
+
+impl fmt::Display for Backend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
 /// The video codecs NVENC offers, as Instant Replay does. AV1 needs an RTX 40 series GPU or
 /// newer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +107,7 @@ impl fmt::Display for Codec {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub(crate) mode: Mode,
+    pub(crate) backend: Backend,
     pub(crate) codec: Codec,
     /// Seconds of gameplay a saved clip covers, at least.
     pub(crate) buffer_seconds: u32,
@@ -95,6 +123,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Fullscreen,
+            backend: Backend::Wgc,
             codec: Codec::H264,
             buffer_seconds: 30,
             frame_rate: 60,
@@ -210,6 +239,14 @@ mod tests {
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.codec, Codec::Av1);
         assert_eq!(config.mode, Mode::Fullscreen);
+        assert_eq!(config.backend, Backend::Wgc);
+        assert_eq!(
+            serde_json::from_str::<Config>(r#"{"backend":"dxgi"}"#)
+                .unwrap()
+                .backend,
+            Backend::Dxgi
+        );
+        assert!(serde_json::from_str::<Config>(r#"{"backend":"gdi"}"#).is_err());
         assert_eq!(
             serde_json::from_str::<Config>(r#"{"mode":"desktop"}"#)
                 .unwrap()

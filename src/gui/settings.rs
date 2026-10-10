@@ -1,4 +1,4 @@
-//! The Settings tab: codec, frame rate, buffer length, bitrate, the save hotkey and clip folder,
+//! The Settings tab: what to record and how, codec, frame rate, buffer length, bitrate, the save hotkey and clip folder,
 //! and the Start-with-Windows entry.
 
 use super::{
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     config::{
-        self, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
+        self, Backend, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
         MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Mode,
     },
     log,
@@ -28,6 +28,7 @@ pub(super) struct SettingsPage {
     page: gui::TabPage,
     frames: Vec<Frame>,
     mode: gui::ComboBox,
+    backend: gui::ComboBox,
     codec: gui::ComboBox,
     frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
@@ -51,7 +52,7 @@ impl SettingsPage {
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
 
-        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 200);
+        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 228);
         let codec = choice_field(
             &page,
             text::CODEC,
@@ -86,26 +87,18 @@ impl SettingsPage {
             config.bitrate_mbps,
         );
         let hotkey = text_field(&page, text::HOTKEY, 82, 110, &config.hotkey);
-        let mode = choice_field(
-            &page,
-            text::MODE,
-            COLUMN_X,
-            82,
-            INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
-            &Mode::ALL.map(Mode::name),
-            Mode::ALL.iter().position(|mode| *mode == config.mode),
-        );
+        let (mode, backend) = source_fields(&page, config);
         let folder = text_field(
             &page,
             text::FOLDER,
-            110,
+            138,
             INNER_WIDTH - FIELD_OFFSET,
             &config.clip_directory().display().to_string(),
         );
-        let estimate = label(&page, "", INNER_X, 136, INNER_WIDTH, 1);
-        let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 154, INNER_WIDTH, 1);
-        let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 174, 120);
-        let settings_error = label(&page, "", INNER_X + 128, 172, INNER_WIDTH - 128, 2);
+        let estimate = label(&page, "", INNER_X, 164, INNER_WIDTH, 1);
+        let _restart_notice = label(&page, text::RESTART_NOTICE, INNER_X, 182, INNER_WIDTH, 1);
+        let apply = button(&page, text::APPLY_AND_RESTART, INNER_X, 202, 120);
+        let settings_error = label(&page, "", INNER_X + 128, 200, INNER_WIDTH - 128, 2);
 
         let startup = startup_controls(&page, start_with_windows);
         let frames = vec![recording_group, startup.frame];
@@ -133,6 +126,7 @@ impl SettingsPage {
             page,
             frames,
             mode,
+            backend,
             codec,
             frame_rate,
             buffer_seconds,
@@ -169,6 +163,7 @@ impl SettingsPage {
         let required =
             |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
         let mode = chosen(&self.mode, &Mode::ALL);
+        let backend = chosen(&self.backend, &Backend::ALL);
         let codec = chosen(&self.codec, &Codec::ALL);
         let hotkey = self.hotkey.text().unwrap_or_default();
         let folder = self.folder.text().unwrap_or_default();
@@ -177,6 +172,7 @@ impl SettingsPage {
 
         let mut config = Config {
             mode,
+            backend,
             codec,
             frame_rate: required(&self.frame_rate)?,
             buffer_seconds: required(&self.buffer_seconds)?,
@@ -270,12 +266,12 @@ struct StartupControls {
 
 fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupControls {
     // Compact; the group adds a line for the error label when one occurs.
-    let startup_group = Frame::new(page, text::GROUP_STARTUP, 212, 78);
+    let startup_group = Frame::new(page, text::GROUP_STARTUP, 240, 78);
     let start_with_windows = gui::CheckBox::new(
         page,
         gui::CheckBoxOpts {
             text: text::START_WITH_WINDOWS,
-            position: gui::dpi(INNER_X, 232),
+            position: gui::dpi(INNER_X, 260),
             // Wide enough for the label in any font, rather than measured once at creation.
             size: gui::dpi(INNER_WIDTH, LINE),
             check_state: if start_with_windows {
@@ -290,11 +286,11 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
         page,
         text::START_WITH_WINDOWS_HELP,
         INNER_X,
-        252,
+        280,
         INNER_WIDTH,
         2,
     );
-    let startup_error = label(page, "", INNER_X, 252 + 2 * LINE, INNER_WIDTH, 1);
+    let startup_error = label(page, "", INNER_X, 280 + 2 * LINE, INNER_WIDTH, 1);
     let group = ExpandableGroup::new(
         startup_group.clone(),
         startup_error.clone(),
@@ -306,6 +302,31 @@ fn startup_controls(page: &gui::TabPage, start_with_windows: bool) -> StartupCon
         error: startup_error,
         group,
     }
+}
+
+/// The drop-down lists of what is recorded and how it is captured.
+fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::ComboBox) {
+    let mode = choice_field(
+        page,
+        text::MODE,
+        COLUMN_X,
+        82,
+        INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
+        &Mode::ALL.map(Mode::name),
+        Mode::ALL.iter().position(|mode| *mode == config.mode),
+    );
+    let backend = choice_field(
+        page,
+        text::BACKEND,
+        INNER_X,
+        110,
+        INNER_WIDTH - FIELD_OFFSET,
+        &Backend::ALL.map(Backend::name),
+        Backend::ALL
+            .iter()
+            .position(|backend| *backend == config.backend),
+    );
+    (mode, backend)
 }
 
 /// The whole number in `field`, if it holds one.

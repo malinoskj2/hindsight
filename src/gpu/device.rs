@@ -9,7 +9,7 @@ use windows::{
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+                D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
                 ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
             },
             Dxgi::{
@@ -84,6 +84,38 @@ impl Device {
     pub(super) fn copy(&self, target: &ID3D11Texture2D, source: &ID3D11Texture2D) {
         // SAFETY: two live textures of the same shape on this device.
         unsafe { self.context.CopyResource(target, source) };
+    }
+
+    /// Copies the top-left `width` × `height` of `source` into `target` on the GPU; both are
+    /// BGRA and at least that large.
+    pub(super) fn copy_region(
+        &self,
+        target: &ID3D11Texture2D,
+        source: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) {
+        let region = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: width,
+            bottom: height,
+            back: 1,
+        };
+        // SAFETY: both textures are BGRA on this device and the region lies within each.
+        unsafe {
+            self.context.CopySubresourceRegion(
+                target,
+                0,
+                0,
+                0,
+                0,
+                source,
+                0,
+                Some(&raw const region),
+            );
+        }
     }
 
     /// Lets the device's copies run ahead of a game that keeps the GPU busy.
