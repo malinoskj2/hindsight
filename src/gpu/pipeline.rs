@@ -43,6 +43,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
                 | NvencError::DriverTooOld(..)
                 | NvencError::VersionRejected
                 | NvencError::Unsupported(_)
+                | NvencError::TooLarge { .. }
         )
     )
 }

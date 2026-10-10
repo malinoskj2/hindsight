@@ -51,6 +51,8 @@ Run as administrator for the highest GPU priority. To check parity yourself, com
 
 - **"this GPU's NVENC has no AV1 encoder"**: choose H.264 or HEVC in Settings.
 - **"the NVIDIA driver supports NVENC API …"**: update the NVIDIA driver.
+- **"the display is … larger than … this GPU's H.264 encoder accepts"**: H.264 stops at 4096 pixels across; choose HEVC or AV1 for super-ultrawide and 8K displays.
+- **The monitor was unplugged or the driver reset**: capture starts again by itself within ten seconds.
 - **The hotkey does nothing**: another application holds it; the Status tab says so. Choose another in Settings.
 - **The display changed resolution** (a game switched modes): capture restarts by itself and the buffer starts over.
 - On Windows 10 a yellow border marks the captured screen; Windows 11 lets dxgi turn it off.
