@@ -1,7 +1,7 @@
-//! Application state on disk, in `%LOCALAPPDATA%\Dxgi`.
+//! Application state on disk, in `%LOCALAPPDATA%\Hindsight`.
 //!
 //! Opening the store takes an exclusive lock on `instance.lock` there and holds it until the
-//! store is dropped, so a second copy of dxgi fails to start instead of two recorders saving
+//! store is dropped, so a second copy of hindsight fails to start instead of two recorders saving
 //! over each other's settings. Each state file is capped at 64 KB, so a damaged file is
 //! reported rather than read without bound. Writes go to a `.pending` file that is then renamed
 //! over the original, so a crash part-way through leaves the previous state intact instead of a
@@ -20,7 +20,7 @@ use thiserror::Error;
 
 const MAX_STATE_BYTES: usize = 64 * 1024;
 const STATE_DIRECTORY_ENV: &str = "LOCALAPPDATA";
-const STATE_DIRECTORY: &str = "Dxgi";
+const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
 const PENDING_EXTENSION: &str = "pending";
@@ -33,7 +33,7 @@ pub(crate) enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("application state is larger than {} KB", MAX_STATE_BYTES / 1024)]
     Oversized,
-    #[error("another dxgi instance is running, or the state directory cannot be locked")]
+    #[error("another hindsight instance is running, or the state directory cannot be locked")]
     Locked,
     #[error("{} is unavailable", STATE_DIRECTORY_ENV)]
     NoDirectory,
@@ -46,7 +46,7 @@ pub(crate) struct Store {
     _lock: File,
 }
 
-/// The application state directory (`%LOCALAPPDATA%\Dxgi`). Without `LOCALAPPDATA` the
+/// The application state directory (`%LOCALAPPDATA%\Hindsight`). Without `LOCALAPPDATA` the
 /// temporary directory stands in, so paths can still be formed; [`Store::open`] reports the
 /// missing variable as an error instead.
 pub(crate) fn state_directory() -> PathBuf {

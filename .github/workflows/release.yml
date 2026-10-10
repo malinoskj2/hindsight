@@ -50,8 +50,8 @@ jobs:
           build_sha=$(jq -r '.head_sha' run.json)
           [[ "$build_sha" =~ ^[0-9a-f]{40}$ ]]
 
-          gh run download "$BUILD_RUN_ID" --name dxgi-windows-x64 --dir release
-          for asset in dxgi-setup-x64.exe dxgi-windows-x64.zip SHA256SUMS.txt; do
+          gh run download "$BUILD_RUN_ID" --name hindsight-windows-x64 --dir release
+          for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt; do
             gh attestation verify "release/$asset" --repo "$GH_REPO" \
               --signer-workflow "$GH_REPO/.github/workflows/check.yml" \
               --source-digest "$build_sha" --deny-self-hosted-runners
@@ -65,7 +65,7 @@ jobs:
             echo
             echo 'Verify the installer with GitHub CLI:'
             echo '```bash'
-            printf 'gh attestation verify dxgi-setup-x64.exe --repo %s --signer-workflow %s/.github/workflows/check.yml --source-digest %s\n' "$GH_REPO" "$GH_REPO" "$build_sha"
+            printf 'gh attestation verify hindsight-setup-x64.exe --repo %s --signer-workflow %s/.github/workflows/check.yml --source-digest %s\n' "$GH_REPO" "$GH_REPO" "$build_sha"
             echo '```'
           } > release-notes.md
 
@@ -80,8 +80,8 @@ jobs:
             -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$BUILD_SHA"
 
           gh release create "$RELEASE_TAG" \
-            release/dxgi-setup-x64.exe \
-            release/dxgi-windows-x64.zip \
+            release/hindsight-setup-x64.exe \
+            release/hindsight-windows-x64.zip \
             release/SHA256SUMS.txt \
-            --verify-tag --draft --title "dxgi $RELEASE_TAG" \
+            --verify-tag --draft --title "hindsight $RELEASE_TAG" \
             --notes-file release-notes.md

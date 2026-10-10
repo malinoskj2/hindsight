@@ -13,11 +13,11 @@ mod service;
 mod storage;
 mod sys;
 
-pub(crate) const APP_NAME: &str = "dxgi";
+pub(crate) const APP_NAME: &str = "hindsight";
 
 #[cfg(not(windows))]
 const UNSUPPORTED_PLATFORM_MESSAGE: &str =
-    "dxgi requires Windows 10 1903 or newer and an NVIDIA GPU";
+    "hindsight requires Windows 10 1903 or newer and an NVIDIA GPU";
 
 #[cfg(windows)]
 use anyhow::Context;

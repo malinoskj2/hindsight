@@ -5,7 +5,7 @@ use std::{collections::VecDeque, fmt::Display, fs::File, io::Write, path::Path, 
 
 /// Entries kept in memory; the file keeps everything from the session.
 const CAPACITY: usize = 500;
-pub(crate) const FILE_NAME: &str = "dxgi.log";
+pub(crate) const FILE_NAME: &str = "hindsight.log";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Level {

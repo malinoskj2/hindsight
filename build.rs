@@ -1,7 +1,7 @@
 //! Windows resources: the application icon (Explorer, Start menu, installer shortcuts, and the
 //! window class) and the manifest that opts into themed common controls and DPI awareness.
 
-const ICON: &str = "assets/dxgi.ico";
+const ICON: &str = "assets/hindsight.ico";
 /// Resource id the window class loads the icon by; must match `gui::ICON_RESOURCE`.
 const ICON_ID: &str = "1";
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -26,7 +26,7 @@ fn main() {
 
     winresource::WindowsResource::new()
         .set_manifest(MANIFEST)
-        .set("ProductName", "dxgi")
+        .set("ProductName", "hindsight")
         .set(
             "FileDescription",
             "Instant replay, captured and encoded on the GPU",
