@@ -23,8 +23,8 @@ use std::{
 
 mod text;
 
-/// How often the worker refreshes its status while no command arrives.
-const TICK: Duration = Duration::from_secs(1);
+/// The shortest span the rates are measured over; a publish sooner than that keeps the last rates.
+const MIN_RATE_SPAN: f64 = 0.5;
 /// How long to wait before starting a session again after it failed (the display was turned
 /// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -136,6 +136,11 @@ enum Command {
     Target(Target),
     Stop,
     Save,
+    /// Sent by a capture or save thread that has something to report, and by the stream
+    /// listener once the encoder is configured: the worker looks at its sessions and publishes.
+    Wake,
+    /// The window wants fresh figures for the Status tab.
+    Publish,
     Exit,
 }
 
@@ -157,12 +162,14 @@ impl Worker {
         config: Config,
     ) -> Self {
         let (commands, receiver) = mpsc::channel();
+        let wake = commands.clone();
         let status = Arc::new(Mutex::new(Status::default()));
         let output = Arc::clone(&status);
         let join = thread::Builder::new()
             .name("recording-worker".to_owned())
             .spawn(move || {
-                let mut machine = Machine::new(recorder, retry_interval, store, config, output);
+                let mut machine =
+                    Machine::new(recorder, retry_interval, store, config, output, wake);
                 machine.run(&receiver);
             })
             .expect("spawn the recording worker thread");
@@ -193,6 +200,11 @@ impl Worker {
 
     pub(crate) fn stop(&self) {
         self.request(Command::Stop);
+    }
+
+    /// Asks for fresh figures; they are read with [`Worker::status`] afterwards.
+    pub(crate) fn refresh(&self) {
+        self.request(Command::Publish);
     }
 
     pub(crate) fn save(&self) {
@@ -252,6 +264,8 @@ struct Machine {
     paused: bool,
     saving: Option<Saving>,
     sample: Option<Sample>,
+    /// Lets the capture and save threads wake the worker when they finish or start streaming.
+    wake: Sender<Command>,
 }
 
 impl Machine {
@@ -261,6 +275,7 @@ impl Machine {
         store: Option<Store>,
         config: Config,
         output: Arc<Mutex<Status>>,
+        wake: Sender<Command>,
     ) -> Self {
         Self {
             recorder,
@@ -268,6 +283,7 @@ impl Machine {
             store,
             config,
             output,
+            wake,
             status: Status::default(),
             session: None,
             target: None,
@@ -283,7 +299,13 @@ impl Machine {
         self.begin();
         self.publish();
         loop {
-            match commands.recv_timeout(TICK) {
+            // Nothing wakes the worker while it is idle: it sleeps until a command or a thread
+            // wakes it, or until a failed session is due to be tried again.
+            let received = match self.retry_at {
+                Some(due) => commands.recv_timeout(due.saturating_duration_since(Instant::now())),
+                None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Stop) => {
@@ -294,8 +316,8 @@ impl Machine {
                     log::info(text::RECORDING_STOPPED);
                 }
                 Ok(Command::Save) => self.save(),
+                Ok(Command::Wake | Command::Publish) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {}
             }
             self.poll();
             self.publish();
@@ -359,6 +381,10 @@ impl Machine {
 
     fn start_session(&mut self, target: Target) {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
+        let wake = self.wake.clone();
+        live.on_stream(move || {
+            let _ = wake.send(Command::Wake);
+        });
         let stop = Arc::new(AtomicBool::new(false));
         let (recorder, config, session_target, session_live, session_stop) = (
             self.recorder,
@@ -367,9 +393,14 @@ impl Machine {
             Arc::clone(&live),
             Arc::clone(&stop),
         );
+        let wake = self.wake.clone();
         let spawned = thread::Builder::new()
             .name("capture".to_owned())
-            .spawn(move || recorder(&config, &session_target, &session_live, &session_stop));
+            .spawn(move || {
+                let ended = recorder(&config, &session_target, &session_live, &session_stop);
+                let _ = wake.send(Command::Wake);
+                ended
+            });
 
         self.retry_at = None;
         self.sample = None;
@@ -493,13 +524,16 @@ impl Machine {
 
         let seconds = clip.seconds();
         let directory = self.config.clip_directory();
+        let wake = self.wake.clone();
         let spawned = thread::Builder::new()
             .name("save".to_owned())
             .spawn(move || {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                replay::save(&clip, &directory)
+                let saved = replay::save(&clip, &directory);
+                let _ = wake.send(Command::Wake);
+                saved
             });
         match spawned {
             Ok(join) => {
@@ -551,25 +585,33 @@ impl Machine {
 
         let now = Instant::now();
         let (encoded, fresh) = live.as_ref().map_or((0, 0), |live| live.counters());
-        (self.status.encode_rate, self.status.fresh_rate) = match (&self.sample, running) {
-            (Some(previous), true) => {
-                let elapsed = now.duration_since(previous.at).as_secs_f64();
-                if elapsed > 0.0 {
-                    (
-                        Some((encoded - previous.encoded) as f64 / elapsed),
-                        Some((fresh - previous.fresh) as f64 / elapsed),
-                    )
-                } else {
-                    (self.status.encode_rate, self.status.fresh_rate)
+        let previous = self
+            .sample
+            .as_ref()
+            .map(|sample| (sample.at, sample.encoded, sample.fresh));
+        match previous {
+            Some((at, encoded_before, fresh_before)) if running => {
+                // A publish soon after the last one keeps its rates: a short span measures noise.
+                let elapsed = now.duration_since(at).as_secs_f64();
+                if elapsed >= MIN_RATE_SPAN {
+                    self.status.encode_rate = Some((encoded - encoded_before) as f64 / elapsed);
+                    self.status.fresh_rate = Some((fresh - fresh_before) as f64 / elapsed);
+                    self.sample = Some(Sample {
+                        at: now,
+                        encoded,
+                        fresh,
+                    });
                 }
             }
-            _ => (None, None),
-        };
-        self.sample = running.then_some(Sample {
-            at: now,
-            encoded,
-            fresh,
-        });
+            _ => {
+                (self.status.encode_rate, self.status.fresh_rate) = (None, None);
+                self.sample = running.then_some(Sample {
+                    at: now,
+                    encoded,
+                    fresh,
+                });
+            }
+        }
 
         *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
     }
@@ -659,6 +701,8 @@ mod tests {
     fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            // Like the window's status timer: figures that grow without an event need a request.
+            worker.refresh();
             let status = worker.status();
             if done(&status) {
                 return status;

@@ -55,6 +55,8 @@ pub(crate) struct Live {
     encoded: AtomicU64,
     /// Frames that brought new screen content.
     fresh: AtomicU64,
+    /// Called once the stream is recorded, so the owner learns of it without polling.
+    on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// What a save writes: the stream and the packets buffered when it was requested.
@@ -83,12 +85,22 @@ impl Live {
             stream: OnceLock::new(),
             encoded: AtomicU64::new(0),
             fresh: AtomicU64::new(0),
+            on_stream: OnceLock::new(),
         }
+    }
+
+    /// Runs `callback` when the stream is recorded; it runs on the capture thread.
+    pub(crate) fn on_stream(&self, callback: impl Fn() + Send + Sync + 'static) {
+        let _ = self.on_stream.set(Box::new(callback));
     }
 
     /// Records the stream's shape once the encoder is configured.
     pub(crate) fn set_stream(&self, stream: Stream) {
-        let _ = self.stream.set(stream);
+        if self.stream.set(stream).is_ok()
+            && let Some(callback) = self.on_stream.get()
+        {
+            callback();
+        }
     }
 
     pub(crate) fn stream(&self) -> Option<Stream> {

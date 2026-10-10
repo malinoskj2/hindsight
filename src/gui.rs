@@ -33,11 +33,6 @@ mod text;
 
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
-/// Looks at the foreground window once a second as well as on every change: an app that was
-/// already in front when it went full screen changes nothing the hook reports. The look is a
-/// handful of system calls.
-const FOREGROUND_TIMER: usize = 2;
-const FOREGROUND_INTERVAL_MS: u32 = 1000;
 /// Resource id of the icon embedded by `build.rs`.
 const ICON_RESOURCE: u16 = 1;
 
@@ -190,13 +185,9 @@ impl Main {
 
         let me = self.clone();
         self.wnd.on().wm_timer(STATUS_TIMER, move || {
+            // The worker publishes what it asked for; the figures shown are from the last one.
+            me.shared.borrow().worker.refresh();
             me.refresh();
-            Ok(())
-        });
-
-        let me = self.clone();
-        self.wnd.on().wm_timer(FOREGROUND_TIMER, move || {
-            me.watch_foreground();
             Ok(())
         });
 
@@ -287,10 +278,6 @@ impl Main {
             log::warning(text::FOREGROUND_WATCH_FAILED);
         }
         self.shared.borrow_mut().foreground_hook = hook;
-        let _ = self
-            .wnd
-            .hwnd()
-            .SetTimer(FOREGROUND_TIMER, FOREGROUND_INTERVAL_MS, None);
         self.watch_foreground();
 
         let me = self.clone();
