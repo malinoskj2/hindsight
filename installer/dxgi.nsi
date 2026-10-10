@@ -13,6 +13,7 @@ SetCompressor /SOLID lzma
 !define MUI_FINISHPAGE_RUN_TEXT "Launch dxgi now"
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchApplication
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "..\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -40,6 +41,7 @@ Section "dxgi"
   SetOutPath "$INSTDIR"
   File "..\dist\dxgi.exe"
   File "..\dist\README.md"
+  File "..\dist\LICENSE"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateDirectory "$SMPROGRAMS\dxgi"
@@ -69,6 +71,7 @@ Section "Uninstall"
 
   Delete "$INSTDIR\dxgi.exe"
   Delete "$INSTDIR\README.md"
+  Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

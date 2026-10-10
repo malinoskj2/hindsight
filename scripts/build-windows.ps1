@@ -10,7 +10,7 @@ if (Test-Path dist) { Remove-Item dist -Recurse -Force }
 New-Item -ItemType Directory -Force dist | Out-Null
 
 Copy-Item target\x86_64-pc-windows-msvc\release\dxgi.exe dist\
-Copy-Item README.md dist\
+Copy-Item README.md, LICENSE dist\
 
 if (!$SkipInstaller) {
     # Locate NSIS via PATH, standard installation directories, or Chocolatey.
