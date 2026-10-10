@@ -8,7 +8,7 @@ use crate::{
     service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
-        hotkey, startup,
+        hotkey, instance, startup,
         tray::{Tray, TrayAction},
         window,
     },
@@ -113,6 +113,8 @@ impl Main {
         let width = WINDOW_WIDTH + skin.extra_width();
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: APP_NAME,
+            // A later launch finds this window by its class and asks it to come forward.
+            class_name: instance::WINDOW_CLASS,
             size: gui::dpi(width, WINDOW_HEIGHT),
             class_icon: gui::Icon::Id(ICON_RESOURCE),
             style: co::WS::CAPTION
@@ -214,6 +216,13 @@ impl Main {
             if message.wparam == hotkey::SAVE_HOTKEY_ID.unsigned_abs() as usize {
                 me.save();
             }
+            Ok(0)
+        });
+
+        // Another launch of the app: this window is the one to show.
+        let me = self.clone();
+        self.wnd.on().wm(instance::show_message(), move |_| {
+            me.show();
             Ok(0)
         });
 

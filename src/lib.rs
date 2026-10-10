@@ -37,7 +37,26 @@ pub fn run() -> Result<()> {
         log::today()
     ));
 
-    gui::run(startup(), tray)
+    let startup = startup();
+    // Only one copy runs at a time: a later launch brings the running one forward and leaves.
+    if let Err(error) = &startup
+        && already_running(error)
+        && sys::instance::show_running()
+    {
+        return Ok(());
+    }
+    gui::run(startup, tray)
+}
+
+/// Whether startup failed only because another copy holds the state lock.
+#[cfg(windows)]
+fn already_running(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<storage::StorageError>(),
+            Some(storage::StorageError::Locked)
+        )
+    })
 }
 
 /// Opens the state and log file, loads the configuration and starts the recording worker.
@@ -61,4 +80,21 @@ fn startup() -> Result<(service::Worker, config::Config)> {
 #[cfg(not(windows))]
 pub fn run() -> Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_held_lock_counts_as_another_copy_running() {
+        let locked: Result<()> =
+            Err(storage::StorageError::Locked).context("open application state");
+        assert!(already_running(&locked.unwrap_err()));
+
+        let other: Result<()> =
+            Err(storage::StorageError::Oversized).context("open application state");
+        assert!(!already_running(&other.unwrap_err()));
+        assert!(!already_running(&anyhow::anyhow!("load configuration")));
+    }
 }
