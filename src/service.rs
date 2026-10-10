@@ -485,6 +485,7 @@ impl Machine {
         let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
             log::warning(text::NOTHING_TO_SAVE);
             self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
+            sys::sound::failed();
             return;
         };
 
@@ -513,9 +514,16 @@ impl Machine {
                 log::info(text::saved(saving.seconds, &path));
                 self.status.last_clip = Some(path);
                 self.status.error = None;
+                sys::sound::saved();
             }
-            Ok(Err(error)) => self.report_error(text::save_failed(error)),
-            Err(_) => self.report_error(text::save_failed(text::SAVE_PANICKED)),
+            Ok(Err(error)) => {
+                self.report_error(text::save_failed(error));
+                sys::sound::failed();
+            }
+            Err(_) => {
+                self.report_error(text::save_failed(text::SAVE_PANICKED));
+                sys::sound::failed();
+            }
         }
     }
 

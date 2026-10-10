@@ -9,6 +9,7 @@ pub(crate) mod hotkey;
 pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod nvfbc_key;
+pub(crate) mod sound;
 #[cfg(windows)]
 pub(crate) mod startup;
 #[cfg_attr(windows, expect(unsafe_code))]
