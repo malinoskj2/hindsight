@@ -3,7 +3,7 @@
 //! which full-screen app is in front, and reads its status once a second.
 
 use crate::{
-    config::{Config, Mode},
+    config::{Backend, Config, Mode},
     log,
     replay::{self, Live, SaveError, Stream},
     storage::Store,
@@ -113,6 +113,8 @@ pub(crate) struct Status {
     pub(crate) recording: bool,
     /// What the current or latest session captures.
     pub(crate) source: Option<String>,
+    /// The capture backend of the current or latest session.
+    pub(crate) backend: Option<Backend>,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
     /// Frames per second with new screen content, over the last refresh.
@@ -538,6 +540,7 @@ impl Machine {
         }
         self.status.recording = running;
         self.status.source = self.target.as_ref().map(|target| target.name().to_owned());
+        self.status.backend = running.then_some(self.config.backend);
         self.status.stream = stream;
         self.status.bitrate_mbps = self.config.bitrate_mbps;
         self.status.saving = self.saving.is_some();

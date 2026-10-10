@@ -17,6 +17,7 @@ pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_STARTUP: &str = "Startup";
 
 pub(super) const SOURCE: &str = "Source";
+pub(super) const CAPTURE: &str = "Capture";
 pub(super) const ENCODER: &str = "Encoder";
 pub(super) const CAPTURE_RATE: &str = "Frame rate";
 pub(super) const BUFFERED: &str = "Buffered";
@@ -95,6 +96,12 @@ pub(super) fn status(state: DisplayStatus) -> String {
 
 pub(super) fn source(status: &Status) -> String {
     status.source.clone().unwrap_or_else(|| NO_VALUE.to_owned())
+}
+
+pub(super) fn capture(status: &Status) -> String {
+    status
+        .backend
+        .map_or_else(|| NO_VALUE.to_owned(), |backend| backend.to_string())
 }
 
 pub(super) fn encoder(status: &Status) -> String {

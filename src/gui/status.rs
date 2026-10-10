@@ -25,6 +25,7 @@ pub(super) struct StatusPage {
     recording_group: ExpandableGroup,
     state: TintedLabel,
     source: gui::Label,
+    backend: gui::Label,
     encoder: gui::Label,
     rates: gui::Label,
     buffered: gui::Label,
@@ -42,30 +43,32 @@ impl StatusPage {
         let caption = |text, y| label(&page, text, INNER_X, y, VALUE_X - INNER_X, 1);
 
         // Compact; the group adds two lines for the notice label when needed.
-        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 126);
+        let recording_frame = Frame::new(&page, text::GROUP_RECORDING, 6, 146);
         let state = TintedLabel::new(&page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
         let _source_caption = caption(text::SOURCE, 48);
         let source = path_label(&page, VALUE_X, 48, VALUE_WIDTH);
-        let _encoder_caption = caption(text::ENCODER, 68);
-        let encoder = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
-        let _rates_caption = caption(text::CAPTURE_RATE, 88);
-        let rates = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
-        let _buffered_caption = caption(text::BUFFERED, 108);
-        let buffered = label(&page, "", VALUE_X, 108, VALUE_WIDTH, 1);
-        let notice = TintedLabel::new(&page, INNER_X, 130, INNER_WIDTH, 2, AMBER);
+        let _capture_caption = caption(text::CAPTURE, 68);
+        let backend = label(&page, "", VALUE_X, 68, VALUE_WIDTH, 1);
+        let _encoder_caption = caption(text::ENCODER, 88);
+        let encoder = label(&page, "", VALUE_X, 88, VALUE_WIDTH, 1);
+        let _rates_caption = caption(text::CAPTURE_RATE, 108);
+        let rates = label(&page, "", VALUE_X, 108, VALUE_WIDTH, 1);
+        let _buffered_caption = caption(text::BUFFERED, 128);
+        let buffered = label(&page, "", VALUE_X, 128, VALUE_WIDTH, 1);
+        let notice = TintedLabel::new(&page, INNER_X, 150, INNER_WIDTH, 2, AMBER);
 
-        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 138, 100);
-        let last_clip_caption = caption(text::LAST_CLIP, 158);
-        let last_clip = path_label(&page, VALUE_X, 158, VALUE_WIDTH);
-        let folder_caption = caption(text::CLIP_FOLDER, 178);
-        let folder = path_label(&page, VALUE_X, 178, VALUE_WIDTH);
-        let save = button(&page, text::SAVE_REPLAY, INNER_X, 204, 120);
-        let hotkey_hint = label(&page, "", INNER_X + 128, 209, 140, 1);
+        let clips_frame = Frame::new(&page, text::GROUP_CLIPS, 158, 100);
+        let last_clip_caption = caption(text::LAST_CLIP, 178);
+        let last_clip = path_label(&page, VALUE_X, 178, VALUE_WIDTH);
+        let folder_caption = caption(text::CLIP_FOLDER, 198);
+        let folder = path_label(&page, VALUE_X, 198, VALUE_WIDTH);
+        let save = button(&page, text::SAVE_REPLAY, INNER_X, 224, 120);
+        let hotkey_hint = label(&page, "", INNER_X + 128, 229, 140, 1);
         let recording = button(
             &page,
             text::STOP_RECORDING,
             INNER_X + INNER_WIDTH - 120,
-            204,
+            224,
             120,
         );
 
@@ -107,6 +110,7 @@ impl StatusPage {
             recording_group,
             state,
             source,
+            backend,
             encoder,
             rates,
             buffered,
@@ -149,6 +153,7 @@ impl StatusPage {
 
         self.state.set_text(&text::status(status.state));
         layout::set_text(&self.source, &text::source(status));
+        layout::set_text(&self.backend, &text::capture(status));
         layout::set_text(&self.encoder, &text::encoder(status));
         layout::set_text(&self.rates, &text::rates(status));
         layout::set_text(&self.buffered, &text::buffered(status));
