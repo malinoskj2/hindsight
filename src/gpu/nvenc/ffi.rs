@@ -100,6 +100,9 @@ pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 
 /// `NV_ENC_RC_PARAMS` flag: rate control looks ahead (and holds frames back).
 pub(super) const RC_ENABLE_LOOKAHEAD: u32 = 1 << 5;
+/// `NV_ENC_RC_PARAMS` flag: temporal adaptive quantization, a compute pass on the GPU's
+/// shader cores rather than the encoder, which a game would feel.
+pub(super) const RC_ENABLE_TEMPORAL_AQ: u32 = 1 << 8;
 /// `NV_ENC_CONFIG_H264` flag: SPS and PPS before every IDR frame.
 pub(super) const H264_REPEAT_SPS_PPS: u32 = 1 << 12;
 /// `NV_ENC_CONFIG_HEVC` flags and fields.

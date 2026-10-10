@@ -343,6 +343,8 @@ impl Encoder {
         let mut config = preset.config;
         configure(&mut config, settings);
 
+        // The zeroed flags leave weighted prediction off: like lookahead, it is a compute pass
+        // on the shader cores.
         let mut params = ffi::InitializeParams::zeroed();
         params.version = ffi::INITIALIZE_PARAMS_VER;
         params.encode_guid = codec;
@@ -727,9 +729,9 @@ const fn codec_guid(codec: Codec) -> GUID {
 }
 
 /// Adapts the preset's configuration: one keyframe per second, no B-frames, single-pass VBR
-/// without lookahead (frames leave the encoder in order, one per input), 8-bit 4:2:0 with
-/// BT.709 signalled, and the sequence header repeated on every keyframe so any of them can start
-/// a clip.
+/// without lookahead or temporal AQ (frames leave the encoder in order, one per input, and
+/// nothing runs on the shader cores), 8-bit 4:2:0 with BT.709 signalled, and the sequence
+/// header repeated on every keyframe so any of them can start a clip.
 fn configure(config: &mut ffi::Config, settings: Settings) {
     let gop = settings.frame_rate * GOP_SECONDS;
     config.gop_length = gop;
@@ -738,7 +740,7 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
     config.rc.average_bit_rate = settings.bitrate;
     // Peak 1.5× the average; halving first keeps the product within `u32`.
     config.rc.max_bit_rate = settings.bitrate / 2 * 3;
-    config.rc.flags &= !ffi::RC_ENABLE_LOOKAHEAD;
+    config.rc.flags &= !(ffi::RC_ENABLE_LOOKAHEAD | ffi::RC_ENABLE_TEMPORAL_AQ);
     config.rc.multi_pass = ffi::MULTI_PASS_DISABLED;
 
     match settings.codec {

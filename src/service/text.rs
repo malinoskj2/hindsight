@@ -54,6 +54,10 @@ pub(super) fn saved(seconds: f64, path: &Path) -> String {
     format!("Saved a {seconds:.1} s clip to {}", path.display())
 }
 
+pub(super) fn background_save_failed(error: impl Display) -> String {
+    format!("The clip is being written at normal priority; background mode was refused: {error}")
+}
+
 pub(super) fn save_failed(error: impl Display) -> String {
     format!("Could not save the clip: {error}")
 }

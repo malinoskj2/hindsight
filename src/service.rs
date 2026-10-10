@@ -7,6 +7,7 @@ use crate::{
     log,
     replay::{self, Live, SaveError, Stream},
     storage::Store,
+    sys,
 };
 use anyhow::Result;
 use std::{
@@ -357,7 +358,12 @@ impl Machine {
         let directory = self.config.clip_directory();
         let spawned = thread::Builder::new()
             .name("save".to_owned())
-            .spawn(move || replay::save(&clip, &directory));
+            .spawn(move || {
+                if let Err(error) = sys::thread::enter_background_mode() {
+                    log::warning(text::background_save_failed(error));
+                }
+                replay::save(&clip, &directory)
+            });
         match spawned {
             Ok(join) => {
                 self.saving = Some(Saving { seconds, join });

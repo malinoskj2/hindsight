@@ -1,6 +1,7 @@
-//! Scheduling for the capture thread and the process: the thread wakes on time, Windows does not
-//! slow the process down as background work, and the GPU scheduler serves its small copies
-//! ahead of a game's rendering, the way `NvFBC`-based capture runs inside the driver.
+//! Scheduling for the capture thread and the process: the thread wakes on time and ahead of a
+//! game's threads, Windows does not slow the process down as background work, and the GPU
+//! scheduler serves its small copies ahead of a game's rendering, the way `NvFBC`-based capture
+//! runs inside the driver.
 
 use windows::{
     Win32::{
@@ -8,8 +9,9 @@ use windows::{
         System::{
             LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
             Threading::{
-                GetCurrentProcess, GetCurrentThread, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-                PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+                AvSetMmThreadPriority, GetCurrentProcess, GetCurrentThread,
+                PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
                 PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
                 ProcessPowerThrottling, SetProcessInformation, SetThreadPriority,
                 THREAD_PRIORITY_HIGHEST,
@@ -25,7 +27,30 @@ const SCHEDULING_HIGH: i32 = 4;
 
 type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTSTATUS;
 
-/// Raises the calling thread's CPU priority.
+/// The calling thread's membership of the multimedia "Capture" scheduling class, which the
+/// Multimedia Class Scheduler runs in the real-time priority range, above any game thread.
+/// Reverted when dropped.
+pub(super) struct MultimediaThread(HANDLE);
+
+pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread> {
+    let mut index = 0;
+    // SAFETY: registers the calling thread with a built-in task name; the index is written.
+    let handle = unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &raw mut index) }?;
+    let joined = MultimediaThread(handle);
+    // SAFETY: the handle was just issued for this thread.
+    unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) }?;
+    Ok(joined)
+}
+
+impl Drop for MultimediaThread {
+    fn drop(&mut self) {
+        // SAFETY: reverts the registration this handle stands for.
+        let _ = unsafe { AvRevertMmThreadCharacteristics(self.0) };
+    }
+}
+
+/// Raises the calling thread's CPU priority; the fallback when the multimedia class is
+/// unavailable (its service is disabled).
 pub(super) fn raise_thread() -> windows::core::Result<()> {
     // SAFETY: changes the priority of the calling thread only.
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }

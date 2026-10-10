@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Records the primary monitor into `live` until `stop` is set, the display changes size or
 /// something fails.
 pub(crate) fn record(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
-    prepare_thread();
+    let _scheduling = prepare_thread();
     match run(config, live, stop) {
         Err(error) if is_permanent(&error) => Ok(Ended::Unsupported(format!("{error:#}"))),
         result => result,
@@ -78,11 +78,19 @@ fn run(config: &Config, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         frame_rate: settings.frame_rate,
     });
 
+    // NVENC reports the picture type it chose. Parsing the bitstream instead costs about
+    // 100 µs per frame for H.264 and HEVC, most of the CPU budget, so it is used only until
+    // the driver has shown that it flags keyframes, which the first one does within a second.
+    let mut driver_flags_keyframes = false;
     let mut output = |encoded: Encoded| {
-        // Parsing the bitstream is the authority for all three codecs, whatever the driver
-        // reports; the driver's IDR flag is a cheap fast path that skips the parse on most
-        // keyframes.
-        let keyframe = encoded.is_idr() || replay::is_keyframe(settings.codec, &encoded.data);
+        let keyframe = if encoded.is_idr() {
+            driver_flags_keyframes = true;
+            true
+        } else if driver_flags_keyframes {
+            false
+        } else {
+            replay::is_keyframe(settings.codec, &encoded.data)
+        };
         live.push(
             Packet {
                 index: encoded.index,
@@ -125,13 +133,23 @@ const fn encodable((width, height): (u32, u32)) -> (u32, u32) {
     (width & !1, height & !1)
 }
 
-fn prepare_thread() {
+/// Returns the thread's multimedia-class membership, which lasts as long as the session.
+fn prepare_thread() -> Option<priority::MultimediaThread> {
     capture::join_apartment();
-    if let Err(error) = priority::raise_thread() {
-        log::warning(format!(
-            "The capture thread priority was not raised: {error}"
-        ));
-    }
+    let multimedia = match priority::join_multimedia_class() {
+        Ok(multimedia) => Some(multimedia),
+        Err(error) => {
+            log::warning(format!(
+                "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
+            ));
+            if let Err(error) = priority::raise_thread() {
+                log::warning(format!(
+                    "The capture thread priority was not raised: {error}"
+                ));
+            }
+            None
+        }
+    };
     if let Err(error) = priority::opt_out_of_throttling() {
         log::warning(format!(
             "Windows power throttling could not be turned off: {error}"
@@ -141,6 +159,7 @@ fn prepare_thread() {
         Some(class) => log::info(format!("GPU scheduling priority: {class}")),
         None => log::warning("The GPU scheduling priority could not be raised"),
     }
+    multimedia
 }
 
 #[cfg(test)]
