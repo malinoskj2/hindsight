@@ -2,6 +2,7 @@
 
 ![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4)
 ![NVIDIA NVENC](https://img.shields.io/badge/NVIDIA-NVENC-76B900)
+![BSD-2-Clause license](https://img.shields.io/badge/license-BSD--2--Clause-555555)
 
 **Instant replay for Windows, captured and encoded on the GPU.**  
 dxgi keeps the last stretch of your screen in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. The aim is the same cost to your game as Instant Replay: well under 1% of one CPU core and no measurable frame-rate loss.
@@ -67,3 +68,7 @@ cargo build --release
 ```
 
 The capture and encoding code is Windows-only; everything else (the replay buffer, the MP4 writer for all three codecs, settings, hotkeys) builds and tests on any platform with `cargo test`. The MP4 writer is tested against real H.264, HEVC and AV1 encoder output in `tests/fixtures`.
+
+## License
+
+[BSD 2-Clause](LICENSE).

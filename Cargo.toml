@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 description = "Instant replay for Windows, captured and encoded on the GPU"
 repository = "https://github.com/malinoskj2/dxgi"
+license = "BSD-2-Clause"
 publish = false
 
 [dependencies]
