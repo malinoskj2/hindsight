@@ -38,6 +38,68 @@ pub(crate) struct Totals {
     pub(crate) saved_bytes: u64,
 }
 
+/// The state directory, locked against other instances for as long as the store is open.
+#[derive(Debug)]
+pub(crate) struct Store {
+    root: PathBuf,
+    /// Held only to keep the instance lock; closing the file releases it.
+    _lock: File,
+}
+
+impl Store {
+    /// Opens the store in the state directory, which `LOCALAPPDATA` must name.
+    pub(crate) fn open() -> Result<Self, StorageError> {
+        if std::env::var_os(STATE_DIRECTORY_ENV).is_none() {
+            return Err(StorageError::NoDirectory);
+        }
+        Self::at(state_directory())
+    }
+
+    /// Opens the store in `root`, creating the directory if it is missing.
+    pub(crate) fn at(root: PathBuf) -> Result<Self, StorageError> {
+        fs::create_dir_all(&root)?;
+        let lock = lock_instance(&root)?;
+        Ok(Self { root, _lock: lock })
+    }
+
+    /// The saved settings, or the defaults if none are saved yet.
+    pub(crate) fn load_config(&self) -> Result<Config, StorageError> {
+        Ok(self.read(CONFIG_FILE)?.unwrap_or_default())
+    }
+
+    /// Replaces the saved settings with `config`.
+    pub(crate) fn save_config(&self, config: &Config) -> Result<(), StorageError> {
+        self.write(CONFIG_FILE, config)
+    }
+
+    /// The saved totals, or zeros if none are saved yet.
+    pub(crate) fn load_totals(&self) -> Result<Totals, StorageError> {
+        Ok(self.read(TOTALS_FILE)?.unwrap_or_default())
+    }
+
+    /// Replaces the saved totals with `totals`.
+    pub(crate) fn save_totals(&self, totals: Totals) -> Result<(), StorageError> {
+        self.write(TOTALS_FILE, &totals)
+    }
+
+    /// The state file `name`, or `None` if there is none yet.
+    fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, StorageError> {
+        let Some(file) = open_if_present(&self.root.join(name))? else {
+            return Ok(None);
+        };
+        let bytes = read_capped(file)?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    /// Replaces the state file `name` with `value`.
+    fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StorageError> {
+        let bytes = within_cap(serde_json::to_vec_pretty(value)?)?;
+        write_atomically(&self.root.join(name), &bytes)?;
+        Ok(())
+    }
+}
+
+/// Why the application state could not be opened, read or written.
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
     #[error("state I/O: {0}")]
@@ -52,13 +114,6 @@ pub(crate) enum StorageError {
     NoDirectory,
 }
 
-#[derive(Debug)]
-pub(crate) struct Store {
-    root: PathBuf,
-    /// Held only to keep the instance lock; closing the file releases it.
-    _lock: File,
-}
-
 /// The application state directory (`%LOCALAPPDATA%\Hindsight`). Without `LOCALAPPDATA` the
 /// temporary directory stands in, so paths can still be formed; [`Store::open`] reports the
 /// missing variable as an error instead.
@@ -66,55 +121,6 @@ pub(crate) fn state_directory() -> PathBuf {
     std::env::var_os(STATE_DIRECTORY_ENV)
         .map_or_else(std::env::temp_dir, PathBuf::from)
         .join(STATE_DIRECTORY)
-}
-
-impl Store {
-    pub(crate) fn open() -> Result<Self, StorageError> {
-        if std::env::var_os(STATE_DIRECTORY_ENV).is_none() {
-            return Err(StorageError::NoDirectory);
-        }
-        Self::at(state_directory())
-    }
-
-    pub(crate) fn at(root: PathBuf) -> Result<Self, StorageError> {
-        fs::create_dir_all(&root)?;
-        let lock = lock_instance(&root)?;
-        Ok(Self { root, _lock: lock })
-    }
-
-    pub(crate) fn load_config(&self) -> Result<Config, StorageError> {
-        Ok(self.read(CONFIG_FILE)?.unwrap_or_default())
-    }
-
-    pub(crate) fn save_config(&self, config: &Config) -> Result<(), StorageError> {
-        self.write(CONFIG_FILE, config)
-    }
-
-    pub(crate) fn load_totals(&self) -> Result<Totals, StorageError> {
-        Ok(self.read(TOTALS_FILE)?.unwrap_or_default())
-    }
-
-    pub(crate) fn save_totals(&self, totals: Totals) -> Result<(), StorageError> {
-        self.write(TOTALS_FILE, &totals)
-    }
-
-    fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, StorageError> {
-        let Some(file) = open_if_present(&self.root.join(name))? else {
-            return Ok(None);
-        };
-        let bytes = read_capped(file)?;
-        Ok(Some(serde_json::from_slice(&bytes)?))
-    }
-
-    fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StorageError> {
-        let bytes = serde_json::to_vec_pretty(value)?;
-        if bytes.len() > MAX_STATE_BYTES {
-            return Err(StorageError::Oversized);
-        }
-
-        atomic_write(&self.root.join(name), &bytes)?;
-        Ok(())
-    }
 }
 
 /// Opens `root`'s instance lock file and locks it exclusively, failing with
@@ -145,6 +151,11 @@ fn read_capped(file: File) -> Result<Vec<u8>, StorageError> {
     let mut bytes = Vec::new();
     file.take(MAX_STATE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
+    within_cap(bytes)
+}
+
+/// `bytes` as they are, or [`StorageError::Oversized`] if they pass the cap.
+fn within_cap(bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
     if bytes.len() > MAX_STATE_BYTES {
         return Err(StorageError::Oversized);
     }
@@ -153,7 +164,7 @@ fn read_capped(file: File) -> Result<Vec<u8>, StorageError> {
 
 /// Replaces the file at `path` with `bytes` by way of a synced `.pending` file, so a crash
 /// leaves either the old contents or the new.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(PENDING_EXTENSION);
     let mut file = File::create(&temporary)?;
     file.write_all(bytes)?;

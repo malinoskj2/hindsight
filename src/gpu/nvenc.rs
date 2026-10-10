@@ -43,6 +43,7 @@ const ENCODE_TIMEOUT_MS: u32 = 2000;
 /// within this many frames of the requested length.
 const GOP_FRAMES: u32 = 30;
 
+/// Why the encoder could not open, or stopped encoding.
 #[derive(Debug, Error)]
 pub(crate) enum NvencError {
     #[error("nvEncodeAPI64.dll was not found; install or update the NVIDIA driver")]
@@ -110,6 +111,27 @@ impl Encoded {
     }
 }
 
+/// An NVENC encode session and its ring of [`SLOTS`] slots.
+pub(super) struct Encoder {
+    api: Box<ffi::FunctionList>,
+    session: ffi::Session,
+    settings: Settings,
+    slots: Vec<Slot>,
+    /// Slots submitted and not yet collected, oldest first.
+    queue: VecDeque<usize>,
+    /// The slot the next frame goes into.
+    next: usize,
+    /// The slot of the newest submitted frame, whose texture holds the latest picture.
+    latest: Option<usize>,
+    /// The device's lock, held around calls that touch its resources: the capture frame pool
+    /// works on the same device from its own threads.
+    device_lock: ID3D11Multithread,
+    /// NVENC stopped answering; teardown does not wait for it again.
+    stalled: bool,
+    /// Declared last, so it is freed after everything else the encoder holds.
+    library: Owned<HMODULE>,
+}
+
 /// A submitted frame, which keeps its slot's input mapped until it is collected.
 struct Frame {
     index: u64,
@@ -134,26 +156,6 @@ enum Wait {
     Poll,
     /// Wait up to [`ENCODE_TIMEOUT_MS`], then consider NVENC stalled.
     Block,
-}
-
-pub(super) struct Encoder {
-    api: Box<ffi::FunctionList>,
-    session: ffi::Session,
-    settings: Settings,
-    slots: Vec<Slot>,
-    /// Slots submitted and not yet collected, oldest first.
-    queue: VecDeque<usize>,
-    /// The slot the next frame goes into.
-    next: usize,
-    /// The slot of the newest submitted frame, whose texture holds the latest picture.
-    latest: Option<usize>,
-    /// The device's lock, held around calls that touch its resources: the capture frame pool
-    /// works on the same device from its own threads.
-    device_lock: ID3D11Multithread,
-    /// NVENC stopped answering; teardown does not wait for it again.
-    stalled: bool,
-    /// Declared last, so it is freed after everything else the encoder holds.
-    library: Owned<HMODULE>,
 }
 
 /// Holds the device lock while it lives.
@@ -206,6 +208,7 @@ impl Encoder {
         Ok(encoder)
     }
 
+    /// The settings the encoder was opened with.
     pub(super) const fn settings(&self) -> Settings {
         self.settings
     }
@@ -265,6 +268,7 @@ impl Encoder {
         error
     }
 
+    /// Fails when this GPU's NVENC has no encoder for the codec.
     fn require_codec(&self) -> Result<(), NvencError> {
         let count_guids = entry_point(self.api.get_encode_guid_count, "nvEncGetEncodeGUIDCount")?;
         let list_guids = entry_point(self.api.get_encode_guids, "nvEncGetEncodeGUIDs")?;
@@ -310,11 +314,12 @@ impl Encoder {
         Ok(())
     }
 
+    /// The value the codec's encoder reports for `capability`.
     fn capability(&self, capability: u32) -> Result<u32, NvencError> {
-        let get_caps = entry_point(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
         let mut query = ffi::CapsParam::zeroed();
         query.version = ffi::CAPS_PARAM_VER;
         query.caps_to_query = capability;
+        let get_caps = entry_point(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
         let mut value = 0;
         // SAFETY: a versioned query structure and one integer to write.
         self.check("nvEncGetEncodeCaps", unsafe {
@@ -581,6 +586,8 @@ impl Encoder {
         }
     }
 
+    /// Copies the completed frame out of the output buffer of `slot`, with the picture type
+    /// NVENC chose for it.
     fn read_bitstream(&self, slot: usize) -> Result<(u32, Box<[u8]>), NvencError> {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
@@ -607,6 +614,7 @@ impl Encoder {
         Ok((lock.picture_type, data))
     }
 
+    /// Undoes a successful [`map_input`](Self::map_input).
     fn unmap(&self, mapped: ffi::Mapped) {
         if let Some(unmap) = self.api.unmap_input_resource {
             // SAFETY: `mapped` came from a successful map that has not been undone.
@@ -614,48 +622,7 @@ impl Encoder {
         }
     }
 
-    /// Ends the stream so the driver releases what it holds for it.
-    fn end_of_stream(&self) {
-        let (Some(encode), Some(slot)) = (self.api.encode_picture, self.slots.first()) else {
-            return;
-        };
-        let mut picture = ffi::PicParams::zeroed();
-        picture.version = ffi::PIC_PARAMS_VER;
-        picture.encode_pic_flags = ffi::PIC_FLAG_EOS;
-        picture.completion_event = slot.event.0;
-        // SAFETY: an end-of-stream picture carries no buffers; its event is signalled once the
-        // driver has flushed.
-        if unsafe { encode(self.session, &raw mut picture) } == Status::SUCCESS {
-            // SAFETY: the slot's event is open.
-            let _ = unsafe { WaitForSingleObject(*slot.event, ENCODE_TIMEOUT_MS) };
-        }
-    }
-
-    fn release_slot(&self, slot: &Slot) {
-        if let Some(frame) = &slot.in_flight {
-            self.unmap(frame.mapped);
-        }
-        if let Some(unregister_event) = self.api.unregister_async_event {
-            let mut event = ffi::EventParams::zeroed();
-            event.version = ffi::EVENT_PARAMS_VER;
-            event.completion_event = slot.event.0;
-            // SAFETY: unregistering an event that is not registered is reported, not fatal.
-            let _ = unsafe { unregister_event(self.session, &raw mut event) };
-        }
-        if !slot.bitstream.is_null()
-            && let Some(destroy) = self.api.destroy_bitstream_buffer
-        {
-            // SAFETY: the buffer is unlocked and no longer in flight.
-            let _ = unsafe { destroy(self.session, slot.bitstream) };
-        }
-        if !slot.registered.is_null()
-            && let Some(unregister) = self.api.unregister_resource
-        {
-            // SAFETY: the resource is unmapped.
-            let _ = unsafe { unregister(self.session, slot.registered) };
-        }
-    }
-
+    /// Turns the `status` of `call` into an error that carries the session's description of it.
     fn check(&self, call: &'static str, status: Status) -> Result<(), NvencError> {
         if status == Status::SUCCESS {
             return Ok(());
@@ -696,6 +663,50 @@ impl Encoder {
             let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
         }
     }
+
+    /// Ends the stream so the driver releases what it holds for it.
+    fn end_of_stream(&self) {
+        let (Some(encode), Some(slot)) = (self.api.encode_picture, self.slots.first()) else {
+            return;
+        };
+        let mut picture = ffi::PicParams::zeroed();
+        picture.version = ffi::PIC_PARAMS_VER;
+        picture.encode_pic_flags = ffi::PIC_FLAG_EOS;
+        picture.completion_event = slot.event.0;
+        // SAFETY: an end-of-stream picture carries no buffers; its event is signalled once the
+        // driver has flushed.
+        if unsafe { encode(self.session, &raw mut picture) } == Status::SUCCESS {
+            // SAFETY: the slot's event is open.
+            let _ = unsafe { WaitForSingleObject(*slot.event, ENCODE_TIMEOUT_MS) };
+        }
+    }
+
+    /// Undoes [`prepare_slot`](Self::prepare_slot) in reverse, after unmapping the input of a
+    /// frame still in flight; each step is skipped when its part was never created.
+    fn release_slot(&self, slot: &Slot) {
+        if let Some(frame) = &slot.in_flight {
+            self.unmap(frame.mapped);
+        }
+        if let Some(unregister_event) = self.api.unregister_async_event {
+            let mut params = ffi::EventParams::zeroed();
+            params.version = ffi::EVENT_PARAMS_VER;
+            params.completion_event = slot.event.0;
+            // SAFETY: unregistering an event that is not registered is reported, not fatal.
+            let _ = unsafe { unregister_event(self.session, &raw mut params) };
+        }
+        if !slot.bitstream.is_null()
+            && let Some(destroy) = self.api.destroy_bitstream_buffer
+        {
+            // SAFETY: the buffer is unlocked and no longer in flight.
+            let _ = unsafe { destroy(self.session, slot.bitstream) };
+        }
+        if !slot.registered.is_null()
+            && let Some(unregister) = self.api.unregister_resource
+        {
+            // SAFETY: the resource is unmapped.
+            let _ = unsafe { unregister(self.session, slot.registered) };
+        }
+    }
 }
 
 impl Drop for Encoder {
@@ -723,6 +734,7 @@ impl Drop for Encoder {
     }
 }
 
+/// Loads the NVENC library the driver installs.
 fn load_library() -> Result<Owned<HMODULE>, NvencError> {
     // The driver installs the library in System32; never look anywhere a planted copy could be.
     // SAFETY: loads a system library by name.
@@ -758,6 +770,127 @@ fn resolve_exports(
         )
     };
     Ok((max_version, create_instance))
+}
+
+/// The function list entry for `call`, which a driver may leave empty.
+fn entry_point<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError> {
+    entry.ok_or(NvencError::MissingEntryPoint(call))
+}
+
+/// The GUID NVENC names the encoder for `codec` by.
+const fn codec_guid(codec: Codec) -> GUID {
+    match codec {
+        Codec::H264 => ffi::CODEC_H264,
+        Codec::Hevc => ffi::CODEC_HEVC,
+        Codec::Av1 => ffi::CODEC_AV1,
+    }
+}
+
+/// The profile `codec` is encoded in: High for H.264, Main for HEVC and AV1.
+const fn profile_guid(codec: Codec) -> GUID {
+    match codec {
+        Codec::H264 => ffi::PROFILE_H264_HIGH,
+        Codec::Hevc => ffi::PROFILE_HEVC_MAIN,
+        Codec::Av1 => ffi::PROFILE_AV1_MAIN,
+    }
+}
+
+/// Adapts the preset's configuration the way NVIDIA's Instant Replay sets up its encoder: the
+/// codec's [profile](profile_guid), a keyframe every 30 frames, no B-frames, and the rate
+/// control of [`configure_rate_control`]. Each codec's own settings make the picture 8-bit
+/// 4:2:0 with BT.709 signalled, and repeat the sequence header on every keyframe so any of them
+/// can start a clip.
+fn configure(config: &mut ffi::Config, settings: Settings) {
+    config.profile_guid = profile_guid(settings.codec);
+    config.gop_length = GOP_FRAMES;
+    // Every frame after a keyframe is a P-frame: no B-frames.
+    config.frame_interval_p = 1;
+    configure_rate_control(&mut config.rc, settings.bitrate);
+    match settings.codec {
+        // SAFETY: the preset filled the union member for the configured codec.
+        Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }),
+        // SAFETY: the preset filled the union member for the configured codec.
+        Codec::Hevc => configure_hevc(unsafe { &mut config.codec.hevc }),
+        // SAFETY: the preset filled the union member for the configured codec.
+        Codec::Av1 => configure_av1(unsafe { &mut config.codec.av1 }),
+    }
+}
+
+/// Sets single-pass VBR averaging `bitrate` and peaking at twice that, with a buffer of the
+/// same size, and no rate-control extras (lookahead, adaptive quantization): frames leave the
+/// encoder in order, one per input, and nothing runs on the shader cores.
+fn configure_rate_control(rc: &mut ffi::RcParams, bitrate: u32) {
+    rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
+    rc.average_bit_rate = bitrate;
+    rc.max_bit_rate = bitrate.saturating_mul(2);
+    rc.vbv_buffer_size = rc.max_bit_rate;
+    rc.flags = 0;
+    rc.multi_pass = ffi::MULTI_PASS_DISABLED;
+}
+
+/// Makes H.264 4:2:0 with limited-range BT.709 signalled, an IDR on every keyframe and the
+/// parameter sets repeated before each.
+fn configure_h264(h264: &mut ffi::H264Config) {
+    h264.flags |= ffi::H264_REPEAT_SPS_PPS;
+    h264.idr_period = GOP_FRAMES;
+    h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
+    h264.vui.signal_bt709();
+}
+
+/// Makes HEVC 8-bit 4:2:0 with limited-range BT.709 signalled, an IDR on every keyframe and the
+/// parameter sets repeated before each, held to 16×16 to 32×32 coding units, which keeps the
+/// encoder fast.
+fn configure_hevc(hevc: &mut ffi::HevcConfig) {
+    hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
+    hevc.flags |=
+        ffi::HEVC_REPEAT_SPS_PPS | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
+    hevc.idr_period = GOP_FRAMES;
+    hevc.min_cu_size = ffi::HEVC_CU_SIZE_16;
+    hevc.max_cu_size = ffi::HEVC_CU_SIZE_32;
+    hevc.vui.signal_bt709();
+}
+
+/// Makes AV1 8-bit 4:2:0 with limited-range BT.709 signalled, a key frame on every keyframe and
+/// the sequence header repeated before each, held to 16×16 to 32×32 partitions, which keeps the
+/// encoder fast. The stream is plain low-overhead OBUs, without Annex B framing or the optional
+/// timing, decoder model and frame id fields.
+fn configure_av1(av1: &mut ffi::Av1Config) {
+    av1.flags &= !(ffi::AV1_ANNEX_B
+        | ffi::AV1_TIMING_INFO
+        | ffi::AV1_DECODER_MODEL_INFO
+        | ffi::AV1_FRAME_ID_NUMBERS
+        | ffi::AV1_DISABLE_SEQUENCE_HEADER
+        | ffi::AV1_CHROMA_FORMAT_MASK
+        | ffi::AV1_BIT_DEPTH_MASK);
+    av1.flags |=
+        ffi::AV1_REPEAT_SEQUENCE_HEADER | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
+    av1.idr_period = GOP_FRAMES;
+    av1.min_part_size = ffi::AV1_PART_SIZE_16;
+    av1.max_part_size = ffi::AV1_PART_SIZE_32;
+    av1.signal_bt709();
+}
+
+/// The session parameters for encoding `settings` with `config`, which they point to and which
+/// must therefore stay in place until the session is initialized. The zeroed flags leave
+/// weighted prediction off: like lookahead, it is a compute pass on the shader cores.
+fn initialize_params(settings: Settings, config: &mut ffi::Config) -> ffi::InitializeParams {
+    let mut params = ffi::InitializeParams::zeroed();
+    params.version = ffi::INITIALIZE_PARAMS_VER;
+    params.encode_guid = codec_guid(settings.codec);
+    params.preset_guid = ffi::PRESET_P4;
+    params.encode_width = settings.width;
+    params.encode_height = settings.height;
+    params.dar_width = settings.width;
+    params.dar_height = settings.height;
+    params.frame_rate_num = settings.frame_rate;
+    params.frame_rate_den = 1;
+    params.enable_encode_async = 1;
+    params.enable_ptd = 1;
+    params.encode_config = &raw mut *config;
+    params.max_encode_width = settings.width;
+    params.max_encode_height = settings.height;
+    params.tuning_info = ffi::TUNING_HIGH_QUALITY;
+    params
 }
 
 /// Creates a BGRA texture of the encoded size for the capture to draw a frame into.
@@ -797,34 +930,8 @@ fn create_event() -> Result<Owned<HANDLE>, NvencError> {
     Ok(unsafe { Owned::new(event) })
 }
 
-/// The session parameters for encoding `settings` with `config`, which they point to and which
-/// must therefore stay in place until the session is initialized. The zeroed flags leave
-/// weighted prediction off: like lookahead, it is a compute pass on the shader cores.
-fn initialize_params(settings: Settings, config: &mut ffi::Config) -> ffi::InitializeParams {
-    let mut params = ffi::InitializeParams::zeroed();
-    params.version = ffi::INITIALIZE_PARAMS_VER;
-    params.encode_guid = codec_guid(settings.codec);
-    params.preset_guid = ffi::PRESET_P4;
-    params.encode_width = settings.width;
-    params.encode_height = settings.height;
-    params.dar_width = settings.width;
-    params.dar_height = settings.height;
-    params.frame_rate_num = settings.frame_rate;
-    params.frame_rate_den = 1;
-    params.enable_encode_async = 1;
-    params.enable_ptd = 1;
-    params.encode_config = &raw mut *config;
-    params.max_encode_width = settings.width;
-    params.max_encode_height = settings.height;
-    params.tuning_info = ffi::TUNING_HIGH_QUALITY;
-    params
-}
-
-/// The function list entry for `call`, which a driver may leave empty.
-fn entry_point<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError> {
-    entry.ok_or(NvencError::MissingEntryPoint(call))
-}
-
+/// The error for `call` failing with `status`; a rejected structure version means the driver
+/// is too old for these structures, whatever the call.
 fn call_error(call: &'static str, status: Status, detail: String) -> NvencError {
     if status == Status::INVALID_VERSION {
         return NvencError::VersionRejected;
@@ -834,96 +941,4 @@ fn call_error(call: &'static str, status: Status, detail: String) -> NvencError 
         status,
         detail,
     }
-}
-
-const fn codec_guid(codec: Codec) -> GUID {
-    match codec {
-        Codec::H264 => ffi::CODEC_H264,
-        Codec::Hevc => ffi::CODEC_HEVC,
-        Codec::Av1 => ffi::CODEC_AV1,
-    }
-}
-
-/// Adapts the preset's configuration the way NVIDIA's Instant Replay sets up its encoder: a
-/// keyframe every 30 frames, no B-frames, and the rate control of [`configure_rate_control`].
-/// Each codec's own settings make the picture 8-bit 4:2:0 with BT.709 signalled, and repeat the
-/// sequence header on every keyframe so any of them can start a clip.
-fn configure(config: &mut ffi::Config, settings: Settings) {
-    config.gop_length = GOP_FRAMES;
-    // Every frame after a keyframe is a P-frame: no B-frames.
-    config.frame_interval_p = 1;
-    configure_rate_control(&mut config.rc, settings.bitrate);
-    match settings.codec {
-        Codec::H264 => {
-            config.profile_guid = ffi::PROFILE_H264_HIGH;
-            // SAFETY: the preset filled the union member for the configured codec.
-            configure_h264(unsafe { &mut config.codec.h264 });
-        }
-        Codec::Hevc => {
-            config.profile_guid = ffi::PROFILE_HEVC_MAIN;
-            // SAFETY: the preset filled the union member for the configured codec.
-            configure_hevc(unsafe { &mut config.codec.hevc });
-        }
-        Codec::Av1 => {
-            config.profile_guid = ffi::PROFILE_AV1_MAIN;
-            // SAFETY: the preset filled the union member for the configured codec.
-            configure_av1(unsafe { &mut config.codec.av1 });
-        }
-    }
-}
-
-/// Sets single-pass VBR averaging `bitrate` and peaking at twice that, with a buffer of the
-/// same size, and no rate-control extras (lookahead, adaptive quantization): frames leave the
-/// encoder in order, one per input, and nothing runs on the shader cores.
-fn configure_rate_control(rc: &mut ffi::RcParams, bitrate: u32) {
-    rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
-    rc.average_bit_rate = bitrate;
-    rc.max_bit_rate = bitrate.saturating_mul(2);
-    rc.vbv_buffer_size = rc.max_bit_rate;
-    rc.flags = 0;
-    rc.multi_pass = ffi::MULTI_PASS_DISABLED;
-}
-
-/// Makes H.264 4:2:0 with BT.709 signalled, an IDR on every keyframe and the parameter sets
-/// repeated before each.
-fn configure_h264(h264: &mut ffi::H264Config) {
-    h264.flags |= ffi::H264_REPEAT_SPS_PPS;
-    h264.idr_period = GOP_FRAMES;
-    h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
-    h264.vui.signal_bt709();
-}
-
-/// Makes HEVC 8-bit 4:2:0 with BT.709 signalled, an IDR on every keyframe and the parameter
-/// sets repeated before each, held to 16×16 to 32×32 coding units, which keeps the encoder
-/// fast.
-fn configure_hevc(hevc: &mut ffi::HevcConfig) {
-    hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
-    hevc.flags |=
-        ffi::HEVC_REPEAT_SPS_PPS | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
-    hevc.idr_period = GOP_FRAMES;
-    hevc.min_cu_size = ffi::HEVC_CU_SIZE_16;
-    hevc.max_cu_size = ffi::HEVC_CU_SIZE_32;
-    hevc.vui.signal_bt709();
-}
-
-/// Makes AV1 a low-overhead OBU stream of 8-bit 4:2:0 with limited-range BT.709 signalled, a
-/// key frame on every keyframe and the sequence header repeated before each, held to 16×16 to
-/// 32×32 partitions, which keeps the encoder fast.
-fn configure_av1(av1: &mut ffi::Av1Config) {
-    av1.flags &= !(ffi::AV1_ANNEX_B
-        | ffi::AV1_TIMING_INFO
-        | ffi::AV1_DECODER_MODEL_INFO
-        | ffi::AV1_FRAME_ID_NUMBERS
-        | ffi::AV1_DISABLE_SEQUENCE_HEADER
-        | ffi::AV1_CHROMA_FORMAT_MASK
-        | ffi::AV1_BIT_DEPTH_MASK);
-    av1.flags |=
-        ffi::AV1_REPEAT_SEQUENCE_HEADER | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
-    av1.idr_period = GOP_FRAMES;
-    av1.min_part_size = ffi::AV1_PART_SIZE_16;
-    av1.max_part_size = ffi::AV1_PART_SIZE_32;
-    av1.color_primaries = ffi::BT709;
-    av1.transfer_characteristics = ffi::BT709;
-    av1.matrix_coefficients = ffi::BT709;
-    av1.color_range = ffi::LIMITED_RANGE;
 }

@@ -16,6 +16,7 @@ use winreg::{
 pub(crate) const MAX_BYTES: usize = 256;
 /// The number of `0x`-prefixed dwords accepted as a key.
 const DWORD_COUNT: usize = 4;
+/// The registry value the key is kept in, under `app_key`.
 const VALUE_NAME: &str = "NvFBCKey";
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -53,6 +54,30 @@ pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     parse_hex(text)
 }
 
+/// The digits after a `0x` or `0X` prefix, if the token has one.
+fn strip_hex_prefix(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+}
+
+/// The key's bytes from `DWORD_COUNT` dwords, each written `0x` followed by 1 to 8 digits.
+fn parse_dwords(tokens: &[&str]) -> Result<Vec<u8>, ParseError> {
+    if tokens.len() != DWORD_COUNT {
+        return Err(ParseError::DwordCount);
+    }
+    let mut key = Vec::with_capacity(DWORD_COUNT * size_of::<u32>());
+    for token in tokens {
+        let digits = strip_hex_prefix(token)
+            .filter(|digits| (1..=8).contains(&digits.len()))
+            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or(ParseError::NotDword)?;
+        let value = u32::from_str_radix(digits, 16).map_err(|_| ParseError::NotDword)?;
+        key.extend_from_slice(&value.to_be_bytes());
+    }
+    Ok(key)
+}
+
 /// The key's bytes from hexadecimal digits, two per byte, with whitespace ignored.
 fn parse_hex(text: &str) -> Result<Vec<u8>, ParseError> {
     let digits = text
@@ -76,30 +101,6 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, ParseError> {
     }
     let (pairs, _) = digits.as_chunks::<2>();
     Ok(pairs.iter().map(|[high, low]| (high << 4) | low).collect())
-}
-
-/// The digits after a `0x` or `0X` prefix, if the token has one.
-fn strip_hex_prefix(token: &str) -> Option<&str> {
-    token
-        .strip_prefix("0x")
-        .or_else(|| token.strip_prefix("0X"))
-}
-
-/// The key's bytes from `DWORD_COUNT` dwords, each written `0x` followed by 1 to 8 digits.
-fn parse_dwords(tokens: &[&str]) -> Result<Vec<u8>, ParseError> {
-    if tokens.len() != DWORD_COUNT {
-        return Err(ParseError::DwordCount);
-    }
-    let mut key = Vec::with_capacity(DWORD_COUNT * size_of::<u32>());
-    for token in tokens {
-        let digits = strip_hex_prefix(token)
-            .filter(|digits| (1..=8).contains(&digits.len()))
-            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .ok_or(ParseError::NotDword)?;
-        let value = u32::from_str_radix(digits, 16).map_err(|_| ParseError::NotDword)?;
-        key.extend_from_slice(&value.to_be_bytes());
-    }
-    Ok(key)
 }
 
 /// The key in the spelling `parse` reads.
@@ -127,6 +128,7 @@ pub(crate) fn load() -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+/// Saves the key, replacing the one entered before.
 pub(crate) fn save(key: &[u8]) -> io::Result<()> {
     let (app, _) = RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey_with_flags(app_key(), KEY_READ | KEY_WRITE)?;
@@ -186,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn formatting_round_trips() {
+    fn formatted_keys_read_back_the_same() {
         let key = [0x00, 0x7F, 0x80, 0xFF];
         assert_eq!(format(&key), "007f80ff");
         assert_eq!(parse(&format(&key)), Ok(key.to_vec()));

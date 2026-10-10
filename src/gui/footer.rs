@@ -3,10 +3,9 @@
 
 use super::{
     TAB_HEIGHT,
-    layout::{self, BLACK, GRAY, MARGIN, WINDOW_WIDTH, label, set_text, show},
-    theme::{Skin, Surface},
+    layout::{self, MARGIN, WINDOW_WIDTH, label},
 };
-use winsafe::{gui, prelude::*};
+use winsafe::gui;
 
 /// Height of the row, in logical pixels.
 pub(super) const HEIGHT: i32 = 30;
@@ -17,42 +16,26 @@ pub(super) struct Footer {
 }
 
 impl Footer {
-    pub(super) fn new(wnd: &gui::WindowMain, skin: &Skin) -> Self {
+    pub(super) fn new(wnd: &gui::WindowMain) -> Self {
         let y = MARGIN + TAB_HEIGHT + 6;
-        let footer = Self {
+        Self {
             hint: label(wnd, "", MARGIN + 2, y, WINDOW_WIDTH - 2 * MARGIN, 1),
-        };
-        // The hint is muted; the window has no other labels.
-        let colours = footer.clone();
-        layout::draw(
-            wnd,
-            wnd.on(),
-            Vec::new(),
-            skin,
-            Surface::Dialog,
-            move |hwnd| {
-                if *hwnd == *colours.hint.hwnd() {
-                    GRAY
-                } else {
-                    BLACK
-                }
-            },
-        );
-        footer
+        }
     }
 
-    /// Hides the row until it has something to say; only possible once the controls exist.
-    pub(super) fn on_create(&self) {
-        show(&self.hint, false);
-    }
-
-    /// The row's one control, which moves when the tab grows.
+    /// The row's one control, which moves when the tab grows and is drawn muted.
     pub(super) fn control(&self) -> &gui::Label {
         &self.hint
     }
 
+    /// Hides the row until it has something to say; only possible once the controls exist.
+    pub(super) fn on_create(&self) {
+        layout::show(&self.hint, false);
+    }
+
+    /// Shows the row with `message` in it.
     pub(super) fn show_hint(&self, message: &str) {
-        set_text(&self.hint, message);
-        show(&self.hint, true);
+        layout::set_text(&self.hint, message);
+        layout::show(&self.hint, true);
     }
 }

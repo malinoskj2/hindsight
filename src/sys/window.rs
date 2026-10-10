@@ -5,6 +5,7 @@ use winsafe::{self as w, co};
 
 /// The caption colour of an ordinary light-theme dialog.
 const CAPTION: w::COLORREF = w::COLORREF::from_rgb(0xF3, 0xF3, 0xF3);
+/// The caption text colour of an ordinary light-theme dialog.
 const CAPTION_TEXT: w::COLORREF = w::COLORREF::from_rgb(0x00, 0x00, 0x00);
 
 /// Applies the dialog title bar to the window.

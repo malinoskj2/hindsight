@@ -12,6 +12,7 @@ use std::{
     mem::{offset_of, size_of},
 };
 
+/// `NVFBC_DLL_VERSION`, which every structure's version carries.
 const DLL_VERSION: u32 = 0x70;
 
 /// `NVFBC_STRUCT_VERSION`: the size, the structure's own version and the library version.
@@ -35,7 +36,7 @@ const _: () = assert!(TODX9VID_GRAB_FRAME_PARAMS_VER == 0x7001_0100);
 
 /// `NVFBC_TO_DX9_VID`: capture into Direct3D 9 surfaces in video memory.
 pub(super) const TO_DX9_VID: u32 = 0x2003;
-/// `NVFBC_STATE_ENABLE`.
+/// `NVFBC_STATE_ENABLE`: turn NvFBC on in the driver.
 pub(super) const STATE_ENABLE: u32 = 1;
 /// `NVFBC_TODX9VID_ARGB`: 32-bit words with blue in the low byte, `D3DFMT_A8R8G8B8`.
 pub(super) const TODX9VID_ARGB: u32 = 0;
@@ -127,8 +128,11 @@ pub(super) unsafe trait Zeroed: Sized {
     }
 }
 
+/// `NvFBC_GetStatusEx`.
 pub(super) type GetStatusEx = unsafe extern "system" fn(*mut StatusEx) -> Status;
+/// `NvFBC_CreateEx`.
 pub(super) type CreateEx = unsafe extern "system" fn(*mut CreateParams) -> Status;
+/// `NvFBC_Enable`.
 pub(super) type Enable = unsafe extern "system" fn(u32) -> Status;
 
 /// `NvFBCStatusEx`.

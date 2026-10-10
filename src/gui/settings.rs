@@ -18,9 +18,9 @@ use crate::{
     sys::startup,
 };
 use std::{cell::Cell, rc::Rc};
-use winsafe::{co, gui, prelude::*};
+use winsafe::{self as w, co, gui, prelude::*};
 
-/// Height the Startup group gains while it shows a Run-key error line.
+/// Height the General group gains while it shows a Run-key error line.
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
 /// Where the second column of fields starts.
 const COLUMN_X: i32 = INNER_X + 204;
@@ -35,24 +35,24 @@ const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 pub(super) struct SettingsPage {
     page: gui::TabPage,
     frames: Vec<Frame>,
-    mode: gui::ComboBox,
-    pub(super) backend: gui::ComboBox,
-    pub(super) theme: gui::ComboBox,
-    /// The capture choice last settled on, restored when the NvFBC key is not given.
-    settled_backend: Rc<Cell<Backend>>,
+    /// The General group; it grows while the Run-key error label has something to show.
+    general_group: ExpandableGroup,
     codec: gui::ComboBox,
     frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
     bitrate: gui::Edit,
     _spins: [gui::UpDown; 3],
     hotkey: gui::Edit,
+    mode: gui::ComboBox,
+    pub(super) backend: gui::ComboBox,
     folder: gui::Edit,
     estimate: gui::Label,
     pub(super) apply: gui::Button,
     settings_error: gui::Label,
+    pub(super) theme: gui::ComboBox,
     pub(super) start_with_windows: gui::CheckBox,
-    /// The Startup group; it grows while the error label has something to show.
-    startup: ExpandableGroup,
+    /// The capture choice last settled on, restored when the NvFBC key is not given.
+    settled_backend: Rc<Cell<Backend>>,
 }
 
 impl SettingsPage {
@@ -63,106 +63,49 @@ impl SettingsPage {
         skin: &Skin,
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
-
-        let recording_group = Frame::new(&page, text::GROUP_RECORDING_SETTINGS, 6, 214);
-        let codec = choice_field(
-            &page,
-            text::CODEC,
-            INNER_X,
-            26,
-            90,
-            &Codec::ALL.map(Codec::name),
-            index_of(&Codec::ALL, config.codec),
-        );
-        let (frame_rate, frame_rate_spin) = number_field(
-            &page,
-            text::FRAME_RATE,
-            COLUMN_X,
-            26,
-            (MIN_FRAME_RATE, MAX_FRAME_RATE),
-            config.frame_rate,
-        );
-        let (buffer_seconds, buffer_spin) = number_field(
-            &page,
-            text::BUFFER_SECONDS,
-            INNER_X,
-            54,
-            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
-            config.buffer_seconds,
-        );
-        let (bitrate, bitrate_spin) = number_field(
-            &page,
-            text::BITRATE,
-            COLUMN_X,
-            54,
-            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
-            config.bitrate_mbps,
-        );
-        let hotkey = text_field(&page, text::HOTKEY, 82, 110, &config.hotkey);
-        let (mode, backend) = source_fields(&page, config);
-        let folder = text_field(
-            &page,
-            text::FOLDER,
-            138,
-            INNER_WIDTH - FIELD_OFFSET,
-            &config.clip_directory().display().to_string(),
-        );
-        let estimate = label(&page, "", INNER_X, 164, INNER_WIDTH, 1);
-        let apply = button(&page, text::APPLY, INNER_X, 182, BUTTON_WIDTH);
-        skin_button(&apply, skin, ButtonRole::Primary);
-        // The error line starts just right of the button.
-        let error_x = BUTTON_WIDTH + 8;
-        let settings_error = label(&page, "", INNER_X + error_x, 180, INNER_WIDTH - error_x, 2);
-
-        let startup = startup_controls(&page, config, start_with_windows);
-        let frames = vec![recording_group, startup.frame];
-
-        // The error lines are red and the estimate muted; every other label is black.
-        let errors = [settings_error.clone(), startup.error];
-        let muted = estimate.clone();
+        let recording = RecordingControls::new(&page, config, skin);
+        let general = GeneralControls::new(&page, config, start_with_windows);
+        let frames = vec![recording.frame, general.frame];
         layout::draw(
             &page,
             page.on(),
             frames.clone(),
             skin,
             Surface::Page,
-            move |hwnd| {
-                if errors.iter().any(|error| *error.hwnd() == *hwnd) {
-                    RED
-                } else if *muted.hwnd() == *hwnd {
-                    GRAY
-                } else {
-                    BLACK
-                }
-            },
+            label_colours(
+                [recording.error.clone(), general.error],
+                recording.estimate.clone(),
+            ),
         );
 
         Self {
             page,
             frames,
-            mode,
-            backend,
-            theme: startup.theme,
+            general_group: general.group,
+            codec: recording.codec,
+            frame_rate: recording.frame_rate,
+            buffer_seconds: recording.buffer_seconds,
+            bitrate: recording.bitrate,
+            _spins: recording.spins,
+            hotkey: recording.hotkey,
+            mode: recording.mode,
+            backend: recording.backend,
+            folder: recording.folder,
+            estimate: recording.estimate,
+            apply: recording.apply,
+            settings_error: recording.error,
+            theme: general.theme,
+            start_with_windows: general.check_box,
             settled_backend: Rc::new(Cell::new(config.backend)),
-            codec,
-            frame_rate,
-            buffer_seconds,
-            bitrate,
-            _spins: [frame_rate_spin, buffer_spin, bitrate_spin],
-            hotkey,
-            folder,
-            estimate,
-            apply,
-            settings_error,
-            start_with_windows: startup.check_box,
-            startup: startup.group,
         }
     }
 
+    /// The tab page the controls sit on.
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
     }
 
+    /// The page's groups, top to bottom.
     pub(super) fn frames(&self) -> &[Frame] {
         &self.frames
     }
@@ -170,50 +113,18 @@ impl SettingsPage {
     /// Finishes the parts that need the controls to exist.
     pub(super) fn on_create(&self) {
         layout::fit_titles(&self.frames);
-        self.startup.on_create();
+        self.general_group.on_create();
         self.update_estimate();
     }
 
     /// The extra height the page currently needs for its expanded group, in logical pixels.
     pub(super) fn extra(&self) -> i32 {
-        self.startup.extra()
+        self.general_group.extra()
     }
 
     /// The configuration as currently entered, or the problem with it.
     pub(super) fn configuration(&self) -> Result<Config, String> {
-        let required =
-            |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
-        let mode = chosen(&self.mode, &Mode::ALL);
-        let backend = chosen(&self.backend, &Backend::ALL);
-        let codec = chosen(&self.codec, &Codec::ALL);
-        let theme = chosen(&self.theme, &Theme::ALL);
-        let hotkey = self.hotkey.text().unwrap_or_default();
-        let folder = self.folder.text().unwrap_or_default();
-        let folder = folder.trim();
-        let default_folder = config::default_clip_directory().display().to_string();
-
-        let mut config = Config {
-            mode,
-            backend,
-            codec,
-            frame_rate: required(&self.frame_rate)?,
-            buffer_seconds: required(&self.buffer_seconds)?,
-            bitrate_mbps: required(&self.bitrate)?,
-            hotkey: hotkey.trim().to_owned(),
-            clip_directory: if folder == default_folder {
-                String::new()
-            } else {
-                folder.to_owned()
-            },
-            theme,
-        };
-        config.validate().map_err(|error| error.to_string())?;
-        // Stored in its canonical spelling, as the Status tab shows it.
-        config.hotkey = config
-            .parsed_hotkey()
-            .map_err(|error| error.to_string())?
-            .to_string();
-        Ok(config)
+        validated(self.entered()?)
     }
 
     /// The capture backend the drop-down list shows.
@@ -272,7 +183,7 @@ impl SettingsPage {
     }
 
     /// Writes the Start-with-Windows choice to the Run key, undoing the tick when that fails,
-    /// and reports whether the Startup group changed height.
+    /// and reports whether the General group changed height.
     pub(super) fn toggle_startup(&self) -> bool {
         let wanted = self.start_with_windows.is_checked();
         match startup::set(wanted) {
@@ -293,16 +204,125 @@ impl SettingsPage {
         }
     }
 
-    /// The Startup group stays compact until a Run-key error needs its extra line; reports
+    /// The General group stays compact until a Run-key error needs its extra line; reports
     /// whether its height changed, so the caller refits the window.
     pub(super) fn show_startup_error(&self, message: Option<&str>) -> bool {
-        self.startup.set_message(message)
+        self.general_group.set_message(message)
+    }
+
+    /// The fields read back as a configuration, not yet validated, or the problem when a
+    /// numeric field does not hold a whole number.
+    fn entered(&self) -> Result<Config, String> {
+        let required =
+            |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
+        let hotkey = self.hotkey.text().unwrap_or_default();
+        let folder = self.folder.text().unwrap_or_default();
+        Ok(Config {
+            mode: chosen(&self.mode, &Mode::ALL),
+            backend: chosen(&self.backend, &Backend::ALL),
+            codec: chosen(&self.codec, &Codec::ALL),
+            frame_rate: required(&self.frame_rate)?,
+            buffer_seconds: required(&self.buffer_seconds)?,
+            bitrate_mbps: required(&self.bitrate)?,
+            hotkey: hotkey.trim().to_owned(),
+            clip_directory: stored_folder(folder.trim()),
+            theme: chosen(&self.theme, &Theme::ALL),
+        })
     }
 }
 
-/// The controls of the group titled "General": the theme, and the Start-with-Windows entry
-/// with the line that reports a Run-key error.
-struct StartupControls {
+/// The Recording group: the encoding, source and clip fields, the memory estimate, and the
+/// Apply button with the line that reports a problem with them.
+struct RecordingControls {
+    frame: Frame,
+    codec: gui::ComboBox,
+    frame_rate: gui::Edit,
+    buffer_seconds: gui::Edit,
+    bitrate: gui::Edit,
+    spins: [gui::UpDown; 3],
+    hotkey: gui::Edit,
+    mode: gui::ComboBox,
+    backend: gui::ComboBox,
+    folder: gui::Edit,
+    estimate: gui::Label,
+    apply: gui::Button,
+    error: gui::Label,
+}
+
+impl RecordingControls {
+    /// Lays out the Recording group on `page`, filled in from `config`, its button in the look
+    /// of `skin`.
+    fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
+        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 214);
+        let codec = choice_field(
+            page,
+            text::CODEC,
+            INNER_X,
+            26,
+            90,
+            &Codec::ALL.map(Codec::name),
+            index_of(&Codec::ALL, config.codec),
+        );
+        let (frame_rate, frame_rate_spin) = number_field(
+            page,
+            text::FRAME_RATE,
+            COLUMN_X,
+            26,
+            (MIN_FRAME_RATE, MAX_FRAME_RATE),
+            config.frame_rate,
+        );
+        let (buffer_seconds, buffer_spin) = number_field(
+            page,
+            text::BUFFER_SECONDS,
+            INNER_X,
+            54,
+            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
+            config.buffer_seconds,
+        );
+        let (bitrate, bitrate_spin) = number_field(
+            page,
+            text::BITRATE,
+            COLUMN_X,
+            54,
+            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
+            config.bitrate_mbps,
+        );
+        let hotkey = text_field(page, text::HOTKEY, 82, 110, &config.hotkey);
+        let (mode, backend) = source_fields(page, config);
+        let folder = text_field(
+            page,
+            text::FOLDER,
+            138,
+            INNER_WIDTH - FIELD_OFFSET,
+            &config.clip_directory().display().to_string(),
+        );
+        let estimate = label(page, "", INNER_X, 164, INNER_WIDTH, 1);
+        let apply = button(page, text::APPLY, INNER_X, 182, BUTTON_WIDTH);
+        skin_button(&apply, skin, ButtonRole::Primary);
+        // The error line starts just right of the button.
+        let error_x = BUTTON_WIDTH + 8;
+        let error = label(page, "", INNER_X + error_x, 180, INNER_WIDTH - error_x, 2);
+        Self {
+            frame,
+            codec,
+            frame_rate,
+            buffer_seconds,
+            bitrate,
+            spins: [frame_rate_spin, buffer_spin, bitrate_spin],
+            hotkey,
+            mode,
+            backend,
+            folder,
+            estimate,
+            apply,
+            error,
+        }
+    }
+}
+
+/// The General group: the theme, and the Start-with-Windows entry with the line that reports a
+/// Run-key error.
+struct GeneralControls {
     frame: Frame,
     theme: gui::ComboBox,
     check_box: gui::CheckBox,
@@ -310,81 +330,85 @@ struct StartupControls {
     group: ExpandableGroup,
 }
 
-fn startup_controls(
-    page: &gui::TabPage,
-    config: &Config,
-    start_with_windows: bool,
-) -> StartupControls {
-    // Compact; the group adds a line for the error label when one occurs.
-    let startup_group = Frame::new(page, text::GROUP_GENERAL, 220, 72);
-    let theme = choice_field(
-        page,
-        text::THEME,
-        INNER_X,
-        240,
-        190,
-        &Theme::ALL.map(Theme::name),
-        index_of(&Theme::ALL, config.theme),
-    );
-    let start_with_windows = gui::CheckBox::new(
-        page,
-        gui::CheckBoxOpts {
-            text: text::START_WITH_WINDOWS,
-            position: gui::dpi(INNER_X, 268),
-            // Wide enough for the label in any font, rather than measured once at creation.
-            size: gui::dpi(INNER_WIDTH, LINE),
-            check_state: if start_with_windows {
-                co::BST::CHECKED
-            } else {
-                co::BST::UNCHECKED
+impl GeneralControls {
+    /// Lays out the General group on `page`, filled in from `config` and the Run key's state.
+    fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
+        // Compact; the group adds a line for the error label when one occurs.
+        let frame = Frame::new(page, text::GROUP_GENERAL, 220, 72);
+        let theme = choice_field(
+            page,
+            text::THEME,
+            INNER_X,
+            240,
+            190,
+            &Theme::ALL.map(Theme::name),
+            index_of(&Theme::ALL, config.theme),
+        );
+        let check_box = gui::CheckBox::new(
+            page,
+            gui::CheckBoxOpts {
+                text: text::START_WITH_WINDOWS,
+                position: gui::dpi(INNER_X, 268),
+                // Wide enough for the label in any font, rather than measured once at creation.
+                size: gui::dpi(INNER_WIDTH, LINE),
+                check_state: if start_with_windows {
+                    co::BST::CHECKED
+                } else {
+                    co::BST::UNCHECKED
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        },
-    );
-    let startup_error = label(page, "", INNER_X, 290, INNER_WIDTH, 1);
-    let group = ExpandableGroup::new(
-        startup_group.clone(),
-        startup_error.clone(),
-        STARTUP_ERROR_EXTRA,
-    );
-    StartupControls {
-        frame: startup_group,
-        theme,
-        check_box: start_with_windows,
-        error: startup_error,
-        group,
+        );
+        let error = label(page, "", INNER_X, 290, INNER_WIDTH, 1);
+        let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
+        Self {
+            frame,
+            theme,
+            check_box,
+            error,
+            group,
+        }
     }
 }
 
-/// The drop-down lists of what is recorded and how it is captured.
-fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::ComboBox) {
-    let mode = choice_field(
-        page,
-        text::MODE,
-        COLUMN_X,
-        82,
-        INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
-        &Mode::ALL.map(Mode::name),
-        index_of(&Mode::ALL, config.mode),
-    );
-    let backend = choice_field(
-        page,
-        text::BACKEND,
-        INNER_X,
-        110,
-        INNER_WIDTH - FIELD_OFFSET,
-        &Backend::ALL.map(Backend::name),
-        index_of(&Backend::ALL, config.backend),
-    );
-    (mode, backend)
+/// The colour of each label on the page: the `errors` lines are red and the `muted` estimate
+/// gray; every other label is black.
+fn label_colours(
+    errors: [gui::Label; 2],
+    muted: gui::Label,
+) -> impl Fn(&w::HWND) -> w::COLORREF + 'static {
+    move |hwnd| {
+        if errors.iter().any(|error| *hwnd == *error.hwnd()) {
+            RED
+        } else if *hwnd == *muted.hwnd() {
+            GRAY
+        } else {
+            BLACK
+        }
+    }
 }
 
-/// The whole number in `field`, if it holds one.
-fn number(field: &gui::Edit) -> Option<u32> {
-    field
-        .text()
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
+/// A caption and a drop-down list of `items`, with the one at `selected` chosen.
+fn choice_field(
+    page: &gui::TabPage,
+    caption: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    items: &[&str],
+    selected: Option<u32>,
+) -> gui::ComboBox {
+    field_caption(page, caption, x, y);
+    gui::ComboBox::new(
+        page,
+        gui::ComboBoxOpts {
+            position: gui::dpi(x + FIELD_OFFSET, y),
+            width: gui::dpi_x(width),
+            items,
+            selected_item: selected,
+            ..Default::default()
+        },
+    )
 }
 
 /// A caption, a numeric edit and its spin buttons.
@@ -429,51 +453,6 @@ fn number_field(
     (edit, spin)
 }
 
-/// A caption and a drop-down list of `items`, with the one at `selected` chosen.
-fn choice_field(
-    page: &gui::TabPage,
-    caption: &str,
-    x: i32,
-    y: i32,
-    width: i32,
-    items: &[&str],
-    selected: Option<u32>,
-) -> gui::ComboBox {
-    field_caption(page, caption, x, y);
-    gui::ComboBox::new(
-        page,
-        gui::ComboBoxOpts {
-            position: gui::dpi(x + FIELD_OFFSET, y),
-            width: gui::dpi_x(width),
-            items,
-            selected_item: selected,
-            ..Default::default()
-        },
-    )
-}
-
-/// Where `value` stands in `all`, as a drop-down list counts its items.
-fn index_of<T: Copy + PartialEq>(all: &[T], value: T) -> Option<u32> {
-    all.iter()
-        .position(|item| *item == value)
-        .and_then(|index| u32::try_from(index).ok())
-}
-
-/// The choice a drop-down list shows, out of `all`, or the first when none is selected.
-fn chosen<T: Copy + Default>(field: &gui::ComboBox, all: &[T]) -> T {
-    field
-        .items()
-        .selected_index()
-        .and_then(|index| all.get(index as usize).copied())
-        .unwrap_or_default()
-}
-
-/// A field's caption, at the left of the field it names.
-fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
-    // The caption sits a little lower than the field so their text lines up.
-    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
-}
-
 /// A caption and a free-text edit.
 fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &str) -> gui::Edit {
     field_caption(page, caption, INNER_X, y);
@@ -487,4 +466,90 @@ fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &st
             ..Default::default()
         },
     )
+}
+
+/// The drop-down lists of what is recorded and how it is captured.
+fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::ComboBox) {
+    let mode = choice_field(
+        page,
+        text::MODE,
+        COLUMN_X,
+        82,
+        INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
+        &Mode::ALL.map(Mode::name),
+        index_of(&Mode::ALL, config.mode),
+    );
+    let backend = choice_field(
+        page,
+        text::BACKEND,
+        INNER_X,
+        110,
+        INNER_WIDTH - FIELD_OFFSET,
+        &Backend::ALL.map(Backend::name),
+        index_of(&Backend::ALL, config.backend),
+    );
+    (mode, backend)
+}
+
+/// A field's caption, at the left of the field it names.
+fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
+    // The caption sits a little lower than the field so their text lines up.
+    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+}
+
+/// `config` once it passes validation, with its hotkey in the canonical spelling the Status tab
+/// shows, or the problem with it.
+fn validated(mut config: Config) -> Result<Config, String> {
+    config.validate().map_err(|error| error.to_string())?;
+    config.hotkey = config
+        .parsed_hotkey()
+        .map_err(|error| error.to_string())?
+        .to_string();
+    Ok(config)
+}
+
+/// The clip folder `entered` as the configuration stores it: empty for the default folder, so
+/// that it follows the default if that moves.
+fn stored_folder(entered: &str) -> String {
+    if entered == config::default_clip_directory().display().to_string() {
+        String::new()
+    } else {
+        entered.to_owned()
+    }
+}
+
+/// The whole number in `field`, if it holds one.
+fn number(field: &gui::Edit) -> Option<u32> {
+    field
+        .text()
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The choice a drop-down list shows, out of `all`, or the first when none is selected.
+fn chosen<T: Copy + Default>(field: &gui::ComboBox, all: &[T]) -> T {
+    field
+        .items()
+        .selected_index()
+        .and_then(|index| all.get(index as usize).copied())
+        .unwrap_or_default()
+}
+
+/// Where `value` stands in `all`, as a drop-down list counts its items.
+fn index_of<T: Copy + PartialEq>(all: &[T], value: T) -> Option<u32> {
+    all.iter()
+        .position(|item| *item == value)
+        .and_then(|index| u32::try_from(index).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_clip_folder_is_stored_as_empty_and_any_other_as_entered() {
+        let default = config::default_clip_directory().display().to_string();
+        assert_eq!(stored_folder(&default), "");
+        assert_eq!(stored_folder(r"D:\Clips"), r"D:\Clips");
+    }
 }

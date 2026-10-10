@@ -17,6 +17,9 @@ pub(super) const API_MAJOR: u32 = 12;
 pub(super) const API_MINOR: u32 = 1;
 pub(super) const API_VERSION: u32 = API_MAJOR | (API_MINOR << 24);
 
+// The header's own value for the version above.
+const _: () = assert!(API_VERSION == 0x0100_000C);
+
 /// How many low bits of a `NvEncodeAPIGetMaxSupportedVersion` result hold the minor version;
 /// the major version sits above them.
 const MAX_VERSION_MINOR_BITS: u32 = 4;
@@ -31,32 +34,33 @@ pub(super) const fn split_max_version(version: u32) -> (u32, u32) {
     )
 }
 
+const _: () = assert!(REQUIRED_MAX_VERSION == 0xC1);
+const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
+
 /// `NVENCAPI_STRUCT_VERSION`. The header also sets bit 31 in some structures' versions, without
 /// naming it, and so do the constants below.
 const fn struct_version(version: u32) -> u32 {
     API_VERSION | (version << 16) | (0x7 << 28)
 }
 
+// One version per structure the API checks, in the order the structures are declared below.
 pub(super) const FUNCTION_LIST_VER: u32 = struct_version(2);
 pub(super) const OPEN_ENCODE_SESSION_EX_PARAMS_VER: u32 = struct_version(1);
-pub(super) const PRESET_CONFIG_VER: u32 = struct_version(4) | (1 << 31);
+pub(super) const CAPS_PARAM_VER: u32 = struct_version(1);
 pub(super) const CONFIG_VER: u32 = struct_version(8) | (1 << 31);
+pub(super) const PRESET_CONFIG_VER: u32 = struct_version(4) | (1 << 31);
 pub(super) const INITIALIZE_PARAMS_VER: u32 = struct_version(6) | (1 << 31);
-pub(super) const PIC_PARAMS_VER: u32 = struct_version(6) | (1 << 31);
-pub(super) const LOCK_BITSTREAM_VER: u32 = struct_version(1) | (1 << 31);
-pub(super) const MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
 pub(super) const REGISTER_RESOURCE_VER: u32 = struct_version(4);
 pub(super) const CREATE_BITSTREAM_BUFFER_VER: u32 = struct_version(1);
 pub(super) const EVENT_PARAMS_VER: u32 = struct_version(1);
-pub(super) const CAPS_PARAM_VER: u32 = struct_version(1);
+pub(super) const MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
+pub(super) const PIC_PARAMS_VER: u32 = struct_version(6) | (1 << 31);
+pub(super) const LOCK_BITSTREAM_VER: u32 = struct_version(1) | (1 << 31);
 
-// The header's own values for the versions above.
-const _: () = assert!(API_VERSION == 0x0100_000C);
+// The header's own values for some of the versions above.
 const _: () = assert!(FUNCTION_LIST_VER == 0x7102_000C);
 const _: () = assert!(CONFIG_VER == 0xF108_000C);
 const _: () = assert!(PIC_PARAMS_VER == 0xF106_000C);
-const _: () = assert!(REQUIRED_MAX_VERSION == 0xC1);
-const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
 
 pub(super) const CODEC_H264: GUID = GUID::from_values(
     0x6bc8_2762,
@@ -102,50 +106,58 @@ pub(super) const PRESET_P4: GUID = GUID::from_values(
     [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
 );
 
+// Field values for the session and frame structures, in the order those structures are declared
+// below.
+pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
 pub(super) const CAPS_WIDTH_MAX: u32 = 16;
 pub(super) const CAPS_HEIGHT_MAX: u32 = 17;
-pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const RATE_CONTROL_VBR: u32 = 1;
 pub(super) const MULTI_PASS_DISABLED: u32 = 0;
-pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
+pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
-pub(super) const INPUT_IMAGE: u32 = 0;
 /// 32-bit words with blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
+pub(super) const INPUT_IMAGE: u32 = 0;
+pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 pub(super) const PIC_STRUCT_FRAME: u32 = 1;
 pub(super) const PIC_TYPE_IDR: u32 = 3;
-pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 
-/// `NV_ENC_HEVC_CUSIZE` 16×16 and 32×32.
-pub(super) const HEVC_CU_SIZE_16: u32 = 2;
-pub(super) const HEVC_CU_SIZE_32: u32 = 3;
-/// `NV_ENC_AV1_PART_SIZE` 16×16 and 32×32.
-pub(super) const AV1_PART_SIZE_16: u32 = 3;
-pub(super) const AV1_PART_SIZE_32: u32 = 4;
-/// `NV_ENC_CONFIG_H264` flag: SPS and PPS before every IDR frame.
+// Colour signalling, in `NV_ENC_CONFIG_H264_VUI_PARAMETERS` and `NV_ENC_CONFIG_AV1`.
+const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
+const BT709: u32 = 1;
+/// Limited (studio) range, both as the H.264/HEVC `video_full_range_flag` and as the AV1
+/// `color_range`.
+const LIMITED_RANGE: u32 = 0;
+
+/// 4:2:0 chroma, as each codec's configuration spells its chroma format.
+pub(super) const CHROMA_FORMAT_420: u32 = 1;
+
+// `NV_ENC_CONFIG_H264` flags.
+/// SPS and PPS before every IDR frame.
 pub(super) const H264_REPEAT_SPS_PPS: u32 = 1 << 12;
-// `NV_ENC_CONFIG_HEVC` flags and fields.
+
+// `NV_ENC_CONFIG_HEVC` flags and fields, and the `NV_ENC_HEVC_CUSIZE` values 16×16 and 32×32.
+/// SPS and PPS before every IDR frame.
 pub(super) const HEVC_REPEAT_SPS_PPS: u32 = 1 << 7;
 pub(super) const HEVC_CHROMA_FORMAT_SHIFT: u32 = 9;
-pub(super) const HEVC_CHROMA_FORMAT_MASK: u32 = 0b11 << 9;
+pub(super) const HEVC_CHROMA_FORMAT_MASK: u32 = 0b11 << HEVC_CHROMA_FORMAT_SHIFT;
 pub(super) const HEVC_BIT_DEPTH_MASK: u32 = 0b111 << 11;
-// `NV_ENC_CONFIG_AV1` flags and fields.
+pub(super) const HEVC_CU_SIZE_16: u32 = 2;
+pub(super) const HEVC_CU_SIZE_32: u32 = 3;
+
+// `NV_ENC_CONFIG_AV1` flags and fields, and the `NV_ENC_AV1_PART_SIZE` values 16×16 and 32×32.
 pub(super) const AV1_ANNEX_B: u32 = 1 << 0;
 pub(super) const AV1_TIMING_INFO: u32 = 1 << 1;
 pub(super) const AV1_DECODER_MODEL_INFO: u32 = 1 << 2;
 pub(super) const AV1_FRAME_ID_NUMBERS: u32 = 1 << 3;
 pub(super) const AV1_DISABLE_SEQUENCE_HEADER: u32 = 1 << 4;
+/// The sequence header before every key frame.
 pub(super) const AV1_REPEAT_SEQUENCE_HEADER: u32 = 1 << 5;
 pub(super) const AV1_CHROMA_FORMAT_SHIFT: u32 = 7;
-pub(super) const AV1_CHROMA_FORMAT_MASK: u32 = 0b11 << 7;
+pub(super) const AV1_CHROMA_FORMAT_MASK: u32 = 0b11 << AV1_CHROMA_FORMAT_SHIFT;
 pub(super) const AV1_BIT_DEPTH_MASK: u32 = 0b11_1111 << 12;
-
-pub(super) const CHROMA_FORMAT_420: u32 = 1;
-const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
-pub(super) const BT709: u32 = 1;
-/// Limited (studio) range, both as the H.264/HEVC `video_full_range_flag` and as the AV1
-/// `color_range`.
-pub(super) const LIMITED_RANGE: u32 = 0;
+pub(super) const AV1_PART_SIZE_16: u32 = 3;
+pub(super) const AV1_PART_SIZE_32: u32 = 4;
 
 /// `NVENCSTATUS`; kept as an integer, since a driver may return values this program does not
 /// know.
@@ -223,31 +235,38 @@ pub(super) type Bitstream = *mut c_void;
 /// A function list entry this program never calls.
 type Entry = *const c_void;
 
+/// `NvEncodeAPIGetMaxSupportedVersion`, one of the library's two exports.
 pub(super) type GetMaxSupportedVersion = unsafe extern "system" fn(*mut u32) -> Status;
+/// `NvEncodeAPICreateInstance`, the other export.
 pub(super) type CreateInstance = unsafe extern "system" fn(*mut FunctionList) -> Status;
-pub(super) type OpenEncodeSessionEx =
-    unsafe extern "system" fn(*mut OpenEncodeSessionExParams, *mut Session) -> Status;
+
+// The function list entries this program calls, in the list's order. An entry named like the
+// structure it takes carries an `Fn` suffix.
 pub(super) type GetEncodeGuidCount = unsafe extern "system" fn(Session, *mut u32) -> Status;
 pub(super) type GetEncodeGuids =
     unsafe extern "system" fn(Session, *mut GUID, u32, *mut u32) -> Status;
 pub(super) type GetEncodeCaps =
     unsafe extern "system" fn(Session, GUID, *mut CapsParam, *mut i32) -> Status;
-pub(super) type GetEncodePresetConfigEx =
-    unsafe extern "system" fn(Session, GUID, GUID, u32, *mut PresetConfig) -> Status;
 pub(super) type InitializeEncoder =
     unsafe extern "system" fn(Session, *mut InitializeParams) -> Status;
 pub(super) type CreateBitstreamBufferFn =
     unsafe extern "system" fn(Session, *mut CreateBitstreamBuffer) -> Status;
+/// The shape of every entry that takes back a handle the session gave out.
 pub(super) type WithPointer = unsafe extern "system" fn(Session, *mut c_void) -> Status;
 pub(super) type EncodePicture = unsafe extern "system" fn(Session, *mut PicParams) -> Status;
 pub(super) type LockBitstreamFn = unsafe extern "system" fn(Session, *mut LockBitstream) -> Status;
+/// The shape of both registering and unregistering a completion event.
+pub(super) type EventFn = unsafe extern "system" fn(Session, *mut EventParams) -> Status;
 pub(super) type MapInputResourceFn =
     unsafe extern "system" fn(Session, *mut MapInputResource) -> Status;
+pub(super) type DestroyEncoder = unsafe extern "system" fn(Session) -> Status;
+pub(super) type OpenEncodeSessionEx =
+    unsafe extern "system" fn(*mut OpenEncodeSessionExParams, *mut Session) -> Status;
 pub(super) type RegisterResourceFn =
     unsafe extern "system" fn(Session, *mut RegisterResource) -> Status;
-pub(super) type EventFn = unsafe extern "system" fn(Session, *mut EventParams) -> Status;
-pub(super) type DestroyEncoder = unsafe extern "system" fn(Session) -> Status;
 pub(super) type GetLastErrorString = unsafe extern "system" fn(Session) -> *const c_char;
+pub(super) type GetEncodePresetConfigEx =
+    unsafe extern "system" fn(Session, GUID, GUID, u32, *mut PresetConfig) -> Status;
 
 /// `NV_ENCODE_API_FUNCTION_LIST`, filled in by `NvEncodeAPICreateInstance`.
 #[repr(C)]
@@ -302,19 +321,6 @@ const _: () = assert!(offset_of!(FunctionList, register_resource) == 248);
 const _: () = assert!(offset_of!(FunctionList, get_last_error_string) == 304);
 const _: () = assert!(offset_of!(FunctionList, get_encode_preset_config_ex) == 320);
 
-/// `NV_ENC_CAPS_PARAM`.
-#[repr(C)]
-pub(super) struct CapsParam {
-    pub(super) version: u32,
-    pub(super) caps_to_query: u32,
-    _reserved: [u32; 62],
-}
-
-// SAFETY: integers only.
-unsafe impl Zeroed for CapsParam {}
-
-const _: () = assert!(size_of::<CapsParam>() == 256);
-
 /// `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`.
 #[repr(C)]
 pub(super) struct OpenEncodeSessionExParams {
@@ -332,6 +338,19 @@ unsafe impl Zeroed for OpenEncodeSessionExParams {}
 
 const _: () = assert!(size_of::<OpenEncodeSessionExParams>() == 1552);
 const _: () = assert!(offset_of!(OpenEncodeSessionExParams, api_version) == 24);
+
+/// `NV_ENC_CAPS_PARAM`.
+#[repr(C)]
+pub(super) struct CapsParam {
+    pub(super) version: u32,
+    pub(super) caps_to_query: u32,
+    _reserved: [u32; 62],
+}
+
+// SAFETY: integers only.
+unsafe impl Zeroed for CapsParam {}
+
+const _: () = assert!(size_of::<CapsParam>() == 256);
 
 /// `NV_ENC_RC_PARAMS`.
 #[repr(C)]
@@ -362,21 +381,20 @@ const _: () = assert!(offset_of!(RcParams, multi_pass) == 100);
 #[derive(Clone, Copy)]
 pub(super) struct Vui {
     _overscan: [u32; 2],
-    pub(super) video_signal_type_present_flag: u32,
-    pub(super) video_format: u32,
-    pub(super) video_full_range_flag: u32,
-    pub(super) colour_description_present_flag: u32,
-    pub(super) colour_primaries: u32,
-    pub(super) transfer_characteristics: u32,
-    pub(super) colour_matrix: u32,
+    video_signal_type_present_flag: u32,
+    video_format: u32,
+    video_full_range_flag: u32,
+    colour_description_present_flag: u32,
+    colour_primaries: u32,
+    transfer_characteristics: u32,
+    colour_matrix: u32,
     _chroma_location_to_time_scale: [u32; 7],
     _reserved: [u32; 12],
 }
 
-const _: () = assert!(size_of::<Vui>() == 112);
-
 impl Vui {
-    /// Limited-range BT.709, as the RGB-to-YUV conversion produces and players assume for HD.
+    /// Signals limited-range BT.709, as the RGB-to-YUV conversion produces and players assume
+    /// for HD.
     pub(super) fn signal_bt709(&mut self) {
         self.video_signal_type_present_flag = 1;
         self.video_format = VIDEO_FORMAT_UNSPECIFIED;
@@ -387,6 +405,8 @@ impl Vui {
         self.colour_matrix = BT709;
     }
 }
+
+const _: () = assert!(size_of::<Vui>() == 112);
 
 /// `NV_ENC_CONFIG_H264`.
 #[repr(C)]
@@ -445,16 +465,26 @@ pub(super) struct Av1Config {
     _intra_refresh_to_tile_rows: [u32; 5],
     _tile_sizes: [*mut u32; 2],
     _max_temporal_layers: u32,
-    pub(super) color_primaries: u32,
-    pub(super) transfer_characteristics: u32,
-    pub(super) matrix_coefficients: u32,
-    pub(super) color_range: u32,
+    color_primaries: u32,
+    transfer_characteristics: u32,
+    matrix_coefficients: u32,
+    color_range: u32,
     _chroma_sample_position: u32,
     _use_b_frames_as_ref: u32,
     _film_grain_params: *mut c_void,
     _references: [u32; 2],
     _reserved1: [u32; 235],
     _reserved2: [*mut c_void; 62],
+}
+
+impl Av1Config {
+    /// Signals limited-range BT.709, as [`Vui::signal_bt709`] does for H.264 and HEVC.
+    pub(super) fn signal_bt709(&mut self) {
+        self.color_primaries = BT709;
+        self.transfer_characteristics = BT709;
+        self.matrix_coefficients = BT709;
+        self.color_range = LIMITED_RANGE;
+    }
 }
 
 const _: () = assert!(size_of::<Av1Config>() == 1552);

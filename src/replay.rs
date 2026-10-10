@@ -61,24 +61,6 @@ pub(crate) struct Live {
     on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
-/// What a save writes: the stream and the packets buffered when it was requested.
-pub(crate) struct Clip {
-    pub(crate) stream: Stream,
-    pub(crate) packets: Vec<Arc<Packet>>,
-}
-
-impl Clip {
-    /// Seconds of video, from the first packet to the end of the last.
-    pub(crate) fn seconds(&self) -> f64 {
-        match (self.packets.first(), self.packets.last()) {
-            (Some(first), Some(last)) => {
-                (last.index - first.index + 1) as f64 / f64::from(self.stream.frame_rate)
-            }
-            _ => 0.0,
-        }
-    }
-}
-
 impl Live {
     /// An empty buffer that keeps at least `span` frames.
     pub(crate) fn new(span: u64) -> Self {
@@ -106,6 +88,7 @@ impl Live {
         }
     }
 
+    /// The stream's shape, once it is recorded.
     pub(crate) fn stream(&self) -> Option<Stream> {
         self.stream.get().copied()
     }
@@ -153,6 +136,51 @@ impl Live {
     }
 }
 
+/// What a save writes: the stream and the packets buffered when it was requested.
+pub(crate) struct Clip {
+    pub(crate) stream: Stream,
+    pub(crate) packets: Vec<Arc<Packet>>,
+}
+
+impl Clip {
+    /// Seconds of video, from the first packet to the end of the last.
+    pub(crate) fn seconds(&self) -> f64 {
+        match (self.packets.first(), self.packets.last()) {
+            (Some(first), Some(last)) => {
+                (last.index - first.index + 1) as f64 / f64::from(self.stream.frame_rate)
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+/// Why a clip could not be saved.
+#[derive(Debug, Error)]
+pub(crate) enum SaveError {
+    /// A file system call failed; `step` says which, in words for the log.
+    #[error("{step} {}: {source}", path.display())]
+    Io {
+        step: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// The clip could not be muxed, or the muxed bytes could not be written.
+    #[error(transparent)]
+    Mux(#[from] MuxError),
+}
+
+impl SaveError {
+    /// Wraps the error of the file system call `step` made on `path`, for `map_err`.
+    fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
+        move |source| Self::Io {
+            step,
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
 /// Whether `data` starts a group of pictures a decoder can begin with.
 pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
     match codec {
@@ -178,31 +206,6 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
         Codec::H264 => h264::sample_units(data),
         Codec::Hevc => hevc::sample_units(data),
         Codec::Av1 => av1::sample_obus(data),
-    }
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum SaveError {
-    /// A file system call failed; `step` says which, in words for the log.
-    #[error("{step} {}: {source}", path.display())]
-    Io {
-        step: &'static str,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error(transparent)]
-    Mux(#[from] MuxError),
-}
-
-impl SaveError {
-    /// Wraps the error of the file system call `step` made on `path`, for `map_err`.
-    fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
-        move |source| Self::Io {
-            step,
-            path: path.to_owned(),
-            source,
-        }
     }
 }
 
@@ -311,8 +314,8 @@ mod tests {
 
     #[test]
     fn keyframes_are_recognised_for_every_codec() {
-        assert!(is_keyframe(Codec::H264, &keyframe()));
-        assert!(!is_keyframe(Codec::H264, &inter_frame()));
+        assert!(is_keyframe(Codec::H264, &h264::tests::keyframe()));
+        assert!(!is_keyframe(Codec::H264, &h264::tests::inter_frame()));
         assert!(is_keyframe(Codec::Hevc, &hevc::tests::keyframe()));
         assert!(!is_keyframe(Codec::Hevc, &hevc::tests::inter_frame()));
         assert!(is_keyframe(Codec::Av1, &av1::tests::keyframe()));
@@ -366,7 +369,7 @@ mod tests {
                 .collect();
             assert_eq!(keyframes, [0, 30, 60], "{codec}");
 
-            let mut ring = ring::Ring::new(40);
+            let mut ring = Ring::new(40);
             for packet in packets {
                 ring.push(packet);
             }

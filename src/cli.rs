@@ -25,14 +25,15 @@ enum Command {
     Icon { path: PathBuf },
 }
 
+/// What the command line asked for.
 pub(crate) enum Launch {
     /// A command ran; there is no window to show.
     Handled,
-    Window {
-        tray: bool,
-    },
+    /// The application starts, hidden in the notification area when `tray` is set.
+    Window { tray: bool },
 }
 
+/// Parses the command line and runs a command it names.
 pub(crate) fn dispatch() -> Result<Launch> {
     let arguments = Arguments::parse();
     match arguments.command {

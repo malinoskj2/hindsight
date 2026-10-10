@@ -7,18 +7,17 @@ use winsafe::{self as w, co};
 
 /// The window class of the application window, which a later launch looks for.
 pub(crate) const WINDOW_CLASS: &str = "HindsightMainWindow";
+/// How often, and for how long, to look for the window: the first copy may still be starting.
+const WAIT: Duration = Duration::from_millis(100);
+const ATTEMPTS: u32 = 50;
 
 /// The first message of the application's own range: "come forward".
 #[expect(unsafe_code)]
 pub(crate) fn show_message() -> co::WM {
-    // SAFETY: every number is a valid window message identifier, and this one is in the range
-    // Windows leaves to the application.
+    // SAFETY: `WM` is a plain newtype over the message number, so every number is valid; this
+    // one is in the range Windows leaves to the application.
     unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) }
 }
-
-/// How often, and for how long, to look for the window: the first copy may still be starting.
-const WAIT: Duration = Duration::from_millis(100);
-const ATTEMPTS: u32 = 50;
 
 /// Asks the running copy's window to come forward, restoring it from the tray or the taskbar.
 /// Reports whether there was a window to ask.

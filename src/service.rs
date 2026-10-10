@@ -93,24 +93,32 @@ pub(crate) enum Ended {
 /// Runs a capture session of a target into `live` until `stop` is set or it fails.
 pub(crate) type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 
+/// The recorder of real sessions: the GPU pipeline.
 #[cfg(windows)]
 const RECORDER: Recorder = crate::gpu::record;
+/// The recorder of real sessions: capture needs Windows, so every session fails.
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
 /// What the worker is doing, for the Status tab to put into words.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) enum DisplayStatus {
+    /// A session is starting and its encoder has not reported the stream yet.
     #[default]
     Starting,
     /// No full-screen app is in front.
     Waiting,
+    /// A session is recording into the buffer.
     Recording,
+    /// A session failed, and the worker waits before it tries again.
     Retrying,
+    /// The user stopped recording, or a session ended because it was asked to.
     Stopped,
+    /// These settings cannot record on this machine.
     Unsupported,
 }
 
+/// The worker's figures as the window reads them.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Status {
     pub(crate) state: DisplayStatus,
@@ -155,6 +163,7 @@ enum Command {
     Exit,
 }
 
+/// The window's handle on the recording worker; dropping it stops the worker and waits for it.
 pub(crate) struct Worker {
     commands: Sender<Command>,
     status: Arc<Mutex<Status>>,
@@ -209,15 +218,12 @@ impl Worker {
         self.request(Command::Target(target));
     }
 
+    /// Stops recording until the settings are applied again.
     pub(crate) fn stop(&self) {
         self.request(Command::Stop);
     }
 
-    /// Asks for fresh figures; they are read with [`Worker::status`] afterwards.
-    pub(crate) fn refresh(&self) {
-        self.request(Command::Publish);
-    }
-
+    /// Saves the replay buffer as a clip.
     pub(crate) fn save(&self) {
         self.request(Command::Save);
     }
@@ -225,6 +231,11 @@ impl Worker {
     /// Saves the chosen look in the settings; recording carries on undisturbed.
     pub(crate) fn set_theme(&self, theme: Theme) {
         self.request(Command::Theme(theme));
+    }
+
+    /// Asks for fresh figures; they are read with [`Worker::status`] afterwards.
+    pub(crate) fn refresh(&self) {
+        self.request(Command::Publish);
     }
 
     fn request(&self, command: Command) {
@@ -270,6 +281,8 @@ struct Reading {
     sample: Sample,
 }
 
+/// The worker thread's state: the settings, the session and its buffer, the clip being written
+/// and the figures for the Status tab.
 struct Machine {
     recorder: Recorder,
     retry_interval: Duration,
@@ -319,7 +332,6 @@ impl Machine {
             session_saved: 0,
             config,
             output,
-            wake,
             status: Status::default(),
             session: None,
             target: None,
@@ -328,6 +340,7 @@ impl Machine {
             paused: false,
             saving: None,
             sample: None,
+            wake,
         }
     }
 
@@ -371,11 +384,11 @@ impl Machine {
         self.publish();
     }
 
+    /// Writes `config` to the settings file and starts recording with it, replacing the current
+    /// session. Settings that cannot be written are not applied.
     fn apply(&mut self, config: Config) {
-        if let Some(store) = &self.store
-            && let Err(error) = store.save_config(&config)
-        {
-            self.report_error(text::save_settings_failed(error));
+        if let Err(message) = self.write_settings(&config) {
+            self.report_error(message);
             return;
         }
         log::info(text::settings_applied(&config));
@@ -383,40 +396,6 @@ impl Machine {
         self.stop_session();
         self.paused = false;
         self.begin();
-    }
-
-    /// Writes the new look to the settings file. The other settings stay as last applied, and
-    /// the session is not restarted.
-    fn remember_theme(&mut self, theme: Theme) {
-        self.config.theme = theme;
-        if let Some(store) = &self.store
-            && let Err(error) = store.save_config(&self.config)
-        {
-            self.report_error(text::save_settings_failed(error));
-        }
-    }
-
-    /// Stops recording at the user's request, until the settings are applied again.
-    fn pause(&mut self) {
-        self.stop_session();
-        self.retry_at = None;
-        self.paused = true;
-        self.status.state = DisplayStatus::Stopped;
-        log::info(text::RECORDING_STOPPED);
-    }
-
-    /// Starts recording as the mode says: the primary monitor at once, or nothing until a
-    /// full-screen app is reported.
-    fn begin(&mut self) {
-        self.retry_at = None;
-        match self.config.mode {
-            Mode::Desktop => self.start_session(Target::primary_monitor()),
-            Mode::Fullscreen => {
-                self.target = None;
-                self.status.state = DisplayStatus::Waiting;
-                self.status.error = None;
-            }
-        }
     }
 
     /// A full-screen app is in front. In full-screen mode it becomes the target, unless it
@@ -437,6 +416,73 @@ impl Machine {
         self.stop_session();
         log::info(text::target_found(target.name()));
         self.start_session(target);
+    }
+
+    /// Stops recording at the user's request, until the settings are applied again.
+    fn pause(&mut self) {
+        self.stop_session();
+        self.retry_at = None;
+        self.paused = true;
+        self.status.state = DisplayStatus::Stopped;
+        log::info(text::RECORDING_STOPPED);
+    }
+
+    /// Starts writing the buffer to a clip, unless a clip is already being written or there is
+    /// nothing to save.
+    fn save(&mut self) {
+        if self.saving.is_some() {
+            log::info(text::ALREADY_SAVING);
+            return;
+        }
+        let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
+            log::warning(text::NOTHING_TO_SAVE);
+            self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
+            sys::sound::failed();
+            return;
+        };
+
+        let seconds = clip.seconds();
+        match self.spawn_save(clip) {
+            Ok(join) => {
+                self.saving = Some(Saving { seconds, join });
+                self.status.notice = None;
+            }
+            Err(error) => self.report_error(text::save_failed(error)),
+        }
+    }
+
+    /// Writes the settings with the new look to the settings file. The other settings stay as
+    /// last applied, and the session is not restarted.
+    fn remember_theme(&mut self, theme: Theme) {
+        self.config.theme = theme;
+        if let Err(message) = self.write_settings(&self.config) {
+            self.report_error(message);
+        }
+    }
+
+    /// Writes `config` to the settings file, when there is one; the error is the message to
+    /// report.
+    fn write_settings(&self, config: &Config) -> Result<(), String> {
+        match &self.store {
+            Some(store) => store
+                .save_config(config)
+                .map_err(text::save_settings_failed),
+            None => Ok(()),
+        }
+    }
+
+    /// Starts recording as the mode says: the primary monitor at once, or nothing until a
+    /// full-screen app is reported.
+    fn begin(&mut self) {
+        self.retry_at = None;
+        match self.config.mode {
+            Mode::Desktop => self.start_session(Target::primary_monitor()),
+            Mode::Fullscreen => {
+                self.target = None;
+                self.status.state = DisplayStatus::Waiting;
+                self.status.error = None;
+            }
+        }
     }
 
     /// Banks the previous buffer and starts a capture session of `target` into a fresh one.
@@ -495,7 +541,7 @@ impl Machine {
         }
     }
 
-    /// Starts the current target again, after a resize or a retry.
+    /// Starts a capture session of the current target again, after a resize or a retry.
     fn restart_session(&mut self) {
         // `start_session` puts the target back.
         match self.target.take() {
@@ -504,6 +550,8 @@ impl Machine {
         }
     }
 
+    /// Stops the running capture session, if there is one, and waits for it; a session that
+    /// failed on its way out is logged.
     fn stop_session(&mut self) {
         let Some(session) = self.session.take() else {
             return;
@@ -511,7 +559,7 @@ impl Machine {
         session.stop.store(true, Ordering::Relaxed);
         match session.join.join() {
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::error(text::session_failed(&format!("{error:#}"))),
+            Ok(Err(error)) => log::error(text::session_failed(format!("{error:#}"))),
             Err(_) => log::error(text::session_failed(text::CAPTURE_PANICKED)),
         }
     }
@@ -545,27 +593,14 @@ impl Machine {
         }
     }
 
-    /// Ends the wait after a failure: whole-desktop recording starts again, and full-screen mode
-    /// accepts targets again.
-    fn retry(&mut self) {
-        match self.config.mode {
-            Mode::Desktop => {
-                log::info(text::RESTARTING);
-                self.restart_session();
-            }
-            // The window may be gone; the next report of a full-screen app starts again.
-            Mode::Fullscreen => self.begin(),
-        }
-    }
-
     /// Acts on how a session that ended by itself finished.
     fn session_ended(&mut self, outcome: thread::Result<Result<Ended>>) {
         match outcome {
+            Ok(Ok(Ended::Stopped)) => self.status.state = DisplayStatus::Stopped,
             Ok(Ok(Ended::Resized)) => {
                 log::info(text::RESIZED);
                 self.restart_session();
             }
-            Ok(Ok(Ended::Stopped)) => self.status.state = DisplayStatus::Stopped,
             Ok(Ok(Ended::Closed)) if self.config.mode == Mode::Desktop => {
                 self.fail(text::DISPLAY_GONE);
             }
@@ -596,32 +631,21 @@ impl Machine {
         self.start_session(monitor);
     }
 
-    /// Starts writing the buffer to a clip, unless a clip is already being written or there is
-    /// nothing to save.
-    fn save(&mut self) {
-        if self.saving.is_some() {
-            log::info(text::ALREADY_SAVING);
-            return;
-        }
-        let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
-            log::warning(text::NOTHING_TO_SAVE);
-            self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
-            sys::sound::failed();
-            return;
-        };
-
-        let seconds = clip.seconds();
-        match self.spawn_save(clip) {
-            Ok(join) => {
-                self.saving = Some(Saving { seconds, join });
-                self.status.notice = None;
+    /// Ends the wait after a failure: whole-desktop recording starts again, and full-screen mode
+    /// accepts targets again.
+    fn retry(&mut self) {
+        match self.config.mode {
+            Mode::Desktop => {
+                log::info(text::RESTARTING);
+                self.restart_session();
             }
-            Err(error) => self.report_error(text::save_failed(error)),
+            // The window may be gone; the next report of a full-screen app starts again.
+            Mode::Fullscreen => self.begin(),
         }
     }
 
-    /// Starts a background thread that writes `clip` to the clip directory, and wakes the worker
-    /// when it is done.
+    /// Starts a thread that writes `clip` to the clip directory, and wakes the worker when it is
+    /// done.
     fn spawn_save(&self, clip: Clip) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
         let directory = self.config.clip_directory();
         let wake = self.waker();
@@ -648,7 +672,7 @@ impl Machine {
 
     /// Logs a clip written to `path`, counts it and plays the saved sound.
     fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
-        log::info(text::saved(seconds, &path));
+        log::info(text::clip_saved(seconds, &path));
         self.add_saved(&path);
         self.status.last_clip = Some(path);
         self.status.error = None;
@@ -691,7 +715,7 @@ impl Machine {
         if let (Some(store), Some(totals)) = (&self.store, self.totals)
             && let Err(error) = store.save_totals(totals)
         {
-            log::warning(text::totals_not_saved(error));
+            log::warning(text::save_totals_failed(error));
         }
     }
 
@@ -783,7 +807,7 @@ impl Machine {
 fn load_totals(store: &Store) -> Option<Totals> {
     store
         .load_totals()
-        .inspect_err(|error| log::error(text::totals_unreadable(error)))
+        .inspect_err(|error| log::error(text::load_totals_failed(error)))
         .ok()
 }
 
@@ -892,7 +916,7 @@ mod tests {
         }
     }
 
-    fn config_in(directory: &std::path::Path) -> Config {
+    fn config_in(directory: &Path) -> Config {
         Config {
             clip_directory: directory.display().to_string(),
             ..desktop()
@@ -908,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn records_and_saves_a_clip() {
+    fn desktop_mode_records_and_saves_a_clip() {
         let directory = tempfile::tempdir().unwrap();
         let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
 
@@ -953,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_ends_the_session_and_saving_then_reports_nothing_new() {
+    fn stopping_ends_the_session_and_its_buffer_stays_saveable() {
         let directory = tempfile::tempdir().unwrap();
         let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
         wait_for(&worker, |status| status.session_written_bytes > 0);

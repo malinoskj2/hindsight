@@ -8,10 +8,12 @@ use std::thread;
 #[cfg(windows)]
 use winsafe::{self as w, Snd};
 
+/// Samples per second; plenty for a few short tones.
 const SAMPLE_RATE: u32 = 22_050;
 /// About -14 dBFS: clear over a game, not startling.
 const AMPLITUDE: f64 = 0.2;
-const FADE_MS: u32 = 5;
+/// How long each tone takes to fade in and out.
+const FADE_MILLISECONDS: u32 = 5;
 
 /// Two rising tones: a clip was written.
 const SAVED: &[(u32, u32)] = &[(880, 90), (0, 30), (1320, 120)];
@@ -51,20 +53,20 @@ fn play(_tones: &'static [(u32, u32)]) {}
 /// silence. Each tone fades in and out so it does not click.
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     let data = pcm(tones);
-    let data_len = u32::try_from(data.len()).expect("a tone is a few hundred milliseconds");
+    let data_length = u32::try_from(data.len()).expect("a tone is a few hundred milliseconds");
     let mut wav = Vec::with_capacity(44 + data.len());
     wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(&(36 + data_length).to_le_bytes());
     wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1_u16.to_le_bytes()); // mono
     wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
     wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // bytes per second
-    wav.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(&2_u16.to_le_bytes()); // bytes per frame
+    wav.extend_from_slice(&16_u16.to_le_bytes()); // bits per sample
     wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&data_length.to_le_bytes());
     wav.extend_from_slice(&data);
     wav
 }
@@ -81,8 +83,8 @@ fn pcm(tones: &[(u32, u32)]) -> Vec<u8> {
     data
 }
 
-/// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MS`; a frequency
-/// of 0 is silence.
+/// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MILLISECONDS`; a
+/// frequency of 0 is silence.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the scaled sample is within the i16 range, and the rounding is intended"
@@ -91,7 +93,7 @@ fn sample(frequency: u32, index: u32, count: u32) -> i16 {
     if frequency == 0 {
         return 0;
     }
-    let fade = SAMPLE_RATE * FADE_MS / 1000;
+    let fade = SAMPLE_RATE * FADE_MILLISECONDS / 1000;
     let time = f64::from(index) / f64::from(SAMPLE_RATE);
     let edge = index.min(count - 1 - index);
     let envelope = (f64::from(edge) / f64::from(fade)).min(1.0);
@@ -103,17 +105,23 @@ fn sample(frequency: u32, index: u32, count: u32) -> i16 {
 mod tests {
     use super::*;
 
+    /// The 16-bit samples after the 44-byte header.
+    fn samples(wav: &[u8]) -> Vec<i16> {
+        let (pairs, _) = wav[44..].as_chunks::<2>();
+        pairs.iter().map(|&pair| i16::from_le_bytes(pair)).collect()
+    }
+
     #[test]
     fn tones_are_a_complete_wav_within_the_quiet_level() {
         let wav = wav(SAVED);
-        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap());
+        let data_length = u32::from_le_bytes(wav[40..44].try_into().unwrap());
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..16], b"WAVEfmt ");
         assert_eq!(&wav[36..40], b"data");
-        assert_eq!(wav.len(), 44 + data_len as usize);
+        assert_eq!(wav.len(), 44 + data_length as usize);
         assert_eq!(
             u32::from_le_bytes(wav[4..8].try_into().unwrap()),
-            36 + data_len
+            36 + data_length
         );
 
         let peak = samples(&wav)
@@ -135,11 +143,5 @@ mod tests {
         let silence = (SAMPLE_RATE * 10 / 1000) as usize;
         assert!(samples[..silence].iter().all(|&sample| sample == 0));
         assert_eq!(samples[silence], 0, "the tone starts from silence");
-    }
-
-    /// The 16-bit samples after the 44-byte header.
-    fn samples(wav: &[u8]) -> Vec<i16> {
-        let (pairs, _) = wav[44..].as_chunks::<2>();
-        pairs.iter().map(|&pair| i16::from_le_bytes(pair)).collect()
     }
 }

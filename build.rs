@@ -1,9 +1,11 @@
 //! Windows resources: the application icon (Explorer, Start menu, installer shortcuts, and the
 //! window class) and the manifest that opts into themed common controls and DPI awareness.
 
+/// The application icon, written by `hindsight icon assets/hindsight.ico`.
 const ICON: &str = "assets/hindsight.ico";
 /// Resource id the window class loads the icon by; must match `gui::ICON_RESOURCE`.
 const ICON_ID: &str = "1";
+/// Opts into themed common controls (version 6) and system DPI awareness.
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>

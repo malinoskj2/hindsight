@@ -20,6 +20,7 @@ const VK_F1: u16 = 0x70;
 /// Function keys run from F1 to F24.
 const FUNCTION_KEY_COUNT: u16 = 24;
 const VK_NUMPAD0: u16 = 0x60;
+/// Number-pad digits run from Numpad0 to Numpad9.
 const NUMPAD_DIGIT_COUNT: u16 = 10;
 const VK_PRINT_SCREEN: u16 = 0x2C;
 const VK_PAUSE: u16 = 0x13;
@@ -80,6 +81,17 @@ impl FromStr for Hotkey {
     }
 }
 
+impl fmt::Display for Hotkey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (flag, name) in MODIFIERS {
+            if self.modifiers & flag != 0 {
+                write!(formatter, "{name}+")?;
+            }
+        }
+        formatter.write_str(&key_label(self.key))
+    }
+}
+
 /// The `MOD_*` flags of the modifier names, each of which may appear once.
 fn parse_modifiers<'a>(names: impl Iterator<Item = &'a str>) -> Result<u16, ParseError> {
     let mut modifiers = 0;
@@ -93,22 +105,7 @@ fn parse_modifiers<'a>(names: impl Iterator<Item = &'a str>) -> Result<u16, Pars
     Ok(modifiers)
 }
 
-/// Whether a key may be the hotkey without a modifier: pressing it never types text.
-fn may_stand_alone(key: u16) -> bool {
-    is_function_key(key) || STANDALONE_KEYS.contains(&key)
-}
-
-impl fmt::Display for Hotkey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (flag, name) in MODIFIERS {
-            if self.modifiers & flag != 0 {
-                write!(formatter, "{name}+")?;
-            }
-        }
-        formatter.write_str(&key_label(self.key))
-    }
-}
-
+/// The `MOD_*` flag of a modifier name, in any case.
 fn modifier(name: &str) -> Option<u16> {
     match name.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => Some(MOD_CONTROL),
@@ -143,7 +140,7 @@ fn letter_or_digit(upper: &str) -> Option<u16> {
 fn function_key(upper: &str) -> Option<u16> {
     upper
         .strip_prefix('F')
-        .and_then(|n| n.parse::<u16>().ok())
+        .and_then(|digits| digits.parse::<u16>().ok())
         .filter(|number| (1..=FUNCTION_KEY_COUNT).contains(number))
         .map(|number| VK_F1 + number - 1)
 }
@@ -152,7 +149,7 @@ fn function_key(upper: &str) -> Option<u16> {
 fn numpad_digit(upper: &str) -> Option<u16> {
     upper
         .strip_prefix("NUMPAD")
-        .and_then(|n| n.parse::<u16>().ok())
+        .and_then(|digits| digits.parse::<u16>().ok())
         .filter(|digit| *digit < NUMPAD_DIGIT_COUNT)
         .map(|digit| VK_NUMPAD0 + digit)
 }
@@ -165,11 +162,17 @@ fn named_key(name: &str) -> Option<u16> {
         .map(|(code, _)| *code)
 }
 
+/// Whether a key may be the hotkey without a modifier: pressing it never types text.
+fn may_stand_alone(key: u16) -> bool {
+    is_function_key(key) || STANDALONE_KEYS.contains(&key)
+}
+
+/// The name of a key as the hotkey is written, the reverse of `key_code`.
 fn key_label(key: u16) -> String {
     if is_function_key(key) {
         return format!("F{}", key - VK_F1 + 1);
     }
-    if (VK_NUMPAD0..VK_NUMPAD0 + NUMPAD_DIGIT_COUNT).contains(&key) {
+    if is_numpad_digit(key) {
         return format!("Numpad{}", key - VK_NUMPAD0);
     }
     if let Some((_, name)) = NAMED_KEYS.iter().find(|(code, _)| *code == key) {
@@ -178,8 +181,14 @@ fn key_label(key: u16) -> String {
     char::from_u32(u32::from(key)).map_or_else(|| format!("{key:#04x}"), String::from)
 }
 
+/// Whether a key is one of `F1` to `F24`.
 const fn is_function_key(key: u16) -> bool {
     key >= VK_F1 && key < VK_F1 + FUNCTION_KEY_COUNT
+}
+
+/// Whether a key is one of `Numpad0` to `Numpad9`.
+const fn is_numpad_digit(key: u16) -> bool {
+    key >= VK_NUMPAD0 && key < VK_NUMPAD0 + NUMPAD_DIGIT_COUNT
 }
 
 #[cfg(windows)]
@@ -244,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_modifiers_and_keys_in_any_case_and_order() {
+    fn hotkeys_parse_modifiers_and_keys_in_any_case_and_order() {
         assert_eq!(
             parse("Alt+F10").unwrap(),
             Hotkey {
@@ -266,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn displays_the_canonical_spelling() {
+    fn hotkeys_display_their_canonical_spelling() {
         for (text, canonical) in [
             ("alt+f10", "Alt+F10"),
             ("Shift+Win+Ctrl+Alt+9", "Ctrl+Alt+Shift+Win+9"),
@@ -280,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_hotkeys() {
+    fn malformed_hotkeys_are_rejected() {
         assert_matches!(parse(""), Err(ParseError::Empty));
         assert_matches!(parse("Alt+"), Err(ParseError::Empty));
         assert_matches!(parse("Alt+F25"), Err(ParseError::UnknownKey(_)));

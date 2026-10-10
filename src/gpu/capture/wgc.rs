@@ -40,15 +40,18 @@ use windows::{
 /// Buffers in the frame pool: one being written by Windows while the newest waits to be taken.
 const POOL_BUFFERS: i32 = 2;
 
+/// A running Windows Graphics Capture of one monitor or window.
 pub(super) struct Capture {
     item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
+    /// Whether the target is a window rather than a monitor.
     captures_window: bool,
     /// Set when Windows ends the capture: the monitor was unplugged, the window closed or the
     /// device was lost.
     closed: Arc<AtomicBool>,
+    /// The registration that sets `closed`, removed when dropped.
     closed_token: i64,
 }
 
@@ -128,6 +131,7 @@ impl Source for Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        // Stops watching for the end of the capture before ending it, then frees the pool.
         let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();

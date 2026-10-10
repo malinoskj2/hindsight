@@ -3,20 +3,25 @@
 //!
 //! A rounded blue square with a white play triangle and a red recording dot.
 
+/// The tile's colour.
 const BACKGROUND: [u8; 3] = [0x25, 0x63, 0xEB];
+/// Fraction of the tile used for the corner radius.
+const CORNER_RADIUS: f32 = 0.22;
+/// The play triangle's colour.
 const GLYPH: [u8; 3] = [0xFF, 0xFF, 0xFF];
+/// Triangle corners as fractions of the tile.
+const TRIANGLE: [(f32, f32); 3] = [(0.37, 0.27), (0.37, 0.73), (0.76, 0.50)];
+/// The recording dot's colour.
 const DOT: [u8; 3] = [0xEF, 0x44, 0x44];
 /// The recording dot's centre and radius as fractions of the tile.
 const DOT_CENTRE: (f32, f32) = (0.76, 0.24);
 const DOT_RADIUS: f32 = 0.11;
-/// Fraction of the tile used for the corner radius.
-const CORNER_RADIUS: f32 = 0.22;
-/// Triangle corners as fractions of the tile.
-const TRIANGLE: [(f32, f32); 3] = [(0.37, 0.27), (0.37, 0.73), (0.76, 0.50)];
 /// Subsamples per axis for anti-aliasing.
 const SUPERSAMPLE: u32 = 4;
+
 /// Sizes stored in the `.ico` resource; Explorer and the Start menu pick the closest.
 const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+/// The number of sizes, as the `ICONDIR` header stores it.
 const ENTRY_COUNT: u16 = 7;
 const _: () = assert!(ENTRY_COUNT as usize == ICO_SIZES.len());
 /// The `ICONDIR` header: reserved, type and entry count, two bytes each.
@@ -25,22 +30,6 @@ const ICO_HEADER_BYTES: usize = 6;
 const ICO_ENTRY_BYTES: usize = 16;
 /// The `BITMAPINFOHEADER` that starts each image.
 const BITMAP_HEADER_BYTES: u32 = 40;
-
-/// `.ico` directory fields are 32-bit; the icon is a few hundred kilobytes.
-fn length_field(bytes: usize) -> u32 {
-    u32::try_from(bytes).expect("icon data fits a 32-bit directory field")
-}
-
-/// RGBA pixels, row-major from the top-left, with straight (unmultiplied) alpha.
-pub(crate) fn rgba(size: u32) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            pixels.extend_from_slice(&shade(&Coverage::of(x, y, size)));
-        }
-    }
-    pixels
-}
 
 /// How many of a pixel's subsamples fall inside the tile, and how many of those land on the
 /// glyph and on the dot.
@@ -76,24 +65,15 @@ impl Coverage {
     }
 }
 
-/// One RGBA pixel: the share of its subsamples inside the tile is its alpha, and the shares of
-/// those on the glyph and the dot mix their colours into the background.
-fn shade(coverage: &Coverage) -> [u8; 4] {
-    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
-    let alpha = coverage.tile / samples;
-    let (glyph_share, dot_share) = if coverage.tile > 0.0 {
-        (coverage.glyph / coverage.tile, coverage.dot / coverage.tile)
-    } else {
-        (0.0, 0.0)
-    };
-    let mix = |channel: usize| {
-        to_byte(
-            f32::from(BACKGROUND[channel]) * (1.0 - glyph_share - dot_share)
-                + f32::from(GLYPH[channel]) * glyph_share
-                + f32::from(DOT[channel]) * dot_share,
-        )
-    };
-    [mix(0), mix(1), mix(2), to_byte(alpha * 255.0)]
+/// RGBA pixels, row-major from the top-left, with straight (unmultiplied) alpha.
+pub(crate) fn rgba(size: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            pixels.extend_from_slice(&shade(&Coverage::of(x, y, size)));
+        }
+    }
+    pixels
 }
 
 /// The icon as a Windows `.ico` file with 32-bit BMP entries for every size in `ICO_SIZES`.
@@ -116,6 +96,61 @@ pub(crate) fn ico() -> Vec<u8> {
     directory
 }
 
+/// One RGBA pixel: the share of its subsamples inside the tile is its alpha, and the shares of
+/// those on the glyph and the dot mix their colours into the background.
+fn shade(coverage: &Coverage) -> [u8; 4] {
+    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
+    let alpha = coverage.tile / samples;
+    let (glyph_share, dot_share) = if coverage.tile > 0.0 {
+        (coverage.glyph / coverage.tile, coverage.dot / coverage.tile)
+    } else {
+        (0.0, 0.0)
+    };
+    let mix = |channel: usize| {
+        to_byte(
+            f32::from(BACKGROUND[channel]) * (1.0 - glyph_share - dot_share)
+                + f32::from(GLYPH[channel]) * glyph_share
+                + f32::from(DOT[channel]) * dot_share,
+        )
+    };
+    [mix(0), mix(1), mix(2), to_byte(alpha * 255.0)]
+}
+
+/// Whether a point, in fractions of the tile, is inside the rounded tile.
+fn inside_tile(x: f32, y: f32) -> bool {
+    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return false;
+    }
+
+    // Distance past the straight edges; inside the cross-shaped body or a corner circle.
+    let dx = (x - 0.5).abs() - (0.5 - CORNER_RADIUS);
+    let dy = (y - 0.5).abs() - (0.5 - CORNER_RADIUS);
+    dx <= 0.0 || dy <= 0.0 || dx * dx + dy * dy <= CORNER_RADIUS * CORNER_RADIUS
+}
+
+/// Whether a point, in fractions of the tile, is inside the play triangle.
+fn inside_triangle(x: f32, y: f32) -> bool {
+    let [first, second, third] = TRIANGLE;
+    let side = |from: (f32, f32), to: (f32, f32)| {
+        (to.0 - from.0) * (y - from.1) - (to.1 - from.1) * (x - from.0)
+    };
+    let sides = [side(first, second), side(second, third), side(third, first)];
+    sides.iter().all(|value| *value >= 0.0) || sides.iter().all(|value| *value <= 0.0)
+}
+
+/// Whether a point, in fractions of the tile, is inside the recording dot.
+fn inside_dot(x: f32, y: f32) -> bool {
+    let (dx, dy) = (x - DOT_CENTRE.0, y - DOT_CENTRE.1);
+    dx * dx + dy * dy <= DOT_RADIUS * DOT_RADIUS
+}
+
+/// A colour channel or alpha from its value on the 0 to 255 scale.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn to_byte(value: f32) -> u8 {
+    // Clamped to 0..=255 first, so the cast neither truncates nor loses a sign.
+    value.round().clamp(0.0, 255.0) as u8
+}
+
 /// The `ICONDIRENTRY` of a 32-bit image `size` pixels square, `length` bytes long and starting
 /// `offset` bytes into the file.
 fn directory_entry(size: u32, length: usize, offset: usize) -> [u8; ICO_ENTRY_BYTES] {
@@ -129,6 +164,11 @@ fn directory_entry(size: u32, length: usize, offset: usize) -> [u8; ICO_ENTRY_BY
     entry[8..12].copy_from_slice(&length_field(length).to_le_bytes());
     entry[12..16].copy_from_slice(&length_field(offset).to_le_bytes());
     entry
+}
+
+/// A length or offset as a 32-bit `.ico` field; the icon is a few hundred kilobytes.
+fn length_field(bytes: usize) -> u32 {
+    u32::try_from(bytes).expect("icon data fits a 32-bit directory field")
 }
 
 /// A `BITMAPINFOHEADER` followed by bottom-up BGRA rows and an empty 1-bit mask.
@@ -167,37 +207,6 @@ fn push_bottom_up_bgra(entry: &mut Vec<u8>, pixels: &[u8], size: u32) {
     }
 }
 
-fn inside_tile(x: f32, y: f32) -> bool {
-    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-        return false;
-    }
-
-    // Distance past the straight edges; inside the cross-shaped body or a corner circle.
-    let dx = (x - 0.5).abs() - (0.5 - CORNER_RADIUS);
-    let dy = (y - 0.5).abs() - (0.5 - CORNER_RADIUS);
-    dx <= 0.0 || dy <= 0.0 || dx * dx + dy * dy <= CORNER_RADIUS * CORNER_RADIUS
-}
-
-fn inside_dot(x: f32, y: f32) -> bool {
-    let (dx, dy) = (x - DOT_CENTRE.0, y - DOT_CENTRE.1);
-    dx * dx + dy * dy <= DOT_RADIUS * DOT_RADIUS
-}
-
-fn inside_triangle(x: f32, y: f32) -> bool {
-    let [first, second, third] = TRIANGLE;
-    let side = |from: (f32, f32), to: (f32, f32)| {
-        (to.0 - from.0) * (y - from.1) - (to.1 - from.1) * (x - from.0)
-    };
-    let sides = [side(first, second), side(second, third), side(third, first)];
-    sides.iter().all(|value| *value >= 0.0) || sides.iter().all(|value| *value <= 0.0)
-}
-
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn to_byte(value: f32) -> u8 {
-    // Clamped to 0..=255 first, so the cast neither truncates nor loses a sign.
-    value.round().clamp(0.0, 255.0) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn ico_directory_lists_every_size_with_consistent_offsets() {
+    fn the_ico_directory_lists_every_size_with_consistent_offsets() {
         let bytes = ico();
         assert_eq!(&bytes[..6], &[0, 0, 1, 0, 7, 0]);
 
@@ -247,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_ico_matches_the_renderer() {
+    fn the_committed_ico_matches_the_renderer() {
         let committed: &[u8] = include_bytes!("../../assets/hindsight.ico");
         assert!(
             committed == ico().as_slice(),

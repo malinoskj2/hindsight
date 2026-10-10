@@ -31,49 +31,22 @@ use windows::Win32::{
 /// while it is refused.
 const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Why a capture could not start, or why a running one stopped.
 #[derive(Debug, Error)]
 pub(crate) enum CaptureError {
     /// This machine or display cannot be captured this way; trying again would fail the same
     /// way.
     #[error("{0}")]
     Unsupported(String),
+    /// The captured monitor or window is gone.
     #[error("the captured display or window went away")]
     Closed,
+    /// A Windows call failed in the named step.
     #[error("{0}: {1}")]
     Windows(&'static str, windows::core::Error),
+    /// The NvFBC driver failed in the named step.
     #[error("{0} failed with {1}")]
     Nvfbc(&'static str, nvfbc::Status),
-}
-
-/// Paces a backend's attempts to open its capture again after Windows or the driver took it
-/// away, so a refusal is retried every [`REOPEN_INTERVAL`] rather than on every tick.
-#[derive(Default)]
-struct ReopenThrottle {
-    /// When the next attempt is due, after a refusal.
-    due: Option<Instant>,
-}
-
-impl ReopenThrottle {
-    /// The current time if an attempt is due now, `None` while waiting out a refusal.
-    fn attempt(&self) -> Option<Instant> {
-        let now = Instant::now();
-        self.due.is_none_or(|due| now >= due).then_some(now)
-    }
-
-    /// Lets the next attempt, after a successful one, go ahead at once.
-    fn succeeded(&mut self) {
-        self.due = None;
-    }
-
-    /// Holds the next attempt back after the one started at `now` was refused.
-    fn refused(&mut self, now: Instant) {
-        self.due = Some(now + REOPEN_INTERVAL);
-    }
-}
-
-/// Wraps a Windows error with the step that failed, for `map_err`.
-fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
-    move |error| CaptureError::Windows(step, error)
 }
 
 /// What a tick found.
@@ -106,6 +79,32 @@ pub(super) trait Source {
     ) -> Result<Frame, CaptureError>;
 }
 
+/// Paces a backend's attempts to open its capture again after Windows or the driver took it
+/// away, so a refusal is retried every [`REOPEN_INTERVAL`] rather than on every tick.
+#[derive(Default)]
+struct ReopenThrottle {
+    /// When the next attempt is due, after a refusal.
+    due: Option<Instant>,
+}
+
+impl ReopenThrottle {
+    /// The current time if an attempt is due now, `None` while waiting out a refusal.
+    fn attempt(&self) -> Option<Instant> {
+        let now = Instant::now();
+        self.due.is_none_or(|due| now >= due).then_some(now)
+    }
+
+    /// Lets the next attempt, after a successful one, go ahead at once.
+    fn succeeded(&mut self) {
+        self.due = None;
+    }
+
+    /// Holds the next attempt back after the one started at `now` was refused.
+    fn refused(&mut self, now: Instant) {
+        self.due = Some(now + REOPEN_INTERVAL);
+    }
+}
+
 /// Starts capturing `target` with `backend`, delivering frames no faster than about twice per
 /// `period` where the backend can be asked to.
 pub(super) fn start(
@@ -116,19 +115,14 @@ pub(super) fn start(
 ) -> Result<Box<dyn Source>, CaptureError> {
     Ok(match backend {
         Backend::Wgc => Box::new(wgc::Capture::start(device, period, target)?),
-        Backend::Dxgi => Box::new(dxgi_dd::DesktopDuplication::start(device, target)?),
-        Backend::Nvfbc => Box::new(nvfbc::Nvfbc::start(device, target)?),
+        Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target)?),
+        Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target)?),
     })
 }
 
-/// The monitor a target's handle names; 0 is the primary one.
-fn monitor(handle: isize) -> HMONITOR {
-    if handle == 0 {
-        // SAFETY: (0, 0) always lies on the primary monitor.
-        unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) }
-    } else {
-        HMONITOR(handle as *mut c_void)
-    }
+/// Wraps a Windows error with the step that failed, for `map_err`.
+fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
+    move |error| CaptureError::Windows(step, error)
 }
 
 /// The monitor a whole-monitor backend records for `target`, and the window it stands in for
@@ -144,8 +138,18 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     }
 }
 
+/// The monitor a target's handle names; 0 is the primary one.
+fn monitor(handle: isize) -> HMONITOR {
+    if handle == 0 {
+        // SAFETY: (0, 0) always lies on the primary monitor.
+        unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) }
+    } else {
+        HMONITOR(handle as *mut c_void)
+    }
+}
+
 /// Whether the window a whole-monitor backend records through its monitor has been destroyed.
-fn window_closed(window: Option<HWND>) -> bool {
+fn is_window_closed(window: Option<HWND>) -> bool {
     // SAFETY: IsWindow accepts any handle, live or not.
     window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())
 }

@@ -3,7 +3,7 @@
 
 use super::{
     annexb::nal_units,
-    mp4::{NAL_LENGTH_BYTES, atom},
+    mp4::{NAL_LENGTH_BYTES, atom, write_parameter_set},
 };
 
 const NAL_TYPE_MASK: u8 = 0x1F;
@@ -21,28 +21,36 @@ const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
 /// 4:2:0, the `chroma_format_idc` the encoder is configured for.
 const CHROMA_420: u8 = 1;
 
-/// The `avcC` record for the first SPS and PPS in `access_unit`, if it carries both.
+/// Whether the access unit holds an IDR picture.
+pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
+    nal_units(access_unit)
+        .iter()
+        .any(|unit| nal_type(unit) == NAL_IDR)
+}
+
+/// The `avcC` record for the parameter sets in `access_unit`, if it carries both.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
-    let sps = of_type(NAL_SPS).filter(|sps| sps.len() >= SPS_PROFILE_BYTES)?;
-    let pps = of_type(NAL_PPS)?;
+    let (sps, pps) = (of_type(NAL_SPS)?, of_type(NAL_PPS)?);
+    if sps.len() < SPS_PROFILE_BYTES {
+        return None;
+    }
     let (profile, compatibility, level) = (sps[1], sps[2], sps[3]);
 
-    // The reserved bits are set throughout. One SPS, then one PPS.
+    // The reserved bits are set throughout.
     let mut body = vec![
         AVCC_VERSION,
         profile,
         compatibility,
         level,
         0xFC | (NAL_LENGTH_BYTES - 1),
-        0xE0 | 1,
     ];
-    body.extend_from_slice(&u16::try_from(sps.len()).ok()?.to_be_bytes());
-    body.extend_from_slice(sps);
+    // One SPS, then one PPS, each behind its count.
+    body.push(0xE0 | 1);
+    write_parameter_set(&mut body, sps)?;
     body.push(1);
-    body.extend_from_slice(&u16::try_from(pps.len()).ok()?.to_be_bytes());
-    body.extend_from_slice(pps);
+    write_parameter_set(&mut body, pps)?;
     // 8-bit luma and chroma (bit depths minus 8 of 0), no SPS extensions.
     if HIGH_PROFILES.contains(&profile) {
         body.extend_from_slice(&[0xFC | CHROMA_420, 0xF8, 0xF8, 0]);
@@ -59,12 +67,7 @@ pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
-    nal_units(access_unit)
-        .iter()
-        .any(|unit| nal_type(unit) == NAL_IDR)
-}
-
+/// The `nal_unit_type` in a NAL unit's one-byte header.
 pub(super) fn nal_type(unit: &[u8]) -> u8 {
     unit[0] & NAL_TYPE_MASK
 }
@@ -92,14 +95,9 @@ pub(super) mod tests {
         .concat()
     }
 
+    /// An access unit holding one slice of a picture that refers to earlier ones.
     pub(in crate::replay) fn inter_frame() -> Vec<u8> {
         [&[0, 0, 0, 1][..], &SLICE].concat()
-    }
-
-    #[test]
-    fn samples_keep_only_picture_data() {
-        assert_eq!(sample_units(&keyframe()), [&IDR[..]]);
-        assert_eq!(sample_units(&inter_frame()), [&SLICE[..]]);
     }
 
     #[test]
@@ -119,5 +117,11 @@ pub(super) mod tests {
         assert_eq!(&body[17..21], &PPS);
         assert_eq!(&body[21..], &[0xFD, 0xF8, 0xF8, 0]);
         assert!(configuration(&inter_frame()).is_none());
+    }
+
+    #[test]
+    fn samples_keep_only_picture_data() {
+        assert_eq!(sample_units(&keyframe()), [&IDR[..]]);
+        assert_eq!(sample_units(&inter_frame()), [&SLICE[..]]);
     }
 }

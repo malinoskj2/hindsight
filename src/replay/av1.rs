@@ -29,6 +29,67 @@ const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
 /// The `av1C` record's first byte: its marker bit and version 1.
 const AV1C_MARKER_AND_VERSION: u8 = 0x81;
 
+/// Whether the temporal unit's first frame is a key frame.
+pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
+    obus(temporal_unit)
+        .iter()
+        .find(|obu| matches!(obu.kind, OBU_FRAME_HEADER | OBU_FRAME))
+        .and_then(|obu| {
+            let mut bits = Bits::new(obu.payload);
+            let show_existing_frame = bits.bit()?;
+            let frame_type = bits.read(2)?;
+            Some(show_existing_frame == 0 && frame_type == KEY_FRAME)
+        })
+        .unwrap_or(false)
+}
+
+/// The `av1C` record for the sequence header in `temporal_unit`, if it carries one.
+pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
+    let obu = obus(temporal_unit)
+        .into_iter()
+        .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
+    let sequence = SequenceHeader::parse(obu.payload)?;
+    let mut body = sequence.record_fields()?.to_vec();
+    write_sized_obu(&mut body, &obu);
+    Some(atom(*b"av1C", &body))
+}
+
+/// Appends `obu` to `output` with a size field, whether or not it came with one.
+fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
+    output.push(obu.header[0] | OBU_HAS_SIZE_FIELD);
+    output.extend_from_slice(&obu.header[1..]);
+    write_leb128(output, obu.payload.len());
+    output.extend_from_slice(obu.payload);
+}
+
+/// The OBUs a stored sample keeps, whole: everything but temporal delimiters and padding.
+pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
+    obus(temporal_unit)
+        .into_iter()
+        .filter(|obu| !matches!(obu.kind, OBU_TEMPORAL_DELIMITER | OBU_PADDING))
+        .map(|obu| obu.bytes)
+        .collect()
+}
+
+/// Splits a low-overhead bitstream into temporal units at their temporal delimiters.
+#[cfg(test)]
+pub(super) fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
+    // OBUs follow one another without gaps, so each one starts where the previous ones end.
+    let mut offset = 0;
+    let mut starts = Vec::new();
+    for obu in obus(stream) {
+        if obu.kind == OBU_TEMPORAL_DELIMITER {
+            starts.push(offset);
+        }
+        offset += obu.bytes.len();
+    }
+    starts.push(stream.len());
+    starts
+        .windows(2)
+        .map(|pair| &stream[pair[0]..pair[1]])
+        .collect()
+}
+
 /// One OBU: its type, its header, its payload, and the whole of it from the header on.
 struct Obu<'a> {
     kind: u8,
@@ -88,6 +149,7 @@ fn leb128(data: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+/// Appends `value` to `output` as an unsigned LEB128 value.
 fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
     loop {
         let byte = u8::try_from(value & 0x7F).expect("a 7-bit value fits a byte");
@@ -98,67 +160,6 @@ fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
         }
         output.push(byte | 0x80);
     }
-}
-
-/// The OBUs a stored sample keeps, whole: everything but temporal delimiters and padding.
-pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
-    obus(temporal_unit)
-        .into_iter()
-        .filter(|obu| !matches!(obu.kind, OBU_TEMPORAL_DELIMITER | OBU_PADDING))
-        .map(|obu| obu.bytes)
-        .collect()
-}
-
-/// Splits a low-overhead bitstream into temporal units at their temporal delimiters.
-#[cfg(test)]
-pub(super) fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
-    // OBUs follow one another without gaps, so each one starts where the previous ones end.
-    let mut offset = 0;
-    let mut starts = Vec::new();
-    for obu in obus(stream) {
-        if obu.kind == OBU_TEMPORAL_DELIMITER {
-            starts.push(offset);
-        }
-        offset += obu.bytes.len();
-    }
-    starts.push(stream.len());
-    starts
-        .windows(2)
-        .map(|pair| &stream[pair[0]..pair[1]])
-        .collect()
-}
-
-/// Whether the temporal unit's first frame is a key frame.
-pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
-    obus(temporal_unit)
-        .iter()
-        .find(|obu| matches!(obu.kind, OBU_FRAME_HEADER | OBU_FRAME))
-        .and_then(|obu| {
-            let mut bits = Bits::new(obu.payload);
-            let show_existing_frame = bits.bit()?;
-            let frame_type = bits.read(2)?;
-            Some(show_existing_frame == 0 && frame_type == KEY_FRAME)
-        })
-        .unwrap_or(false)
-}
-
-/// The `av1C` record for the sequence header in `temporal_unit`, if it carries one.
-pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
-    let obu = obus(temporal_unit)
-        .into_iter()
-        .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
-    let sequence = SequenceHeader::parse(obu.payload)?;
-    let mut body = sequence.record_fields()?.to_vec();
-    write_sized_obu(&mut body, &obu);
-    Some(atom(*b"av1C", &body))
-}
-
-/// Appends `obu` to `output` with a size field, whether or not it came with one.
-fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
-    output.push(obu.header[0] | OBU_HAS_SIZE_FIELD);
-    output.extend_from_slice(&obu.header[1..]);
-    write_leb128(output, obu.payload.len());
-    output.extend_from_slice(obu.payload);
 }
 
 /// The fields of a sequence header the `av1C` record repeats; the flags mirror the bitstream's.
@@ -211,48 +212,6 @@ impl SequenceHeader {
         ])
     }
 
-    /// Skips the frame size, the frame id lengths and the coding tool flags, which lie between
-    /// the operating points and `color_config()` and which the `av1C` record does not repeat.
-    fn skip_frame_size_and_tools(
-        bits: &mut Bits<'_>,
-        reduced_still_picture_header: bool,
-    ) -> Option<()> {
-        let width_bits = bits.read(4)? + 1;
-        let height_bits = bits.read(4)? + 1;
-        bits.skip(width_bits + height_bits)?;
-        if !reduced_still_picture_header && bits.flag()? {
-            // Frame id lengths.
-            bits.skip(4 + 3)?;
-        }
-        // 128×128 superblocks, filter intra, intra edge filter.
-        bits.skip(3)?;
-        if !reduced_still_picture_header {
-            Self::skip_inter_tools(bits)?;
-        }
-        // Superres, CDEF, loop restoration.
-        bits.skip(3)
-    }
-
-    /// Skips the inter prediction tool flags, which only a sequence header that is not reduced
-    /// to still pictures carries.
-    fn skip_inter_tools(bits: &mut Bits<'_>) -> Option<()> {
-        // Inter-intra, masked compound, warped motion, dual filter.
-        bits.skip(4)?;
-        let order_hint = bits.flag()?;
-        if order_hint {
-            // Joint compound, reference frame motion vectors.
-            bits.skip(2)?;
-        }
-        let force_screen_content_tools = if bits.flag()? { 2 } else { bits.read(1)? };
-        if force_screen_content_tools > 0 && !bits.flag()? {
-            bits.skip(1)?;
-        }
-        if order_hint {
-            bits.skip(3)?;
-        }
-        Some(())
-    }
-
     /// Reads the optional timing and decoder model information, then every operating point,
     /// and returns the first point's level and tier.
     fn first_operating_point(bits: &mut Bits<'_>) -> Option<(u32, bool)> {
@@ -299,6 +258,48 @@ impl SequenceHeader {
         let buffer_delay_length = bits.read(5)? + 1;
         bits.skip(32 + 5 + 5)?;
         Some(buffer_delay_length)
+    }
+
+    /// Skips the frame size, the frame id lengths and the coding tool flags, which lie between
+    /// the operating points and `color_config()` and which the `av1C` record does not repeat.
+    fn skip_frame_size_and_tools(
+        bits: &mut Bits<'_>,
+        reduced_still_picture_header: bool,
+    ) -> Option<()> {
+        let width_bits = bits.read(4)? + 1;
+        let height_bits = bits.read(4)? + 1;
+        bits.skip(width_bits + height_bits)?;
+        if !reduced_still_picture_header && bits.flag()? {
+            // Frame id lengths.
+            bits.skip(4 + 3)?;
+        }
+        // 128×128 superblocks, filter intra, intra edge filter.
+        bits.skip(3)?;
+        if !reduced_still_picture_header {
+            Self::skip_inter_tools(bits)?;
+        }
+        // Superres, CDEF, loop restoration.
+        bits.skip(3)
+    }
+
+    /// Skips the inter prediction tool flags, which only a sequence header that is not reduced
+    /// to still pictures carries.
+    fn skip_inter_tools(bits: &mut Bits<'_>) -> Option<()> {
+        // Inter-intra, masked compound, warped motion, dual filter.
+        bits.skip(4)?;
+        let order_hint = bits.flag()?;
+        if order_hint {
+            // Joint compound, reference frame motion vectors.
+            bits.skip(2)?;
+        }
+        let force_screen_content_tools = if bits.flag()? { 2 } else { bits.read(1)? };
+        if force_screen_content_tools > 0 && !bits.flag()? {
+            bits.skip(1)?;
+        }
+        if order_hint {
+            bits.skip(3)?;
+        }
+        Some(())
     }
 }
 
@@ -375,6 +376,7 @@ impl<'a> Bits<'a> {
         Self { data, position: 0 }
     }
 
+    /// The next bit, as 0 or 1.
     fn bit(&mut self) -> Option<u32> {
         let byte = self.data.get(self.position / 8)?;
         let bit = (byte >> (7 - self.position % 8)) & 1;
@@ -382,14 +384,17 @@ impl<'a> Bits<'a> {
         Some(u32::from(bit))
     }
 
+    /// The next bit, as a flag.
     fn flag(&mut self) -> Option<bool> {
         self.bit().map(|bit| bit == 1)
     }
 
+    /// The next `count` bits, as an unsigned value.
     fn read(&mut self, count: u32) -> Option<u32> {
         (0..count).try_fold(0, |value, _| Some((value << 1) | self.bit()?))
     }
 
+    /// Moves past the next `count` bits, unless fewer are left.
     fn skip(&mut self, count: u32) -> Option<()> {
         let end = self.position + count as usize;
         (end <= self.data.len() * 8).then(|| self.position = end)
@@ -484,6 +489,7 @@ pub(super) mod tests {
         bytes
     }
 
+    /// A keyframe temporal unit: delimiter, sequence header, then the frame.
     pub(in crate::replay) fn keyframe() -> Vec<u8> {
         [
             obu(OBU_TEMPORAL_DELIMITER, &[]),
@@ -494,6 +500,7 @@ pub(super) mod tests {
         .concat()
     }
 
+    /// A temporal unit holding a delimiter and one frame that refers to earlier ones.
     pub(in crate::replay) fn inter_frame() -> Vec<u8> {
         [
             obu(OBU_TEMPORAL_DELIMITER, &[]),
@@ -501,6 +508,42 @@ pub(super) mod tests {
             obu(OBU_FRAME, &[0b0011_0000, 0x12]),
         ]
         .concat()
+    }
+
+    #[test]
+    fn keyframes_are_told_from_inter_frames() {
+        assert!(is_keyframe(&keyframe()));
+        assert!(!is_keyframe(&inter_frame()));
+        // A frame shown again from the reference buffer is not a new key frame.
+        assert!(!is_keyframe(&obu(OBU_FRAME_HEADER, &[0b1000_0000])));
+    }
+
+    #[test]
+    fn configuration_repeats_the_sequence_header() {
+        let record = configuration(&keyframe()).unwrap();
+
+        assert_eq!(&record[4..8], b"av1C");
+        let body = &record[8..];
+        assert_eq!(body[..4], [0x81, 0x08, 0x8D, 0]);
+        assert_eq!(
+            body[4..],
+            obu(OBU_SEQUENCE_HEADER, &elaborate_sequence_header())
+        );
+        assert!(configuration(&inter_frame()).is_none());
+    }
+
+    #[test]
+    fn samples_drop_delimiters_and_padding() {
+        let unit = [keyframe(), obu(OBU_PADDING, &[0; 3])].concat();
+        let kept = sample_obus(&unit);
+
+        assert_eq!(kept.len(), 2);
+        assert_eq!(obu_type(kept[0][0]), OBU_SEQUENCE_HEADER);
+        assert_eq!(kept[1], obu(OBU_FRAME, &[0b0001_0000, 0xAB, 0xCD]));
+        assert_eq!(
+            sample_obus(&inter_frame()),
+            [&obu(OBU_FRAME, &[0b0011_0000, 0x12])[..]]
+        );
     }
 
     #[test]
@@ -522,42 +565,6 @@ pub(super) mod tests {
             }
         );
         assert!(SequenceHeader::parse(&elaborate_sequence_header()[..20]).is_none());
-    }
-
-    #[test]
-    fn samples_drop_delimiters_and_padding() {
-        let unit = [keyframe(), obu(OBU_PADDING, &[0; 3])].concat();
-        let kept = sample_obus(&unit);
-
-        assert_eq!(kept.len(), 2);
-        assert_eq!(obu_type(kept[0][0]), OBU_SEQUENCE_HEADER);
-        assert_eq!(kept[1], obu(OBU_FRAME, &[0b0001_0000, 0xAB, 0xCD]));
-        assert_eq!(
-            sample_obus(&inter_frame()),
-            [&obu(OBU_FRAME, &[0b0011_0000, 0x12])[..]]
-        );
-    }
-
-    #[test]
-    fn key_frames_are_told_from_inter_frames() {
-        assert!(is_keyframe(&keyframe()));
-        assert!(!is_keyframe(&inter_frame()));
-        // A frame shown again from the reference buffer is not a new key frame.
-        assert!(!is_keyframe(&obu(OBU_FRAME_HEADER, &[0b1000_0000])));
-    }
-
-    #[test]
-    fn configuration_repeats_the_sequence_header() {
-        let record = configuration(&keyframe()).unwrap();
-
-        assert_eq!(&record[4..8], b"av1C");
-        let body = &record[8..];
-        assert_eq!(body[..4], [0x81, 0x08, 0x8D, 0]);
-        assert_eq!(
-            body[4..],
-            obu(OBU_SEQUENCE_HEADER, &elaborate_sequence_header())
-        );
-        assert!(configuration(&inter_frame()).is_none());
     }
 
     #[test]

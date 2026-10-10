@@ -37,24 +37,39 @@ pub(crate) fn record(
     }
 }
 
-/// Failures that come from the machine or the settings rather than the moment.
-fn is_permanent(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<DeviceError>(),
-        Some(DeviceError::NoNvidiaAdapter)
-    ) || matches!(
-        error.downcast_ref::<CaptureError>(),
-        Some(CaptureError::Unsupported(_))
-    ) || matches!(
-        error.downcast_ref::<NvencError>(),
-        Some(
-            NvencError::Library
-                | NvencError::DriverTooOld(..)
-                | NvencError::VersionRejected
-                | NvencError::Unsupported(_)
-                | NvencError::TooLarge { .. }
-        )
-    )
+/// Raises the thread's scheduling priorities for the session, and returns its multimedia-class
+/// membership, which lasts as long as the session.
+fn prepare_thread() -> Option<priority::MultimediaThread> {
+    let multimedia = match priority::join_multimedia_class() {
+        Ok(multimedia) => Some(multimedia),
+        Err(error) => {
+            raise_thread_instead(&error);
+            None
+        }
+    };
+    if let Err(error) = priority::opt_out_of_throttling() {
+        log::warning(format!(
+            "Windows power throttling could not be turned off: {error}"
+        ));
+    }
+    if priority::raise_gpu_class() {
+        log::info("GPU scheduling priority: high");
+    } else {
+        log::warning("The GPU scheduling priority could not be raised");
+    }
+    multimedia
+}
+
+/// Falls back to a high thread priority when joining the multimedia class failed with `error`.
+fn raise_thread_instead(error: &windows::core::Error) {
+    log::warning(format!(
+        "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
+    ));
+    if let Err(error) = priority::raise_thread() {
+        log::warning(format!(
+            "The capture thread priority was not raised: {error}"
+        ));
+    }
 }
 
 /// Opens the device, the capture and the encoder, then encodes one frame per tick of the frame
@@ -136,6 +151,11 @@ fn open_device(config: &Config) -> Result<Device> {
     Ok(device)
 }
 
+/// NVENC encodes 4:2:0 video, whose dimensions must be even; an odd row or column is dropped.
+const fn encodable((width, height): (u32, u32)) -> (u32, u32) {
+    (width & !1, height & !1)
+}
+
 /// Decides which encoded frames are keyframes.
 ///
 /// NVENC reports the picture type it chose. Parsing the bitstream instead costs about 100 µs
@@ -199,43 +219,24 @@ fn fill_input(
     })
 }
 
-/// NVENC encodes 4:2:0 video, whose dimensions must be even; an odd row or column is dropped.
-const fn encodable((width, height): (u32, u32)) -> (u32, u32) {
-    (width & !1, height & !1)
-}
-
-/// Returns the thread's multimedia-class membership, which lasts as long as the session.
-fn prepare_thread() -> Option<priority::MultimediaThread> {
-    let multimedia = match priority::join_multimedia_class() {
-        Ok(multimedia) => Some(multimedia),
-        Err(error) => {
-            raise_thread_instead(&error);
-            None
-        }
-    };
-    if let Err(error) = priority::opt_out_of_throttling() {
-        log::warning(format!(
-            "Windows power throttling could not be turned off: {error}"
-        ));
-    }
-    if priority::raise_gpu_class() {
-        log::info("GPU scheduling priority: high");
-    } else {
-        log::warning("The GPU scheduling priority could not be raised");
-    }
-    multimedia
-}
-
-/// Falls back to a high thread priority when joining the multimedia class failed with `error`.
-fn raise_thread_instead(error: &windows::core::Error) {
-    log::warning(format!(
-        "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
-    ));
-    if let Err(error) = priority::raise_thread() {
-        log::warning(format!(
-            "The capture thread priority was not raised: {error}"
-        ));
-    }
+/// Whether `error` comes from the machine or the settings rather than the moment.
+fn is_permanent(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<DeviceError>(),
+        Some(DeviceError::NoNvidiaAdapter)
+    ) || matches!(
+        error.downcast_ref::<CaptureError>(),
+        Some(CaptureError::Unsupported(_))
+    ) || matches!(
+        error.downcast_ref::<NvencError>(),
+        Some(
+            NvencError::Library
+                | NvencError::DriverTooOld(..)
+                | NvencError::VersionRejected
+                | NvencError::Unsupported(_)
+                | NvencError::TooLarge { .. }
+        )
+    )
 }
 
 #[cfg(test)]

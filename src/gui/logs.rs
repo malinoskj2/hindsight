@@ -22,14 +22,6 @@ pub(super) struct LogsPage {
     tail: Rc<Tail>,
 }
 
-#[derive(Default)]
-struct Tail {
-    /// The last journal entry copied into the view.
-    sequence: Cell<u64>,
-    /// Lines were appended while the tab was hidden; scroll once it shows.
-    need_scroll: Cell<bool>,
-}
-
 impl LogsPage {
     pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
@@ -57,6 +49,7 @@ impl LogsPage {
         }
     }
 
+    /// The tab page the view sits on.
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
     }
@@ -113,4 +106,13 @@ impl LogsPage {
         // SAFETY: EM_SCROLLCARET takes no parameters and is sent to this control's own handle.
         unsafe { self.view.hwnd().SendMessage(w::msg::EmScrollCaret {}) };
     }
+}
+
+/// How far the view has followed the journal.
+#[derive(Default)]
+struct Tail {
+    /// The last journal entry copied into the view.
+    sequence: Cell<u64>,
+    /// Lines were appended while the tab was hidden; scroll once it shows.
+    need_scroll: Cell<bool>,
 }

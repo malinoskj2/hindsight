@@ -26,12 +26,16 @@ const NVIDIA_VENDOR_ID: u32 = 0x10DE;
 /// The highest GPU thread priority; Windows grants more than 0 only to an elevated process.
 const GPU_THREAD_PRIORITY: i32 = 7;
 
+/// Why the shared device could not be created.
 #[derive(Debug, Error)]
 pub(crate) enum DeviceError {
+    /// No hardware adapter from NVIDIA is installed.
     #[error("no NVIDIA GPU was found; NVENC needs one")]
     NoNvidiaAdapter,
+    /// Listing the adapters failed.
     #[error("list the graphics adapters: {0}")]
     Enumerate(windows::core::Error),
+    /// Creating the device on the named adapter failed.
     #[error("create the Direct3D 11 device on {0}: {1}")]
     Create(String, windows::core::Error),
 }
@@ -44,15 +48,16 @@ pub(super) struct Device {
 }
 
 impl Device {
+    /// Creates the device on the first NVIDIA adapter.
     pub(super) fn create() -> Result<Self, DeviceError> {
         let (adapter, name) = nvidia_adapter()?;
         let created = |error| DeviceError::Create(name.clone(), error);
-        let (device, context) = create_device(&adapter).map_err(created)?;
+        let (d3d, context) = create_device(&adapter).map_err(created)?;
         // The capture frame pool works on the device from its own threads.
         protect_multithreaded(&context).map_err(created)?;
 
         Ok(Self {
-            d3d: device,
+            d3d,
             context,
             adapter: name,
         })
@@ -117,43 +122,6 @@ impl Device {
     }
 }
 
-/// A Direct3D 11 device on `adapter` with BGRA support, which Windows Graphics Capture
-/// requires of it, and its immediate context.
-fn create_device(
-    adapter: &IDXGIAdapter1,
-) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
-    let mut device = None;
-    let mut context = None;
-    // SAFETY: the adapter is live and the out-parameters outlive the call, which writes
-    // them on success.
-    unsafe {
-        D3D11CreateDevice(
-            adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&[D3D_FEATURE_LEVEL_11_0]),
-            D3D11_SDK_VERSION,
-            Some(&raw mut device),
-            None,
-            Some(&raw mut context),
-        )
-    }?;
-    match (device, context) {
-        (Some(device), Some(context)) => Ok((device, context)),
-        _ => Err(windows::core::Error::empty()),
-    }
-}
-
-/// Switches on the internal locking of the device behind `context`, so threads other than the
-/// capture thread may use it too.
-fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result<()> {
-    let multithread: ID3D11Multithread = context.cast()?;
-    // SAFETY: switches on the device's internal locking; returns the previous setting.
-    let _ = unsafe { multithread.SetMultithreadProtected(true) };
-    Ok(())
-}
-
 /// The first hardware adapter from NVIDIA, and its name.
 fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     // SAFETY: creates a factory; no other preconditions.
@@ -188,4 +156,41 @@ fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
         .position(|unit| *unit == 0)
         .unwrap_or(description.Description.len());
     String::from_utf16_lossy(&description.Description[..length])
+}
+
+/// A Direct3D 11 device on `adapter` with BGRA support, which Windows Graphics Capture
+/// requires of it, and its immediate context.
+fn create_device(
+    adapter: &IDXGIAdapter1,
+) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: the adapter is live; both out-parameters outlive the call and are written on
+    // success.
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&raw mut device),
+            None,
+            Some(&raw mut context),
+        )
+    }?;
+    match (device, context) {
+        (Some(device), Some(context)) => Ok((device, context)),
+        _ => Err(windows::core::Error::empty()),
+    }
+}
+
+/// Switches on the internal locking of the device behind `context`, so threads other than the
+/// capture thread may use it too.
+fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result<()> {
+    let multithread: ID3D11Multithread = context.cast()?;
+    // SAFETY: switches on the device's internal locking; returns the previous setting.
+    let _ = unsafe { multithread.SetMultithreadProtected(true) };
+    Ok(())
 }

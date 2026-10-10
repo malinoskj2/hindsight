@@ -18,7 +18,7 @@
 
 mod ffi;
 
-use super::{CaptureError, Frame, ReopenThrottle, Source, failed, monitor_of, window_closed};
+use super::{CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of};
 use crate::{gpu::device::Device, log, service::Target, sys::nvfbc_key};
 use std::{
     ptr::{self, NonNull},
@@ -54,104 +54,18 @@ use ffi::Zeroed;
 const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
 /// Surfaces grabbed into in turn.
 const SLOT_COUNT: u32 = 2;
+/// [`SLOT_COUNT`] as an array length.
 const SLOTS: usize = SLOT_COUNT as usize;
 
-/// A Direct3D 9 surface NvFBC grabs into, the same memory opened on the encoder's device, and
-/// a query that tells when the grab has finished on the GPU.
-struct Slot {
-    surface: IDirect3DSurface9,
-    /// The texture `surface` is the only level of, kept alive for as long as the surface.
-    _texture: IDirect3DTexture9,
-    shared: ID3D11Texture2D,
-    done: IDirect3DQuery9,
-}
-
-/// `NvFBC64.dll`, unloaded when dropped. Entry points looked up in it, and objects it made,
-/// must be gone by then.
-struct Library(HMODULE);
-
-impl Library {
-    fn load() -> Result<Self, CaptureError> {
-        // The driver installs the library in System32; never look anywhere a planted copy
-        // could be.
-        // SAFETY: loads a system library by name.
-        unsafe { LoadLibraryExW(w!("NvFBC64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
-            .map(Self)
-            .map_err(|_| {
-                CaptureError::Unsupported(
-                    "NvFBC64.dll was not found; install or update the NVIDIA driver".to_owned(),
-                )
-            })
-    }
-}
-
-impl Drop for Library {
-    fn drop(&mut self) {
-        // SAFETY: the library was loaded by `load`, and whoever holds it drops everything that
-        // came from it first: `Nvfbc` releases its session in its own `Drop`.
-        let _ = unsafe { FreeLibrary(self.0) };
-    }
-}
-
-/// A capture object of the driver's, released when dropped.
-struct Session {
-    /// Live from `NvFBC_CreateEx` until `Drop` releases it; its method table lives in the
-    /// library, which outlives the session.
-    object: NonNull<ffi::ToDx9Vid>,
-    /// The surfaces handed to the driver at setup, kept for as long as it may look at them.
-    buffers: Box<[ffi::OutputBuffer; SLOTS]>,
-}
-
-impl Session {
-    /// The object's method table.
-    fn methods(&self) -> &ffi::ToDx9VidVtable {
-        // SAFETY: the object is live (see the field), and a live object's table pointer is
-        // valid for as long as the library that made it is loaded.
-        unsafe { &*(*self.object.as_ptr()).vtable }
-    }
-
-    /// Hands the driver the session's surfaces to grab into, with the cursor drawn in.
-    fn set_up(&self) -> Result<(), Status> {
-        let mut setup = ffi::SetupParams::zeroed();
-        setup.version = ffi::TODX9VID_SETUP_PARAMS_VER;
-        setup.flags = ffi::SETUP_WITH_HW_CURSOR;
-        setup.mode = ffi::TODX9VID_ARGB;
-        setup.buffer_count = SLOT_COUNT;
-        setup.buffers = self.buffers.as_ptr().cast_mut();
-        // SAFETY: a live object; the surfaces belong to the device it was created on and live
-        // as long as the session.
-        unsafe { (self.methods().set_up)(self.object.as_ptr(), &raw mut setup) }.ok()
-    }
-
-    /// Starts a grab of the whole display into the surface at `buffer_index` without waiting
-    /// for the screen to change, and returns the driver's status with its report on the grab.
-    fn grab_frame(&self, buffer_index: u32) -> (Status, ffi::FrameGrabInfo) {
-        let mut info = ffi::FrameGrabInfo::zeroed();
-        let mut params = ffi::GrabFrameParams::zeroed();
-        params.version = ffi::TODX9VID_GRAB_FRAME_PARAMS_VER;
-        params.flags = ffi::TODX9VID_NOWAIT;
-        params.grab_mode = ffi::TODX9VID_SOURCEMODE_FULL;
-        params.buffer_index = buffer_index;
-        params.grab_info = &raw mut info;
-        // SAFETY: a live object, set up by `Nvfbc::open_session` before it handed the session
-        // out; `info` outlives the call.
-        let status = unsafe { (self.methods().grab_frame)(self.object.as_ptr(), &raw mut params) };
-        (status, info)
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards.
-        let _ = unsafe { (self.methods().release)(self.object.as_ptr()) };
-    }
-}
-
-pub(super) struct Nvfbc {
+/// A running NvFBC capture of one monitor.
+pub(super) struct Capture {
     /// Unloaded only after `Drop` has released the session, the one thing here that needs it.
     _library: Library,
+    /// The library's entry point that creates a capture object.
     create: ffi::CreateEx,
+    /// The key presented to the driver whenever a session is opened.
     key: Vec<u8>,
+    /// The Direct3D 9Ex device the surfaces live on.
     device: IDirect3DDevice9Ex,
     slots: [Slot; SLOTS],
     /// `None` while the driver has taken it away.
@@ -161,6 +75,7 @@ pub(super) struct Nvfbc {
     /// The slot the next grab goes into.
     next: u32,
     size: (u32, u32),
+    /// The captured monitor, checked for before a lost session is opened again.
     monitor: HMONITOR,
     /// The window whose monitor is recorded, when the target is one.
     window: Option<HWND>,
@@ -168,7 +83,21 @@ pub(super) struct Nvfbc {
     reopen: ReopenThrottle,
 }
 
-impl Nvfbc {
+/// What starting a grab came to.
+enum Grab {
+    /// A grab is on its way into the next slot.
+    Started,
+    /// Protected video is on screen, and the driver withholds the picture.
+    Withheld,
+    /// The display's size changed.
+    Resized,
+    /// The driver ended the session.
+    Lost,
+}
+
+impl Capture {
+    /// Starts capturing the monitor `target` names, or the monitor its window fills, with the
+    /// cursor.
     pub(super) fn start(device: &Device, target: &Target) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
         let key = saved_key()?;
@@ -307,24 +236,7 @@ impl Nvfbc {
     }
 }
 
-/// The surfaces of `slots` as the driver is handed them at setup.
-fn output_buffers(slots: &[Slot; SLOTS]) -> [ffi::OutputBuffer; SLOTS] {
-    std::array::from_fn(|index| {
-        let mut buffer = ffi::OutputBuffer::zeroed();
-        buffer.primary = slots[index].surface.as_raw();
-        buffer
-    })
-}
-
-/// What starting a grab came to.
-enum Grab {
-    Started,
-    Withheld,
-    Lost,
-    Resized,
-}
-
-impl Source for Nvfbc {
+impl Source for Capture {
     fn size(&self) -> (u32, u32) {
         self.size
     }
@@ -340,9 +252,10 @@ impl Source for Nvfbc {
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
-        if window_closed(self.window) {
+        if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
+
         let collected = self.collect(device, target, width, height)?;
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
@@ -361,11 +274,144 @@ impl Source for Nvfbc {
     }
 }
 
-impl Drop for Nvfbc {
+impl Drop for Capture {
     fn drop(&mut self) {
         // The driver's object goes before the library that implements it, which is unloaded
         // when the fields are dropped after this.
         self.session = None;
+    }
+}
+
+/// `NvFBC64.dll`, unloaded when dropped. Entry points looked up in it, and objects it made,
+/// must be gone by then.
+struct Library(HMODULE);
+
+impl Library {
+    /// Loads the library the driver installed.
+    fn load() -> Result<Self, CaptureError> {
+        // The driver installs the library in System32; never look anywhere a planted copy
+        // could be.
+        // SAFETY: loads a system library by name.
+        unsafe { LoadLibraryExW(w!("NvFBC64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+            .map(Self)
+            .map_err(|_| {
+                CaptureError::Unsupported(
+                    "NvFBC64.dll was not found; install or update the NVIDIA driver".to_owned(),
+                )
+            })
+    }
+}
+
+impl Drop for Library {
+    fn drop(&mut self) {
+        // SAFETY: the library was loaded by `load`, and whoever holds it drops everything that
+        // came from it first: `Capture` releases its session in its own `Drop`.
+        let _ = unsafe { FreeLibrary(self.0) };
+    }
+}
+
+/// The entry points of `NvFBC64.dll` that capture calls, valid while the library is loaded.
+struct EntryPoints {
+    get_status: ffi::GetStatusEx,
+    create: ffi::CreateEx,
+    enable: ffi::Enable,
+}
+
+impl EntryPoints {
+    /// Looks the entry points up in the loaded library.
+    fn look_up(library: &Library) -> Result<Self, CaptureError> {
+        let library = library.0;
+        let missing = |name: &str| {
+            CaptureError::Unsupported(format!(
+                "NvFBC64.dll has no {name}; update the NVIDIA driver"
+            ))
+        };
+        // SAFETY: looks symbols up in the loaded NvFBC library; each has the documented
+        // signature.
+        unsafe {
+            let get_status = GetProcAddress(library, s!("NvFBC_GetStatusEx"))
+                .ok_or_else(|| missing("NvFBC_GetStatusEx"))?;
+            let create = GetProcAddress(library, s!("NvFBC_CreateEx"))
+                .ok_or_else(|| missing("NvFBC_CreateEx"))?;
+            let enable = GetProcAddress(library, s!("NvFBC_Enable"))
+                .ok_or_else(|| missing("NvFBC_Enable"))?;
+            Ok(Self {
+                get_status: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    ffi::GetStatusEx,
+                >(get_status),
+                create: std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::CreateEx>(
+                    create,
+                ),
+                enable: std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::Enable>(
+                    enable,
+                ),
+            })
+        }
+    }
+}
+
+/// A Direct3D 9 surface NvFBC grabs into, the same memory opened on the encoder's device, and
+/// a query that tells when the grab has finished on the GPU.
+struct Slot {
+    surface: IDirect3DSurface9,
+    /// The texture `surface` is the only level of, kept alive for as long as the surface.
+    _texture: IDirect3DTexture9,
+    shared: ID3D11Texture2D,
+    done: IDirect3DQuery9,
+}
+
+/// A capture object of the driver's, released when dropped.
+struct Session {
+    /// Live from `NvFBC_CreateEx` until `Drop` releases it; its method table lives in the
+    /// library, which outlives the session.
+    object: NonNull<ffi::ToDx9Vid>,
+    /// The surfaces handed to the driver at setup, kept for as long as it may look at them.
+    buffers: Box<[ffi::OutputBuffer; SLOTS]>,
+}
+
+impl Session {
+    /// The object's method table.
+    fn methods(&self) -> &ffi::ToDx9VidVtable {
+        // SAFETY: the object is live (see the field), and a live object's table pointer is
+        // valid for as long as the library that made it is loaded.
+        unsafe { &*(*self.object.as_ptr()).vtable }
+    }
+
+    /// Hands the driver the session's surfaces to grab into, with the cursor drawn in.
+    fn set_up(&self) -> Result<(), Status> {
+        let mut setup = ffi::SetupParams::zeroed();
+        setup.version = ffi::TODX9VID_SETUP_PARAMS_VER;
+        setup.flags = ffi::SETUP_WITH_HW_CURSOR;
+        setup.mode = ffi::TODX9VID_ARGB;
+        setup.buffer_count = SLOT_COUNT;
+        setup.buffers = self.buffers.as_ptr().cast_mut();
+        // SAFETY: a live object; the surfaces belong to the device it was created on and live
+        // as long as the session.
+        unsafe { (self.methods().set_up)(self.object.as_ptr(), &raw mut setup) }.ok()
+    }
+
+    /// Starts a grab of the whole display into the surface at `buffer_index` without waiting
+    /// for the screen to change, and returns the driver's status with its report on the grab.
+    fn grab_frame(&self, buffer_index: u32) -> (Status, ffi::FrameGrabInfo) {
+        let mut info = ffi::FrameGrabInfo::zeroed();
+        let mut params = ffi::GrabFrameParams::zeroed();
+        params.version = ffi::TODX9VID_GRAB_FRAME_PARAMS_VER;
+        params.flags = ffi::TODX9VID_NOWAIT;
+        params.grab_mode = ffi::TODX9VID_SOURCEMODE_FULL;
+        params.buffer_index = buffer_index;
+        params.grab_info = &raw mut info;
+        // SAFETY: a live object, set up by `Capture::open_session` before it handed the session
+        // out; `info` outlives the call.
+        let status = unsafe { (self.methods().grab_frame)(self.object.as_ptr(), &raw mut params) };
+        (status, info)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards.
+        let _ = unsafe { (self.methods().release)(self.object.as_ptr()) };
     }
 }
 
@@ -383,6 +429,7 @@ fn saved_key() -> Result<Vec<u8>, CaptureError> {
     }
 }
 
+/// The key's length as the driver's parameter structures hold it.
 fn key_size(key: &[u8]) -> u32 {
     // At most `nvfbc_key::MAX_BYTES`, checked when it was entered.
     u32::try_from(key.len()).unwrap_or(u32::MAX)
@@ -436,59 +483,18 @@ fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), Capture
     Ok((mode.Width, mode.Height))
 }
 
-/// The entry points of `NvFBC64.dll` that capture calls, valid while the library is loaded.
-struct EntryPoints {
-    get_status: ffi::GetStatusEx,
-    create: ffi::CreateEx,
-    enable: ffi::Enable,
-}
-
-impl EntryPoints {
-    /// Looks the entry points up in the loaded library.
-    fn look_up(library: &Library) -> Result<Self, CaptureError> {
-        let library = library.0;
-        let missing = |name: &str| {
-            CaptureError::Unsupported(format!(
-                "NvFBC64.dll has no {name}; update the NVIDIA driver"
-            ))
-        };
-        // SAFETY: looks symbols up in the loaded NvFBC library; each has the documented
-        // signature.
-        unsafe {
-            let get_status = GetProcAddress(library, s!("NvFBC_GetStatusEx"))
-                .ok_or_else(|| missing("NvFBC_GetStatusEx"))?;
-            let create = GetProcAddress(library, s!("NvFBC_CreateEx"))
-                .ok_or_else(|| missing("NvFBC_CreateEx"))?;
-            let enable = GetProcAddress(library, s!("NvFBC_Enable"))
-                .ok_or_else(|| missing("NvFBC_Enable"))?;
-            Ok(Self {
-                get_status: std::mem::transmute::<
-                    unsafe extern "system" fn() -> isize,
-                    ffi::GetStatusEx,
-                >(get_status),
-                create: std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::CreateEx>(
-                    create,
-                ),
-                enable: std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::Enable>(
-                    enable,
-                ),
-            })
-        }
-    }
-}
-
 /// Checks that the driver will capture `adapter` with this key, turning NvFBC on in the driver
 /// when it is off, and returns the entry point that creates a session.
 fn prepare(library: &Library, key: &[u8], adapter: u32) -> Result<ffi::CreateEx, CaptureError> {
     let entry_points = EntryPoints::look_up(library)?;
-    if !capture_possible(entry_points.get_status, key, adapter)? {
+    if !is_capture_possible(entry_points.get_status, key, adapter)? {
         turn_on(entry_points.enable)?;
     }
     Ok(entry_points.create)
 }
 
 /// Asks the driver whether it will capture `adapter` with this key as things stand.
-fn capture_possible(
+fn is_capture_possible(
     get_status: ffi::GetStatusEx,
     key: &[u8],
     adapter: u32,
@@ -590,8 +596,8 @@ fn create_shared_texture(
 ) -> Result<(IDirect3DTexture9, HANDLE), CaptureError> {
     let mut texture = None;
     let mut handle = HANDLE::default();
-    // SAFETY: out-parameters are written on success; a shared texture must be in the default
-    // pool, as it is.
+    // SAFETY: a shared texture must be in the default pool, as it is; both out-parameters are
+    // written on success.
     let texture = unsafe {
         d3d9.CreateTexture(
             width,
@@ -620,6 +626,26 @@ fn open_shared(device: &Device, handle: HANDLE) -> Result<ID3D11Texture2D, Captu
         .map_err(failed("share the NvFBC surface with the encoder"))
 }
 
+/// The surfaces of `slots` as the driver is handed them at setup.
+fn output_buffers(slots: &[Slot; SLOTS]) -> [ffi::OutputBuffer; SLOTS] {
+    std::array::from_fn(|index| {
+        let mut buffer = ffi::OutputBuffer::zeroed();
+        buffer.primary = slots[index].surface.as_raw();
+        buffer
+    })
+}
+
+/// Whether the monitor still exists.
+fn is_attached(monitor: HMONITOR) -> bool {
+    let mut info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>())
+            .expect("monitor information is a few bytes"),
+        ..Default::default()
+    };
+    // SAFETY: GetMonitorInfoW accepts any handle and fails for one that is gone.
+    unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
+}
+
 /// Waits until the work before `query` has finished on the GPU, which it usually has: the
 /// grab was started a whole frame earlier.
 fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
@@ -646,19 +672,8 @@ fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
     }
 }
 
-/// Whether the monitor still exists.
-fn is_attached(monitor: HMONITOR) -> bool {
-    let mut info = MONITORINFO {
-        cbSize: u32::try_from(size_of::<MONITORINFO>())
-            .expect("monitor information is a few bytes"),
-        ..Default::default()
-    };
-    // SAFETY: GetMonitorInfoW accepts any handle and fails for one that is gone.
-    unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
-}
-
-/// Wraps a status the driver failed with and the step that failed, for `map_err`; a refusal
-/// that trying again would not change reads as unsupported.
+/// Wraps a driver status with the step that failed, for `map_err`; a refusal that trying again
+/// would not change reads as unsupported.
 fn nvfbc_failed(step: &'static str) -> impl Fn(Status) -> CaptureError {
     move |status| permanent(status).unwrap_or(CaptureError::Nvfbc(step, status))
 }

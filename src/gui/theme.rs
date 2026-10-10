@@ -43,8 +43,8 @@ const TITLE_FONT_PERCENT: i32 = 118;
 /// Black, as `0xRRGGBB`.
 const BLACK_RGB: u32 = 0x0000_0000;
 
-/// A theme's colours.
-pub(super) struct Palette {
+/// A theme's colours, each as `0xRRGGBB`.
+struct Palette {
     background: u32,
     panel: u32,
     border: u32,
@@ -92,19 +92,14 @@ const NOVA: Palette = Palette {
     secondary_button: 0x00ED_F3F9,
 };
 
-/// A colour from `0xRRGGBB`.
-const fn colour(hex: u32) -> w::COLORREF {
-    let [_, red, green, blue] = hex.to_be_bytes();
-    w::COLORREF::from_rgb(red, green, blue)
-}
-
-/// `from` moved `part` out of 255 of the way to `to`, channel by channel.
-fn mix(from: u32, to: u32, part: u32) -> u32 {
-    let channel = |shift: u32| {
-        let (a, b) = ((from >> shift) & 0xFF, (to >> shift) & 0xFF);
-        (a * (255 - part) + b * part + 127) / 255
-    };
-    channel(16) << 16 | channel(8) << 8 | channel(0)
+/// The colours of `theme`; `None` in classic.
+const fn palette(theme: Theme) -> Option<&'static Palette> {
+    match theme {
+        Theme::Classic => None,
+        Theme::Ember => Some(&EMBER),
+        Theme::Selene => Some(&SELENE),
+        Theme::Nova => Some(&NOVA),
+    }
 }
 
 /// The artwork of a theme: a standing character and a faint ornament, both 1024 by 1536 with
@@ -114,6 +109,7 @@ struct Artwork {
     decoration: &'static [u8],
 }
 
+/// The artwork of `theme`; `None` in classic.
 const fn artwork(theme: Theme) -> Option<Artwork> {
     match theme {
         Theme::Classic => None,
@@ -129,15 +125,6 @@ const fn artwork(theme: Theme) -> Option<Artwork> {
             character: include_bytes!("../../assets/themes/nova/nova-character.png"),
             decoration: include_bytes!("../../assets/themes/nova/nova-decoration.png"),
         }),
-    }
-}
-
-fn palette(theme: Theme) -> Option<&'static Palette> {
-    match theme {
-        Theme::Classic => None,
-        Theme::Ember => Some(&EMBER),
-        Theme::Selene => Some(&SELENE),
-        Theme::Nova => Some(&NOVA),
     }
 }
 
@@ -178,56 +165,6 @@ struct Inner {
     resources: RefCell<Resources>,
 }
 
-/// What painting needs besides the palette, made when first wanted. Everything drawn in the
-/// theme's colours or artwork is dropped when the theme changes; the title font is not.
-#[derive(Default)]
-struct Resources {
-    brushes: Option<Brushes>,
-    /// The artwork at full size, decoded once.
-    pictures: Option<Pictures>,
-    /// The artwork scaled to the page it is drawn on.
-    scaled: Option<Scaled>,
-    title_font: Option<DeleteObjectGuard<w::HFONT>>,
-}
-
-struct Brushes {
-    background: DeleteObjectGuard<w::HBRUSH>,
-    panel: DeleteObjectGuard<w::HBRUSH>,
-}
-
-impl Brushes {
-    /// The brush `surface` is filled with.
-    fn of(&self, surface: Surface) -> &w::HBRUSH {
-        match surface {
-            Surface::Dialog => &self.background,
-            Surface::Page => &self.panel,
-        }
-    }
-}
-
-struct Pictures {
-    character: Image,
-    decoration: Image,
-}
-
-impl Pictures {
-    /// The artwork of `theme`, decoded; `None` in classic or when either picture is unreadable.
-    fn decode(theme: Theme) -> Option<Self> {
-        let artwork = artwork(theme)?;
-        Some(Self {
-            character: Image::decode(artwork.character)?,
-            decoration: Image::decode(artwork.decoration)?,
-        })
-    }
-}
-
-struct Scaled {
-    /// The page height these were made for, in pixels.
-    page_height: i32,
-    character: Layer,
-    decoration: Layer,
-}
-
 impl Skin {
     pub(super) fn new(theme: Theme) -> Self {
         Self(Rc::new(Inner {
@@ -236,6 +173,7 @@ impl Skin {
         }))
     }
 
+    /// The look chosen.
     pub(super) fn theme(&self) -> Theme {
         self.0.theme.get()
     }
@@ -249,10 +187,7 @@ impl Skin {
         resources.scaled = None;
     }
 
-    pub(super) fn palette(&self) -> Option<&'static Palette> {
-        palette(self.theme())
-    }
-
+    /// Whether a character theme is chosen rather than classic.
     pub(super) fn is_themed(&self) -> bool {
         self.palette().is_some()
     }
@@ -293,17 +228,9 @@ impl Skin {
         })
     }
 
-    /// A copy of the theme's brush for `surface`, made if need be; `None` in classic.
-    fn brush(&self, surface: Surface) -> Option<w::HBRUSH> {
-        let mut resources = self.0.resources.borrow_mut();
-        resources
-            .ensure_brushes(self.palette())
-            .map(|brushes| copy_handle(brushes.of(surface)))
-    }
-
-    /// Fills `window`'s client area on `hdc` with the theme's background.
-    pub(super) fn fill_dialog(&self, hdc: &w::HDC, window: &w::HWND) {
-        let Ok(client) = window.GetClientRect() else {
+    /// Fills `dialog`'s client area on `hdc` with the theme's background.
+    pub(super) fn fill_dialog(&self, hdc: &w::HDC, dialog: &w::HWND) {
+        let Ok(client) = dialog.GetClientRect() else {
             return;
         };
         if let Some(background) = self.brush(Surface::Dialog) {
@@ -416,13 +343,7 @@ impl Skin {
         let _ = hdc.SetTextColor(colour(ink));
         draw_centred(hdc, text, draw.rc);
         if state.has(co::CDIS::FOCUS) && state.has(co::CDIS::SHOWKEYBOARDCUES) {
-            let inset = gui::dpi_x(FOCUS_INSET);
-            let _ = hdc.DrawFocusRect(w::RECT {
-                left: draw.rc.left + inset,
-                top: draw.rc.top + inset,
-                right: draw.rc.right - inset,
-                bottom: draw.rc.bottom - inset,
-            });
+            draw_focus(hdc, draw.rc);
         }
         co::CDRF::SKIPDEFAULT
     }
@@ -443,9 +364,34 @@ impl Skin {
         // tab control must not put anything there.
         let pages = display_rect(hwnd, client);
         buffered(&paint, (client.right, client.bottom), pages, |target| {
-            draw_tabs(target, tab, palette, client);
+            paint_tab_strip(target, palette, tab, client);
         });
     }
+
+    /// The colours of the look chosen; `None` in classic.
+    fn palette(&self) -> Option<&'static Palette> {
+        palette(self.theme())
+    }
+
+    /// A copy of the theme's brush for `surface`, made if need be; `None` in classic.
+    fn brush(&self, surface: Surface) -> Option<w::HBRUSH> {
+        let mut resources = self.0.resources.borrow_mut();
+        resources
+            .ensure_brushes(self.palette())
+            .map(|brushes| copy_handle(brushes.of(surface)))
+    }
+}
+
+/// What painting needs besides the palette, made when first wanted. Everything drawn in the
+/// theme's colours or artwork is dropped when the theme changes; the title font is not.
+#[derive(Default)]
+struct Resources {
+    brushes: Option<Brushes>,
+    /// The artwork at full size, decoded once.
+    pictures: Option<Pictures>,
+    /// The artwork scaled to the page it is drawn on.
+    scaled: Option<Scaled>,
+    title_font: Option<DeleteObjectGuard<w::HFONT>>,
 }
 
 impl Resources {
@@ -493,6 +439,55 @@ impl Resources {
         let Some(pictures) = &self.pictures else {
             return;
         };
+        self.scaled = Scaled::new(pictures, page_height);
+    }
+}
+
+/// The brushes the theme fills its surfaces with.
+struct Brushes {
+    background: DeleteObjectGuard<w::HBRUSH>,
+    panel: DeleteObjectGuard<w::HBRUSH>,
+}
+
+impl Brushes {
+    /// The brush `surface` is filled with.
+    fn of(&self, surface: Surface) -> &w::HBRUSH {
+        match surface {
+            Surface::Dialog => &self.background,
+            Surface::Page => &self.panel,
+        }
+    }
+}
+
+/// The theme's artwork, decoded at full size.
+struct Pictures {
+    character: Image,
+    decoration: Image,
+}
+
+impl Pictures {
+    /// The artwork of `theme`, decoded; `None` in classic or when either picture is unreadable.
+    fn decode(theme: Theme) -> Option<Self> {
+        let artwork = artwork(theme)?;
+        Some(Self {
+            character: Image::decode(artwork.character)?,
+            decoration: Image::decode(artwork.decoration)?,
+        })
+    }
+}
+
+/// The theme's artwork, scaled to a page and ready to blend.
+struct Scaled {
+    /// The page height these were made for, in pixels.
+    page_height: i32,
+    character: Layer,
+    decoration: Layer,
+}
+
+impl Scaled {
+    /// `pictures` scaled to a page `page_height` pixels tall: the character within the page's
+    /// margins, the ornament its full height. `None` when either bitmap cannot be made.
+    fn new(pictures: &Pictures, page_height: i32) -> Option<Self> {
         let margin = gui::dpi_y(ART_MARGIN);
         let character_height = usize::try_from(page_height - 2 * margin).unwrap_or(1);
         let decoration_height = usize::try_from(page_height).unwrap_or(1);
@@ -500,15 +495,179 @@ impl Resources {
             Layer::new(&pictures.character.scaled_to_height(character_height)),
             Layer::new(&pictures.decoration.scaled_to_height(decoration_height)),
         );
-        self.scaled = match layers {
-            (Some(character), Some(decoration)) => Some(Scaled {
+        match layers {
+            (Some(character), Some(decoration)) => Some(Self {
                 page_height,
                 character,
                 decoration,
             }),
             _ => None,
-        };
+        }
     }
+}
+
+/// One tab of the strip, as it is drawn.
+struct TabFace {
+    /// In the tab control's client coordinates.
+    rect: w::RECT,
+    text: String,
+    selected: bool,
+}
+
+/// Lets the tab control paint itself, as when no theme is chosen.
+#[expect(unsafe_code)]
+pub(super) fn paint_tabs_natively(tab: &w::HWND) {
+    // SAFETY: passes WM_PAINT on to the control's own window procedure, which `BeginPaint`s.
+    unsafe {
+        tab.DefSubclassProc(w::msg::Wm::new(co::WM::PAINT, 0, 0));
+    }
+}
+
+/// A group box: a panel with a hairline border and its title sitting on the border.
+fn paint_frame(
+    hdc: &w::HDC,
+    palette: &Palette,
+    panel: &w::HBRUSH,
+    title_font: Option<&w::HFONT>,
+    frame: &Frame,
+) {
+    let rect = frame.rect();
+    let Ok(pen) = solid_pen(palette.border) else {
+        return;
+    };
+    if !round_rect(hdc, rect, &pen, panel) {
+        return;
+    }
+    let _font = title_font.and_then(|font| hdc.SelectObject(font).ok());
+    paint_title(hdc, palette, panel, frame);
+}
+
+/// A group box's title in the font selected into `hdc`, on a break in the top border of its
+/// `panel`-filled frame.
+fn paint_title(hdc: &w::HDC, palette: &Palette, panel: &w::HBRUSH, frame: &Frame) {
+    let rect = frame.rect();
+    let title = frame.title();
+    let Ok(size) = hdc.GetTextExtentPoint32(title) else {
+        return;
+    };
+    let left = rect.left + gui::dpi_x(TITLE_INDENT);
+    let top = rect.top - size.cy / 2;
+    // The border breaks where the title sits.
+    let gap = gui::dpi_x(TITLE_GAP);
+    let _ = hdc.FillRect(
+        w::RECT {
+            left: left - gap,
+            top: rect.top - 1,
+            right: left + size.cx + gap,
+            bottom: rect.top + 2,
+        },
+        panel,
+    );
+    let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
+    let _ = hdc.SetTextColor(colour(palette.accent));
+    let mut bounds = w::RECT {
+        left,
+        top,
+        right: left + size.cx + 2,
+        bottom: top + size.cy,
+    };
+    let _ = hdc.DrawText(
+        title,
+        &mut bounds,
+        co::DT::LEFT | co::DT::SINGLELINE | co::DT::NOPREFIX,
+    );
+}
+
+/// Paints the strip of tabs and the frame round the pages onto `hdc`.
+fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::RECT) {
+    let hwnd = tab.hwnd();
+    let items = tab.items();
+    let count = items.count().unwrap_or(0);
+    let selected = items.selected().map(|item| item.index());
+    let strip_bottom = (0..count)
+        .filter_map(|index| tab_rect(hwnd, index))
+        .map(|rect| rect.bottom)
+        .max()
+        .unwrap_or(0);
+
+    let Ok(pen) = solid_pen(palette.border) else {
+        return;
+    };
+    let Ok(background) = solid_brush(palette.background) else {
+        return;
+    };
+    let _ = hdc.FillRect(client, &background);
+
+    let font = control_font(hwnd);
+    let _font = font.as_ref().and_then(|font| hdc.SelectObject(font).ok());
+    let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
+
+    let frame = w::RECT {
+        top: strip_bottom - 1,
+        ..client
+    };
+    if !outline_rect(hdc, frame, &pen) {
+        return;
+    }
+
+    // The pen stays selected for every tab's outline.
+    let _pen = hdc.SelectObject(&*pen);
+    for index in 0..count {
+        let Some(rect) = tab_rect(hwnd, index) else {
+            continue;
+        };
+        let face = TabFace {
+            rect,
+            text: items.get(index).text().unwrap_or_default(),
+            selected: selected == Some(index),
+        };
+        paint_tab(hdc, palette, &face);
+    }
+}
+
+/// Paints one tab with the pen already selected into `hdc`: its fill, its outline open towards
+/// the page when it is the selected one, and its caption.
+fn paint_tab(hdc: &w::HDC, palette: &Palette, face: &TabFace) {
+    let TabFace {
+        rect,
+        text,
+        selected,
+    } = face;
+    let fill = if *selected {
+        palette.panel
+    } else {
+        palette.secondary_button
+    };
+    let Ok(brush) = solid_brush(fill) else {
+        return;
+    };
+    let _ = hdc.FillRect(*rect, &brush);
+    // Top and sides; the selected tab opens into its page below.
+    let _ = hdc.MoveToEx(rect.left, rect.bottom, None);
+    let _ = hdc.LineTo(rect.left, rect.top);
+    let _ = hdc.LineTo(rect.right - 1, rect.top);
+    let _ = hdc.LineTo(rect.right - 1, rect.bottom);
+    if *selected {
+        let _ = hdc.FillRect(
+            w::RECT {
+                left: rect.left + 1,
+                top: rect.bottom - 1,
+                right: rect.right - 1,
+                bottom: rect.bottom + 1,
+            },
+            &brush,
+        );
+    } else {
+        let _ = hdc.MoveToEx(rect.left, rect.bottom - 1, None);
+        let _ = hdc.LineTo(rect.right, rect.bottom - 1);
+    }
+    let ink = if *selected {
+        palette.accent
+    } else {
+        palette.text
+    };
+    let _ = hdc.SetTextColor(colour(ink));
+    draw_centred(hdc, text, *rect);
 }
 
 /// A push button's fill, border and text colours, as `0xRRGGBB`, for its `role` in `state`.
@@ -539,6 +698,21 @@ fn button_colours(palette: &Palette, role: ButtonRole, state: co::CDIS) -> (u32,
     };
     let edge = if hot { palette.accent } else { palette.border };
     (fill, edge, palette.text)
+}
+
+/// A colour from `0xRRGGBB`.
+const fn colour(hex: u32) -> w::COLORREF {
+    let [_, red, green, blue] = hex.to_be_bytes();
+    w::COLORREF::from_rgb(red, green, blue)
+}
+
+/// `from` moved `part` out of 255 of the way to `to`, channel by channel.
+fn mix(from: u32, to: u32, part: u32) -> u32 {
+    let channel = |shift: u32| {
+        let (a, b) = ((from >> shift) & 0xFF, (to >> shift) & 0xFF);
+        (a * (255 - part) + b * part + 127) / 255
+    };
+    channel(16) << 16 | channel(8) << 8 | channel(0)
 }
 
 /// A brush of one colour, given as `0xRRGGBB`.
@@ -583,131 +757,15 @@ fn draw_centred(hdc: &w::HDC, text: &str, mut rect: w::RECT) {
     );
 }
 
-/// A group box: a panel with a hairline border and its title sitting on the border.
-fn paint_frame(
-    hdc: &w::HDC,
-    palette: &Palette,
-    panel: &w::HBRUSH,
-    title_font: Option<&w::HFONT>,
-    frame: &Frame,
-) {
-    let rect = frame.rect();
-    let Ok(pen) = solid_pen(palette.border) else {
-        return;
-    };
-    if !round_rect(hdc, rect, &pen, panel) {
-        return;
-    }
-
-    let _font = title_font.and_then(|font| hdc.SelectObject(font).ok());
-    let title = frame.title();
-    let Ok(size) = hdc.GetTextExtentPoint32(title) else {
-        return;
-    };
-    let left = rect.left + gui::dpi_x(TITLE_INDENT);
-    let top = rect.top - size.cy / 2;
-    // The border breaks where the title sits.
-    let gap = gui::dpi_x(TITLE_GAP);
-    let _ = hdc.FillRect(
-        w::RECT {
-            left: left - gap,
-            top: rect.top - 1,
-            right: left + size.cx + gap,
-            bottom: rect.top + 2,
-        },
-        panel,
-    );
-    let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
-    let _ = hdc.SetTextColor(colour(palette.accent));
-    let mut bounds = w::RECT {
-        left,
-        top,
-        right: left + size.cx + 2,
-        bottom: top + size.cy,
-    };
-    let _ = hdc.DrawText(
-        title,
-        &mut bounds,
-        co::DT::LEFT | co::DT::SINGLELINE | co::DT::NOPREFIX,
-    );
-}
-
-/// Draws the strip of tabs and the frame round the pages onto `paint`.
-fn draw_tabs(paint: &w::HDC, tab: &gui::Tab, palette: &Palette, client: w::RECT) {
-    let hwnd = tab.hwnd();
-    let items = tab.items();
-    let count = items.count().unwrap_or(0);
-    let selected = items.selected().map(|item| item.index());
-    let strip_bottom = (0..count)
-        .filter_map(|index| tab_rect(hwnd, index))
-        .map(|rect| rect.bottom)
-        .max()
-        .unwrap_or(0);
-
-    let Ok(pen) = solid_pen(palette.border) else {
-        return;
-    };
-    let Ok(background) = solid_brush(palette.background) else {
-        return;
-    };
-    let _ = paint.FillRect(client, &background);
-
-    let font = control_font(hwnd);
-    let _font = font.as_ref().and_then(|font| paint.SelectObject(font).ok());
-    let _ = paint.SetBkMode(co::BKMODE::TRANSPARENT);
-
-    let frame = w::RECT {
-        top: strip_bottom - 1,
-        ..client
-    };
-    if !outline_rect(paint, frame, &pen) {
-        return;
-    }
-
-    // The pen stays selected for every tab's outline.
-    let _pen = paint.SelectObject(&*pen);
-    for index in 0..count {
-        let Some(rect) = tab_rect(hwnd, index) else {
-            continue;
-        };
-        let is_selected = selected == Some(index);
-        let fill = if is_selected {
-            palette.panel
-        } else {
-            palette.secondary_button
-        };
-        let Ok(brush) = solid_brush(fill) else {
-            continue;
-        };
-        let _ = paint.FillRect(rect, &brush);
-        // Top and sides; the selected tab opens into its page below.
-        let _ = paint.MoveToEx(rect.left, rect.bottom, None);
-        let _ = paint.LineTo(rect.left, rect.top);
-        let _ = paint.LineTo(rect.right - 1, rect.top);
-        let _ = paint.LineTo(rect.right - 1, rect.bottom);
-        if is_selected {
-            let _ = paint.FillRect(
-                w::RECT {
-                    left: rect.left + 1,
-                    top: rect.bottom - 1,
-                    right: rect.right - 1,
-                    bottom: rect.bottom + 1,
-                },
-                &brush,
-            );
-        } else {
-            let _ = paint.MoveToEx(rect.left, rect.bottom - 1, None);
-            let _ = paint.LineTo(rect.right, rect.bottom - 1);
-        }
-        let text = items.get(index).text().unwrap_or_default();
-        let ink = if is_selected {
-            palette.accent
-        } else {
-            palette.text
-        };
-        let _ = paint.SetTextColor(colour(ink));
-        draw_centred(paint, &text, rect);
-    }
+/// Draws the keyboard-focus rectangle just inside a button's `rect`.
+fn draw_focus(hdc: &w::HDC, rect: w::RECT) {
+    let inset = gui::dpi_x(FOCUS_INSET);
+    let _ = hdc.DrawFocusRect(w::RECT {
+        left: rect.left + inset,
+        top: rect.top + inset,
+        right: rect.right - inset,
+        bottom: rect.bottom - inset,
+    });
 }
 
 /// Runs `draw` on an off-screen surface `size` pixels across, then copies the result over
@@ -783,15 +841,6 @@ fn display_rect(tab: &w::HWND, client: w::RECT) -> Option<w::RECT> {
         });
     }
     (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
-}
-
-/// Lets the tab control paint itself, as when no theme is chosen.
-#[expect(unsafe_code)]
-pub(super) fn paint_tabs_natively(tab: &w::HWND) {
-    // SAFETY: passes WM_PAINT on to the control's own window procedure, which `BeginPaint`s.
-    unsafe {
-        tab.DefSubclassProc(w::msg::Wm::new(co::WM::PAINT, 0, 0));
-    }
 }
 
 #[cfg(test)]

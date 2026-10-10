@@ -3,7 +3,7 @@
 
 use super::{
     annexb::{nal_units, unescape},
-    mp4::{NAL_LENGTH_BYTES, atom},
+    mp4::{NAL_LENGTH_BYTES, atom, write_parameter_set},
 };
 use std::ops::{Range, RangeInclusive};
 
@@ -26,18 +26,24 @@ const HVCC_VERSION: u8 = 1;
 /// the samples.
 const ARRAY_COMPLETE: u8 = 0x80;
 
+/// Whether the access unit holds an intra random access point picture.
+pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
+    nal_units(access_unit)
+        .iter()
+        .any(|unit| IRAP.contains(&nal_type(unit)))
+}
+
 /// The `hvcC` record for the parameter sets in `access_unit`, if it carries all three.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
     let (vps, sps, pps) = (of_type(NAL_VPS)?, of_type(NAL_SPS)?, of_type(NAL_PPS)?);
     let mut body = record_fields(sps)?;
+    // One array per parameter set type, each holding one parameter set behind its count.
     for unit in [vps, sps, pps] {
         body.push(ARRAY_COMPLETE | nal_type(unit));
-        // One parameter set in the array.
         body.extend_from_slice(&1_u16.to_be_bytes());
-        body.extend_from_slice(&u16::try_from(unit.len()).ok()?.to_be_bytes());
-        body.extend_from_slice(unit);
+        write_parameter_set(&mut body, unit)?;
     }
     Some(atom(*b"hvcC", &body))
 }
@@ -88,12 +94,7 @@ pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
-    nal_units(access_unit)
-        .iter()
-        .any(|unit| IRAP.contains(&nal_type(unit)))
-}
-
+/// The `nal_unit_type` in the first byte of a NAL unit's two-byte header.
 pub(super) fn nal_type(unit: &[u8]) -> u8 {
     (unit[0] >> 1) & NAL_TYPE_MASK
 }
@@ -113,6 +114,7 @@ pub(super) mod tests {
     pub(in crate::replay) const IDR: [u8; 4] = [0x26, 0x01, 0xAF, 0x09];
     pub(in crate::replay) const TRAIL: [u8; 4] = [0x02, 0x01, 0xD0, 0x11];
 
+    /// A keyframe access unit as NVENC writes it: delimiter, parameter sets, then the picture.
     pub(in crate::replay) fn keyframe() -> Vec<u8> {
         [
             &[0, 0, 0, 1, 0x46, 0x01, 0x10][..],
@@ -128,14 +130,9 @@ pub(super) mod tests {
         .concat()
     }
 
+    /// An access unit holding a delimiter and one trailing picture that refers to earlier ones.
     pub(in crate::replay) fn inter_frame() -> Vec<u8> {
         [&[0, 0, 0, 1, 0x46, 0x01, 0x50][..], &[0, 0, 0, 1], &TRAIL].concat()
-    }
-
-    #[test]
-    fn samples_keep_only_picture_data() {
-        assert_eq!(sample_units(&keyframe()), [&IDR[..]]);
-        assert_eq!(sample_units(&inter_frame()), [&TRAIL[..]]);
     }
 
     #[test]
@@ -165,5 +162,11 @@ pub(super) mod tests {
         assert_eq!(body[57..62], [0xA2, 0, 1, 0, 4]);
         assert_eq!(&body[62..], &PPS);
         assert!(configuration(&inter_frame()).is_none());
+    }
+
+    #[test]
+    fn samples_keep_only_picture_data() {
+        assert_eq!(sample_units(&keyframe()), [&IDR[..]]);
+        assert_eq!(sample_units(&inter_frame()), [&TRAIL[..]]);
     }
 }

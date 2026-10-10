@@ -16,117 +16,163 @@ use crate::{
 use std::{cell::Cell, rc::Rc};
 use winsafe::{co, gui, prelude::*};
 
+/// Width of the window.
 const WIDTH: i32 = 400;
+/// Height of the window.
 const HEIGHT: i32 = 170;
 /// Gap between the window's edges and what it holds.
 const PADDING: i32 = 12;
+/// Width left for what the window holds.
 const INNER_WIDTH: i32 = WIDTH - 2 * PADDING;
 /// Lines the explanation above the field takes.
 const HELP_LINES: i32 = 3;
+/// Where the field starts, below the explanation.
 const FIELD_Y: i32 = PADDING + HELP_LINES * LINE + 10;
 /// How far the field sits to the right of the start of its caption.
 const FIELD_OFFSET: i32 = 76;
+/// Width of a button on the bottom row.
 const BUTTON_WIDTH: i32 = 84;
+/// Gap between the buttons on the bottom row.
 const BUTTON_GAP: i32 = 8;
+/// Where the bottom row of buttons starts.
 const BUTTON_Y: i32 = HEIGHT - PADDING - BUTTON_HEIGHT;
 
 /// Asks for the key over `parent` until it is saved or the user cancels; reports whether a
 /// key was saved.
 pub(super) fn ask(parent: &impl GuiParent) -> bool {
-    let saved = match nvfbc_key::load() {
+    let dialog = KeyDialog::new(&saved_key());
+    let accepted = Rc::new(Cell::new(false));
+    dialog.events(&accepted);
+    dialog.draw();
+    if let Err(problem) = dialog.wnd.show_modal(parent) {
+        log::error(text::nvfbc_key_window_failed(problem));
+    }
+    accepted.get()
+}
+
+/// The window and the controls a handler needs.
+struct KeyDialog {
+    wnd: gui::WindowModal,
+    field: gui::Edit,
+    error: gui::Label,
+    save: gui::Button,
+    cancel: gui::Button,
+}
+
+impl KeyDialog {
+    /// Declares the window and its controls, in tab order, with `saved` in the field.
+    fn new(saved: &str) -> Self {
+        let wnd = gui::WindowModal::new(gui::WindowModalOpts {
+            title: text::NVFBC_KEY_TITLE,
+            size: gui::dpi(WIDTH, HEIGHT),
+            ..Default::default()
+        });
+        let _help = label(
+            &wnd,
+            text::NVFBC_KEY_HELP,
+            PADDING,
+            PADDING,
+            INNER_WIDTH,
+            HELP_LINES,
+        );
+        let _caption = label(
+            &wnd,
+            text::NVFBC_KEY,
+            PADDING,
+            FIELD_Y + 4,
+            FIELD_OFFSET - 4,
+            1,
+        );
+        let field = gui::Edit::new(
+            &wnd,
+            gui::EditOpts {
+                text: saved,
+                position: gui::dpi(PADDING + FIELD_OFFSET, FIELD_Y),
+                width: gui::dpi_x(INNER_WIDTH - FIELD_OFFSET),
+                control_style: co::ES::AUTOHSCROLL | co::ES::NOHIDESEL | co::ES::PASSWORD,
+                ..Default::default()
+            },
+        );
+        let error = label(&wnd, "", PADDING, FIELD_Y + 30, INNER_WIDTH, 1);
+        let save = dialog_button(
+            &wnd,
+            text::NVFBC_KEY_SAVE,
+            WIDTH - PADDING - 2 * BUTTON_WIDTH - BUTTON_GAP,
+            co::DLGID::OK,
+            co::BS::DEFPUSHBUTTON,
+        );
+        let cancel = dialog_button(
+            &wnd,
+            text::NVFBC_KEY_CANCEL,
+            WIDTH - PADDING - BUTTON_WIDTH,
+            co::DLGID::CANCEL,
+            co::BS::PUSHBUTTON,
+        );
+        Self {
+            wnd,
+            field,
+            error,
+            save,
+            cancel,
+        }
+    }
+
+    /// Wires the buttons and the window's creation; `accepted` is set once a key is saved.
+    fn events(&self, accepted: &Rc<Cell<bool>>) {
+        let save_wnd = self.wnd.clone();
+        let save_field = self.field.clone();
+        let save_error = self.error.clone();
+        let save_accepted = accepted.clone();
+        self.save.on().bn_clicked(move || {
+            if let Err(message) = save_entered(&save_field.text().unwrap_or_default()) {
+                layout::set_text(&save_error, &message);
+                return Ok(());
+            }
+            save_accepted.set(true);
+            save_wnd.close();
+            Ok(())
+        });
+        let cancel_wnd = self.wnd.clone();
+        self.cancel.on().bn_clicked(move || {
+            cancel_wnd.close();
+            Ok(())
+        });
+        let create_wnd = self.wnd.clone();
+        let create_field = self.field.clone();
+        self.wnd.on().wm_create(move |_| {
+            window::match_dialog_title_bar(create_wnd.hwnd());
+            let _ = create_field.focus();
+            Ok(0)
+        });
+    }
+
+    /// Installs the handlers that draw the window in the classic look, with the error line
+    /// red and every other label black.
+    fn draw(&self) {
+        let error = self.error.clone();
+        layout::draw(
+            &self.wnd,
+            self.wnd.on(),
+            Vec::new(),
+            &Skin::new(Theme::Classic),
+            Surface::Dialog,
+            move |hwnd| {
+                if *hwnd == *error.hwnd() { RED } else { BLACK }
+            },
+        );
+    }
+}
+
+/// The key saved before, spelled as it is entered, or nothing when there is none or it cannot
+/// be read.
+fn saved_key() -> String {
+    match nvfbc_key::load() {
         Ok(key) => key.map(|key| nvfbc_key::format(&key)).unwrap_or_default(),
         Err(error) => {
             log::warning(text::nvfbc_key_unreadable(error));
             String::new()
         }
-    };
-
-    let wnd = gui::WindowModal::new(gui::WindowModalOpts {
-        title: text::NVFBC_KEY_TITLE,
-        size: gui::dpi(WIDTH, HEIGHT),
-        ..Default::default()
-    });
-    let _help = label(
-        &wnd,
-        text::NVFBC_KEY_HELP,
-        PADDING,
-        PADDING,
-        INNER_WIDTH,
-        HELP_LINES,
-    );
-    let _caption = label(
-        &wnd,
-        text::NVFBC_KEY,
-        PADDING,
-        FIELD_Y + 4,
-        FIELD_OFFSET - 4,
-        1,
-    );
-    let field = gui::Edit::new(
-        &wnd,
-        gui::EditOpts {
-            text: &saved,
-            position: gui::dpi(PADDING + FIELD_OFFSET, FIELD_Y),
-            width: gui::dpi_x(INNER_WIDTH - FIELD_OFFSET),
-            control_style: co::ES::AUTOHSCROLL | co::ES::NOHIDESEL | co::ES::PASSWORD,
-            ..Default::default()
-        },
-    );
-    let error = label(&wnd, "", PADDING, FIELD_Y + 30, INNER_WIDTH, 1);
-    let save = dialog_button(
-        &wnd,
-        text::NVFBC_KEY_SAVE,
-        WIDTH - PADDING - 2 * BUTTON_WIDTH - BUTTON_GAP,
-        co::DLGID::OK,
-        co::BS::DEFPUSHBUTTON,
-    );
-    let cancel = dialog_button(
-        &wnd,
-        text::NVFBC_KEY_CANCEL,
-        WIDTH - PADDING - BUTTON_WIDTH,
-        co::DLGID::CANCEL,
-        co::BS::PUSHBUTTON,
-    );
-
-    let accepted = Rc::new(Cell::new(false));
-    let (save_wnd, save_field, save_error, save_accepted) =
-        (wnd.clone(), field.clone(), error.clone(), accepted.clone());
-    save.on().bn_clicked(move || {
-        if let Err(message) = save_entered(&save_field.text().unwrap_or_default()) {
-            layout::set_text(&save_error, &message);
-            return Ok(());
-        }
-        save_accepted.set(true);
-        save_wnd.close();
-        Ok(())
-    });
-    let cancel_wnd = wnd.clone();
-    cancel.on().bn_clicked(move || {
-        cancel_wnd.close();
-        Ok(())
-    });
-    let created = wnd.clone();
-    wnd.on().wm_create(move |_| {
-        window::match_dialog_title_bar(created.hwnd());
-        let _ = field.focus();
-        Ok(0)
-    });
-    // The error line is red; every other label is black.
-    layout::draw(
-        &wnd,
-        wnd.on(),
-        Vec::new(),
-        &Skin::new(Theme::Classic),
-        Surface::Dialog,
-        move |hwnd| {
-            if *hwnd == *error.hwnd() { RED } else { BLACK }
-        },
-    );
-
-    if let Err(problem) = wnd.show_modal(parent) {
-        log::error(text::nvfbc_key_window_failed(problem));
     }
-    accepted.get()
 }
 
 /// A push button on the bottom row at `x`. Its dialog `id` lets Enter or Escape press it.

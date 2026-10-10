@@ -139,6 +139,7 @@ impl fmt::Display for Theme {
     }
 }
 
+/// Every setting, as stored; a field the file leaves out takes its default.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
@@ -173,6 +174,56 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Checks the settings a hand-edited file could get wrong, reporting the first bad one.
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if !(MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&self.buffer_seconds) {
+            return Err(ConfigError::Buffer);
+        }
+        if !(MIN_FRAME_RATE..=MAX_FRAME_RATE).contains(&self.frame_rate) {
+            return Err(ConfigError::FrameRate);
+        }
+        if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
+            return Err(ConfigError::Bitrate);
+        }
+        self.parsed_hotkey()?;
+        if !self.clip_directory.is_empty() && !is_absolute_directory(&self.clip_directory) {
+            return Err(ConfigError::ClipDirectory);
+        }
+        Ok(())
+    }
+
+    /// The hotkey chord, parsed.
+    pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
+        Ok(self.hotkey.parse()?)
+    }
+
+    /// The bitrate in bits per second.
+    pub(crate) const fn bitrate(&self) -> u32 {
+        self.bitrate_mbps * BITS_PER_MEGABIT
+    }
+
+    /// Frames the buffer keeps, at least: the clip length at the capture rate.
+    pub(crate) const fn buffer_frames(&self) -> u64 {
+        self.buffer_seconds as u64 * self.frame_rate as u64
+    }
+
+    /// Where clips are saved: the chosen folder, or the default one.
+    pub(crate) fn clip_directory(&self) -> PathBuf {
+        if self.clip_directory.is_empty() {
+            default_clip_directory()
+        } else {
+            PathBuf::from(&self.clip_directory)
+        }
+    }
+
+    /// Encoded bytes the buffer holds at the configured bitrate, for the Settings estimate.
+    pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
+        self.buffer_seconds as u64 * self.bitrate() as u64 / BITS_PER_BYTE
+    }
+}
+
+/// Why a setting was rejected.
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
     #[error(
@@ -197,51 +248,6 @@ pub(crate) enum ConfigError {
     Hotkey(#[from] ParseError),
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
     ClipDirectory,
-}
-
-impl Config {
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        if !(MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&self.buffer_seconds) {
-            return Err(ConfigError::Buffer);
-        }
-        if !(MIN_FRAME_RATE..=MAX_FRAME_RATE).contains(&self.frame_rate) {
-            return Err(ConfigError::FrameRate);
-        }
-        if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
-            return Err(ConfigError::Bitrate);
-        }
-        self.parsed_hotkey()?;
-        if !self.clip_directory.is_empty() && !is_absolute_directory(&self.clip_directory) {
-            return Err(ConfigError::ClipDirectory);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
-        Ok(self.hotkey.parse()?)
-    }
-
-    pub(crate) const fn bitrate(&self) -> u32 {
-        self.bitrate_mbps * BITS_PER_MEGABIT
-    }
-
-    /// Frames the buffer keeps, at least: the clip length at the capture rate.
-    pub(crate) const fn buffer_frames(&self) -> u64 {
-        self.buffer_seconds as u64 * self.frame_rate as u64
-    }
-
-    pub(crate) fn clip_directory(&self) -> PathBuf {
-        if self.clip_directory.is_empty() {
-            default_clip_directory()
-        } else {
-            PathBuf::from(&self.clip_directory)
-        }
-    }
-
-    /// Encoded bytes the buffer holds at the configured bitrate, for the Settings estimate.
-    pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
-        self.buffer_seconds as u64 * self.bitrate() as u64 / BITS_PER_BYTE
-    }
 }
 
 /// `%USERPROFILE%\Videos\hindsight`, or the temporary directory when there is no profile.
@@ -272,48 +278,33 @@ mod tests {
 
     #[test]
     fn defaults_fill_missing_settings_without_accepting_unknown_ones() {
-        let config: Config =
-            serde_json::from_str(r#"{"buffer_seconds":120,"codec":"av1"}"#).unwrap();
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
 
-        assert_eq!(config.buffer_seconds, 120);
-        assert_eq!(config.codec, Codec::Av1);
+        let config = parse(r#"{"buffer_seconds":120,"codec":"av1"}"#).unwrap();
         assert_eq!(config.mode, Mode::Fullscreen);
         assert_eq!(config.backend, Backend::Wgc);
-        assert_eq!(
-            serde_json::from_str::<Config>(r#"{"backend":"dxgi"}"#)
-                .unwrap()
-                .backend,
-            Backend::Dxgi
-        );
-        assert_eq!(
-            serde_json::from_str::<Config>(r#"{"backend":"nvfbc"}"#)
-                .unwrap()
-                .backend,
-            Backend::Nvfbc
-        );
-        assert!(serde_json::from_str::<Config>(r#"{"backend":"gdi"}"#).is_err());
-        assert_eq!(
-            serde_json::from_str::<Config>(r#"{"mode":"desktop"}"#)
-                .unwrap()
-                .mode,
-            Mode::Desktop
-        );
-        assert!(serde_json::from_str::<Config>(r#"{"codec":"vp9"}"#).is_err());
+        assert_eq!(config.codec, Codec::Av1);
+        assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey, "Alt+F10");
         assert_eq!(config.theme, Theme::Classic);
+        assert_eq!(parse("{}").unwrap(), Config::default());
+
+        assert_eq!(parse(r#"{"mode":"desktop"}"#).unwrap().mode, Mode::Desktop);
         assert_eq!(
-            serde_json::from_str::<Config>(r#"{"theme":"selene"}"#)
-                .unwrap()
-                .theme,
-            Theme::Selene
+            parse(r#"{"backend":"dxgi"}"#).unwrap().backend,
+            Backend::Dxgi
         );
-        assert!(serde_json::from_str::<Config>(r#"{"theme":"neon"}"#).is_err());
-        assert!(serde_json::from_str::<Config>(r#"{"buffer_secs":120}"#).is_err());
         assert_eq!(
-            serde_json::from_str::<Config>("{}").unwrap(),
-            Config::default()
+            parse(r#"{"backend":"nvfbc"}"#).unwrap().backend,
+            Backend::Nvfbc
         );
+        assert_eq!(parse(r#"{"theme":"selene"}"#).unwrap().theme, Theme::Selene);
+
+        assert!(parse(r#"{"backend":"gdi"}"#).is_err());
+        assert!(parse(r#"{"codec":"vp9"}"#).is_err());
+        assert!(parse(r#"{"theme":"neon"}"#).is_err());
+        assert!(parse(r#"{"buffer_secs":120}"#).is_err());
     }
 
     #[test]

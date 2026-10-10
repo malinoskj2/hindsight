@@ -1,4 +1,11 @@
+//! hindsight keeps the last moments of a game in a replay buffer, captured and encoded on the
+//! GPU, and saves them as a clip when the hotkey is pressed.
+
 #![cfg_attr(not(windows), expect(dead_code))]
+
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 
 #[cfg(windows)]
 mod cli;
@@ -19,11 +26,7 @@ pub(crate) const APP_NAME: &str = "hindsight";
 const UNSUPPORTED_PLATFORM_MESSAGE: &str =
     "hindsight requires Windows 10 1903 or newer and an NVIDIA GPU";
 
-#[cfg(windows)]
-use anyhow::Context;
-use anyhow::Result;
-
-/// Start the desktop application and its recording worker.
+/// Starts the desktop application and its recording worker.
 #[cfg(windows)]
 pub fn run() -> Result<()> {
     let tray = match cli::dispatch()? {
@@ -48,15 +51,10 @@ pub fn run() -> Result<()> {
     gui::run(startup, tray)
 }
 
-/// Whether startup failed only because another copy holds the state lock.
-#[cfg(windows)]
-fn already_running(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<storage::StorageError>(),
-            Some(storage::StorageError::Locked)
-        )
-    })
+/// Fails at once: the recording application is available on Windows only.
+#[cfg(not(windows))]
+pub fn run() -> Result<()> {
+    anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
 }
 
 /// Opens the state and log file, loads the configuration and starts the recording worker.
@@ -83,10 +81,15 @@ fn mirror_log() {
     }
 }
 
-/// The recording application is available on Windows only.
-#[cfg(not(windows))]
-pub fn run() -> Result<()> {
-    anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
+/// Whether startup failed only because another copy holds the state lock.
+#[cfg(windows)]
+fn already_running(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<storage::StorageError>(),
+            Some(storage::StorageError::Locked)
+        )
+    })
 }
 
 #[cfg(all(test, windows))]

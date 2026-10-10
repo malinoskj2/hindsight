@@ -4,16 +4,19 @@
 use super::Packet;
 use std::{collections::VecDeque, sync::Arc};
 
+/// The buffered packets, oldest first, with what trimming them needs.
 pub(crate) struct Ring {
     packets: VecDeque<Arc<Packet>>,
     /// Frame indices of the keyframes still in `packets`, oldest first.
     keyframes: VecDeque<u64>,
     /// Frames of history to keep, at least.
     span: u64,
+    /// Bytes of packet data in `packets`.
     bytes: usize,
 }
 
 impl Ring {
+    /// An empty buffer that keeps at least `span` frames, and never less than one.
     pub(crate) fn new(span: u64) -> Self {
         Self {
             packets: VecDeque::new(),
@@ -65,6 +68,7 @@ impl Ring {
         }
     }
 
+    /// Bytes of packet data currently buffered.
     #[cfg(test)]
     pub(crate) const fn bytes(&self) -> usize {
         self.bytes

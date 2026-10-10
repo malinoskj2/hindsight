@@ -5,28 +5,43 @@ use super::theme::{ButtonRole, Skin, Surface};
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
+/// Width of the window before a character theme widens it for its artwork.
 pub(super) const WINDOW_WIDTH: i32 = 470;
+/// Gap between the window's edges and the tab control.
 pub(super) const MARGIN: i32 = 8;
-/// Pitch of a row of text.
-pub(super) const LINE: i32 = 18;
-pub(super) const BUTTON_WIDTH: i32 = 120;
-pub(super) const BUTTON_HEIGHT: i32 = 24;
 /// What the tab control's frame takes from the width of its pages, both sides together.
 const TAB_FRAME: i32 = 8;
+/// Width of a tab page.
 const PAGE_WIDTH: i32 = WINDOW_WIDTH - 2 * MARGIN - TAB_FRAME;
+
+/// Where a group's frame starts on its page.
 pub(super) const GROUP_X: i32 = 8;
+/// Width of a group's frame.
 pub(super) const GROUP_WIDTH: i32 = PAGE_WIDTH - 2 * GROUP_X;
 /// Gap between a group's frame and the controls inside it, either side.
 const GROUP_PADDING: i32 = 12;
+/// Where the controls inside a group start.
 pub(super) const INNER_X: i32 = GROUP_X + GROUP_PADDING;
+/// Width left for the controls inside a group.
 pub(super) const INNER_WIDTH: i32 = GROUP_WIDTH - 2 * GROUP_PADDING;
 /// Width of the caption column that a value sits to the right of.
 const CAPTION_WIDTH: i32 = 108;
+/// Where a value starts, right of its caption.
 pub(super) const VALUE_X: i32 = INNER_X + CAPTION_WIDTH;
+/// Width left for a value, right of its caption.
 pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
 /// How far a classic group title sits from the frame's left edge.
 const TITLE_INDENT: i32 = 8;
 
+/// Pitch of a row of text.
+pub(super) const LINE: i32 = 18;
+/// Width of a push button.
+pub(super) const BUTTON_WIDTH: i32 = 120;
+/// Height of a push button.
+pub(super) const BUTTON_HEIGHT: i32 = 24;
+
+// The colours labels are drawn in, as classic shows them; a character theme gives the black,
+// gray and green ones its own.
 pub(super) const BLACK: w::COLORREF = w::COLORREF::from_rgb(0x00, 0x00, 0x00);
 pub(super) const GRAY: w::COLORREF = w::COLORREF::from_rgb(0x6D, 0x6D, 0x6D);
 pub(super) const GREEN: w::COLORREF = w::COLORREF::from_rgb(0x10, 0x7C, 0x10);
@@ -70,6 +85,7 @@ impl Frame {
         self.rect.get()
     }
 
+    /// The title as written, without the padding of its label.
     pub(super) fn title(&self) -> &str {
         &self.text
     }
@@ -97,96 +113,6 @@ impl Frame {
     }
 }
 
-/// Sizes the title labels to their text; only possible once the controls exist.
-pub(super) fn fit_titles(frames: &[Frame]) {
-    for frame in frames {
-        if let Ok(title) = frame.title.hwnd().GetWindowText() {
-            let _ = frame.title.set_text_and_resize(&title);
-        }
-    }
-}
-
-/// Installs the handlers that draw a window's own parts: its background, `frames`, if any, and
-/// in `WM_CTLCOLORSTATIC` the colour `text_colour` chooses for each label. Classic draws them
-/// as Windows would; a character theme in `skin` paints its backdrop, panels and artwork.
-pub(super) fn draw(
-    host: &(impl GuiParent + 'static),
-    events: &impl GuiEventsParent,
-    frames: Vec<Frame>,
-    skin: &Skin,
-    surface: Surface,
-    text_colour: impl Fn(&w::HWND) -> w::COLORREF + 'static,
-) {
-    let erase_host = host.clone();
-    let erase_skin = skin.clone();
-    let erase_frames = frames.clone();
-    events.wm_erase_bkgnd(move |p| {
-        erase(
-            &p.hdc,
-            erase_host.hwnd(),
-            &erase_skin,
-            surface,
-            &erase_frames,
-        );
-        Ok(1)
-    });
-    if surface == Surface::Page || !frames.is_empty() {
-        let paint_host = host.clone();
-        let paint_skin = skin.clone();
-        events.wm_paint(move || {
-            paint_page(paint_host.hwnd(), &paint_skin, &frames);
-            Ok(())
-        });
-    }
-    let label_skin = skin.clone();
-    events.wm_ctl_color_static(move |p| {
-        let _ = p
-            .hdc
-            .SetTextColor(label_skin.text_colour(text_colour(&p.hwnd)));
-        let _ = p.hdc.SetBkMode(co::BKMODE::TRANSPARENT);
-        Ok(label_skin.label_brush(surface))
-    });
-}
-
-/// Erases `host`'s background on `hdc` during `WM_ERASEBKGND`: in the system colour of
-/// `surface` in classic, or in a character theme with its backdrop and `frames`.
-fn erase(hdc: &w::HDC, host: &w::HWND, skin: &Skin, surface: Surface, frames: &[Frame]) {
-    if !skin.is_themed() {
-        if let Ok(client) = host.GetClientRect()
-            && let Ok(brush) = w::HBRUSH::GetSysColorBrush(surface.classic())
-        {
-            let _ = hdc.FillRect(client, &brush);
-        }
-        return;
-    }
-    match surface {
-        Surface::Dialog => skin.fill_dialog(hdc, host),
-        // The page's own erase is left to its paint, which draws everything at once; a control
-        // asking for the background it sits on is given it here.
-        Surface::Page if hdc.WindowFromDC().as_ref() == Some(host) => {}
-        Surface::Page => skin.paint_backdrop(hdc, host, frames),
-    }
-}
-
-/// Paints a tab page: the character over the page in a character theme, or else Windows'
-/// own group boxes.
-fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
-    let Ok(paint) = hwnd.BeginPaint() else {
-        return;
-    };
-    if skin.is_themed() {
-        skin.paint_page(&paint, hwnd, frames);
-        return;
-    }
-    let Some(theme) = hwnd.OpenThemeData("BUTTON") else {
-        return;
-    };
-    for frame in frames {
-        let _ =
-            theme.DrawThemeBackground(&paint, co::VS::BUTTON_GROUPBOX_NORMAL, frame.rect(), None);
-    }
-}
-
 /// A label whose text colour carries meaning. The colour is kept beside the control so the
 /// window's colour handler, which runs during painting, reads it without borrowing anything.
 #[derive(Clone)]
@@ -210,10 +136,12 @@ impl TintedLabel {
         }
     }
 
+    /// The label itself.
     pub(super) fn label(&self) -> &gui::Label {
         &self.label
     }
 
+    /// Sets the label's text when it differs.
     pub(super) fn set_text(&self, value: &str) {
         set_text(&self.label, value);
     }
@@ -312,6 +240,7 @@ impl ExpandableGroup {
     }
 }
 
+/// A label `lines` rows of text tall.
 pub(super) fn label(
     parent: &(impl GuiParent + 'static),
     text: &str,
@@ -350,6 +279,7 @@ pub(super) fn path_label(
     )
 }
 
+/// A push button of the standard height.
 pub(super) fn button(
     parent: &(impl GuiParent + 'static),
     text: &str,
@@ -380,6 +310,97 @@ pub(super) fn skin_button(button: &gui::Button, skin: &Skin, role: ButtonRole) {
     });
 }
 
+/// Sizes the title labels to their text; only possible once the controls exist.
+pub(super) fn fit_titles(frames: &[Frame]) {
+    for frame in frames {
+        if let Ok(title) = frame.title.hwnd().GetWindowText() {
+            let _ = frame.title.set_text_and_resize(&title);
+        }
+    }
+}
+
+/// Installs the handlers that draw a window's own parts: its background, `frames`, if any, and
+/// in `WM_CTLCOLORSTATIC` the colour `text_colour` chooses for each label. Classic draws them
+/// as Windows would; a character theme in `skin` paints its backdrop, panels and artwork.
+pub(super) fn draw(
+    host: &(impl GuiParent + 'static),
+    events: &impl GuiEventsParent,
+    frames: Vec<Frame>,
+    skin: &Skin,
+    surface: Surface,
+    text_colour: impl Fn(&w::HWND) -> w::COLORREF + 'static,
+) {
+    let erase_host = host.clone();
+    let erase_skin = skin.clone();
+    let erase_frames = frames.clone();
+    events.wm_erase_bkgnd(move |p| {
+        erase(
+            &p.hdc,
+            erase_host.hwnd(),
+            &erase_skin,
+            surface,
+            &erase_frames,
+        );
+        Ok(1)
+    });
+    if surface == Surface::Page || !frames.is_empty() {
+        let paint_host = host.clone();
+        let paint_skin = skin.clone();
+        events.wm_paint(move || {
+            paint_page(paint_host.hwnd(), &paint_skin, &frames);
+            Ok(())
+        });
+    }
+    let label_skin = skin.clone();
+    events.wm_ctl_color_static(move |p| {
+        let _ = p
+            .hdc
+            .SetTextColor(label_skin.text_colour(text_colour(&p.hwnd)));
+        let _ = p.hdc.SetBkMode(co::BKMODE::TRANSPARENT);
+        Ok(label_skin.label_brush(surface))
+    });
+}
+
+/// Erases `host`'s background on `hdc` during `WM_ERASEBKGND`: in the system colour of
+/// `surface` in classic, or in a character theme with its backdrop and `frames`.
+fn erase(hdc: &w::HDC, host: &w::HWND, skin: &Skin, surface: Surface, frames: &[Frame]) {
+    if !skin.is_themed() {
+        if let Ok(client) = host.GetClientRect()
+            && let Ok(brush) = w::HBRUSH::GetSysColorBrush(surface.classic())
+        {
+            let _ = hdc.FillRect(client, &brush);
+        }
+        return;
+    }
+    match surface {
+        Surface::Dialog => skin.fill_dialog(hdc, host),
+        // The page's own erase is left to its paint, which draws everything at once; a control
+        // asking for the background it sits on is given it here.
+        Surface::Page if hdc.WindowFromDC().as_ref() == Some(host) => {}
+        Surface::Page => skin.paint_backdrop(hdc, host, frames),
+    }
+}
+
+/// Paints a tab page: the character over the page in a character theme, or else Windows'
+/// own group boxes.
+fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
+    let Ok(paint) = hwnd.BeginPaint() else {
+        return;
+    };
+    if skin.is_themed() {
+        skin.paint_page(&paint, hwnd, frames);
+        return;
+    }
+    let Some(theme) = hwnd.OpenThemeData("BUTTON") else {
+        return;
+    };
+    for frame in frames {
+        let _ =
+            theme.DrawThemeBackground(&paint, co::VS::BUTTON_GROUPBOX_NORMAL, frame.rect(), None);
+    }
+}
+
+/// Shows or hides a control.
 pub(super) fn show(control: &impl GuiWindow, visible: bool) {
     control
         .hwnd()
@@ -418,7 +439,7 @@ pub(super) fn resize_width_by(window: &w::HWND, delta: i32) {
 }
 
 /// Makes a window `delta` physical pixels taller (shorter when negative), keeping its position.
-pub(super) fn resize_by(window: &w::HWND, delta: i32) {
+pub(super) fn resize_height_by(window: &w::HWND, delta: i32) {
     add_to_size(window, 0, delta);
 }
 

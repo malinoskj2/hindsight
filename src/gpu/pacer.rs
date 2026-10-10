@@ -26,6 +26,7 @@ pub(super) struct Pacer {
 }
 
 impl Pacer {
+    /// Starts a clock whose first tick is due at once.
     pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
         // SAFETY: an unnamed timer with default security.
         let timer = unsafe {
@@ -46,6 +47,7 @@ impl Pacer {
         })
     }
 
+    /// The time between ticks.
     pub(super) const fn period(&self) -> Duration {
         self.period
     }
