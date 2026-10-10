@@ -1,7 +1,8 @@
 //! The NvFBC key: the private data NVIDIA issues to a licensed vendor, which the driver
 //! requires before it lets an application capture with NvFBC on a GeForce GPU. It is entered
-//! as hexadecimal or as four 0x-prefixed dwords when the NvFBC backend is chosen and kept as binary in the user's registry,
-//! outside the settings file, so a shared or synced configuration never carries it.
+//! as hexadecimal or as four 0x-prefixed dwords when the NvFBC backend is chosen, and kept as
+//! binary in the user's registry, outside the settings file, so a shared or synced
+//! configuration never carries it.
 
 use crate::APP_NAME;
 use std::{borrow::Cow, fmt::Write, io};
@@ -46,7 +47,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::Empty);
     }
-    if tokens.iter().any(|token| has_hex_prefix(token)) {
+    if tokens.iter().any(|token| strip_hex_prefix(token).is_some()) {
         return parse_dwords(&tokens);
     }
     let digits = text
@@ -72,8 +73,11 @@ pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     Ok(pairs.iter().map(|[high, low]| (high << 4) | low).collect())
 }
 
-fn has_hex_prefix(token: &str) -> bool {
-    token.starts_with("0x") || token.starts_with("0X")
+/// The digits after a `0x` or `0X` prefix, if the token has one.
+fn strip_hex_prefix(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
 }
 
 /// The key's bytes from `DWORD_COUNT` dwords, each written `0x` followed by 1 to 8 digits.
@@ -81,11 +85,9 @@ fn parse_dwords(tokens: &[&str]) -> Result<Vec<u8>, ParseError> {
     if tokens.len() != DWORD_COUNT {
         return Err(ParseError::DwordCount);
     }
-    let mut key = Vec::with_capacity(DWORD_COUNT * 4);
+    let mut key = Vec::with_capacity(DWORD_COUNT * size_of::<u32>());
     for token in tokens {
-        let digits = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
+        let digits = strip_hex_prefix(token)
             .filter(|digits| (1..=8).contains(&digits.len()))
             .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or(ParseError::NotDword)?;

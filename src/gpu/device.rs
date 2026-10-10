@@ -21,6 +21,7 @@ use windows::{
     core::Interface,
 };
 
+/// The PCI vendor id DXGI reports for NVIDIA adapters.
 const NVIDIA_VENDOR_ID: u32 = 0x10DE;
 /// The highest GPU thread priority; Windows grants more than 0 only to an elevated process.
 const GPU_THREAD_PRIORITY: i32 = 7;
@@ -35,6 +36,7 @@ pub(crate) enum DeviceError {
     Create(String, windows::core::Error),
 }
 
+/// The shared device, its immediate context and the name of the adapter it runs on.
 pub(super) struct Device {
     pub(super) d3d: ID3D11Device,
     pub(super) context: ID3D11DeviceContext,
@@ -48,8 +50,9 @@ impl Device {
 
         let mut device = None;
         let mut context = None;
-        // SAFETY: out-parameters are written on success; BGRA support is what Windows Graphics
-        // Capture requires of the device.
+        // BGRA support is what Windows Graphics Capture requires of the device.
+        // SAFETY: the adapter is live and the out-parameters outlive the call, which writes
+        // them on success.
         unsafe {
             D3D11CreateDevice(
                 &adapter,
@@ -118,9 +121,14 @@ impl Device {
         }
     }
 
+    /// The device's DXGI interface, through which its adapter is reached.
+    pub(super) fn dxgi(&self) -> windows::core::Result<IDXGIDevice> {
+        self.d3d.cast()
+    }
+
     /// The locally unique id of the device's adapter, which other graphics APIs report too.
     pub(super) fn luid(&self) -> windows::core::Result<LUID> {
-        let device: IDXGIDevice = self.d3d.cast()?;
+        let device = self.dxgi()?;
         // SAFETY: reads the adapter of a live device and then its description.
         let description = unsafe { device.GetAdapter()?.GetDesc() }?;
         Ok(description.AdapterLuid)
@@ -128,7 +136,7 @@ impl Device {
 
     /// Lets the device's copies run ahead of a game that keeps the GPU busy.
     pub(super) fn raise_priority(&self) -> windows::core::Result<()> {
-        let device: IDXGIDevice = self.d3d.cast()?;
+        let device = self.dxgi()?;
         // SAFETY: a plain setter on a live device.
         unsafe { device.SetGPUThreadPriority(GPU_THREAD_PRIORITY) }
     }

@@ -48,24 +48,21 @@ impl Tray {
         menu.append_items(&[&show, &save, &quit])?;
 
         let icon = TrayIconBuilder::new()
-            .with_icon(replay_icon()?)
+            .with_icon(app_icon()?)
             .with_tooltip(format!("{APP_NAME} · click to open"))
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()?;
 
-        let (show_id, save_id, quit_id) = (show.id().clone(), save.id().clone(), quit.id().clone());
+        let actions = [
+            (show.id().clone(), TrayAction::Show),
+            (save.id().clone(), TrayAction::Save),
+            (quit.id().clone(), TrayAction::Quit),
+        ];
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let action = if event.id == show_id {
-                TrayAction::Show
-            } else if event.id == save_id {
-                TrayAction::Save
-            } else if event.id == quit_id {
-                TrayAction::Quit
-            } else {
-                return;
-            };
-            dispatch(action);
+            if let Some(&(_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
+                dispatch(action);
+            }
         }));
         TrayIconEvent::set_event_handler(Some(|event| {
             if matches!(
@@ -103,7 +100,8 @@ fn dispatch(action: TrayAction) {
     }
 }
 
-fn replay_icon() -> Result<Icon, tray_icon::BadIcon> {
+/// The application icon at the notification area's size.
+fn app_icon() -> Result<Icon, tray_icon::BadIcon> {
     const SIZE: u32 = 32;
     Icon::from_rgba(super::icon::rgba(SIZE), SIZE, SIZE)
 }

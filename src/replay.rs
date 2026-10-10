@@ -8,7 +8,7 @@ use std::{
     io::{self, BufWriter},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock, PoisonError,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -86,8 +86,8 @@ impl Live {
             ring: Mutex::new(Ring::new(span)),
             stream: OnceLock::new(),
             encoded: AtomicU64::new(0),
-            bytes: AtomicU64::new(0),
             fresh: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
             on_stream: OnceLock::new(),
         }
     }
@@ -148,7 +148,7 @@ impl Live {
         (!packets.is_empty()).then_some(Clip { stream, packets })
     }
 
-    fn ring(&self) -> std::sync::MutexGuard<'_, Ring> {
+    fn ring(&self) -> MutexGuard<'_, Ring> {
         self.ring.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -195,48 +195,42 @@ pub(crate) enum SaveError {
     Mux(#[from] MuxError),
 }
 
+impl SaveError {
+    /// Wraps the error of the file system call `step` made on `path`, for `map_err`.
+    fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
+        move |source| Self::Io {
+            step,
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
 /// Writes `clip` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The file
 /// appears under its final name only once it is complete.
 pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
-    fs::create_dir_all(directory).map_err(|source| SaveError::Io {
-        step: "create the clip folder",
-        path: directory.to_owned(),
-        source,
-    })?;
+    fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let path = unused_path(directory, &log::file_stamp());
     let partial = path.with_extension(PARTIAL_EXTENSION);
 
-    let result = write_file(clip, &partial).and_then(|()| {
-        fs::rename(&partial, &path).map_err(|source| SaveError::Io {
-            step: "finish",
-            path: path.clone(),
-            source,
-        })
-    });
+    let result = write_file(clip, &partial)
+        .and_then(|()| fs::rename(&partial, &path).map_err(SaveError::io("finish", &path)));
     if result.is_err() {
+        // The save already failed; a leftover partial file is all that is lost here.
         let _ = fs::remove_file(&partial);
     }
     result.map(|()| path)
 }
 
 fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
-    let file = File::create(path).map_err(|source| SaveError::Io {
-        step: "create",
-        path: path.to_owned(),
-        source,
-    })?;
+    let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     mp4::write(&mut output, &clip.stream, &clip.packets)?;
-    let file = output.into_inner().map_err(|error| SaveError::Io {
-        step: "finish",
-        path: path.to_owned(),
-        source: error.into_error(),
-    })?;
-    file.sync_all().map_err(|source| SaveError::Io {
-        step: "finish",
-        path: path.to_owned(),
-        source,
-    })
+    let file = output
+        .into_inner()
+        .map_err(io::IntoInnerError::into_error)
+        .map_err(SaveError::io("finish", path))?;
+    file.sync_all().map_err(SaveError::io("finish", path))
 }
 
 /// `hindsight_<stamp>.mp4`, or with `-2`, `-3`, … when a clip was already saved that second.
@@ -341,6 +335,13 @@ mod tests {
             .collect()
     }
 
+    /// The 64-bit FNV-1a hash of `bytes`: stable across Rust releases, unlike `DefaultHasher`.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
+        })
+    }
+
     /// Set `HINDSIGHT_MUX_OUTPUT` to a directory to keep the files, e.g. to check them with ffprobe.
     #[test]
     fn real_encoder_output_muxes_for_every_codec() {
@@ -373,6 +374,13 @@ mod tests {
             mp4::write(&mut file, &clip.stream, &clip.packets).unwrap();
             let top = mp4::tests::atoms(&file);
             assert_eq!(top.len(), 3, "{codec}");
+            // Pins the written bytes, so a refactor of the writer shows up as a changed file.
+            let expected = match codec {
+                Codec::H264 => 0xDD34_1F2C_9F9F_EB0C,
+                Codec::Hevc => 0x8B6A_2560_120A_255F,
+                Codec::Av1 => 0x3BED_D0D1_7FCC_6739,
+            };
+            assert_eq!(fnv1a(&file), expected, "{codec}");
             if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
                 let name = format!("{}.mp4", codec.name().replace('.', "").to_lowercase());
                 fs::write(Path::new(&directory).join(name), &file).unwrap();

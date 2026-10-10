@@ -4,20 +4,21 @@
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
+        Foundation::{HANDLE, WAIT_OBJECT_0},
         System::Threading::{
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE,
             SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject,
         },
     },
-    core::PCWSTR,
+    core::{Owned, PCWSTR},
 };
 
 /// Nanoseconds in the 100 ns unit Windows measures timer due times and capture intervals in.
 pub(super) const HUNDRED_NANOSECONDS: u128 = 100;
 
+/// Ticks `frame_rate` times a second, counted from its creation.
 pub(super) struct Pacer {
-    timer: HANDLE,
+    timer: Owned<HANDLE>,
     start: Instant,
     period: Duration,
     /// The tick the next call returns, unless the thread has fallen behind it.
@@ -26,7 +27,7 @@ pub(super) struct Pacer {
 
 impl Pacer {
     pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
-        // SAFETY: an unnamed timer with default security; closed in `Drop`.
+        // SAFETY: an unnamed timer with default security.
         let timer = unsafe {
             CreateWaitableTimerExW(
                 None,
@@ -35,6 +36,8 @@ impl Pacer {
                 TIMER_ALL_ACCESS.0,
             )
         }?;
+        // SAFETY: the timer was just created, and only this `Owned` closes it.
+        let timer = unsafe { Owned::new(timer) };
         Ok(Self {
             timer,
             start: Instant::now(),
@@ -64,10 +67,11 @@ impl Pacer {
         // Relative due times are negative, in 100 ns units.
         let relative =
             -i64::try_from(remaining.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
-        // SAFETY: the timer is open; no completion routine.
-        unsafe { SetWaitableTimer(self.timer, &raw const relative, 0, None, None, false) }?;
+        // SAFETY: the timer is open; `relative` outlives the call; a one-shot timer (period 0)
+        // with no completion routine.
+        unsafe { SetWaitableTimer(*self.timer, &raw const relative, 0, None, None, false) }?;
         // SAFETY: waits on the open timer.
-        if unsafe { WaitForSingleObject(self.timer, INFINITE) } != WAIT_OBJECT_0 {
+        if unsafe { WaitForSingleObject(*self.timer, INFINITE) } != WAIT_OBJECT_0 {
             return Err(windows::core::Error::from_thread());
         }
 
@@ -77,13 +81,7 @@ impl Pacer {
     }
 }
 
-impl Drop for Pacer {
-    fn drop(&mut self) {
-        // SAFETY: closes the timer this pacer opened.
-        let _ = unsafe { CloseHandle(self.timer) };
-    }
-}
-
+/// The tick that `elapsed` falls in: the number of whole periods it spans.
 fn tick(elapsed: Duration, period: Duration) -> u64 {
     u64::try_from(elapsed.as_nanos() / period.as_nanos()).unwrap_or(u64::MAX)
 }

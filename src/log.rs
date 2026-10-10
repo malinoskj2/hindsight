@@ -1,7 +1,14 @@
 //! What the app did and what went wrong: kept in memory for the Logs tab and mirrored to a
 //! file in the state directory, so a problem can be read back or attached to a bug report.
 
-use std::{collections::VecDeque, fmt::Display, fs::File, io::Write, path::Path, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    fmt::Display,
+    fs::File,
+    io::Write,
+    path::Path,
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 
 /// Entries kept in memory; the file keeps everything from the session.
 const CAPACITY: usize = 500;
@@ -69,7 +76,7 @@ pub(crate) fn error(message: impl Display) {
 
 /// Entries recorded after `sequence` (0 for all that are still in memory), oldest first.
 pub(crate) fn since(sequence: u64) -> Vec<Entry> {
-    lock()
+    journal()
         .entries
         .iter()
         .filter(|entry| entry.sequence > sequence)
@@ -84,7 +91,7 @@ pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
     let mut file = file_lock();
     // No entry is recorded while the file lock is held, so nothing falls between the copy and
     // the switch to the new file.
-    let lines: Vec<String> = lock().entries.iter().map(Entry::line).collect();
+    let lines: Vec<String> = journal().entries.iter().map(Entry::line).collect();
     for line in lines {
         writeln!(created, "{line}")?;
     }
@@ -103,7 +110,7 @@ fn record(level: Level, message: impl Display) {
     let message = message.to_string();
     let mut file = file_lock();
     let line = {
-        let mut journal = lock();
+        let mut journal = journal();
         let entry = Entry {
             sequence: journal.next_sequence,
             time,
@@ -124,15 +131,12 @@ fn record(level: Level, message: impl Display) {
     }
 }
 
-fn lock() -> std::sync::MutexGuard<'static, Journal> {
-    JOURNAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn journal() -> MutexGuard<'static, Journal> {
+    JOURNAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn file_lock() -> std::sync::MutexGuard<'static, Option<File>> {
-    FILE.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn file_lock() -> MutexGuard<'static, Option<File>> {
+    FILE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The local date, `YYYY-MM-DD`.

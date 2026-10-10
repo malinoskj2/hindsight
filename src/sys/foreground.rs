@@ -88,61 +88,71 @@ thread_local! {
 /// Calls its handler, on the installing thread, whenever the foreground window changes.
 /// Two hooks: one for foreground changes, and one for moves and resizes of the foreground
 /// window. A game that goes full screen while already in front changes nothing else.
-pub(crate) struct ForegroundHook(HWINEVENTHOOK, HWINEVENTHOOK);
+pub(crate) struct ForegroundHook {
+    _foreground: EventHook,
+    _location: EventHook,
+}
 
 impl ForegroundHook {
     pub(crate) fn install(on_change: impl Fn() + 'static) -> Option<Self> {
         HANDLER.with(|handler| *handler.borrow_mut() = Some(Rc::new(on_change)));
-        let foreground = hook(EVENT_SYSTEM_FOREGROUND);
-        let location = hook(EVENT_OBJECT_LOCATIONCHANGE);
-        if foreground.is_invalid() || location.is_invalid() {
-            // SAFETY: unhooks only the hooks that were set; an invalid one is skipped.
-            unsafe {
-                for valid in [foreground, location]
-                    .into_iter()
-                    .filter(|h| !h.is_invalid())
-                {
-                    let _ = UnhookWinEvent(valid);
-                }
-            }
+        // A hook that was set is removed again when the other one fails.
+        let (Some(foreground), Some(location)) = (
+            EventHook::set(EVENT_SYSTEM_FOREGROUND),
+            EventHook::set(EVENT_OBJECT_LOCATIONCHANGE),
+        ) else {
             HANDLER.with(|handler| handler.borrow_mut().take());
             crate::log::warning(format!("{APP_NAME} could not watch the foreground window"));
             return None;
-        }
-        Some(Self(foreground, location))
-    }
-}
-
-/// An out-of-context hook for one event, delivered on this thread's message loop.
-fn hook(event: u32) -> HWINEVENTHOOK {
-    // SAFETY: the callback is a plain function that only reads thread-local state; the hook
-    // is removed when the `ForegroundHook` that owns it is dropped.
-    unsafe {
-        SetWinEventHook(
-            event,
-            event,
-            None,
-            Some(on_event),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        )
+        };
+        Some(Self {
+            _foreground: foreground,
+            _location: location,
+        })
     }
 }
 
 impl Drop for ForegroundHook {
     fn drop(&mut self) {
-        // SAFETY: unhooks the hooks this value stands for.
-        unsafe {
-            let _ = UnhookWinEvent(self.0);
-            let _ = UnhookWinEvent(self.1);
-        }
+        // The hooks themselves are removed when the fields drop, right after this.
         HANDLER.with(|handler| handler.borrow_mut().take());
     }
 }
 
-/// The handler is cloned out first, so it may itself replace or drop the hook. A location
-/// change counts only for the foreground window itself, not its controls or other windows.
+/// An out-of-context hook for one event, delivered on this thread's message loop and removed
+/// when dropped.
+struct EventHook(HWINEVENTHOOK);
+
+impl EventHook {
+    fn set(event: u32) -> Option<Self> {
+        // SAFETY: no module handle is passed, as an out-of-context hook requires, and the
+        // callback is a plain function with the `WINEVENTPROC` signature that only reads
+        // thread-local state. The hook is removed when the returned value is dropped.
+        let hook = unsafe {
+            SetWinEventHook(
+                event,
+                event,
+                None,
+                Some(on_event),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
+        (!hook.is_invalid()).then_some(Self(hook))
+    }
+}
+
+impl Drop for EventHook {
+    fn drop(&mut self) {
+        // SAFETY: the handle is a valid hook this value owns, and it is unhooked only here.
+        let _ = unsafe { UnhookWinEvent(self.0) };
+    }
+}
+
+/// The hooks' callback. The handler is cloned out first, so it may itself replace or drop the
+/// hook. A location change counts only for the foreground window itself, not its controls or
+/// other windows.
 unsafe extern "system" fn on_event(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -153,7 +163,7 @@ unsafe extern "system" fn on_event(
     _time: u32,
 ) {
     if event == EVENT_OBJECT_LOCATIONCHANGE {
-        // SAFETY: reads the foreground window handle only.
+        // SAFETY: `GetForegroundWindow` takes no arguments and has no preconditions.
         let foreground = unsafe { GetForegroundWindow() };
         if object != OBJID_WINDOW.0 || child != CHILDID_SELF.cast_signed() || window != foreground {
             return;

@@ -26,7 +26,7 @@ fn main() {
 
     winresource::WindowsResource::new()
         .set_manifest(MANIFEST)
-        .set("ProductName", "hindsight")
+        .set("ProductName", env!("CARGO_PKG_NAME"))
         .set(
             "FileDescription",
             "Instant replay, captured and encoded on the GPU",

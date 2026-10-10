@@ -16,20 +16,15 @@ pub(super) const ALREADY_SAVING: &str = "A clip is already being saved";
 pub(super) const CAPTURE_PANICKED: &str = "the capture thread panicked";
 pub(super) const SAVE_PANICKED: &str = "the save thread panicked";
 
-pub(super) fn recording(stream: Option<&Stream>, config: &Config) -> String {
-    stream.map_or_else(
-        || "Recording".to_owned(),
-        |stream| {
-            format!(
-                "Recording {} {}×{} at {} fps, {} Mbps, keeping {} s",
-                stream.codec,
-                stream.width,
-                stream.height,
-                stream.frame_rate,
-                config.bitrate_mbps,
-                config.buffer_seconds
-            )
-        },
+pub(super) fn recording(stream: &Stream, config: &Config) -> String {
+    format!(
+        "Recording {} {}×{} at {} fps, {} Mbps, keeping {} s",
+        stream.codec,
+        stream.width,
+        stream.height,
+        stream.frame_rate,
+        config.bitrate_mbps,
+        config.buffer_seconds
     )
 }
 

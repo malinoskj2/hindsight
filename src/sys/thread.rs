@@ -7,7 +7,8 @@ pub(crate) fn enter_background_mode() -> windows::core::Result<()> {
     use windows::Win32::System::Threading::{
         GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
     };
-    // SAFETY: changes the mode of the calling thread only.
+    // SAFETY: `GetCurrentThread` returns a pseudo-handle to the calling thread that is always
+    // valid and never closed; the call changes that thread's mode only.
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) }
 }
 

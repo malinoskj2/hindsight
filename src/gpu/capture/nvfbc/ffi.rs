@@ -53,7 +53,7 @@ pub(super) const SETUP_WITH_HW_CURSOR: u32 = 1 << 0;
 /// know.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gpu) struct Status(pub(super) i32);
+pub(in crate::gpu) struct Status(i32);
 
 impl Status {
     pub(super) const SUCCESS: Self = Self(0);
@@ -67,7 +67,17 @@ impl Status {
     pub(super) const INVALID_TARGET: Self = Self(-18);
     pub(super) const DYNAMIC_DISABLE: Self = Self(-20);
 
-    pub(super) const fn name(self) -> &'static str {
+    /// `Ok` for `SUCCESS`, and any other status as the error.
+    pub(super) fn ok(self) -> Result<(), Self> {
+        if self == Self::SUCCESS {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+
+    /// The header's name for the status.
+    const fn name(self) -> &'static str {
         match self.0 {
             0 => "NVFBC_SUCCESS",
             -1 => "NVFBC_ERROR_GENERIC",
@@ -252,6 +262,10 @@ const _: () = assert!(size_of::<FrameGrabInfo>() == 108);
 const _: () = assert!(offset_of!(FrameGrabInfo, must_recreate) == 20);
 
 /// An `INvFBCToDx9Vid_v3` object: a pointer to its method table.
+///
+/// Only ever seen behind a pointer `NvFBC_CreateEx` returned. Such a pointer, and the table it
+/// leads to, stay valid until `release` is called on it, provided the library that created it
+/// stays loaded; the table itself lives in the library.
 #[repr(C)]
 pub(super) struct ToDx9Vid {
     pub(super) vtable: *const ToDx9VidVtable,

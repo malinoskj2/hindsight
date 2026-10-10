@@ -16,9 +16,15 @@ const TRIANGLE: [(f32, f32); 3] = [(0.37, 0.27), (0.37, 0.73), (0.76, 0.50)];
 /// Subsamples per axis for anti-aliasing.
 const SUPERSAMPLE: u32 = 4;
 /// Sizes stored in the `.ico` resource; Explorer and the Start menu pick the closest.
-pub(crate) const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
 const ENTRY_COUNT: u16 = 7;
 const _: () = assert!(ENTRY_COUNT as usize == ICO_SIZES.len());
+/// The `ICONDIR` header: reserved, type and entry count, two bytes each.
+const ICO_HEADER_BYTES: usize = 6;
+/// One `ICONDIRENTRY` per size.
+const ICO_ENTRY_BYTES: usize = 16;
+/// The `BITMAPINFOHEADER` that starts each image.
+const BITMAP_HEADER_BYTES: u32 = 40;
 
 /// `.ico` directory fields are 32-bit; the icon is a few hundred kilobytes.
 fn length_field(bytes: usize) -> u32 {
@@ -69,7 +75,7 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
 
 /// The icon as a Windows `.ico` file with 32-bit BMP entries for every size in `ICO_SIZES`.
 pub(crate) fn ico() -> Vec<u8> {
-    let header_bytes = 6 + 16 * ICO_SIZES.len();
+    let header_bytes = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * ICO_SIZES.len();
     let mut directory = Vec::with_capacity(header_bytes);
     directory.extend_from_slice(&0_u16.to_le_bytes());
     directory.extend_from_slice(&1_u16.to_le_bytes());
@@ -100,8 +106,10 @@ pub(crate) fn ico() -> Vec<u8> {
 fn bmp_entry(size: u32) -> Vec<u8> {
     let pixels = rgba(size);
     let mask_row_bytes = size.div_ceil(32) * 4;
-    let mut entry = Vec::with_capacity(40 + pixels.len() + (mask_row_bytes * size) as usize);
-    entry.extend_from_slice(&40_u32.to_le_bytes());
+    let mut entry = Vec::with_capacity(
+        BITMAP_HEADER_BYTES as usize + pixels.len() + (mask_row_bytes * size) as usize,
+    );
+    entry.extend_from_slice(&BITMAP_HEADER_BYTES.to_le_bytes());
     entry.extend_from_slice(&size.to_le_bytes());
     entry.extend_from_slice(&(size * 2).to_le_bytes());
     entry.extend_from_slice(&1_u16.to_le_bytes());
@@ -182,14 +190,18 @@ mod tests {
         let bytes = ico();
         assert_eq!(&bytes[..6], &[0, 0, 1, 0, 7, 0]);
 
-        let mut expected_offset = 6 + 16 * ICO_SIZES.len();
+        let mut expected_offset = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * ICO_SIZES.len();
         for (index, size) in ICO_SIZES.iter().enumerate() {
-            let entry = &bytes[6 + 16 * index..6 + 16 * (index + 1)];
+            let start = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * index;
+            let entry = &bytes[start..start + ICO_ENTRY_BYTES];
             assert_eq!(u32::from(entry[0]), size % 256);
             let length = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
             let offset = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
             assert_eq!(offset, expected_offset);
-            assert_eq!(&bytes[offset..offset + 4], &40_u32.to_le_bytes());
+            assert_eq!(
+                &bytes[offset..offset + 4],
+                &BITMAP_HEADER_BYTES.to_le_bytes()
+            );
             expected_offset += length;
         }
         assert_eq!(expected_offset, bytes.len());

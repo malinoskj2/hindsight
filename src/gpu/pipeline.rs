@@ -123,8 +123,9 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         let index = pacer.wait().context("wait for the frame timer")?;
         encoder.collect(&mut output)?;
 
-        let input = encoder.input(&mut output)?.clone();
-        let fresh = match capture.take(&device, &input, width, height) {
+        encoder.reserve(&mut output)?;
+        let input = encoder.input();
+        let fresh = match capture.take(&device, input, width, height) {
             Ok(Frame::Fresh) => true,
             Ok(Frame::Unchanged) => {
                 let Some(latest) = encoder.latest() else {
@@ -134,7 +135,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
                     }
                     continue;
                 };
-                device.copy(&input, latest);
+                device.copy(input, latest);
                 false
             }
             Ok(Frame::Resized) => break Ended::Resized,

@@ -8,12 +8,26 @@ const OBU_TEMPORAL_DELIMITER: u8 = 2;
 const OBU_FRAME_HEADER: u8 = 3;
 const OBU_FRAME: u8 = 6;
 const OBU_PADDING: u8 = 15;
+/// Where `obu_type` sits in the first header byte.
+const OBU_TYPE_SHIFT: u8 = 3;
+const OBU_TYPE_MASK: u8 = 0x0F;
 const OBU_EXTENSION_FLAG: u8 = 0x04;
 const OBU_HAS_SIZE_FIELD: u8 = 0x02;
+/// The longest `leb128()` value the specification allows, in bytes.
+const MAX_LEB128_BYTES: usize = 8;
 const KEY_FRAME: u32 = 0;
+const PROFILE_MAIN: u32 = 0;
+const PROFILE_HIGH: u32 = 1;
+const PROFILE_PROFESSIONAL: u32 = 2;
+/// Levels above 3.3 (`seq_level_idx` 7) signal a tier; lower ones are always in the main tier.
+const MAX_LEVEL_WITHOUT_TIER: u32 = 7;
 /// `color_primaries`, `transfer_characteristics` and `matrix_coefficients` of sRGB, which the
 /// sequence header codes without chroma subsampling.
 const SRGB: (u32, u32, u32) = (1, 13, 0);
+/// The same three when the sequence header leaves them out: unspecified.
+const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
+/// The `av1C` record's first byte: its marker bit and version 1.
+const AV1C_MARKER_AND_VERSION: u8 = 0x81;
 
 /// One OBU: its type, its header, its payload, and the whole of it from the header on.
 struct Obu<'a> {
@@ -50,7 +64,7 @@ fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
             break;
         };
         found.push(Obu {
-            kind: (first >> 3) & 0x0F,
+            kind: obu_type(first),
             header: &data[..header_length],
             payload,
             bytes: &data[..end],
@@ -60,10 +74,15 @@ fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
     found
 }
 
+/// The `obu_type` in an OBU's first header byte.
+const fn obu_type(header: u8) -> u8 {
+    (header >> OBU_TYPE_SHIFT) & OBU_TYPE_MASK
+}
+
 /// An unsigned LEB128 value and the bytes it took.
 fn leb128(data: &[u8]) -> Option<(usize, usize)> {
     let mut value: u64 = 0;
-    for (index, byte) in data.iter().take(8).enumerate() {
+    for (index, byte) in data.iter().take(MAX_LEB128_BYTES).enumerate() {
         value |= u64::from(byte & 0x7F) << (7 * index);
         if byte & 0x80 == 0 {
             return Some((usize::try_from(value).ok()?, index + 1));
@@ -134,8 +153,7 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
     let sequence = SequenceHeader::parse(obu.payload)?;
 
     let mut body = vec![
-        // Marker and version 1.
-        0x81,
+        AV1C_MARKER_AND_VERSION,
         (u8::try_from(sequence.profile).ok()? << 5) | u8::try_from(sequence.level).ok()?,
         (u8::from(sequence.tier) << 7)
             | (u8::from(sequence.colour.high_bitdepth) << 6)
@@ -197,7 +215,7 @@ impl SequenceHeader {
             for _ in 0..operating_points {
                 let _idc = bits.read(12)?;
                 let point_level = bits.read(5)?;
-                let point_tier = point_level > 7 && bits.flag()?;
+                let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.flag()?;
                 if decoder_model_info_present && bits.flag()? {
                     bits.skip(2 * buffer_delay_length + 1)?;
                 }
@@ -263,12 +281,12 @@ impl ColourConfig {
     /// Reads `color_config()` (section 5.5.2).
     fn parse(bits: &mut Bits<'_>, profile: u32) -> Option<Self> {
         let high_bitdepth = bits.flag()?;
-        let twelve_bit = profile == 2 && high_bitdepth && bits.flag()?;
-        let monochrome = profile != 1 && bits.flag()?;
+        let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.flag()?;
+        let monochrome = profile != PROFILE_HIGH && bits.flag()?;
         let colours = if bits.flag()? {
             (bits.read(8)?, bits.read(8)?, bits.read(8)?)
         } else {
-            (2, 2, 2)
+            UNSPECIFIED_COLOUR
         };
         let (subsampling_x, subsampling_y, chroma_sample_position);
         if monochrome {
@@ -278,8 +296,8 @@ impl ColourConfig {
         } else {
             let _color_range = bits.flag()?;
             (subsampling_x, subsampling_y) = match profile {
-                0 => (true, true),
-                1 => (false, false),
+                PROFILE_MAIN => (true, true),
+                PROFILE_HIGH => (false, false),
                 _ if twelve_bit => {
                     let x = bits.flag()?;
                     (x, x && bits.flag()?)
@@ -417,7 +435,7 @@ pub(super) mod tests {
     }
 
     fn obu(kind: u8, payload: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![(kind << 3) | OBU_HAS_SIZE_FIELD];
+        let mut bytes = vec![(kind << OBU_TYPE_SHIFT) | OBU_HAS_SIZE_FIELD];
         write_leb128(&mut bytes, payload.len());
         bytes.extend_from_slice(payload);
         bytes
@@ -469,7 +487,7 @@ pub(super) mod tests {
         let kept = sample_obus(&unit);
 
         assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0][0] >> 3, OBU_SEQUENCE_HEADER);
+        assert_eq!(obu_type(kept[0][0]), OBU_SEQUENCE_HEADER);
         assert_eq!(kept[1], obu(OBU_FRAME, &[0b0001_0000, 0xAB, 0xCD]));
         assert_eq!(
             sample_obus(&inter_frame()),

@@ -2,7 +2,7 @@
 //! on each tick the capture thread takes the newest one, copies it into the encoder's input
 //! texture on the GPU and hands the pool's buffer straight back to Windows.
 
-use super::{CaptureError, Frame, Source, monitor};
+use super::{CaptureError, Frame, Source, failed, monitor};
 use crate::{
     gpu::{device::Device, pacer::HUNDRED_NANOSECONDS},
     service::Target,
@@ -24,7 +24,7 @@ use windows::{
     },
     Win32::{
         Foundation::HWND,
-        Graphics::{Direct3D11::ID3D11Texture2D, Dxgi::IDXGIDevice},
+        Graphics::Direct3D11::ID3D11Texture2D,
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -42,7 +42,7 @@ pub(super) struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
-    window: bool,
+    captures_window: bool,
     /// Set when Windows ends the capture: the monitor was unplugged, the window closed or the
     /// device was lost.
     closed: Arc<AtomicBool>,
@@ -58,7 +58,6 @@ impl Capture {
         period: Duration,
         target: &Target,
     ) -> Result<Self, CaptureError> {
-        let failed = |step| move |error| CaptureError::Windows(step, error);
         // The free-threaded capture objects live in the multithreaded apartment; a thread
         // already in it stays.
         // SAFETY: initializes WinRT for the calling thread only.
@@ -95,9 +94,8 @@ impl Capture {
             }))
             .map_err(failed("watch the capture item"))?;
 
-        let dxgi: IDXGIDevice = device
-            .d3d
-            .cast()
+        let dxgi = device
+            .dxgi()
             .map_err(failed("share the device with capture"))?;
         // SAFETY: wraps the live device for the WinRT capture API.
         let direct3d: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
@@ -129,7 +127,7 @@ impl Capture {
             pool,
             session,
             size,
-            window: matches!(target, Target::Window { .. }),
+            captures_window: matches!(target, Target::Window { .. }),
             closed,
             closed_token,
         })
@@ -143,7 +141,7 @@ impl Source for Capture {
     }
 
     fn captures_window(&self) -> bool {
-        self.window
+        self.captures_window
     }
 
     fn take(
@@ -153,7 +151,6 @@ impl Source for Capture {
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
-        let failed = |step| move |error| CaptureError::Windows(step, error);
         if self.closed.load(Ordering::Relaxed) {
             return Err(CaptureError::Closed);
         }

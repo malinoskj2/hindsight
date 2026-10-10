@@ -11,12 +11,9 @@
 //! change, or the secure desktop of a UAC prompt or the lock screen. It is opened again in
 //! place, keeping the buffer, unless the monitor's size changed.
 
-use super::{CaptureError, Frame, Source, monitor};
+use super::{CaptureError, Frame, REOPEN_INTERVAL, Source, failed, monitor_of, window_closed};
 use crate::{gpu::device::Device, service::Target};
-use std::{
-    ffi::c_void,
-    time::{Duration, Instant},
-};
+use std::time::Instant;
 use windows::{
     Win32::{
         Foundation::{E_ACCESSDENIED, HWND},
@@ -26,18 +23,15 @@ use windows::{
                 Common::{DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED},
                 DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
                 DXGI_ERROR_SESSION_DISCONNECTED, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, IDXGIDevice, IDXGIOutput1,
-                IDXGIOutputDuplication, IDXGIResource,
+                DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, IDXGIOutput1, IDXGIOutputDuplication,
+                IDXGIResource,
             },
             Gdi::HMONITOR,
         },
-        UI::WindowsAndMessaging::IsWindow,
     },
     core::{HRESULT, Interface},
 };
 
-/// How often a lost duplication is opened again while Windows refuses it.
-const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 /// Refusals that pass: the secure desktop is up, too many apps duplicate the monitor, the
 /// session is being switched, or the desktop is still changing.
 const PASSING_REFUSALS: [HRESULT; 4] = [
@@ -62,20 +56,15 @@ pub(super) struct DesktopDuplication {
 
 impl DesktopDuplication {
     pub(super) fn start(device: &Device, target: &Target) -> Result<Self, CaptureError> {
-        let (handle, window) = match *target {
-            Target::Monitor { handle, .. } => (handle, None),
-            Target::Window {
-                window, monitor, ..
-            } => (monitor, Some(HWND(window as *mut c_void))),
-        };
-        let output = find_output(device, monitor(handle))?;
+        let (monitor, window) = monitor_of(target);
+        let output = find_output(device, monitor)?;
         let (duplication, description) =
             duplicate(&output, device).map_err(|error| match error.code() {
                 DXGI_ERROR_UNSUPPORTED => CaptureError::Unsupported(
                     "Desktop Duplication is not available for this monitor; choose Windows Graphics Capture"
                         .to_owned(),
                 ),
-                _ => CaptureError::Windows("duplicate the monitor", error),
+                _ => failed("duplicate the monitor")(error),
             })?;
         if is_rotated(&description) {
             return Err(CaptureError::Unsupported(
@@ -121,7 +110,7 @@ impl DesktopDuplication {
                 self.reopen_at = Some(now + REOPEN_INTERVAL);
                 Ok(Frame::Unchanged)
             }
-            Err(error) => Err(CaptureError::Windows("duplicate the monitor again", error)),
+            Err(error) => Err(failed("duplicate the monitor again")(error)),
         }
     }
 }
@@ -142,10 +131,7 @@ impl Source for DesktopDuplication {
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
-        // SAFETY: IsWindow accepts any handle, live or not.
-        if let Some(window) = self.window
-            && !unsafe { IsWindow(Some(window)) }.as_bool()
-        {
+        if window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
         let Some(duplication) = &self.duplication else {
@@ -162,7 +148,7 @@ impl Source for DesktopDuplication {
                 self.duplication = None;
                 return self.reopen(device);
             }
-            Err(error) => return Err(CaptureError::Windows("take the desktop image", error)),
+            Err(error) => return Err(failed("take the desktop image")(error)),
         }
 
         // A frame that only moved the cursor keeps the previous picture.
@@ -175,7 +161,7 @@ impl Source for DesktopDuplication {
                     self.primed = true;
                     Frame::Fresh
                 })
-                .map_err(|error| CaptureError::Windows("read the desktop image", error))
+                .map_err(failed("read the desktop image"))
         } else {
             Ok(Frame::Unchanged)
         };
@@ -188,10 +174,8 @@ impl Source for DesktopDuplication {
 
 /// The output of the device's adapter that shows `monitor`.
 fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, CaptureError> {
-    let failed = |step| move |error| CaptureError::Windows(step, error);
     let adapter = device
-        .d3d
-        .cast::<IDXGIDevice>()
+        .dxgi()
         // SAFETY: reads the adapter of a live device.
         .and_then(|dxgi| unsafe { dxgi.GetAdapter() })
         .map_err(failed("find the GPU's monitors"))?;
@@ -228,6 +212,7 @@ fn duplicate(
     Ok((duplication, description))
 }
 
+/// The duplicated monitor's size in pixels.
 fn size(description: &DXGI_OUTDUPL_DESC) -> (u32, u32) {
     (description.ModeDesc.Width, description.ModeDesc.Height)
 }

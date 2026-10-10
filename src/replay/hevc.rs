@@ -3,17 +3,28 @@
 
 use super::{
     annexb::{nal_units, unescape},
-    mp4::atom,
+    mp4::{NAL_LENGTH_BYTES, atom},
 };
+use std::ops::{Range, RangeInclusive};
 
+const NAL_TYPE_MASK: u8 = 0x3F;
+const NAL_HEADER_BYTES: usize = 2;
 const NAL_VPS: u8 = 32;
 const NAL_SPS: u8 = 33;
 const NAL_PPS: u8 = 34;
 pub(super) const NAL_AUD: u8 = 35;
 /// Intra random access points: BLA, IDR and CRA pictures.
-const IRAP: std::ops::RangeInclusive<u8> = 16..=21;
+const IRAP: RangeInclusive<u8> = 16..=21;
 /// Bytes of an SPS up to and including `general_level_idc`, after emulation prevention.
 const SPS_PROFILE_BYTES: usize = 15;
+/// Where `profile_tier_level` sits in those bytes: general profile space, tier and profile,
+/// compatibility flags, constraint flags and level, which the `hvcC` record copies as they are.
+const SPS_PROFILE_TIER_LEVEL: Range<usize> = 3..SPS_PROFILE_BYTES;
+/// `configurationVersion` of the `hvcC` record.
+const HVCC_VERSION: u8 = 1;
+/// The `array_completeness` flag: every parameter set of the type is in the record, none only in
+/// the samples.
+const ARRAY_COMPLETE: u8 = 0x80;
 
 /// The `hvcC` record for the parameter sets in `access_unit`, if it carries all three.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
@@ -22,8 +33,7 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let (vps, sps, pps) = (of_type(NAL_VPS)?, of_type(NAL_SPS)?, of_type(NAL_PPS)?);
 
     // After the two-byte NAL header: VPS id (4 bits), max sub-layers minus one (3) and temporal
-    // id nesting (1), then `profile_tier_level` with the general profile, compatibility flags,
-    // constraint flags and level.
+    // id nesting (1), then `profile_tier_level`.
     let header = unescape(sps, SPS_PROFILE_BYTES);
     if header.len() < SPS_PROFILE_BYTES {
         return None;
@@ -31,9 +41,11 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let sub_layers = ((header[2] >> 1) & 0b111) + 1;
     let temporal_id_nested = header[2] & 1;
 
-    let mut body = vec![1];
-    body.extend_from_slice(&header[3..15]);
+    // The reserved bits are set throughout.
+    let mut body = vec![HVCC_VERSION];
+    body.extend_from_slice(&header[SPS_PROFILE_TIER_LEVEL]);
     body.extend_from_slice(&[
+        // No minimum spatial segmentation.
         0xF0,
         0x00,
         // Unknown parallelism.
@@ -45,12 +57,14 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
         // Unknown average frame rate.
         0x00,
         0x00,
-        (sub_layers << 3) | (temporal_id_nested << 2) | 3,
+        // Frame rate not constant, the sub-layers, temporal id nesting, then the length size.
+        (sub_layers << 3) | (temporal_id_nested << 2) | (NAL_LENGTH_BYTES - 1),
+        // One array per parameter set type.
         3,
     ]);
     for unit in [vps, sps, pps] {
-        // Complete arrays: every parameter set is here, none only in the samples.
-        body.push(0x80 | nal_type(unit));
+        body.push(ARRAY_COMPLETE | nal_type(unit));
+        // One parameter set in the array.
         body.extend_from_slice(&1_u16.to_be_bytes());
         body.extend_from_slice(&u16::try_from(unit.len()).ok()?.to_be_bytes());
         body.extend_from_slice(unit);
@@ -63,7 +77,7 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
     nal_units(access_unit)
         .into_iter()
-        .filter(|unit| unit.len() >= 2)
+        .filter(|unit| unit.len() >= NAL_HEADER_BYTES)
         .filter(|unit| !matches!(nal_type(unit), NAL_VPS | NAL_SPS | NAL_PPS | NAL_AUD))
         .collect()
 }
@@ -75,7 +89,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
 }
 
 pub(super) fn nal_type(unit: &[u8]) -> u8 {
-    (unit[0] >> 1) & 0x3F
+    (unit[0] >> 1) & NAL_TYPE_MASK
 }
 
 #[cfg(test)]

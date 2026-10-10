@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -25,9 +25,9 @@ mod text;
 
 /// The span the frame rate is measured over; a publish sooner than that keeps the last rate, so
 /// the figure changes about every ten seconds.
-const RATE_SPAN: f64 = 10.0;
+const RATE_SPAN: Duration = Duration::from_secs(10);
 /// The span of the first measurement after recording starts, so the figure appears promptly.
-const FIRST_RATE_SPAN: f64 = 1.0;
+const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 /// How long to wait before starting a session again after it failed (the display was turned
 /// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -254,6 +254,7 @@ struct Saving {
 }
 
 /// Counters at the previous refresh, for the rates.
+#[derive(Clone, Copy)]
 struct Sample {
     at: Instant,
     encoded: u64,
@@ -298,16 +299,12 @@ impl Machine {
         output: Arc<Mutex<Status>>,
         wake: Sender<Command>,
     ) -> Self {
-        let totals = match &store {
-            Some(store) => match store.load_totals() {
-                Ok(totals) => Some(totals),
-                Err(error) => {
-                    log::error(text::totals_unreadable(error));
-                    None
-                }
-            },
-            None => None,
-        };
+        let totals = store.as_ref().and_then(|store| {
+            store
+                .load_totals()
+                .inspect_err(|error| log::error(text::totals_unreadable(error)))
+                .ok()
+        });
         Self {
             recorder,
             retry_interval,
@@ -342,13 +339,7 @@ impl Machine {
             match received {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
-                Ok(Command::Stop) => {
-                    self.stop_session();
-                    self.retry_at = None;
-                    self.paused = true;
-                    self.status.state = DisplayStatus::Stopped;
-                    log::info(text::RECORDING_STOPPED);
-                }
+                Ok(Command::Stop) => self.pause(),
                 Ok(Command::Save) => self.save(),
                 Ok(Command::Theme(theme)) => self.remember_theme(theme),
                 Ok(Command::Wake | Command::Publish) | Err(RecvTimeoutError::Timeout) => {}
@@ -390,6 +381,15 @@ impl Machine {
         {
             self.report_error(text::save_settings_failed(error));
         }
+    }
+
+    /// Stops recording at the user's request, until the settings are applied again.
+    fn pause(&mut self) {
+        self.stop_session();
+        self.retry_at = None;
+        self.paused = true;
+        self.status.state = DisplayStatus::Stopped;
+        log::info(text::RECORDING_STOPPED);
     }
 
     /// Starts recording as the mode says: the primary monitor at once, or nothing until a
@@ -466,7 +466,8 @@ impl Machine {
 
     /// Starts the current target again, after a resize or a retry.
     fn restart_session(&mut self) {
-        match self.target.clone() {
+        // `start_session` puts the target back.
+        match self.target.take() {
             Some(target) => self.start_session(target),
             None => self.begin(),
         }
@@ -499,12 +500,7 @@ impl Machine {
 
     /// Notices a session that ended by itself, a retry that is due and a save that finished.
     fn poll(&mut self) {
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.join.is_finished())
-            && let Some(session) = self.session.take()
-        {
+        if let Some(session) = self.session.take_if(|session| session.join.is_finished()) {
             match session.join.join() {
                 Ok(Ok(Ended::Resized)) => {
                     log::info(text::RESIZED);
@@ -515,16 +511,17 @@ impl Machine {
                 }
                 Ok(Ok(Ended::Closed)) => match self.config.mode {
                     Mode::Fullscreen => {
-                        let name = self.target.as_ref().map_or("", Target::name).to_owned();
-                        log::info(text::target_closed(&name));
+                        let name = self.target.as_ref().map_or("", Target::name);
+                        log::info(text::target_closed(name));
                         self.status.state = DisplayStatus::Waiting;
                     }
                     Mode::Desktop => self.fail(text::DISPLAY_GONE),
                 },
-                Ok(Ok(Ended::NoFrames)) => match self.target.clone() {
-                    Some(target @ Target::Window { .. }) => {
-                        log::info(text::falling_back_to_monitor(target.name()));
-                        self.start_session(target.monitor());
+                Ok(Ok(Ended::NoFrames)) => match &self.target {
+                    Some(window @ Target::Window { .. }) => {
+                        log::info(text::falling_back_to_monitor(window.name()));
+                        let monitor = window.monitor();
+                        self.start_session(monitor);
                     }
                     _ => self.fail(text::NO_FRAMES),
                 },
@@ -548,12 +545,7 @@ impl Machine {
             }
         }
 
-        if self
-            .saving
-            .as_ref()
-            .is_some_and(|saving| saving.join.is_finished())
-            && let Some(saving) = self.saving.take()
-        {
+        if let Some(saving) = self.saving.take_if(|saving| saving.join.is_finished()) {
             self.finish_save(saving);
         }
     }
@@ -613,7 +605,7 @@ impl Machine {
     }
 
     /// Adds a saved clip's size to the lifetime total and writes the totals to disk.
-    fn add_saved(&mut self, path: &std::path::Path) {
+    fn add_saved(&mut self, path: &Path) {
         let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
         self.session_saved = self.session_saved.saturating_add(bytes);
         if let Some(totals) = self.totals.as_mut() {
@@ -628,9 +620,10 @@ impl Machine {
         let Some(live) = self.live.take() else {
             return;
         };
-        self.session_buffered = self.session_buffered.saturating_add(live.bytes());
+        let bytes = live.bytes();
+        self.session_buffered = self.session_buffered.saturating_add(bytes);
         if let Some(totals) = self.totals.as_mut() {
-            totals.buffered_bytes = totals.buffered_bytes.saturating_add(live.bytes());
+            totals.buffered_bytes = totals.buffered_bytes.saturating_add(bytes);
         }
         self.persist_totals();
     }
@@ -646,12 +639,15 @@ impl Machine {
     }
 
     fn publish(&mut self) {
-        let live = self.live.clone();
+        let live = self.live.as_deref();
         let running = self.session.is_some();
-        let stream = live.as_ref().and_then(|live| live.stream());
+        let stream = live.and_then(Live::stream);
 
-        if running && stream.is_some() && self.status.state == DisplayStatus::Starting {
-            log::info(text::recording(stream.as_ref(), &self.config));
+        if let Some(stream) = &stream
+            && running
+            && self.status.state == DisplayStatus::Starting
+        {
+            log::info(text::recording(stream, &self.config));
             self.status.state = DisplayStatus::Recording;
         }
         self.status.recording = running;
@@ -661,40 +657,38 @@ impl Machine {
         self.status.bitrate_mbps = self.config.bitrate_mbps;
         self.status.saving = self.saving.is_some();
 
-        self.status.session_written_bytes = self
-            .session_buffered
-            .saturating_add(live.as_ref().map_or(0, |live| live.bytes()));
+        // Read once, so the session and lifetime figures agree.
+        let live_bytes = live.map_or(0, Live::bytes);
+        self.status.session_written_bytes = self.session_buffered.saturating_add(live_bytes);
         self.status.session_saved_bytes = self.session_saved;
         self.status.saved_bytes = self.totals.map(|totals| totals.saved_bytes);
-        self.status.buffered_lifetime_bytes = self.totals.map(|totals| {
-            totals
-                .buffered_bytes
-                .saturating_add(live.as_ref().map_or(0, |live| live.bytes()))
-        });
+        self.status.buffered_lifetime_bytes = self
+            .totals
+            .map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
 
-        let now = Instant::now();
-        let (encoded, _) = live.as_ref().map_or((0, 0), |live| live.counters());
-        let previous = self
-            .sample
-            .as_ref()
-            .map(|sample| (sample.at, sample.encoded));
-        match previous {
-            Some((at, encoded_before)) if running => {
+        let (encoded, _) = live.map_or((0, 0), Live::counters);
+        let current = Sample {
+            at: Instant::now(),
+            encoded,
+        };
+        match self.sample {
+            Some(previous) if running => {
                 // A publish soon after the last one keeps its rate: the figure moves slowly.
-                let elapsed = now.duration_since(at).as_secs_f64();
+                let elapsed = current.at.duration_since(previous.at);
                 let span = if self.status.encode_rate.is_some() {
                     RATE_SPAN
                 } else {
                     FIRST_RATE_SPAN
                 };
                 if elapsed >= span {
-                    self.status.encode_rate = Some((encoded - encoded_before) as f64 / elapsed);
-                    self.sample = Some(Sample { at: now, encoded });
+                    self.status.encode_rate =
+                        Some((encoded - previous.encoded) as f64 / elapsed.as_secs_f64());
+                    self.sample = Some(current);
                 }
             }
             _ => {
                 self.status.encode_rate = None;
-                self.sample = running.then_some(Sample { at: now, encoded });
+                self.sample = running.then_some(current);
             }
         }
 

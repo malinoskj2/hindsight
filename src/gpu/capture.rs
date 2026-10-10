@@ -16,12 +16,17 @@ use crate::{config::Backend, service::Target};
 use std::{ffi::c_void, time::Duration};
 use thiserror::Error;
 use windows::Win32::{
-    Foundation::POINT,
+    Foundation::{HWND, POINT},
     Graphics::{
         Direct3D11::ID3D11Texture2D,
         Gdi::{HMONITOR, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
     },
+    UI::WindowsAndMessaging::IsWindow,
 };
+
+/// How often a backend that lost its capture to Windows or the driver tries to open it again
+/// while it is refused.
+const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error)]
 pub(crate) enum CaptureError {
@@ -35,6 +40,11 @@ pub(crate) enum CaptureError {
     Windows(&'static str, windows::core::Error),
     #[error("{0} failed with {1}")]
     Nvfbc(&'static str, nvfbc::Status),
+}
+
+/// Wraps a Windows error with the step that failed, for `map_err`.
+fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
+    move |error| CaptureError::Windows(step, error)
 }
 
 /// What a tick found.
@@ -90,4 +100,23 @@ fn monitor(handle: isize) -> HMONITOR {
     } else {
         HMONITOR(handle as *mut c_void)
     }
+}
+
+/// The monitor a whole-monitor backend records for `target`, and the window it stands in for
+/// when the target is one.
+fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
+    match *target {
+        Target::Monitor { handle, .. } => (monitor(handle), None),
+        Target::Window {
+            window,
+            monitor: handle,
+            ..
+        } => (monitor(handle), Some(HWND(window as *mut c_void))),
+    }
+}
+
+/// Whether the window a whole-monitor backend records through its monitor has been destroyed.
+fn window_closed(window: Option<HWND>) -> bool {
+    // SAFETY: IsWindow accepts any handle, live or not.
+    window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())
 }

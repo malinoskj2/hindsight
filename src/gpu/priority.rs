@@ -21,9 +21,11 @@ use windows::{
     core::{s, w},
 };
 
-/// `D3DKMT_SCHEDULINGPRIORITYCLASS` high.
+/// `D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH`, which any process may take.
 const SCHEDULING_HIGH: i32 = 4;
 
+/// `D3DKMTSetProcessSchedulingPriorityClass`, which `gdi32.dll` exports without an import
+/// library.
 type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTSTATUS;
 
 /// The calling thread's membership of the multimedia "Capture" scheduling class, which the
@@ -31,12 +33,14 @@ type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTST
 /// Reverted when dropped.
 pub(super) struct MultimediaThread(HANDLE);
 
+/// Puts the calling thread in the multimedia "Capture" class at high priority within it.
 pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread> {
     let mut index = 0;
     // SAFETY: registers the calling thread with a built-in task name; the index is written.
     let handle = unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &raw mut index) }?;
+    // Reverts the registration should the priority below be refused.
     let joined = MultimediaThread(handle);
-    // SAFETY: the handle was just issued for this thread.
+    // SAFETY: the handle was just issued for this thread and is still registered.
     unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) }?;
     Ok(joined)
 }
@@ -81,7 +85,9 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
 /// left alone: it could starve the game and the desktop compositor of the GPU. Reports whether
 /// the class was set.
 pub(super) fn raise_gpu_class() -> bool {
-    // SAFETY: loads a system library by name; `gdi32.dll` is loaded in every GUI process.
+    // The reference is never released, so the entry point read from it stays valid;
+    // `gdi32.dll` is loaded in every GUI process anyway.
+    // SAFETY: loads a system library by name.
     let Ok(gdi) = (unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) })
     else {
         return false;

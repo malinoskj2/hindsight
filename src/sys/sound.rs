@@ -8,7 +8,7 @@ use std::thread;
 #[cfg(windows)]
 use winsafe::{self as w, Snd};
 
-const RATE: u32 = 22_050;
+const SAMPLE_RATE: u32 = 22_050;
 /// About -14 dBFS: clear over a game, not startling.
 const AMPLITUDE: f64 = 0.2;
 const FADE_MS: u32 = 5;
@@ -31,7 +31,7 @@ pub(crate) fn failed() {
 #[cfg(windows)]
 fn play(tones: &'static [(u32, u32)]) {
     let wav = wav(tones);
-    // A new tone cuts off one still playing; a failed spawn only loses the sound.
+    // A new tone cuts off one still playing; a failed spawn or playback only loses the sound.
     let _ = thread::Builder::new()
         .name("sound".to_owned())
         .spawn(move || {
@@ -54,15 +54,15 @@ fn play(_tones: &'static [(u32, u32)]) {}
     reason = "the scaled sample is within the i16 range, and the rounding is intended"
 )]
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
-    let fade = RATE * FADE_MS / 1000;
+    let fade = SAMPLE_RATE * FADE_MS / 1000;
     let mut data = Vec::new();
     for &(frequency, milliseconds) in tones {
-        let count = RATE * milliseconds / 1000;
+        let count = SAMPLE_RATE * milliseconds / 1000;
         for index in 0..count {
             let value = if frequency == 0 {
                 0.0
             } else {
-                let time = f64::from(index) / f64::from(RATE);
+                let time = f64::from(index) / f64::from(SAMPLE_RATE);
                 let edge = index.min(count - 1 - index);
                 let envelope = (f64::from(edge) / f64::from(fade)).min(1.0);
                 envelope * AMPLITUDE * (TAU * f64::from(frequency) * time).sin()
@@ -79,8 +79,8 @@ fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     wav.extend_from_slice(&16u32.to_le_bytes());
     wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
     wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&RATE.to_le_bytes());
-    wav.extend_from_slice(&(RATE * 2).to_le_bytes()); // bytes per second
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // bytes per second
     wav.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
     wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     wav.extend_from_slice(b"data");
@@ -122,7 +122,7 @@ mod tests {
     fn silence_is_zeros_and_each_tone_fades_in() {
         let wav = wav(&[(0, 10), (440, 10)]);
         let samples = samples(&wav);
-        let silence = (RATE * 10 / 1000) as usize;
+        let silence = (SAMPLE_RATE * 10 / 1000) as usize;
         assert!(samples[..silence].iter().all(|&sample| sample == 0));
         assert_eq!(samples[silence], 0, "the tone starts from silence");
     }

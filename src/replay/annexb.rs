@@ -1,16 +1,21 @@
 //! Annex B streams, the form NVENC writes H.264 and HEVC in: NAL units separated by start codes.
 
+/// The three-byte start code; a four-byte one has a zero byte in front.
+const START_CODE: [u8; 3] = [0, 0, 1];
+/// The byte inserted after two zero bytes so that a payload never contains a start code.
+const EMULATION_PREVENTION: u8 = 3;
+
 /// NAL units of an Annex B stream, without their start codes.
 pub(super) fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
     let mut units = Vec::new();
     let mut start = None;
     let mut index = 0;
-    while index + 3 <= stream.len() {
-        if stream[index..index + 3] == [0, 0, 1] {
+    while index + START_CODE.len() <= stream.len() {
+        if stream[index..].starts_with(&START_CODE) {
             if let Some(start) = start {
                 units.push(trim_trailing_zeros(&stream[start..index]));
             }
-            index += 3;
+            index += START_CODE.len();
             start = Some(index);
         } else {
             index += 1;
@@ -32,7 +37,7 @@ pub(super) fn unescape(unit: &[u8], limit: usize) -> Vec<u8> {
         if payload.len() == limit {
             break;
         }
-        if zeros >= 2 && byte == 3 {
+        if zeros >= 2 && byte == EMULATION_PREVENTION {
             zeros = 0;
             continue;
         }
@@ -45,8 +50,11 @@ pub(super) fn unescape(unit: &[u8], limit: usize) -> Vec<u8> {
 /// Splits a stream into access units, each starting at a NAL unit `starts_unit` accepts.
 #[cfg(test)]
 pub(super) fn access_units(stream: &[u8], starts_unit: impl Fn(&[u8]) -> bool) -> Vec<&[u8]> {
-    let mut starts: Vec<usize> = (0..stream.len().saturating_sub(3))
-        .filter(|&index| stream[index..index + 3] == [0, 0, 1] && starts_unit(&stream[index + 3..]))
+    let mut starts: Vec<usize> = (0..stream.len().saturating_sub(START_CODE.len()))
+        .filter(|&index| {
+            stream[index..].starts_with(&START_CODE)
+                && starts_unit(&stream[index + START_CODE.len()..])
+        })
         // A four-byte start code begins one byte earlier.
         .map(|index| {
             if index > 0 && stream[index - 1] == 0 {

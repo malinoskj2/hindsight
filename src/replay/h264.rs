@@ -1,32 +1,51 @@
 //! H.264 in MP4 (ISO/IEC 14496-15): length-prefixed NAL units in each sample, with the
 //! sequence and picture parameter sets in an `avcC` record.
 
-use super::{annexb::nal_units, mp4::atom};
+use super::{
+    annexb::nal_units,
+    mp4::{NAL_LENGTH_BYTES, atom},
+};
 
 const NAL_TYPE_MASK: u8 = 0x1F;
 const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 pub(super) const NAL_AUD: u8 = 9;
+/// The NAL header byte, then `profile_idc`, the constraint flags and `level_idc`.
+const SPS_PROFILE_BYTES: usize = 4;
+/// `configurationVersion` of the `avcC` record.
+const AVCC_VERSION: u8 = 1;
+/// The profiles whose `avcC` record goes on to state the chroma format and bit depths: High,
+/// High 10, High 4:2:2 and High 4:4:4 Predictive.
+const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
+/// 4:2:0, the `chroma_format_idc` the encoder is configured for.
+const CHROMA_420: u8 = 1;
 
 /// The `avcC` record for the first SPS and PPS in `access_unit`, if it carries both.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
-    let sps = of_type(NAL_SPS).filter(|sps| sps.len() >= 4)?;
+    let sps = of_type(NAL_SPS).filter(|sps| sps.len() >= SPS_PROFILE_BYTES)?;
     let pps = of_type(NAL_PPS)?;
     let (profile, compatibility, level) = (sps[1], sps[2], sps[3]);
 
-    // Four-byte lengths, one SPS, one PPS.
-    let mut body = vec![1, profile, compatibility, level, 0xFC | 3, 0xE0 | 1];
+    // The reserved bits are set throughout. One SPS, then one PPS.
+    let mut body = vec![
+        AVCC_VERSION,
+        profile,
+        compatibility,
+        level,
+        0xFC | (NAL_LENGTH_BYTES - 1),
+        0xE0 | 1,
+    ];
     body.extend_from_slice(&u16::try_from(sps.len()).ok()?.to_be_bytes());
     body.extend_from_slice(sps);
     body.push(1);
     body.extend_from_slice(&u16::try_from(pps.len()).ok()?.to_be_bytes());
     body.extend_from_slice(pps);
-    // High profiles add the chroma format and bit depths: 4:2:0, 8-bit, no SPS extensions.
-    if matches!(profile, 100 | 110 | 122 | 144) {
-        body.extend_from_slice(&[0xFC | 1, 0xF8, 0xF8, 0]);
+    // 8-bit luma and chroma (bit depths minus 8 of 0), no SPS extensions.
+    if HIGH_PROFILES.contains(&profile) {
+        body.extend_from_slice(&[0xFC | CHROMA_420, 0xF8, 0xF8, 0]);
     }
     Some(atom(*b"avcC", &body))
 }

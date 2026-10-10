@@ -12,11 +12,33 @@ const TICKS_PER_FRAME: u32 = 1000;
 /// The movie header's time scale: milliseconds.
 const MOVIE_TIMESCALE: u32 = 1000;
 const TRACK_ID: u32 = 1;
+/// The bytes of the length in front of each H.264 or HEVC NAL unit in a sample, which the
+/// `avcC` and `hvcC` records declare.
+pub(super) const NAL_LENGTH_BYTES: u8 = 4;
+/// An atom size of 1 means a 64-bit size follows the atom type.
+const LARGE_SIZE: u32 = 1;
 /// A 16-byte `mdat` header with a 64-bit size, so clips larger than 4 GB need no special case.
 const MDAT_HEADER_BYTES: u64 = 16;
-const UNITY_MATRIX: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
+/// 1.0 in 16.16 fixed point: the playback rate, and the matrix's scale factors.
+const FIXED_ONE: u32 = 0x0001_0000;
+/// The identity transform, with its last column in 2.30 fixed point.
+const UNITY_MATRIX: [u32; 9] = [FIXED_ONE, 0, 0, 0, FIXED_ONE, 0, 0, 0, 0x4000_0000];
+/// 1.0 in 8.8 fixed point: full volume.
+const FULL_VOLUME: u16 = 0x0100;
+/// `ftyp` minor version, as other muxers write it next to the `isom` brand.
+const FILE_TYPE_MINOR_VERSION: u32 = 0x200;
+/// `tkhd` flags: the track is enabled and part of the presentation.
+const TRACK_ENABLED_IN_MOVIE: u32 = 0x3;
+/// The `vmhd` flags the specification requires.
+const VIDEO_MEDIA_HEADER_FLAGS: u32 = 1;
+/// The `url ` flag saying the media is in this file.
+const SELF_CONTAINED: u32 = 1;
 /// `und`, packed as three 5-bit letters.
 const UNDETERMINED_LANGUAGE: u16 = 0x55C4;
+/// 72 dpi in 16.16 fixed point, the resolution every visual sample entry declares.
+const RESOLUTION_72_DPI: u32 = 0x0048_0000;
+/// 24-bit colour without alpha.
+const DEPTH_24_BIT: u16 = 0x0018;
 /// BT.709 primaries, transfer and matrix, limited range: what the encoder signals.
 const BT709: u16 = 1;
 
@@ -33,6 +55,8 @@ pub(crate) enum MuxError {
 }
 
 struct Sample<'a> {
+    /// The packet's frame index.
+    index: u64,
     parts: Vec<&'a [u8]>,
     size: u32,
     duration: u32,
@@ -64,13 +88,14 @@ pub(crate) fn write(
 
     output.write_all(&file_type)?;
     output.write_all(&index)?;
-    output.write_all(&1_u32.to_be_bytes())?;
+    output.write_all(&LARGE_SIZE.to_be_bytes())?;
     output.write_all(b"mdat")?;
     output.write_all(&(MDAT_HEADER_BYTES + media_bytes).to_be_bytes())?;
     for sample in &samples {
         for part in &sample.parts {
             if prefixed {
-                output.write_all(&length(part.len())?.to_be_bytes())?;
+                let length: u32 = fit(part.len())?;
+                output.write_all(&length.to_be_bytes())?;
             }
             output.write_all(part)?;
         }
@@ -81,9 +106,12 @@ pub(crate) fn write(
 
 /// Each packet as a sample; a frame index that skips ahead lengthens the previous sample.
 fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, MuxError> {
-    let prefix = if length_prefixed(codec) { 4 } else { 0 };
+    let prefix = if length_prefixed(codec) {
+        usize::from(NAL_LENGTH_BYTES)
+    } else {
+        0
+    };
     let mut samples: Vec<Sample<'_>> = Vec::with_capacity(packets.len());
-    let mut previous_index = None;
     for packet in packets {
         let parts = sample_parts(codec, &packet.data);
         if parts.is_empty() {
@@ -91,17 +119,16 @@ fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, Mux
         }
         let size = parts
             .iter()
-            .map(|part| length(part.len() + prefix))
+            .map(|part| fit::<u32, _>(part.len() + prefix))
             .sum::<Result<u32, _>>()?;
-        if let (Some(last), Some(previous)) = (samples.last_mut(), previous_index) {
-            let frames = u32::try_from(packet.index.saturating_sub(previous).max(1))
-                .map_err(|_| MuxError::TooLarge)?;
+        if let Some(last) = samples.last_mut() {
+            let frames: u32 = fit(packet.index.saturating_sub(last.index).max(1))?;
             last.duration = frames
                 .checked_mul(TICKS_PER_FRAME)
                 .ok_or(MuxError::TooLarge)?;
         }
-        previous_index = Some(packet.index);
         samples.push(Sample {
+            index: packet.index,
             parts,
             size,
             duration: TICKS_PER_FRAME,
@@ -111,8 +138,9 @@ fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, Mux
     Ok(samples)
 }
 
-fn length(bytes: usize) -> Result<u32, MuxError> {
-    u32::try_from(bytes).map_err(|_| MuxError::TooLarge)
+/// `value` as the narrower integer an MP4 field holds, or [`MuxError::TooLarge`].
+fn fit<T: TryFrom<U>, U>(value: U) -> Result<T, MuxError> {
+    T::try_from(value).map_err(|_| MuxError::TooLarge)
 }
 
 /// H.264 and HEVC samples are NAL units behind four-byte lengths; AV1 OBUs carry their own.
@@ -128,15 +156,14 @@ fn file_type(codec: Codec) -> Vec<u8> {
         Codec::Hevc => b"",
         Codec::Av1 => b"av01",
     };
-    let body = [
-        &b"isom"[..],
-        &0x200_u32.to_be_bytes(),
-        b"isom",
-        b"iso2",
-        codec_brand,
-        b"mp41",
-    ]
-    .concat();
+    let mut body = Vec::new();
+    // The major brand and its version, then the compatible brands.
+    body.put(b"isom")
+        .put_u32(FILE_TYPE_MINOR_VERSION)
+        .put(b"isom")
+        .put(b"iso2")
+        .put(codec_brand)
+        .put(b"mp41");
     atom(*b"ftyp", &body)
 }
 
@@ -155,19 +182,22 @@ fn movie(
         .map(|sample| u64::from(sample.duration))
         .sum();
     let movie_duration = media_duration * u64::from(MOVIE_TIMESCALE) / u64::from(timescale);
-    let media_duration = u32::try_from(media_duration).map_err(|_| MuxError::TooLarge)?;
-    let movie_duration = u32::try_from(movie_duration).map_err(|_| MuxError::TooLarge)?;
+    let media_duration: u32 = fit(media_duration)?;
+    let movie_duration: u32 = fit(movie_duration)?;
 
     let mut header = Vec::new();
-    header.extend_from_slice(&[0; 8]);
-    header.extend_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
-    header.extend_from_slice(&movie_duration.to_be_bytes());
-    header.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
-    header.extend_from_slice(&0x0100_u16.to_be_bytes());
-    header.extend_from_slice(&[0; 10]);
-    header.extend_from_slice(&matrix());
-    header.extend_from_slice(&[0; 24]);
-    header.extend_from_slice(&(TRACK_ID + 1).to_be_bytes());
+    header
+        // Creation and modification times.
+        .put_zeros(8)
+        .put_u32(MOVIE_TIMESCALE)
+        .put_u32(movie_duration)
+        .put_u32(FIXED_ONE)
+        .put_u16(FULL_VOLUME)
+        .put_zeros(10)
+        .put_u32s(&UNITY_MATRIX)
+        // Pre-defined fields.
+        .put_zeros(24)
+        .put_u32(TRACK_ID + 1);
 
     let track = [
         track_header(stream, movie_duration),
@@ -179,7 +209,7 @@ fn movie(
                 atom(
                     *b"minf",
                     &[
-                        full_atom(*b"vmhd", 0, 1, &[0; 8]),
+                        full_atom(*b"vmhd", 0, VIDEO_MEDIA_HEADER_FLAGS, &[0; 8]),
                         data_information(),
                         sample_table(stream, decoder, samples, media_offset)?,
                     ]
@@ -199,43 +229,49 @@ fn movie(
 
 fn track_header(stream: &Stream, duration: u32) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(&[0; 8]);
-    body.extend_from_slice(&TRACK_ID.to_be_bytes());
-    body.extend_from_slice(&[0; 4]);
-    body.extend_from_slice(&duration.to_be_bytes());
-    body.extend_from_slice(&[0; 16]);
-    body.extend_from_slice(&matrix());
-    body.extend_from_slice(&(stream.width << 16).to_be_bytes());
-    body.extend_from_slice(&(stream.height << 16).to_be_bytes());
-    // Enabled and part of the presentation.
-    full_atom(*b"tkhd", 0, 0x3, &body)
+    body
+        // Creation and modification times.
+        .put_zeros(8)
+        .put_u32(TRACK_ID)
+        .put_zeros(4)
+        .put_u32(duration)
+        // Reserved, layer, alternate group, volume (none for video), reserved.
+        .put_zeros(16)
+        .put_u32s(&UNITY_MATRIX)
+        // Width and height in 16.16 fixed point.
+        .put_u32(stream.width << 16)
+        .put_u32(stream.height << 16);
+    full_atom(*b"tkhd", 0, TRACK_ENABLED_IN_MOVIE, &body)
 }
 
 fn media_header(timescale: u32, duration: u32) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(&[0; 8]);
-    body.extend_from_slice(&timescale.to_be_bytes());
-    body.extend_from_slice(&duration.to_be_bytes());
-    body.extend_from_slice(&UNDETERMINED_LANGUAGE.to_be_bytes());
-    body.extend_from_slice(&[0; 2]);
+    body
+        // Creation and modification times.
+        .put_zeros(8)
+        .put_u32(timescale)
+        .put_u32(duration)
+        .put_u16(UNDETERMINED_LANGUAGE)
+        .put_zeros(2);
     full_atom(*b"mdhd", 0, 0, &body)
 }
 
 fn handler() -> Vec<u8> {
-    let body = [&[0; 4][..], b"vide", &[0; 12], b"VideoHandler\0"].concat();
+    let mut body = Vec::new();
+    body.put_zeros(4)
+        .put(b"vide")
+        .put_zeros(12)
+        .put(b"VideoHandler\0");
     full_atom(*b"hdlr", 0, 0, &body)
 }
 
 fn data_information() -> Vec<u8> {
     // One entry: the media is in this file.
-    let reference = full_atom(*b"url ", 0, 1, &[]);
-    let table = full_atom(
-        *b"dref",
-        0,
-        0,
-        &[&1_u32.to_be_bytes()[..], &reference].concat(),
-    );
-    atom(*b"dinf", &table)
+    let mut table = Vec::new();
+    table
+        .put_u32(1)
+        .put(&full_atom(*b"url ", 0, SELF_CONTAINED, &[]));
+    atom(*b"dinf", &full_atom(*b"dref", 0, 0, &table))
 }
 
 fn sample_table(
@@ -244,9 +280,13 @@ fn sample_table(
     samples: &[Sample<'_>],
     media_offset: u64,
 ) -> Result<Vec<u8>, MuxError> {
-    let count = length(samples.len())?;
+    let count: u32 = fit(samples.len())?;
 
-    let mut times = Vec::new();
+    // One sample description.
+    let mut description = Vec::new();
+    description.put_u32(1).put(&visual_entry(stream, decoder)?);
+
+    // Durations, as runs of equal ones.
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for sample in samples {
         match runs.last_mut() {
@@ -254,47 +294,40 @@ fn sample_table(
             _ => runs.push((1, sample.duration)),
         }
     }
-    times.extend_from_slice(&length(runs.len())?.to_be_bytes());
+    let mut times = Vec::new();
+    times.put_u32(fit(runs.len())?);
     for (run, duration) in runs {
-        times.extend_from_slice(&run.to_be_bytes());
-        times.extend_from_slice(&duration.to_be_bytes());
+        times.put_u32(run).put_u32(duration);
     }
 
+    // Keyframes, by sample number from 1.
     let keyframes: Vec<u32> = (1..=count)
         .zip(samples)
         .filter(|(_, sample)| sample.keyframe)
         .map(|(number, _)| number)
         .collect();
-    let mut sync = length(keyframes.len())?.to_be_bytes().to_vec();
-    for number in keyframes {
-        sync.extend_from_slice(&number.to_be_bytes());
-    }
+    let mut sync = Vec::new();
+    sync.put_u32(fit(keyframes.len())?).put_u32s(&keyframes);
 
-    // Every sample sits in one chunk.
-    let chunks = [1_u32, 1, count, 1]
-        .iter()
-        .flat_map(|value| value.to_be_bytes())
-        .collect::<Vec<u8>>();
+    // One entry: from the first chunk on, every sample sits in one chunk with description 1.
+    let mut chunks = Vec::new();
+    chunks.put_u32s(&[1, 1, count, 1]);
 
-    let mut sizes = [0_u32, count]
-        .iter()
-        .flat_map(|value| value.to_be_bytes())
-        .collect::<Vec<u8>>();
+    // A default size of 0, so each sample's size is listed.
+    let mut sizes = Vec::new();
+    sizes.put_u32(0).put_u32(count);
     for sample in samples {
-        sizes.extend_from_slice(&sample.size.to_be_bytes());
+        sizes.put_u32(sample.size);
     }
 
-    let offsets = [&1_u32.to_be_bytes()[..], &media_offset.to_be_bytes()].concat();
+    // The one chunk's offset.
+    let mut offsets = Vec::new();
+    offsets.put_u32(1).put_u64(media_offset);
 
     Ok(atom(
         *b"stbl",
         &[
-            full_atom(
-                *b"stsd",
-                0,
-                0,
-                &[&1_u32.to_be_bytes()[..], &visual_entry(stream, decoder)?].concat(),
-            ),
+            full_atom(*b"stsd", 0, 0, &description),
             full_atom(*b"stts", 0, 0, &times),
             full_atom(*b"stss", 0, 0, &sync),
             full_atom(*b"stsc", 0, 0, &chunks),
@@ -307,8 +340,8 @@ fn sample_table(
 
 /// The sample description: a visual sample entry with the decoder configuration record.
 fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<Vec<u8>, MuxError> {
-    let width = u16::try_from(stream.width).map_err(|_| MuxError::TooLarge)?;
-    let height = u16::try_from(stream.height).map_err(|_| MuxError::TooLarge)?;
+    let width: u16 = fit(stream.width)?;
+    let height: u16 = fit(stream.height)?;
     // Parameter sets live only in the configuration record (`hvc1`, not `hev1`).
     let kind = match stream.codec {
         Codec::H264 => b"avc1",
@@ -317,39 +350,73 @@ fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<Vec<u8>, MuxError> {
     };
 
     let mut body = Vec::new();
-    body.extend_from_slice(&[0; 6]);
-    body.extend_from_slice(&1_u16.to_be_bytes());
-    body.extend_from_slice(&[0; 16]);
-    body.extend_from_slice(&width.to_be_bytes());
-    body.extend_from_slice(&height.to_be_bytes());
-    // 72 dpi in both directions.
-    body.extend_from_slice(&0x0048_0000_u32.to_be_bytes());
-    body.extend_from_slice(&0x0048_0000_u32.to_be_bytes());
-    body.extend_from_slice(&[0; 4]);
-    body.extend_from_slice(&1_u16.to_be_bytes());
-    body.extend_from_slice(&[0; 32]);
-    body.extend_from_slice(&0x0018_u16.to_be_bytes());
-    body.extend_from_slice(&(-1_i16).to_be_bytes());
-    body.extend_from_slice(decoder);
-    body.extend_from_slice(&colour());
+    body.put_zeros(6)
+        // Data reference index.
+        .put_u16(1)
+        .put_zeros(16)
+        .put_u16(width)
+        .put_u16(height)
+        .put_u32(RESOLUTION_72_DPI)
+        .put_u32(RESOLUTION_72_DPI)
+        .put_zeros(4)
+        // Frames per sample.
+        .put_u16(1)
+        // Compressor name.
+        .put_zeros(32)
+        .put_u16(DEPTH_24_BIT)
+        // Pre-defined.
+        .put_u16(u16::MAX)
+        .put(decoder)
+        .put(&colour());
     Ok(atom(*kind, &body))
 }
 
 fn colour() -> Vec<u8> {
-    let mut body = b"nclx".to_vec();
-    for value in [BT709; 3] {
-        body.extend_from_slice(&value.to_be_bytes());
-    }
-    // Limited range.
-    body.push(0);
+    let mut body = Vec::new();
+    // Primaries, transfer and matrix, then the full-range flag cleared.
+    body.put(b"nclx").put_u16s(&[BT709; 3]).put(&[0]);
     atom(*b"colr", &body)
 }
 
-fn matrix() -> Vec<u8> {
-    UNITY_MATRIX
-        .iter()
-        .flat_map(|value| value.to_be_bytes())
-        .collect()
+/// Big-endian field writers for building atom bodies.
+trait Fields {
+    fn put(&mut self, bytes: &[u8]) -> &mut Self;
+    fn put_zeros(&mut self, count: usize) -> &mut Self;
+    fn put_u16(&mut self, value: u16) -> &mut Self;
+    fn put_u32(&mut self, value: u32) -> &mut Self;
+    fn put_u64(&mut self, value: u64) -> &mut Self;
+
+    fn put_u16s(&mut self, values: &[u16]) -> &mut Self {
+        values.iter().fold(self, |body, &value| body.put_u16(value))
+    }
+
+    fn put_u32s(&mut self, values: &[u32]) -> &mut Self {
+        values.iter().fold(self, |body, &value| body.put_u32(value))
+    }
+}
+
+impl Fields for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) -> &mut Self {
+        self.extend_from_slice(bytes);
+        self
+    }
+
+    fn put_zeros(&mut self, count: usize) -> &mut Self {
+        self.resize(self.len() + count, 0);
+        self
+    }
+
+    fn put_u16(&mut self, value: u16) -> &mut Self {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn put_u32(&mut self, value: u32) -> &mut Self {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn put_u64(&mut self, value: u64) -> &mut Self {
+        self.put(&value.to_be_bytes())
+    }
 }
 
 pub(super) fn atom(kind: [u8; 4], body: &[u8]) -> Vec<u8> {

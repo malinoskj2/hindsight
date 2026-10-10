@@ -17,6 +17,22 @@ pub(super) const API_MAJOR: u32 = 12;
 pub(super) const API_MINOR: u32 = 1;
 pub(super) const API_VERSION: u32 = API_MAJOR | (API_MINOR << 24);
 
+/// How many low bits of a `NvEncodeAPIGetMaxSupportedVersion` result hold the minor version;
+/// the major version sits above them.
+const MAX_VERSION_MINOR_BITS: u32 = 4;
+/// The lowest `NvEncodeAPIGetMaxSupportedVersion` result that accepts this program's structures.
+pub(super) const REQUIRED_MAX_VERSION: u32 = (API_MAJOR << MAX_VERSION_MINOR_BITS) | API_MINOR;
+
+/// Splits a `NvEncodeAPIGetMaxSupportedVersion` result into its major and minor versions.
+pub(super) const fn split_max_version(version: u32) -> (u32, u32) {
+    (
+        version >> MAX_VERSION_MINOR_BITS,
+        version & ((1 << MAX_VERSION_MINOR_BITS) - 1),
+    )
+}
+
+/// `NVENCAPI_STRUCT_VERSION`. The header also sets bit 31 in some structures' versions, without
+/// naming it, and so do the constants below.
 const fn struct_version(version: u32) -> u32 {
     API_VERSION | (version << 16) | (0x7 << 28)
 }
@@ -39,6 +55,8 @@ const _: () = assert!(API_VERSION == 0x0100_000C);
 const _: () = assert!(FUNCTION_LIST_VER == 0x7102_000C);
 const _: () = assert!(CONFIG_VER == 0xF108_000C);
 const _: () = assert!(PIC_PARAMS_VER == 0xF106_000C);
+const _: () = assert!(REQUIRED_MAX_VERSION == 0xC1);
+const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
 
 pub(super) const CODEC_H264: GUID = GUID::from_values(
     0x6bc8_2762,
@@ -106,12 +124,12 @@ pub(super) const AV1_PART_SIZE_16: u32 = 3;
 pub(super) const AV1_PART_SIZE_32: u32 = 4;
 /// `NV_ENC_CONFIG_H264` flag: SPS and PPS before every IDR frame.
 pub(super) const H264_REPEAT_SPS_PPS: u32 = 1 << 12;
-/// `NV_ENC_CONFIG_HEVC` flags and fields.
+// `NV_ENC_CONFIG_HEVC` flags and fields.
 pub(super) const HEVC_REPEAT_SPS_PPS: u32 = 1 << 7;
 pub(super) const HEVC_CHROMA_FORMAT_SHIFT: u32 = 9;
 pub(super) const HEVC_CHROMA_FORMAT_MASK: u32 = 0b11 << 9;
 pub(super) const HEVC_BIT_DEPTH_MASK: u32 = 0b111 << 11;
-/// `NV_ENC_CONFIG_AV1` flags and fields.
+// `NV_ENC_CONFIG_AV1` flags and fields.
 pub(super) const AV1_ANNEX_B: u32 = 1 << 0;
 pub(super) const AV1_TIMING_INFO: u32 = 1 << 1;
 pub(super) const AV1_DECODER_MODEL_INFO: u32 = 1 << 2;
@@ -123,8 +141,11 @@ pub(super) const AV1_CHROMA_FORMAT_MASK: u32 = 0b11 << 7;
 pub(super) const AV1_BIT_DEPTH_MASK: u32 = 0b11_1111 << 12;
 
 pub(super) const CHROMA_FORMAT_420: u32 = 1;
-pub(super) const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
+const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
 pub(super) const BT709: u32 = 1;
+/// Limited (studio) range, both as the H.264/HEVC `video_full_range_flag` and as the AV1
+/// `color_range`.
+pub(super) const LIMITED_RANGE: u32 = 0;
 
 /// `NVENCSTATUS`; kept as an integer, since a driver may return values this program does not
 /// know.
@@ -136,7 +157,7 @@ impl Status {
     pub(super) const SUCCESS: Self = Self(0);
     pub(super) const INVALID_VERSION: Self = Self(15);
 
-    pub(super) const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self.0 {
             0 => "NV_ENC_SUCCESS",
             1 => "NV_ENC_ERR_NO_ENCODE_DEVICE",
@@ -191,7 +212,15 @@ pub(super) unsafe trait Zeroed: Sized {
     }
 }
 
+/// An encode session, from `nvEncOpenEncodeSessionEx`.
 pub(super) type Session = *mut c_void;
+/// `NV_ENC_REGISTERED_PTR`: a texture registered with a session as encoder input.
+pub(super) type Registered = *mut c_void;
+/// `NV_ENC_INPUT_PTR`: a registered texture while it is mapped for one frame.
+pub(super) type Mapped = *mut c_void;
+/// `NV_ENC_OUTPUT_PTR`: a bitstream buffer.
+pub(super) type Bitstream = *mut c_void;
+/// A function list entry this program never calls.
 type Entry = *const c_void;
 
 pub(super) type GetMaxSupportedVersion = unsafe extern "system" fn(*mut u32) -> Status;
@@ -308,7 +337,7 @@ const _: () = assert!(offset_of!(OpenEncodeSessionExParams, api_version) == 24);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct RcParams {
-    pub(super) version: u32,
+    _version: u32,
     pub(super) rate_control_mode: u32,
     _const_qp: [u32; 3],
     pub(super) average_bit_rate: u32,
@@ -351,7 +380,7 @@ impl Vui {
     pub(super) fn signal_bt709(&mut self) {
         self.video_signal_type_present_flag = 1;
         self.video_format = VIDEO_FORMAT_UNSPECIFIED;
-        self.video_full_range_flag = 0;
+        self.video_full_range_flag = LIMITED_RANGE;
         self.colour_description_present_flag = 1;
         self.colour_primaries = BT709;
         self.transfer_characteristics = BT709;
@@ -365,7 +394,7 @@ impl Vui {
 pub(super) struct H264Config {
     /// Bit fields, `enableTemporalSVC` first; see [`H264_REPEAT_SPS_PPS`].
     pub(super) flags: u32,
-    pub(super) level: u32,
+    _level: u32,
     pub(super) idr_period: u32,
     _colour_plane_to_slice_mode: [u32; 15],
     pub(super) vui: Vui,
@@ -528,7 +557,7 @@ pub(super) struct RegisterResource {
     _pitch: u32,
     _sub_resource_index: u32,
     pub(super) resource_to_register: *mut c_void,
-    pub(super) registered_resource: *mut c_void,
+    pub(super) registered_resource: Registered,
     pub(super) buffer_format: u32,
     pub(super) buffer_usage: u32,
     _input_fence_point: *mut c_void,
@@ -547,7 +576,7 @@ const _: () = assert!(offset_of!(RegisterResource, buffer_format) == 40);
 pub(super) struct CreateBitstreamBuffer {
     pub(super) version: u32,
     _size_heap_reserved: [u32; 3],
-    pub(super) bitstream_buffer: *mut c_void,
+    pub(super) bitstream_buffer: Bitstream,
     _rest: [u64; 94],
 }
 
@@ -577,8 +606,8 @@ pub(super) struct MapInputResource {
     pub(super) version: u32,
     _sub_resource_index: u32,
     _input_resource: *mut c_void,
-    pub(super) registered_resource: *mut c_void,
-    pub(super) mapped_resource: *mut c_void,
+    pub(super) registered_resource: Registered,
+    pub(super) mapped_resource: Mapped,
     pub(super) mapped_buffer_format: u32,
     _rest: [u32; 377],
 }
@@ -601,8 +630,8 @@ pub(super) struct PicParams {
     _frame_index: u32,
     pub(super) input_time_stamp: u64,
     _input_duration: u64,
-    pub(super) input_buffer: *mut c_void,
-    pub(super) output_bitstream: *mut c_void,
+    pub(super) input_buffer: Mapped,
+    pub(super) output_bitstream: Bitstream,
     pub(super) completion_event: *mut c_void,
     pub(super) buffer_format: u32,
     pub(super) picture_struct: u32,
@@ -624,11 +653,11 @@ const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
 pub(super) struct LockBitstream {
     pub(super) version: u32,
     _flags: u32,
-    pub(super) output_bitstream: *mut c_void,
+    pub(super) output_bitstream: Bitstream,
     _slice_offsets: *mut u32,
     _frame_index_to_num_slices: [u32; 3],
     pub(super) bitstream_size_in_bytes: u32,
-    pub(super) output_time_stamp: u64,
+    _output_time_stamp: u64,
     _output_duration: u64,
     pub(super) bitstream_buffer_ptr: *mut c_void,
     pub(super) picture_type: u32,
@@ -640,6 +669,6 @@ unsafe impl Zeroed for LockBitstream {}
 
 const _: () = assert!(size_of::<LockBitstream>() == 1552);
 const _: () = assert!(offset_of!(LockBitstream, bitstream_size_in_bytes) == 36);
-const _: () = assert!(offset_of!(LockBitstream, output_time_stamp) == 40);
+const _: () = assert!(offset_of!(LockBitstream, _output_time_stamp) == 40);
 const _: () = assert!(offset_of!(LockBitstream, bitstream_buffer_ptr) == 56);
 const _: () = assert!(offset_of!(LockBitstream, picture_type) == 64);

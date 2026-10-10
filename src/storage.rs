@@ -135,13 +135,10 @@ impl Store {
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(PENDING_EXTENSION);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)?;
+    let mut file = File::create(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    // Windows cannot rename a file that is still open.
     drop(file);
 
     fs::rename(temporary, path)

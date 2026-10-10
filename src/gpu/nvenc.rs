@@ -12,7 +12,7 @@ use std::{collections::VecDeque, ffi::CStr, ptr};
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, FreeLibrary, HANDLE, HMODULE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{HANDLE, HMODULE, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Graphics::{
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
@@ -25,7 +25,7 @@ use windows::{
             Threading::{CreateEventW, WaitForSingleObject},
         },
     },
-    core::{GUID, Interface, s, w},
+    core::{GUID, Interface, Owned, s, w},
 };
 
 mod ffi;
@@ -99,7 +99,7 @@ pub(super) struct Settings {
 pub(super) struct Encoded {
     pub(super) index: u64,
     pub(super) fresh: bool,
-    pub(super) picture_type: u32,
+    picture_type: u32,
     pub(super) data: Box<[u8]>,
 }
 
@@ -110,18 +110,30 @@ impl Encoded {
     }
 }
 
+/// A submitted frame, which keeps its slot's input mapped until it is collected.
 struct Frame {
     index: u64,
     fresh: bool,
-    mapped: *mut std::ffi::c_void,
+    mapped: ffi::Mapped,
 }
 
+/// One input texture and what NVENC needs to encode it. The encoder releases the NVENC parts in
+/// [`Encoder::release_slot`]; the texture and the event are released when the slot is dropped.
 struct Slot {
     texture: ID3D11Texture2D,
-    registered: *mut std::ffi::c_void,
-    bitstream: *mut std::ffi::c_void,
-    event: HANDLE,
+    registered: ffi::Registered,
+    bitstream: ffi::Bitstream,
+    event: Owned<HANDLE>,
     in_flight: Option<Frame>,
+}
+
+/// Whether collecting the oldest frame in flight may wait for NVENC to finish it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// Report at once that the frame is not ready.
+    Poll,
+    /// Wait up to [`ENCODE_TIMEOUT_MS`], then consider NVENC stalled.
+    Block,
 }
 
 pub(super) struct Encoder {
@@ -140,7 +152,8 @@ pub(super) struct Encoder {
     device_lock: ID3D11Multithread,
     /// NVENC stopped answering; teardown does not wait for it again.
     stalled: bool,
-    library: HMODULE,
+    /// Declared last, so it is freed after everything else the encoder holds.
+    library: Owned<HMODULE>,
 }
 
 /// Holds the device lock while it lives.
@@ -199,19 +212,21 @@ impl Encoder {
     fn connect(&mut self, device: &ID3D11Device) -> Result<(), NvencError> {
         // SAFETY: looks a symbol up in the loaded NVENC library.
         let max_version =
-            unsafe { GetProcAddress(self.library, s!("NvEncodeAPIGetMaxSupportedVersion")) }
+            unsafe { GetProcAddress(*self.library, s!("NvEncodeAPIGetMaxSupportedVersion")) }
                 .ok_or(NvencError::Library)?;
         // SAFETY: looks a symbol up in the loaded NVENC library.
         let create_instance =
-            unsafe { GetProcAddress(self.library, s!("NvEncodeAPICreateInstance")) }
+            unsafe { GetProcAddress(*self.library, s!("NvEncodeAPICreateInstance")) }
                 .ok_or(NvencError::Library)?;
-        // SAFETY: the export has the documented signature.
+        // SAFETY: nvEncodeAPI.h declares this export as `NVENCSTATUS NVENCAPI (uint32_t*)`,
+        // which is `ffi::GetMaxSupportedVersion`.
         let max_version = unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::GetMaxSupportedVersion>(
                 max_version,
             )
         };
-        // SAFETY: the export has the documented signature.
+        // SAFETY: nvEncodeAPI.h declares this export as
+        // `NVENCSTATUS NVENCAPI (NV_ENCODE_API_FUNCTION_LIST*)`, which is `ffi::CreateInstance`.
         let create_instance = unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, ffi::CreateInstance>(
                 create_instance,
@@ -223,8 +238,9 @@ impl Encoder {
         self.check("NvEncodeAPIGetMaxSupportedVersion", unsafe {
             max_version(&raw mut version)
         })?;
-        if version < ((ffi::API_MAJOR << 4) | ffi::API_MINOR) {
-            return Err(NvencError::DriverTooOld(version >> 4, version & 0xF));
+        if version < ffi::REQUIRED_MAX_VERSION {
+            let (major, minor) = ffi::split_max_version(version);
+            return Err(NvencError::DriverTooOld(major, minor));
         }
 
         self.api.version = ffi::FUNCTION_LIST_VER;
@@ -237,7 +253,7 @@ impl Encoder {
         params.device_type = ffi::DEVICE_TYPE_DIRECTX;
         params.device = device.as_raw();
         params.api_version = ffi::API_VERSION;
-        let open = function(self.api.open_encode_session_ex, "nvEncOpenEncodeSessionEx")?;
+        let open = entry_point(self.api.open_encode_session_ex, "nvEncOpenEncodeSessionEx")?;
         // SAFETY: the device outlives the session (the pipeline drops the encoder first), and
         // the session handle is written on success only.
         let status = unsafe { open(&raw mut params, &raw mut self.session) };
@@ -257,8 +273,8 @@ impl Encoder {
     }
 
     fn require_codec(&self) -> Result<(), NvencError> {
-        let count_guids = function(self.api.get_encode_guid_count, "nvEncGetEncodeGUIDCount")?;
-        let list_guids = function(self.api.get_encode_guids, "nvEncGetEncodeGUIDs")?;
+        let count_guids = entry_point(self.api.get_encode_guid_count, "nvEncGetEncodeGUIDCount")?;
+        let list_guids = entry_point(self.api.get_encode_guids, "nvEncGetEncodeGUIDs")?;
         let mut count = 0;
         // SAFETY: writes one integer for an open session.
         self.check("nvEncGetEncodeGUIDCount", unsafe {
@@ -302,7 +318,7 @@ impl Encoder {
     }
 
     fn capability(&self, capability: u32) -> Result<u32, NvencError> {
-        let get_caps = function(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
+        let get_caps = entry_point(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
         let mut query = ffi::CapsParam::zeroed();
         query.version = ffi::CAPS_PARAM_VER;
         query.caps_to_query = capability;
@@ -326,7 +342,7 @@ impl Encoder {
         let mut preset = ffi::PresetConfig::zeroed();
         preset.version = ffi::PRESET_CONFIG_VER;
         preset.config.version = ffi::CONFIG_VER;
-        let get_preset = function(
+        let get_preset = entry_point(
             self.api.get_encode_preset_config_ex,
             "nvEncGetEncodePresetConfigEx",
         )?;
@@ -362,7 +378,7 @@ impl Encoder {
         params.max_encode_width = settings.width;
         params.max_encode_height = settings.height;
         params.tuning_info = ffi::TUNING_HIGH_QUALITY;
-        let initialize = function(self.api.initialize_encoder, "nvEncInitializeEncoder")?;
+        let initialize = entry_point(self.api.initialize_encoder, "nvEncInitializeEncoder")?;
         // SAFETY: `params` and the configuration it points to live across the call.
         self.check("nvEncInitializeEncoder", unsafe {
             initialize(self.session, &raw mut params)
@@ -381,22 +397,22 @@ impl Encoder {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0.cast_unsigned(),
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
+        let texture_failed = |error| NvencError::Windows("create an encoder input texture", error);
         let mut texture = None;
         // SAFETY: a plain texture description without initial data.
         unsafe { device.CreateTexture2D(&raw const description, None, Some(&raw mut texture)) }
-            .map_err(|error| NvencError::Windows("create an encoder input texture", error))?;
-        let texture = texture.ok_or(NvencError::Windows(
-            "create an encoder input texture",
-            windows::core::Error::empty(),
-        ))?;
+            .map_err(texture_failed)?;
+        let texture = texture.ok_or_else(|| texture_failed(windows::core::Error::empty()))?;
 
         // SAFETY: an unnamed auto-reset event with default security.
         let event = unsafe { CreateEventW(None, false, false, None) }
             .map_err(|error| NvencError::Windows("create an encoder event", error))?;
+        // SAFETY: the event was just created, and only this `Owned` closes it.
+        let event = unsafe { Owned::new(event) };
         let mut slot = Slot {
             texture,
             registered: ptr::null_mut(),
@@ -420,7 +436,7 @@ impl Encoder {
         resource.resource_to_register = slot.texture.as_raw();
         resource.buffer_format = ffi::BUFFER_FORMAT_ARGB;
         resource.buffer_usage = ffi::INPUT_IMAGE;
-        let register = function(self.api.register_resource, "nvEncRegisterResource")?;
+        let register = entry_point(self.api.register_resource, "nvEncRegisterResource")?;
         // SAFETY: the texture stays alive, and registered, as long as the slot.
         self.check("nvEncRegisterResource", unsafe {
             register(self.session, &raw mut resource)
@@ -429,7 +445,7 @@ impl Encoder {
 
         let mut buffer = ffi::CreateBitstreamBuffer::zeroed();
         buffer.version = ffi::CREATE_BITSTREAM_BUFFER_VER;
-        let create = function(
+        let create = entry_point(
             self.api.create_bitstream_buffer,
             "nvEncCreateBitstreamBuffer",
         )?;
@@ -442,23 +458,26 @@ impl Encoder {
         let mut event = ffi::EventParams::zeroed();
         event.version = ffi::EVENT_PARAMS_VER;
         event.completion_event = slot.event.0;
-        let register_event = function(self.api.register_async_event, "nvEncRegisterAsyncEvent")?;
+        let register_event = entry_point(self.api.register_async_event, "nvEncRegisterAsyncEvent")?;
         // SAFETY: the event stays open until it is unregistered with the slot.
         self.check("nvEncRegisterAsyncEvent", unsafe {
             register_event(self.session, &raw mut event)
         })
     }
 
-    /// The texture the next frame must be drawn into. When every slot is still in flight, waits
-    /// for the oldest and hands its packet to `output` first.
-    pub(super) fn input(
-        &mut self,
-        output: &mut impl FnMut(Encoded),
-    ) -> Result<&ID3D11Texture2D, NvencError> {
+    /// Frees the slot the next frame goes into: when every slot is still in flight, waits for
+    /// the oldest and hands its packet to `output`.
+    pub(super) fn reserve(&mut self, output: &mut impl FnMut(Encoded)) -> Result<(), NvencError> {
         if self.slots[self.next].in_flight.is_some() {
-            self.collect_one(true, output)?;
+            self.collect_one(Wait::Block, output)?;
         }
-        Ok(&self.slots[self.next].texture)
+        Ok(())
+    }
+
+    /// The texture the next frame must be drawn into, once [`reserve`](Self::reserve) has freed
+    /// its slot.
+    pub(super) fn input(&self) -> &ID3D11Texture2D {
+        &self.slots[self.next].texture
     }
 
     /// The texture holding the newest submitted picture, to repeat when the screen did not
@@ -474,7 +493,7 @@ impl Encoder {
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
         map.registered_resource = self.slots[slot].registered;
-        let map_input = function(self.api.map_input_resource, "nvEncMapInputResource")?;
+        let map_input = entry_point(self.api.map_input_resource, "nvEncMapInputResource")?;
         // SAFETY: the resource is registered and not currently mapped.
         self.check("nvEncMapInputResource", unsafe {
             map_input(self.session, &raw mut map)
@@ -490,7 +509,7 @@ impl Encoder {
         picture.completion_event = self.slots[slot].event.0;
         picture.buffer_format = map.mapped_buffer_format;
         picture.picture_struct = ffi::PIC_STRUCT_FRAME;
-        let encode = function(self.api.encode_picture, "nvEncEncodePicture")?;
+        let encode = entry_point(self.api.encode_picture, "nvEncEncodePicture")?;
         // SAFETY: the input is mapped and the output buffer is not locked or in flight.
         let status = unsafe { encode(self.session, &raw mut picture) };
         if let Err(error) = self.check("nvEncEncodePicture", status) {
@@ -511,30 +530,33 @@ impl Encoder {
 
     /// Hands every frame NVENC has finished, oldest first, to `output` without waiting.
     pub(super) fn collect(&mut self, output: &mut impl FnMut(Encoded)) -> Result<(), NvencError> {
-        while self.collect_one(false, output)? {}
+        while self.collect_one(Wait::Poll, output)? {}
         Ok(())
     }
 
     /// Waits for every frame in flight and hands them to `output`.
     pub(super) fn finish(&mut self, output: &mut impl FnMut(Encoded)) -> Result<(), NvencError> {
-        while self.collect_one(true, output)? {}
+        while self.collect_one(Wait::Block, output)? {}
         Ok(())
     }
 
     /// Collects the oldest frame in flight; reports whether there was one ready.
     fn collect_one(
         &mut self,
-        wait: bool,
+        wait: Wait,
         output: &mut impl FnMut(Encoded),
     ) -> Result<bool, NvencError> {
         let Some(&slot) = self.queue.front() else {
             return Ok(false);
         };
-        let timeout = if wait { ENCODE_TIMEOUT_MS } else { 0 };
+        let timeout = match wait {
+            Wait::Poll => 0,
+            Wait::Block => ENCODE_TIMEOUT_MS,
+        };
         // SAFETY: the event belongs to the slot and is open.
-        match unsafe { WaitForSingleObject(self.slots[slot].event, timeout) } {
+        match unsafe { WaitForSingleObject(*self.slots[slot].event, timeout) } {
             WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT if !wait => return Ok(false),
+            WAIT_TIMEOUT if wait == Wait::Poll => return Ok(false),
             WAIT_TIMEOUT => {
                 self.stalled = true;
                 return Err(NvencError::Timeout);
@@ -572,8 +594,8 @@ impl Encoder {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = self.slots[slot].bitstream;
-        let lock_bitstream = function(self.api.lock_bitstream, "nvEncLockBitstream")?;
-        let unlock_bitstream = function(self.api.unlock_bitstream, "nvEncUnlockBitstream")?;
+        let lock_bitstream = entry_point(self.api.lock_bitstream, "nvEncLockBitstream")?;
+        let unlock_bitstream = entry_point(self.api.unlock_bitstream, "nvEncUnlockBitstream")?;
         // SAFETY: the buffer's frame has completed; it stays locked only while it is copied.
         self.check("nvEncLockBitstream", unsafe {
             lock_bitstream(self.session, &raw mut lock)
@@ -587,14 +609,14 @@ impl Encoder {
             )
         }
         .into();
-        // SAFETY: unlocks the buffer locked above.
+        // SAFETY: unlocks the buffer locked above; `data` no longer points into it.
         self.check("nvEncUnlockBitstream", unsafe {
             unlock_bitstream(self.session, self.slots[slot].bitstream)
         })?;
         Ok((lock.picture_type, data))
     }
 
-    fn unmap(&self, mapped: *mut std::ffi::c_void) {
+    fn unmap(&self, mapped: ffi::Mapped) {
         if let Some(unmap) = self.api.unmap_input_resource {
             // SAFETY: `mapped` came from a successful map that has not been undone.
             let _ = unsafe { unmap(self.session, mapped) };
@@ -614,7 +636,7 @@ impl Encoder {
         // driver has flushed.
         if unsafe { encode(self.session, &raw mut picture) } == Status::SUCCESS {
             // SAFETY: the slot's event is open.
-            let _ = unsafe { WaitForSingleObject(slot.event, ENCODE_TIMEOUT_MS) };
+            let _ = unsafe { WaitForSingleObject(*slot.event, ENCODE_TIMEOUT_MS) };
         }
     }
 
@@ -641,8 +663,6 @@ impl Encoder {
             // SAFETY: the resource is unmapped.
             let _ = unsafe { unregister(self.session, slot.registered) };
         }
-        // SAFETY: the event is open and no longer registered with the driver.
-        let _ = unsafe { CloseHandle(slot.event) };
     }
 
     fn check(&self, call: &'static str, status: Status) -> Result<(), NvencError> {
@@ -676,7 +696,7 @@ impl Drop for Encoder {
             // stalled encoder is not waited for again.
             if !self.stalled {
                 for &slot in &self.queue {
-                    if let Some(event) = self.slots.get(slot).map(|slot| slot.event) {
+                    if let Some(event) = self.slots.get(slot).map(|slot| *slot.event) {
                         // SAFETY: the slot's event is open.
                         let _ = unsafe { WaitForSingleObject(event, ENCODE_TIMEOUT_MS) };
                     }
@@ -694,19 +714,22 @@ impl Drop for Encoder {
                 let _ = unsafe { destroy(self.session) };
             }
         }
-        // SAFETY: nothing from the library is used after this.
-        let _ = unsafe { FreeLibrary(self.library) };
+        // The fields then release the slots' textures and events, and the library last.
     }
 }
 
-fn load_library() -> Result<HMODULE, NvencError> {
+fn load_library() -> Result<Owned<HMODULE>, NvencError> {
     // The driver installs the library in System32; never look anywhere a planted copy could be.
     // SAFETY: loads a system library by name.
-    unsafe { LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
-        .map_err(|_| NvencError::Library)
+    let library =
+        unsafe { LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+            .map_err(|_| NvencError::Library)?;
+    // SAFETY: the module was just loaded, and only this `Owned` frees it.
+    Ok(unsafe { Owned::new(library) })
 }
 
-fn function<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError> {
+/// The function list entry for `call`, which a driver may leave empty.
+fn entry_point<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError> {
     entry.ok_or(NvencError::MissingEntryPoint(call))
 }
 
@@ -739,6 +762,7 @@ const fn codec_guid(codec: Codec) -> GUID {
 fn configure(config: &mut ffi::Config, settings: Settings) {
     let gop = GOP_FRAMES;
     config.gop_length = gop;
+    // Every frame after a keyframe is a P-frame: no B-frames.
     config.frame_interval_p = 1;
     config.rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
     config.rc.average_bit_rate = settings.bitrate;
@@ -788,7 +812,7 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
             av1.color_primaries = ffi::BT709;
             av1.transfer_characteristics = ffi::BT709;
             av1.matrix_coefficients = ffi::BT709;
-            av1.color_range = 0;
+            av1.color_range = ffi::LIMITED_RANGE;
         }
     }
 }

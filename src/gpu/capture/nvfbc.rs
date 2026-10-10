@@ -18,10 +18,9 @@
 
 mod ffi;
 
-use super::{CaptureError, Frame, Source, monitor};
+use super::{CaptureError, Frame, REOPEN_INTERVAL, Source, failed, monitor_of, window_closed};
 use crate::{gpu::device::Device, log, service::Target, sys::nvfbc_key};
 use std::{
-    ffi::c_void,
     ptr::{self, NonNull},
     time::{Duration, Instant},
 };
@@ -42,7 +41,7 @@ use windows::{
             Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
         },
         System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
-        UI::WindowsAndMessaging::{GetDesktopWindow, IsWindow},
+        UI::WindowsAndMessaging::GetDesktopWindow,
     },
     core::{BOOL, Interface, s, w},
 };
@@ -51,8 +50,6 @@ use windows::{
 pub(in crate::gpu) use ffi::Status;
 use ffi::Zeroed;
 
-/// How often a lost session is opened again while the driver refuses.
-const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long a grab may take on the GPU before the driver is judged to have stopped.
 const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
 /// Surfaces grabbed into in turn.
@@ -63,31 +60,67 @@ const SLOTS: usize = SLOT_COUNT as usize;
 /// a query that tells when the grab has finished on the GPU.
 struct Slot {
     surface: IDirect3DSurface9,
+    /// The texture `surface` is the only level of, kept alive for as long as the surface.
     _texture: IDirect3DTexture9,
     shared: ID3D11Texture2D,
     done: IDirect3DQuery9,
 }
 
+/// `NvFBC64.dll`, unloaded when dropped. Entry points looked up in it, and objects it made,
+/// must be gone by then.
+struct Library(HMODULE);
+
+impl Library {
+    fn load() -> Result<Self, CaptureError> {
+        // The driver installs the library in System32; never look anywhere a planted copy
+        // could be.
+        // SAFETY: loads a system library by name.
+        unsafe { LoadLibraryExW(w!("NvFBC64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+            .map(Self)
+            .map_err(|_| {
+                CaptureError::Unsupported(
+                    "NvFBC64.dll was not found; install or update the NVIDIA driver".to_owned(),
+                )
+            })
+    }
+}
+
+impl Drop for Library {
+    fn drop(&mut self) {
+        // SAFETY: the library was loaded by `load`, and whoever holds it drops everything that
+        // came from it first: `Nvfbc` releases its session in its own `Drop`.
+        let _ = unsafe { FreeLibrary(self.0) };
+    }
+}
+
 /// A capture object of the driver's, released when dropped.
 struct Session {
+    /// Live from `NvFBC_CreateEx` until `Drop` releases it; its method table lives in the
+    /// library, which outlives the session.
     object: NonNull<ffi::ToDx9Vid>,
     /// The surfaces handed to the driver at setup, kept for as long as it may look at them.
     buffers: Box<[ffi::OutputBuffer; SLOTS]>,
 }
 
+impl Session {
+    /// The object's method table.
+    fn methods(&self) -> &ffi::ToDx9VidVtable {
+        // SAFETY: the object is live (see the field), and a live object's table pointer is
+        // valid for as long as the library that made it is loaded.
+        unsafe { &*(*self.object.as_ptr()).vtable }
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
-        // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards. The library
-        // that made it is still loaded: `Nvfbc` drops its session before unloading it.
-        unsafe {
-            let object = self.object.as_ptr();
-            let _ = ((*(*object).vtable).release)(object);
-        }
+        // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards.
+        let _ = unsafe { (self.methods().release)(self.object.as_ptr()) };
     }
 }
 
 pub(super) struct Nvfbc {
-    library: HMODULE,
+    /// Unloaded only after `Drop` has released the session, the one thing here that needs it.
+    _library: Library,
     create: ffi::CreateEx,
     key: Vec<u8>,
     device: IDirect3DDevice9Ex,
@@ -108,43 +141,25 @@ pub(super) struct Nvfbc {
 
 impl Nvfbc {
     pub(super) fn start(device: &Device, target: &Target) -> Result<Self, CaptureError> {
-        let (handle, window) = match *target {
-            Target::Monitor { handle, .. } => (handle, None),
-            Target::Window {
-                window, monitor, ..
-            } => (monitor, Some(HWND(window as *mut c_void))),
-        };
-        let monitor = monitor(handle);
+        let (monitor, window) = monitor_of(target);
         let key = saved_key()?;
 
-        let failed = |step| move |error| CaptureError::Windows(step, error);
         // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
         let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION) }
             .map_err(failed("start Direct3D 9 for NvFBC"))?;
         let adapter = find_adapter(&d3d9, device, monitor)?;
         let size = display_size(&d3d9, adapter)?;
 
-        let library = load_library()?;
-        // From here on, `Drop` would unload the library; until `Self` exists, do it here.
-        let prepared = prepare(library, &key, adapter).and_then(|create| {
-            let d3d9_device = create_device(&d3d9, adapter)?;
-            let slots = [
-                create_slot(&d3d9_device, device, size)?,
-                create_slot(&d3d9_device, device, size)?,
-            ];
-            Ok((create, d3d9_device, slots))
-        });
-        let (create, d3d9_device, slots) = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                // SAFETY: nothing from the library is in use.
-                let _ = unsafe { FreeLibrary(library) };
-                return Err(error);
-            }
-        };
+        let library = Library::load()?;
+        let create = prepare(&library, &key, adapter)?;
+        let d3d9_device = create_device(&d3d9, adapter)?;
+        let slots = [
+            create_slot(&d3d9_device, device, size)?,
+            create_slot(&d3d9_device, device, size)?,
+        ];
 
         let mut capture = Self {
-            library,
+            _library: library,
             create,
             key,
             device: d3d9_device,
@@ -157,9 +172,11 @@ impl Nvfbc {
             window,
             reopen_at: None,
         };
-        capture.session = Some(capture.open_session().map_err(|status| {
-            permanent(status).unwrap_or(CaptureError::Nvfbc("create the NvFBC session", status))
-        })?);
+        capture.session = Some(
+            capture
+                .open_session()
+                .map_err(nvfbc_failed("create the NvFBC session"))?,
+        );
         Ok(capture)
     }
 
@@ -172,16 +189,14 @@ impl Nvfbc {
         params.private_data = self.key.as_ptr().cast();
         params.private_data_size = key_size(&self.key);
         // SAFETY: the parameters are complete; the device and the key outlive the call.
-        let status = unsafe { (self.create)(&raw mut params) };
-        if status != Status::SUCCESS {
-            return Err(status);
-        }
+        unsafe { (self.create)(&raw mut params) }.ok()?;
         let object = NonNull::new(params.nvfbc).ok_or(Status::UNSUPPORTED)?;
 
-        let mut buffers = Box::new([ffi::OutputBuffer::zeroed(), ffi::OutputBuffer::zeroed()]);
-        for (buffer, slot) in buffers.iter_mut().zip(&self.slots) {
-            buffer.primary = slot.surface.as_raw();
-        }
+        let buffers = Box::new(std::array::from_fn(|index| {
+            let mut buffer = ffi::OutputBuffer::zeroed();
+            buffer.primary = self.slots[index].surface.as_raw();
+            buffer
+        }));
         // Released by `Drop` should setup fail.
         let session = Session { object, buffers };
         let mut setup = ffi::SetupParams::zeroed();
@@ -192,15 +207,8 @@ impl Nvfbc {
         setup.buffers = session.buffers.as_ptr().cast_mut();
         // SAFETY: a live object; the surfaces belong to the device it was created on and live
         // as long as the session.
-        let status = unsafe {
-            let object = object.as_ptr();
-            ((*(*object).vtable).set_up)(object, &raw mut setup)
-        };
-        if status == Status::SUCCESS {
-            Ok(session)
-        } else {
-            Err(status)
-        }
+        unsafe { (session.methods().set_up)(object.as_ptr(), &raw mut setup) }.ok()?;
+        Ok(session)
     }
 
     /// Opens the session again after the driver ended it. While the driver refuses, the last
@@ -259,10 +267,8 @@ impl Nvfbc {
         params.buffer_index = self.next;
         params.grab_info = &raw mut info;
         // SAFETY: a live, set-up object; `info` outlives the call.
-        let status = unsafe {
-            let object = session.object.as_ptr();
-            ((*(*object).vtable).grab_frame)(object, &raw mut params)
-        };
+        let status =
+            unsafe { (session.methods().grab_frame)(session.object.as_ptr(), &raw mut params) };
         match status {
             Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
             Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
@@ -270,7 +276,7 @@ impl Nvfbc {
                 let slot = &self.slots[self.next as usize];
                 // SAFETY: marks the end of the grab's work on the device.
                 unsafe { slot.done.Issue(D3DISSUE_END) }
-                    .map_err(|error| CaptureError::Windows("follow the NvFBC grab", error))?;
+                    .map_err(failed("follow the NvFBC grab"))?;
                 self.pending = Some(self.next as usize);
                 self.next = (self.next + 1) % SLOT_COUNT;
                 Ok(Grab::Started)
@@ -278,8 +284,7 @@ impl Nvfbc {
             Status::INVALIDATED_SESSION => Ok(Grab::Lost),
             // Protected video is on screen; the driver withholds the picture until it is gone.
             Status::PROTECTED_CONTENT => Ok(Grab::Withheld),
-            status => Err(permanent(status)
-                .unwrap_or(CaptureError::Nvfbc("grab the display with NvFBC", status))),
+            status => Err(nvfbc_failed("grab the display with NvFBC")(status)),
         }
     }
 }
@@ -308,10 +313,7 @@ impl Source for Nvfbc {
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
-        // SAFETY: IsWindow accepts any handle, live or not.
-        if let Some(window) = self.window
-            && !unsafe { IsWindow(Some(window)) }.as_bool()
-        {
+        if window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
         let collected = self.collect(device, target, width, height)?;
@@ -334,10 +336,9 @@ impl Source for Nvfbc {
 
 impl Drop for Nvfbc {
     fn drop(&mut self) {
-        // The driver's object goes before the library that implements it.
+        // The driver's object goes before the library that implements it, which is unloaded
+        // when the fields are dropped after this.
         self.session = None;
-        // SAFETY: nothing from the library is used after this.
-        let _ = unsafe { FreeLibrary(self.library) };
     }
 }
 
@@ -373,18 +374,17 @@ fn find_adapter(
             device.adapter
         ))
     };
-    // SAFETY: lists the adapters of a live object.
+    // SAFETY: counts the adapters of a live object.
     let adapter = (0..unsafe { d3d9.GetAdapterCount() })
+        // SAFETY: every index below the count names an adapter.
         .find(|&adapter| unsafe { d3d9.GetAdapterMonitor(adapter) } == monitor)
         .ok_or_else(other_gpu)?;
     let mut luid = LUID::default();
     // SAFETY: the adapter exists; the out-parameter is written on success.
     unsafe { d3d9.GetAdapterLUID(adapter, &raw mut luid) }
-        .map_err(|error| CaptureError::Windows("identify the monitor's GPU", error))?;
-    let encoding = device
-        .luid()
-        .map_err(|error| CaptureError::Windows("identify the encoding GPU", error))?;
-    if (luid.HighPart, luid.LowPart) != (encoding.HighPart, encoding.LowPart) {
+        .map_err(failed("identify the monitor's GPU"))?;
+    let encoding = device.luid().map_err(failed("identify the encoding GPU"))?;
+    if luid != encoding {
         return Err(other_gpu());
     }
     Ok(adapter)
@@ -399,7 +399,7 @@ fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), Capture
     let mut rotation = D3DDISPLAYROTATION::default();
     // SAFETY: the adapter exists; both out-parameters are written on success.
     unsafe { d3d9.GetAdapterDisplayModeEx(adapter, &raw mut mode, &raw mut rotation) }
-        .map_err(|error| CaptureError::Windows("read the monitor's display mode", error))?;
+        .map_err(failed("read the monitor's display mode"))?;
     if rotation != D3DDISPLAYROTATION_IDENTITY {
         return Err(CaptureError::Unsupported(
             "the monitor is rotated, which NvFBC capture does not undo; choose Windows Graphics Capture"
@@ -409,19 +409,10 @@ fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), Capture
     Ok((mode.Width, mode.Height))
 }
 
-fn load_library() -> Result<HMODULE, CaptureError> {
-    // The driver installs the library in System32; never look anywhere a planted copy could be.
-    // SAFETY: loads a system library by name.
-    unsafe { LoadLibraryExW(w!("NvFBC64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.map_err(|_| {
-        CaptureError::Unsupported(
-            "NvFBC64.dll was not found; install or update the NVIDIA driver".to_owned(),
-        )
-    })
-}
-
 /// Checks that the driver will capture `adapter` with this key, turning NvFBC on in the driver
 /// when it is off, and returns the entry point that creates a session.
-fn prepare(library: HMODULE, key: &[u8], adapter: u32) -> Result<ffi::CreateEx, CaptureError> {
+fn prepare(library: &Library, key: &[u8], adapter: u32) -> Result<ffi::CreateEx, CaptureError> {
+    let library = library.0;
     let missing = |name: &str| {
         CaptureError::Unsupported(format!(
             "NvFBC64.dll has no {name}; update the NVIDIA driver"
@@ -450,12 +441,9 @@ fn prepare(library: HMODULE, key: &[u8], adapter: u32) -> Result<ffi::CreateEx, 
     status.private_data = key.as_ptr().cast();
     status.private_data_size = key_size(key);
     // SAFETY: the parameters are complete; the key outlives the call.
-    let result = unsafe { get_status(&raw mut status) };
-    if result != Status::SUCCESS {
-        return Err(
-            permanent(result).unwrap_or(CaptureError::Nvfbc("read the NvFBC status", result))
-        );
-    }
+    unsafe { get_status(&raw mut status) }
+        .ok()
+        .map_err(nvfbc_failed("read the NvFBC status"))?;
     if status.flags & ffi::STATUS_CAPTURE_POSSIBLE == 0 {
         // SAFETY: a plain call into the loaded library.
         let result = unsafe { enable(ffi::STATE_ENABLE) };
@@ -508,7 +496,7 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
         )
     }
     .and_then(|()| device.ok_or_else(windows::core::Error::empty))
-    .map_err(|error| CaptureError::Windows("create the Direct3D 9 device for NvFBC", error))
+    .map_err(failed("create the Direct3D 9 device for NvFBC"))
 }
 
 /// A surface the size of the display, shared with the encoder's device.
@@ -517,12 +505,11 @@ fn create_slot(
     device: &Device,
     (width, height): (u32, u32),
 ) -> Result<Slot, CaptureError> {
-    let failed = |step| move |error| CaptureError::Windows(step, error);
     let mut texture = None;
     let mut handle = HANDLE::default();
     // SAFETY: out-parameters are written on success; a shared texture must be in the default
     // pool, as it is.
-    unsafe {
+    let texture: IDirect3DTexture9 = unsafe {
         d3d9.CreateTexture(
             width,
             height,
@@ -534,19 +521,17 @@ fn create_slot(
             &raw mut handle,
         )
     }
+    .and_then(|()| texture.ok_or_else(windows::core::Error::empty))
     .map_err(failed("create a surface for NvFBC"))?;
-    let texture: IDirect3DTexture9 = texture
-        .ok_or_else(|| failed("create a surface for NvFBC")(windows::core::Error::empty()))?;
     // SAFETY: the texture has one level.
     let surface =
         unsafe { texture.GetSurfaceLevel(0) }.map_err(failed("open the NvFBC surface"))?;
     let mut shared: Option<ID3D11Texture2D> = None;
-    // SAFETY: a shared handle from a Direct3D 9Ex device on the same adapter.
-    unsafe { device.d3d.OpenSharedResource(handle, &raw mut shared) }
+    // SAFETY: a shared handle from a Direct3D 9Ex device on the same adapter; the
+    // out-parameter is written on success.
+    let shared = unsafe { device.d3d.OpenSharedResource(handle, &raw mut shared) }
+        .and_then(|()| shared.ok_or_else(windows::core::Error::empty))
         .map_err(failed("share the NvFBC surface with the encoder"))?;
-    let shared = shared.ok_or_else(|| {
-        failed("share the NvFBC surface with the encoder")(windows::core::Error::empty())
-    })?;
     // SAFETY: creates a query on a live device.
     let done = unsafe { d3d9.CreateQuery(D3DQUERYTYPE_EVENT) }
         .map_err(failed("create the NvFBC completion query"))?;
@@ -564,7 +549,8 @@ fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
     let deadline = Instant::now() + GRAB_TIMEOUT;
     loop {
         // The method's wrapper reports S_FALSE ("not yet") as success, so it is called
-        // directly. SAFETY: an event query takes no data buffer.
+        // directly.
+        // SAFETY: a live query; an event query takes no data buffer.
         let result = unsafe {
             (Interface::vtable(query).GetData)(query.as_raw(), ptr::null_mut(), 0, D3DGETDATA_FLUSH)
         };
@@ -572,10 +558,7 @@ fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
             return Ok(());
         }
         if result.is_err() {
-            return Err(CaptureError::Windows(
-                "wait for the NvFBC grab",
-                result.into(),
-            ));
+            return Err(failed("wait for the NvFBC grab")(result.into()));
         }
         if Instant::now() >= deadline {
             return Err(CaptureError::Unsupported(
@@ -595,6 +578,12 @@ fn is_attached(monitor: HMONITOR) -> bool {
     };
     // SAFETY: GetMonitorInfoW accepts any handle and fails for one that is gone.
     unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
+}
+
+/// Wraps a status the driver failed with and the step that failed, for `map_err`; a refusal
+/// that trying again would not change reads as unsupported.
+fn nvfbc_failed(step: &'static str) -> impl Fn(Status) -> CaptureError {
+    move |status| permanent(status).unwrap_or(CaptureError::Nvfbc(step, status))
 }
 
 /// The driver's refusals that trying again would not change.

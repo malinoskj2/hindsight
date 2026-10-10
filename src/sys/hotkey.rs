@@ -17,7 +17,13 @@ const MODIFIERS: [(u16, &str); 4] = [
 ];
 
 const VK_F1: u16 = 0x70;
+/// Function keys run from F1 to F24.
+const FUNCTION_KEY_COUNT: u16 = 24;
 const VK_NUMPAD0: u16 = 0x60;
+const NUMPAD_DIGIT_COUNT: u16 = 10;
+const VK_PRINT_SCREEN: u16 = 0x2C;
+const VK_PAUSE: u16 = 0x13;
+const VK_SCROLL_LOCK: u16 = 0x91;
 /// Named keys other than letters, digits, function keys and the number pad.
 const NAMED_KEYS: [(u16, &str); 11] = [
     (0x20, "Space"),
@@ -27,13 +33,13 @@ const NAMED_KEYS: [(u16, &str); 11] = [
     (0x23, "End"),
     (0x21, "PageUp"),
     (0x22, "PageDown"),
-    (0x2C, "PrintScreen"),
-    (0x13, "Pause"),
-    (0x91, "ScrollLock"),
+    (VK_PRINT_SCREEN, "PrintScreen"),
+    (VK_PAUSE, "Pause"),
+    (VK_SCROLL_LOCK, "ScrollLock"),
     (0xC0, "`"),
 ];
 /// Keys that may stand alone: pressing them never types text.
-const STANDALONE_KEYS: [u16; 3] = [0x2C, 0x13, 0x91];
+const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
 
 #[derive(Debug, Error)]
 pub(crate) enum ParseError {
@@ -58,9 +64,11 @@ impl FromStr for Hotkey {
     type Err = ParseError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
-        let key_name = parts.pop().filter(|name| !name.is_empty());
-        let key_name = key_name.ok_or(ParseError::Empty)?;
+        let mut parts = text.split('+').map(str::trim);
+        let key_name = parts
+            .next_back()
+            .filter(|name| !name.is_empty())
+            .ok_or(ParseError::Empty)?;
 
         let mut modifiers = 0;
         for part in parts {
@@ -110,14 +118,14 @@ fn key_code(name: &str) -> Option<u16> {
         return u16::try_from(u32::from(single)).ok();
     }
     if let Some(number) = upper.strip_prefix('F').and_then(|n| n.parse::<u16>().ok())
-        && (1..=24).contains(&number)
+        && (1..=FUNCTION_KEY_COUNT).contains(&number)
     {
         return Some(VK_F1 + number - 1);
     }
     if let Some(digit) = upper
         .strip_prefix("NUMPAD")
         .and_then(|n| n.parse::<u16>().ok())
-        && digit <= 9
+        && digit < NUMPAD_DIGIT_COUNT
     {
         return Some(VK_NUMPAD0 + digit);
     }
@@ -131,7 +139,7 @@ fn key_label(key: u16) -> String {
     if is_function_key(key) {
         return format!("F{}", key - VK_F1 + 1);
     }
-    if (VK_NUMPAD0..VK_NUMPAD0 + 10).contains(&key) {
+    if (VK_NUMPAD0..VK_NUMPAD0 + NUMPAD_DIGIT_COUNT).contains(&key) {
         return format!("Numpad{}", key - VK_NUMPAD0);
     }
     if let Some((_, name)) = NAMED_KEYS.iter().find(|(code, _)| *code == key) {
@@ -141,7 +149,7 @@ fn key_label(key: u16) -> String {
 }
 
 const fn is_function_key(key: u16) -> bool {
-    key >= VK_F1 && key < VK_F1 + 24
+    key >= VK_F1 && key < VK_F1 + FUNCTION_KEY_COUNT
 }
 
 #[cfg(windows)]
