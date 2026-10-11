@@ -47,6 +47,7 @@ pub(super) struct SettingsPage {
     pub(super) backend: gui::ComboBox,
     folder: gui::Edit,
     audio: gui::CheckBox,
+    cursor: gui::CheckBox,
     estimate: gui::Label,
     pub(super) apply: gui::Button,
     settings_error: gui::Label,
@@ -93,6 +94,7 @@ impl SettingsPage {
             backend: recording.backend,
             folder: recording.folder,
             audio: recording.audio,
+            cursor: recording.cursor,
             estimate: recording.estimate,
             apply: recording.apply,
             settings_error: recording.error,
@@ -229,13 +231,14 @@ impl SettingsPage {
             hotkey: hotkey.trim().to_owned(),
             clip_directory: stored_folder(folder.trim()),
             audio: self.audio.is_checked(),
+            cursor: self.cursor.is_checked(),
             theme: chosen(&self.theme, &Theme::ALL),
         })
     }
 }
 
-/// The Recording group: the encoding, source and clip fields, the sound switch, the memory
-/// estimate, and the Apply button with the line that reports a problem with them.
+/// The Recording group: the encoding, source and clip fields, the sound and cursor switches,
+/// the memory estimate, and the Apply button with the line that reports a problem with them.
 struct RecordingControls {
     frame: Frame,
     codec: gui::ComboBox,
@@ -248,6 +251,7 @@ struct RecordingControls {
     backend: gui::ComboBox,
     folder: gui::Edit,
     audio: gui::CheckBox,
+    cursor: gui::CheckBox,
     estimate: gui::Label,
     apply: gui::Button,
     error: gui::Label,
@@ -257,7 +261,7 @@ impl RecordingControls {
     /// Lays out the Recording group on `page`, filled in from `config`, its button in the look
     /// of `skin`.
     fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
-        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 242);
+        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 264);
         let codec = choice_field(
             page,
             text::CODEC,
@@ -301,12 +305,13 @@ impl RecordingControls {
             &config.clip_directory().display().to_string(),
         );
         let audio = check_box(page, text::AUDIO, 166, config.audio);
-        let estimate = label(page, "", INNER_X, 192, INNER_WIDTH, 1);
-        let apply = button(page, text::APPLY, INNER_X, 210, BUTTON_WIDTH);
+        let cursor = check_box(page, text::CURSOR, 188, config.cursor);
+        let estimate = label(page, "", INNER_X, 214, INNER_WIDTH, 1);
+        let apply = button(page, text::APPLY, INNER_X, 232, BUTTON_WIDTH);
         skin_button(&apply, skin, ButtonRole::Primary);
         // The error line starts just right of the button.
         let error_x = BUTTON_WIDTH + 8;
-        let error = label(page, "", INNER_X + error_x, 208, INNER_WIDTH - error_x, 2);
+        let error = label(page, "", INNER_X + error_x, 230, INNER_WIDTH - error_x, 2);
         Self {
             frame,
             codec,
@@ -319,6 +324,7 @@ impl RecordingControls {
             backend,
             folder,
             audio,
+            cursor,
             estimate,
             apply,
             error,
@@ -340,18 +346,18 @@ impl GeneralControls {
     /// Lays out the General group on `page`, filled in from `config` and the Run key's state.
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
         // Compact; the group adds a line for the error label when one occurs.
-        let frame = Frame::new(page, text::GROUP_GENERAL, 248, 72);
+        let frame = Frame::new(page, text::GROUP_GENERAL, 270, 72);
         let theme = choice_field(
             page,
             text::THEME,
             INNER_X,
-            268,
+            290,
             190,
             &Theme::ALL.map(Theme::name),
             index_of(&Theme::ALL, config.theme),
         );
-        let check_box = check_box(page, text::START_WITH_WINDOWS, 296, start_with_windows);
-        let error = label(page, "", INNER_X, 318, INNER_WIDTH, 1);
+        let check_box = check_box(page, text::START_WITH_WINDOWS, 318, start_with_windows);
+        let error = label(page, "", INNER_X, 340, INNER_WIDTH, 1);
         let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
         Self {
             frame,

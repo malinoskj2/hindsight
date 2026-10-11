@@ -158,6 +158,9 @@ pub(crate) struct Config {
     pub(crate) theme: Theme,
     /// Whether clips carry the system's sound, as the default output device plays it.
     pub(crate) audio: bool,
+    /// Whether the mouse cursor is drawn into the picture, where the backend can (NvFBC and
+    /// Windows Graphics Capture; Desktop Duplication never draws it).
+    pub(crate) cursor: bool,
 }
 
 impl Default for Config {
@@ -173,6 +176,7 @@ impl Default for Config {
             clip_directory: String::new(),
             theme: Theme::Classic,
             audio: true,
+            cursor: false,
         }
     }
 }
@@ -295,6 +299,9 @@ mod tests {
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
         assert!(!parse(r#"{"audio":false}"#).unwrap().audio);
+        // The cursor stays out of the picture unless asked for.
+        assert!(!config.cursor);
+        assert!(parse(r#"{"cursor":true}"#).unwrap().cursor);
 
         assert_eq!(parse(r#"{"mode":"desktop"}"#).unwrap().mode, Mode::Desktop);
         assert_eq!(

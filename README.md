@@ -45,6 +45,7 @@ The **Capture** setting chooses how frames are taken. All three keep every frame
 | Clip folder | `Videos\hindsight` | Any absolute folder |
 | Theme | Classic Windows | Classic Windows, Ember, Selene or Nova |
 | Record system sound | On | On or off |
+| Record the mouse cursor | Off | On or off; NvFBC and Windows Graphics Capture draw it, DXGI Desktop Duplication never does |
 
 **Theme** (in the General group) dresses the window in one of three characters: their colours, rounded group panels, tab strip and buttons, and an illustration beside the controls. It applies the moment you choose it, without restarting recording, and is remembered. Classic Windows, the default, is the plain dialog of Windows' own controls, unchanged. The artwork is in `assets/themes`.
 

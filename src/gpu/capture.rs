@@ -5,7 +5,7 @@
 //! - [`dxgi_dd`], DXGI Desktop Duplication, records whole monitors only; a window target is
 //!   recorded through the monitor it fills.
 //! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
-//!   cursor included, for licensed vendors holding the key NVIDIA issues.
+//!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues.
 
 mod dxgi_dd;
 mod nvfbc;
@@ -131,17 +131,19 @@ impl ReopenThrottle {
 }
 
 /// Starts capturing `target` with `backend`, delivering frames no faster than about twice per
-/// `period` where the backend can be asked to.
+/// `period` where the backend can be asked to, with the mouse cursor drawn in when `cursor`
+/// is set and the backend can (Desktop Duplication never draws it).
 pub(super) fn start(
     backend: Backend,
     device: &Device,
     period: Duration,
     target: &Target,
+    cursor: bool,
 ) -> Result<Box<dyn Source>, CaptureError> {
     Ok(match backend {
-        Backend::Wgc => Box::new(wgc::Capture::start(device, period, target)?),
+        Backend::Wgc => Box::new(wgc::Capture::start(device, period, target, cursor)?),
         Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target)?),
-        Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target)?),
+        Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target, cursor)?),
     })
 }
 

@@ -87,6 +87,8 @@ pub(super) struct Capture {
     window: Option<HWND>,
     /// Paces the attempts to open a lost session again.
     reopen: ReopenThrottle,
+    /// Whether the driver draws the mouse cursor into each grab.
+    cursor: bool,
 }
 
 /// What starting a grab came to.
@@ -103,8 +105,12 @@ enum Grab {
 
 impl Capture {
     /// Starts capturing the monitor `target` names, or the monitor its window fills, with the
-    /// cursor.
-    pub(super) fn start(device: &Device, target: &Target) -> Result<Self, CaptureError> {
+    /// cursor drawn in if `cursor` is set.
+    pub(super) fn start(
+        device: &Device,
+        target: &Target,
+        cursor: bool,
+    ) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
         let key = saved_key()?;
 
@@ -137,6 +143,7 @@ impl Capture {
             monitor,
             window,
             reopen: ReopenThrottle::default(),
+            cursor,
         };
         capture.session = Some(
             capture
@@ -154,7 +161,7 @@ impl Capture {
             object,
             buffers: Box::new(output_buffers(&self.slots)),
         };
-        session.set_up()?;
+        session.set_up(self.cursor)?;
         Ok(session)
     }
 
@@ -405,11 +412,12 @@ impl Session {
         unsafe { &*(*self.object.as_ptr()).vtable }
     }
 
-    /// Hands the driver the session's surfaces to grab into, with the cursor drawn in.
-    fn set_up(&self) -> Result<(), Status> {
+    /// Hands the driver the session's surfaces to grab into, with the cursor drawn in if
+    /// `cursor` is set.
+    fn set_up(&self, cursor: bool) -> Result<(), Status> {
         let mut setup = ffi::SetupParams::zeroed();
         setup.version = ffi::TODX9VID_SETUP_PARAMS_VER;
-        setup.flags = ffi::SETUP_WITH_HW_CURSOR;
+        setup.flags = if cursor { ffi::SETUP_WITH_HW_CURSOR } else { 0 };
         setup.mode = ffi::TODX9VID_ARGB;
         setup.buffer_count = SLOT_COUNT;
         setup.buffers = self.buffers.as_ptr().cast_mut();

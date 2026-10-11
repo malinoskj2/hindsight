@@ -81,7 +81,13 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
     // which is how the sound is lined up with the video.
     live.set_origin(sys::clock::now());
-    let mut capture = capture::start(config.backend, &device, pacer.period(), target)?;
+    let mut capture = capture::start(
+        config.backend,
+        &device,
+        pacer.period(),
+        target,
+        config.cursor,
+    )?;
     let (width, height) = encodable(capture.size());
     let mut encoder = Encoder::open(
         &device.d3d,

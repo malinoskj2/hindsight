@@ -42,6 +42,7 @@ pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
 pub(super) const AUDIO: &str = "Record system sound (what the default output device plays)";
+pub(super) const CURSOR: &str = "Record the mouse cursor (not with DXGI Desktop Duplication)";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";

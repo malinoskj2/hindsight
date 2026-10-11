@@ -73,13 +73,14 @@ pub(super) struct Capture {
 }
 
 impl Capture {
-    /// Starts capturing `target`, with the cursor, at most twice per `period`: the display
-    /// delivers frames only on its own refresh, so a limit of exactly one period would skip to
-    /// every other refresh whenever the two rates do not divide evenly.
+    /// Starts capturing `target`, with the cursor if `cursor` is set, at most twice per
+    /// `period`: the display delivers frames only on its own refresh, so a limit of exactly one
+    /// period would skip to every other refresh whenever the two rates do not divide evenly.
     pub(super) fn start(
         device: &Device,
         period: Duration,
         target: &Target,
+        cursor: bool,
     ) -> Result<Self, CaptureError> {
         prepare_thread()?;
         let item = capture_item(target)?;
@@ -93,7 +94,7 @@ impl Capture {
             size,
         )
         .map_err(failed("create the capture frame pool"))?;
-        let session = start_session(&pool, &item, period)?;
+        let session = start_session(&pool, &item, period, cursor)?;
 
         Ok(Self {
             item,
@@ -278,19 +279,20 @@ fn winrt_device(device: &Device) -> Result<IDirect3DDevice, CaptureError> {
         .map_err(failed("share the device with capture"))
 }
 
-/// Starts capturing `item` into `pool`, with the cursor and without the border, at most twice
-/// per `period`.
+/// Starts capturing `item` into `pool`, with the cursor only if `cursor` is set and without
+/// the border, at most twice per `period`.
 fn start_session(
     pool: &Direct3D11CaptureFramePool,
     item: &GraphicsCaptureItem,
     period: Duration,
+    cursor: bool,
 ) -> Result<GraphicsCaptureSession, CaptureError> {
     let session = pool
         .CreateCaptureSession(item)
         .map_err(failed("create the capture session"))?;
     // Each of these needs a newer Windows than capture itself; without them the defaults
     // stay: the cursor is captured anyway, the border shows, frames come at the display rate.
-    let _ = session.SetIsCursorCaptureEnabled(true);
+    let _ = session.SetIsCursorCaptureEnabled(cursor);
     let _ = session.SetIsBorderRequired(false);
     let _ = session.SetMinUpdateInterval(TimeSpan {
         Duration: i64::try_from((period / 2).as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX),

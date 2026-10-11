@@ -44,7 +44,7 @@ const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 
 /// Height of the tab control, in logical pixels.
-const TAB_HEIGHT: i32 = 384;
+const TAB_HEIGHT: i32 = 406;
 /// The tab and its margins; a footer row is added only while it has something to say.
 const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
 
