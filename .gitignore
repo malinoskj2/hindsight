@@ -1,3 +1,6 @@
 /target/
 /dist/
 *.user
+
+# Raw benchmark captures (hundreds of MB); the summaries next to them are tracked.
+docs/benchmarks/raw/

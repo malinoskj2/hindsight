@@ -1,10 +1,17 @@
-//! The tones that say whether a clip was saved. They are generated here at a low level, so they
-//! are heard without taking over from the game, and they play on their own thread so a save
-//! never waits on the sound card.
+//! The tones that say how a save is going: a short blip each second while a clip is written,
+//! then whether it was saved. They are generated here at a low level, so they are heard without
+//! taking over from the game, and they play on their own thread so a save never waits on the
+//! sound card.
 
 use std::f64::consts::TAU;
 #[cfg(windows)]
-use std::thread;
+use std::{
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
+};
 #[cfg(windows)]
 use winsafe::{self as w, Snd};
 
@@ -15,28 +22,57 @@ const AMPLITUDE: f64 = 0.2;
 /// How long each tone takes to fade in and out.
 const FADE_MILLISECONDS: u32 = 5;
 
+/// One short blip between the other two in pitch: a clip is being written.
+const PROGRESS: &[(u32, u32)] = &[(990, 35)];
 /// Two rising tones: a clip was written.
 const SAVED: &[(u32, u32)] = &[(880, 90), (0, 30), (1320, 120)];
-/// Two falling tones: the save failed, or there was nothing to save.
-const FAILED: &[(u32, u32)] = &[(330, 150), (0, 40), (220, 220)];
+/// Three falling tones, low and ending long: the save failed, or there was nothing to save.
+const FAILED: &[(u32, u32)] = &[(440, 120), (0, 30), (330, 120), (0, 30), (220, 300)];
 
-/// Plays the sound for a clip that was saved.
-pub(crate) fn saved() {
-    play(SAVED);
+/// What a tone says about a save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tone {
+    /// A clip is still being written.
+    Progress,
+    /// The clip was saved.
+    Saved,
+    /// The save failed, or there was nothing to save.
+    Failed,
 }
 
-/// Plays the sound for a save that failed.
-pub(crate) fn failed() {
-    play(FAILED);
+impl Tone {
+    /// The `(frequency Hz, milliseconds)` tones that make up the sound.
+    fn tones(self) -> &'static [(u32, u32)] {
+        match self {
+            Self::Progress => PROGRESS,
+            Self::Saved => SAVED,
+            Self::Failed => FAILED,
+        }
+    }
 }
 
+/// The number of the latest tone asked for; a tone that is no longer the latest when its turn
+/// comes is dropped.
 #[cfg(windows)]
-fn play(tones: &'static [(u32, u32)]) {
-    let wav = wav(tones);
-    // A new tone cuts off one still playing; a failed spawn or playback only loses the sound.
+static REQUESTED: AtomicU64 = AtomicU64::new(0);
+/// Held while a tone plays, so tones play one at a time in the order they were asked for.
+#[cfg(windows)]
+static PLAYING: Mutex<()> = Mutex::new(());
+
+/// Plays `tone` on a thread of its own. A tone still playing is let finish, so a progress blip
+/// never cuts off the outcome that follows it; of the tones asked for meanwhile only the latest
+/// plays. A failed spawn or playback only loses the sound.
+#[cfg(windows)]
+pub(crate) fn play(tone: Tone) {
+    let turn = REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
+    let wav = wav(tone.tones());
     let _ = thread::Builder::new()
         .name("sound".to_owned())
         .spawn(move || {
+            let _playing = PLAYING.lock().unwrap_or_else(PoisonError::into_inner);
+            if REQUESTED.load(Ordering::Relaxed) != turn {
+                return;
+            }
             let _ = w::PlaySound(Snd::MemSync {
                 src: &wav,
                 default: false,
@@ -46,8 +82,9 @@ fn play(tones: &'static [(u32, u32)]) {
         });
 }
 
+/// Plays `tone`: there is no sound card to play it on outside Windows.
 #[cfg(not(windows))]
-fn play(_tones: &'static [(u32, u32)]) {}
+pub(crate) fn play(_tone: Tone) {}
 
 /// A mono 16-bit WAV of the `(frequency Hz, milliseconds)` tones, where a frequency of 0 is
 /// silence. Each tone fades in and out so it does not click.
@@ -134,6 +171,42 @@ mod tests {
             f64::from(peak) <= AMPLITUDE * f64::from(i16::MAX) + 1.0,
             "the tones stay quiet"
         );
+    }
+
+    /// The milliseconds of sound in `tones`, silences included.
+    fn length(tones: &[(u32, u32)]) -> u32 {
+        tones.iter().map(|&(_, milliseconds)| milliseconds).sum()
+    }
+
+    /// The pitches of `tones`, silences left out.
+    fn pitches(tones: &[(u32, u32)]) -> Vec<u32> {
+        tones
+            .iter()
+            .map(|&(frequency, _)| frequency)
+            .filter(|&frequency| frequency > 0)
+            .collect()
+    }
+
+    #[test]
+    fn the_three_tones_are_told_apart_by_ear() {
+        let (progress, saved, failed) = (
+            Tone::Progress.tones(),
+            Tone::Saved.tones(),
+            Tone::Failed.tones(),
+        );
+        assert_eq!(pitches(progress).len(), 1, "progress is a single blip");
+        assert!(
+            length(progress) <= 50,
+            "a blip delays the outcome very little"
+        );
+        assert!(pitches(saved).is_sorted(), "saved rises");
+        assert!(pitches(failed).is_sorted_by(|a, b| a > b), "failed falls");
+        assert!(pitches(failed).len() > pitches(saved).len());
+        assert!(length(failed) > length(saved), "failed lasts longer");
+        assert!(pitches(failed).last() < pitches(progress).first());
+        for tone in [Tone::Progress, Tone::Saved, Tone::Failed] {
+            assert!(wav(tone.tones()).len() > 44, "{tone:?} has samples");
+        }
     }
 
     #[test]

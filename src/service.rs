@@ -7,7 +7,7 @@ use crate::{
     log,
     replay::{self, Clip, Live, SaveError, Stream},
     storage::{Store, Totals},
-    sys,
+    sys::{self, sound::Tone},
 };
 use anyhow::Result;
 use std::{
@@ -32,6 +32,8 @@ const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 /// How long to wait before starting a session again after it failed (the display was turned
 /// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+/// How often the progress tone plays while a clip is being written.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What a session captures. Handles are the OS's, carried as integers so the worker stays
 /// portable; a stale one makes capture fail, which the worker treats like any other failure.
@@ -99,6 +101,28 @@ const RECORDER: Recorder = crate::gpu::record;
 /// The recorder of real sessions: capture needs Windows, so every session fails.
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
+
+/// Writes a clip into a directory and returns its path.
+type Writer = fn(&Clip, &Path) -> Result<PathBuf, SaveError>;
+/// Plays a tone about a save.
+type Chime = Box<dyn Fn(Tone) + Send>;
+
+/// What saving a clip goes through: the writer, on the save thread, and the tones, played from
+/// the worker. Tests replace both, to make a save slow or fail and to hear the tones.
+struct Saver {
+    write: Writer,
+    chime: Chime,
+}
+
+impl Saver {
+    /// The saver of real clips: the MP4 writer and the sound card.
+    fn real() -> Self {
+        Self {
+            write: replay::save,
+            chime: Box::new(sys::sound::play),
+        }
+    }
+}
 
 /// What the worker is doing, for the Status tab to put into words.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -181,6 +205,16 @@ impl Worker {
         store: Option<Store>,
         config: Config,
     ) -> Self {
+        Self::spawn_saving_with(recorder, retry_interval, store, config, Saver::real())
+    }
+
+    fn spawn_saving_with(
+        recorder: Recorder,
+        retry_interval: Duration,
+        store: Option<Store>,
+        config: Config,
+        saver: Saver,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let wake = commands.clone();
         let status = Arc::new(Mutex::new(Status::default()));
@@ -189,7 +223,7 @@ impl Worker {
             .name("recording-worker".to_owned())
             .spawn(move || {
                 let mut machine =
-                    Machine::new(recorder, retry_interval, store, config, output, wake);
+                    Machine::new(recorder, retry_interval, store, config, output, wake, saver);
                 machine.run(&receiver);
             })
             .expect("spawn the recording worker thread");
@@ -263,6 +297,8 @@ struct Session {
 struct Saving {
     seconds: f64,
     join: JoinHandle<Result<PathBuf, SaveError>>,
+    /// When the progress tone plays next.
+    next_tick: Instant,
 }
 
 /// Counters at the previous refresh, for the rates.
@@ -311,6 +347,7 @@ struct Machine {
     sample: Option<Sample>,
     /// Lets the capture and save threads wake the worker when they finish or start streaming.
     wake: Sender<Command>,
+    saver: Saver,
 }
 
 impl Machine {
@@ -321,6 +358,7 @@ impl Machine {
         config: Config,
         output: Arc<Mutex<Status>>,
         wake: Sender<Command>,
+        saver: Saver,
     ) -> Self {
         let totals = store.as_ref().and_then(load_totals);
         Self {
@@ -341,6 +379,7 @@ impl Machine {
             saving: None,
             sample: None,
             wake,
+            saver,
         }
     }
 
@@ -364,9 +403,11 @@ impl Machine {
     }
 
     /// Waits for the next command. Nothing wakes the worker while it is idle: it sleeps until a
-    /// command or a thread wakes it, or until a failed session is due to be tried again.
+    /// command or a thread wakes it, until a failed session is due to be tried again, or until
+    /// the progress tone of a clip being written is due.
     fn receive(&self, commands: &Receiver<Command>) -> Result<Command, RecvTimeoutError> {
-        match self.retry_at {
+        let tick = self.saving.as_ref().map(|saving| saving.next_tick);
+        match self.retry_at.into_iter().chain(tick).min() {
             Some(due) => commands.recv_timeout(due.saturating_duration_since(Instant::now())),
             None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
@@ -428,7 +469,8 @@ impl Machine {
     }
 
     /// Starts writing the buffer to a clip, unless a clip is already being written or there is
-    /// nothing to save.
+    /// nothing to save. The first progress tone plays at once, so the user hears that the hotkey
+    /// registered.
     fn save(&mut self) {
         if self.saving.is_some() {
             log::info(text::ALREADY_SAVING);
@@ -437,17 +479,22 @@ impl Machine {
         let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
             log::warning(text::NOTHING_TO_SAVE);
             self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
-            sys::sound::failed();
+            (self.saver.chime)(Tone::Failed);
             return;
         };
 
         let seconds = clip.seconds();
         match self.spawn_save(clip) {
             Ok(join) => {
-                self.saving = Some(Saving { seconds, join });
+                (self.saver.chime)(Tone::Progress);
+                self.saving = Some(Saving {
+                    seconds,
+                    join,
+                    next_tick: Instant::now() + PROGRESS_INTERVAL,
+                });
                 self.status.notice = None;
             }
-            Err(error) => self.report_error(text::save_failed(error)),
+            Err(error) => self.report_failed_save(text::save_failed(error)),
         }
     }
 
@@ -578,7 +625,8 @@ impl Machine {
         self.status.error = Some(message);
     }
 
-    /// Notices a session that ended by itself, a retry that is due and a save that finished.
+    /// Notices a session that ended by itself, a retry that is due, a save that finished and a
+    /// progress tone that is due.
     fn poll(&mut self) {
         if let Some(session) = self.session.take_if(|session| session.join.is_finished()) {
             self.session_ended(session.join.join());
@@ -588,9 +636,11 @@ impl Machine {
             self.retry();
         }
 
+        // A finished save is reported before the tick, so no blip plays after its outcome.
         if let Some(saving) = self.saving.take_if(|saving| saving.join.is_finished()) {
             self.finish_save(saving);
         }
+        self.tick_save();
     }
 
     /// Acts on how a session that ended by itself finished.
@@ -648,6 +698,7 @@ impl Machine {
     /// done.
     fn spawn_save(&self, clip: Clip) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
         let directory = self.config.clip_directory();
+        let write = self.saver.write;
         let wake = self.waker();
         thread::Builder::new()
             .name("save".to_owned())
@@ -655,10 +706,24 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                let saved = replay::save(&clip, &directory);
+                let saved = write(&clip, &directory);
                 wake();
                 saved
             })
+    }
+
+    /// Plays the progress tone while a clip is being written, once a second after the first.
+    fn tick_save(&mut self) {
+        let now = Instant::now();
+        let Some(saving) = self
+            .saving
+            .as_mut()
+            .filter(|saving| now >= saving.next_tick)
+        else {
+            return;
+        };
+        saving.next_tick = now + PROGRESS_INTERVAL;
+        (self.saver.chime)(Tone::Progress);
     }
 
     /// Waits for a clip being written and reports how it went.
@@ -676,13 +741,13 @@ impl Machine {
         self.add_saved(&path);
         self.status.last_clip = Some(path);
         self.status.error = None;
-        sys::sound::saved();
+        (self.saver.chime)(Tone::Saved);
     }
 
     /// Reports a clip that could not be written and plays the failed sound.
     fn report_failed_save(&mut self, message: String) {
         self.report_error(message);
-        sys::sound::failed();
+        (self.saver.chime)(Tone::Failed);
     }
 
     /// Adds a saved clip's size to the lifetime total and writes the totals to disk.
@@ -1130,5 +1195,118 @@ mod tests {
                 ..config
             }
         );
+    }
+
+    /// The tones a test saver played, with when.
+    type Heard = Arc<Mutex<Vec<(Instant, Tone)>>>;
+
+    /// A saver with the writer `write` whose tones are written down instead of played.
+    fn listening(write: Writer) -> (Saver, Heard) {
+        let heard = Heard::default();
+        let ear = Arc::clone(&heard);
+        let chime = Box::new(move |tone| {
+            ear.lock().unwrap().push((Instant::now(), tone));
+        });
+        (Saver { write, chime }, heard)
+    }
+
+    fn tones(heard: &Heard) -> Vec<Tone> {
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&(_, tone)| tone)
+            .collect()
+    }
+
+    /// Asserts that `heard` is progress blips at least most of a second apart, then `outcome`
+    /// once, and returns the number of blips.
+    fn assert_ticks_then(heard: &Heard, outcome: Tone) -> usize {
+        let heard = heard.lock().unwrap();
+        let (last, blips) = heard.split_last().expect("a tone played");
+        assert_eq!(last.1, outcome, "the outcome comes last: {heard:?}");
+        assert!(blips.iter().all(|&(_, tone)| tone == Tone::Progress));
+        for pair in blips.windows(2) {
+            let gap = pair[1].0.duration_since(pair[0].0);
+            assert!(gap >= Duration::from_millis(900), "blips {gap:?} apart");
+        }
+        blips.len()
+    }
+
+    /// Writes the clip after two and a half seconds.
+    fn slow_write(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
+        thread::sleep(Duration::from_millis(2500));
+        replay::save(clip, directory)
+    }
+
+    /// Fails after a second and a half.
+    fn failing_write(_: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
+        thread::sleep(Duration::from_millis(1500));
+        Err(SaveError::Io {
+            step: "create",
+            path: directory.to_owned(),
+            source: io::Error::other("the disk is full"),
+        })
+    }
+
+    #[test]
+    fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (saver, heard) = listening(slow_write);
+        let worker = Worker::spawn_saving_with(
+            steady,
+            RETRY_INTERVAL,
+            None,
+            config_in(directory.path()),
+            saver,
+        );
+        wait_for(&worker, |status| status.session_written_bytes > 0);
+
+        worker.save();
+        wait_for(&worker, |status| status.saving);
+        assert_eq!(tones(&heard), [Tone::Progress], "the first blip is at once");
+        wait_for(&worker, |status| status.last_clip.is_some());
+        let blips = assert_ticks_then(&heard, Tone::Saved);
+        assert!((2..=3).contains(&blips), "{blips} blips in 2.5 seconds");
+
+        // The ticking stopped with the save.
+        thread::sleep(PROGRESS_INTERVAL + Duration::from_millis(300));
+        assert_eq!(tones(&heard).len(), blips + 1);
+    }
+
+    #[test]
+    fn a_failed_save_sounds_failed_and_stops_ticking() {
+        let directory = tempfile::tempdir().unwrap();
+        let (saver, heard) = listening(failing_write);
+        let worker = Worker::spawn_saving_with(
+            steady,
+            RETRY_INTERVAL,
+            None,
+            config_in(directory.path()),
+            saver,
+        );
+        wait_for(&worker, |status| status.session_written_bytes > 0);
+
+        worker.save();
+        let status = wait_for(&worker, |status| status.error.is_some() && !status.saving);
+        assert!(status.error.unwrap().contains("the disk is full"));
+        assert!(status.last_clip.is_none());
+        let blips = assert_ticks_then(&heard, Tone::Failed);
+        assert!((1..=2).contains(&blips), "{blips} blips in 1.5 seconds");
+
+        thread::sleep(PROGRESS_INTERVAL + Duration::from_millis(300));
+        assert_eq!(tones(&heard).len(), blips + 1);
+    }
+
+    #[test]
+    fn nothing_to_save_sounds_failed_without_ticking() {
+        let (saver, heard) = listening(slow_write);
+        let worker =
+            Worker::spawn_saving_with(failing, Duration::from_secs(60), None, desktop(), saver);
+        wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
+
+        worker.save();
+        wait_for(&worker, |status| status.notice.is_some());
+        assert_eq!(tones(&heard), [Tone::Failed]);
     }
 }
