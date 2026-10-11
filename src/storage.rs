@@ -78,8 +78,8 @@ impl Store {
     }
 
     /// Replaces the saved totals with `totals`.
-    pub(crate) fn save_totals(&self, totals: Totals) -> Result<(), StorageError> {
-        self.write(TOTALS_FILE, &totals)
+    pub(crate) fn save_totals(&self, totals: &Totals) -> Result<(), StorageError> {
+        self.write(TOTALS_FILE, totals)
     }
 
     /// The state file `name`, or `None` if there is none yet.
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(store.load_totals().unwrap(), Totals::default());
 
         store
-            .save_totals(Totals {
+            .save_totals(&Totals {
                 buffered_bytes: 9_000_000_000,
                 saved_bytes: 3_000_000_000,
             })

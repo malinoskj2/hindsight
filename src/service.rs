@@ -763,9 +763,16 @@ impl Machine {
         (self.saver.chime)(Tone::Failed);
     }
 
-    /// Adds a saved clip's size to the lifetime total and writes the totals to disk.
+    /// Adds a saved clip's size to the lifetime total and writes the totals to disk. A clip
+    /// whose size cannot be read is logged and counted as nothing.
     fn add_saved(&mut self, path: &Path) {
-        let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+        let bytes = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                log::warning(text::clip_size_unreadable(path, error));
+                0
+            }
+        };
         self.session_saved = self.session_saved.saturating_add(bytes);
         if let Some(totals) = self.totals.as_mut() {
             totals.saved_bytes = totals.saved_bytes.saturating_add(bytes);
@@ -790,7 +797,7 @@ impl Machine {
     /// Writes the totals to disk, if they were read; a failure is logged and the next write
     /// tries again.
     fn persist_totals(&self) {
-        if let (Some(store), Some(totals)) = (&self.store, self.totals)
+        if let (Some(store), Some(totals)) = (&self.store, &self.totals)
             && let Err(error) = store.save_totals(totals)
         {
             log::warning(text::save_totals_failed(error));

@@ -87,6 +87,13 @@ pub(super) fn background_save_failed(error: impl Display) -> String {
 
 // The totals.
 
+pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> String {
+    format!(
+        "the size of {} could not be read, so the clip counts as nothing: {error}",
+        path.display()
+    )
+}
+
 pub(super) fn load_totals_failed(error: impl Display) -> String {
     format!("the lifetime totals could not be read, so they are not kept: {error}")
 }

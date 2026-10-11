@@ -16,10 +16,12 @@ pub(crate) const TRAY_FLAG_NAME: &str = "tray";
 /// The key whose values Windows runs at logon, under `HKEY_CURRENT_USER`.
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
-/// Whether the entry is there.
+/// Whether the entry is there; it is not when the `Run` key itself is missing.
 pub(crate) fn enabled() -> io::Result<bool> {
-    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_READ)?;
-    match key.get_value::<String, _>(APP_NAME) {
+    let value = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(RUN_KEY, KEY_READ)
+        .and_then(|key| key.get_value::<String, _>(APP_NAME));
+    match value {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),

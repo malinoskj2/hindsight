@@ -67,6 +67,10 @@ pub(crate) enum NvencError {
     #[error("this GPU's NVENC has no {0} encoder")]
     Unsupported(Codec),
     #[error(
+        "the NVIDIA driver reports {value} for NVENC capability {capability}, which is not a limit"
+    )]
+    BadCapability { capability: u32, value: i32 },
+    #[error(
         "the display is {width}×{height}, larger than the {max_width}×{max_height} this GPU's {codec} encoder accepts"
     )]
     TooLarge {
@@ -338,7 +342,8 @@ impl Encoder {
         Ok(())
     }
 
-    /// The value the codec's encoder reports for `capability`.
+    /// The value the codec's encoder reports for `capability`, which must be a non-negative
+    /// limit.
     fn capability(&self, capability: u32) -> Result<u32, NvencError> {
         let mut query = ffi::CapsParam::zeroed();
         query.version = ffi::CAPS_PARAM_VER;
@@ -354,7 +359,7 @@ impl Encoder {
                 &raw mut value,
             )
         })?;
-        Ok(u32::try_from(value).expect("a capability value is a non-negative limit"))
+        u32::try_from(value).map_err(|_| NvencError::BadCapability { capability, value })
     }
 
     /// Initializes the session with the preset's configuration, adapted by [`configure`].
@@ -611,7 +616,7 @@ impl Encoder {
     }
 
     /// Queues the input `map` holds for encoding into `slot` as frame `index`, unmapping it
-    /// again when NVENC refuses it.
+    /// again when NVENC refuses it or the driver lacks the call.
     fn encode_picture(
         &self,
         slot: usize,
@@ -628,10 +633,13 @@ impl Encoder {
         picture.completion_event = self.slots[slot].event.0;
         picture.buffer_format = map.mapped_buffer_format;
         picture.picture_struct = ffi::PIC_STRUCT_FRAME;
-        let encode = entry_point(self.api.encode_picture, "nvEncEncodePicture")?;
-        // SAFETY: the input is mapped and the output buffer is not locked or in flight.
-        let status = unsafe { encode(self.session, &raw mut picture) };
-        if let Err(error) = self.check("nvEncEncodePicture", status) {
+        let queued =
+            entry_point(self.api.encode_picture, "nvEncEncodePicture").and_then(|encode| {
+                // SAFETY: the input is mapped and the output buffer is not locked or in flight.
+                let status = unsafe { encode(self.session, &raw mut picture) };
+                self.check("nvEncEncodePicture", status)
+            });
+        if let Err(error) = queued {
             self.unmap(map.mapped_resource);
             return Err(error);
         }
