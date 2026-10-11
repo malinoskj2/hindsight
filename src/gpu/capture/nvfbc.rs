@@ -32,8 +32,8 @@ use windows::{
         Foundation::{FreeLibrary, HANDLE, HMODULE, HWND, LUID, S_OK},
         Graphics::{
             Direct3D9::{
-                D3D_SDK_VERSION, D3DCREATE_FPU_PRESERVE, D3DCREATE_HARDWARE_VERTEXPROCESSING,
-                D3DCREATE_MULTITHREADED, D3DCREATE_NOWINDOWCHANGES, D3DDEVTYPE_HAL,
+                D3D_SDK_VERSION, D3DCREATE_FPU_PRESERVE, D3DCREATE_MULTITHREADED,
+                D3DCREATE_NOWINDOWCHANGES, D3DCREATE_SOFTWARE_VERTEXPROCESSING, D3DDEVTYPE_HAL,
                 D3DDISPLAYMODEEX, D3DDISPLAYROTATION, D3DDISPLAYROTATION_IDENTITY, D3DFMT_A8R8G8B8,
                 D3DFMT_UNKNOWN, D3DGETDATA_FLUSH, D3DISSUE_END, D3DPOOL_DEFAULT,
                 D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS, D3DQUERYTYPE_EVENT,
@@ -579,9 +579,15 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
         PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ..Default::default()
     };
+    // Software vertex processing, because the device never draws a vertex: it only owns the
+    // surfaces NvFBC grabs into. With hardware vertex processing the NVIDIA driver runs a
+    // worker thread for the device that costs about 170 Mcycles/s at 240 fps (a third of the
+    // backend's CPU); with software vertex processing it starts none, and the grabs, the
+    // frames reaching the encoder and the game's frame times are unchanged (measured 2026-10-11,
+    // `docs/backend-overhead.md`).
     let flags = D3DCREATE_FPU_PRESERVE
         | D3DCREATE_MULTITHREADED
-        | D3DCREATE_HARDWARE_VERTEXPROCESSING
+        | D3DCREATE_SOFTWARE_VERTEXPROCESSING
         | D3DCREATE_NOWINDOWCHANGES;
     let mut device = None;
     // SAFETY: windowed parameters on the desktop window; the out-parameter is written on

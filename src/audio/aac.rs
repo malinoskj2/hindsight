@@ -141,8 +141,7 @@ impl Encoder {
             return Ok(());
         }
         let frames = (pcm.len() / usize::from(self.channels.max(1))) as u64;
-        let bytes: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-        let input = self.input_sample(&bytes, frames)?;
+        let input = self.input_sample(pcm, frames)?;
         self.fed += frames;
         // SAFETY: the encoder takes its own reference to the sample.
         unsafe { self.transform.ProcessInput(0, &input, 0) }?;
@@ -152,21 +151,21 @@ impl Encoder {
         Ok(())
     }
 
-    /// A Media Foundation sample holding `bytes`, the `frames` samples per channel after the
-    /// ones fed so far.
-    fn input_sample(&self, bytes: &[u8], frames: u64) -> Result<IMFSample> {
-        let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    /// A Media Foundation sample holding `pcm` as little-endian 16-bit samples (what Windows
+    /// runs on), the `frames` samples per channel after the ones fed so far.
+    fn input_sample(&self, pcm: &[i16], frames: u64) -> Result<IMFSample> {
+        let length = u32::try_from(size_of_val(pcm)).unwrap_or(u32::MAX);
         let time = |samples: u64| {
             i64::try_from(i128::from(samples) * i128::from(CLOCK_RATE) / i128::from(self.rate))
                 .unwrap_or(i64::MAX)
         };
-        // SAFETY: the buffer is created with room for `length` bytes, locked while `bytes` is
-        // copied into it, and unlocked before it is handed to the sample.
+        // SAFETY: the buffer is created with room for `length` bytes, locked while the samples
+        // are copied into it byte for byte, and unlocked before it is handed to the sample.
         unsafe {
             let buffer = MFCreateMemoryBuffer(length)?;
             let mut data = std::ptr::null_mut();
             buffer.Lock(&raw mut data, None, None)?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, length as usize);
+            std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, length as usize);
             buffer.Unlock()?;
             buffer.SetCurrentLength(length)?;
             let sample = MFCreateSample()?;

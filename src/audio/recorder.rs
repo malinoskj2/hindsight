@@ -15,7 +15,7 @@ use super::{
 use crate::{
     log,
     replay::{AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES, Live},
-    sys::clock,
+    sys::{self, clock},
 };
 use std::{
     sync::Arc,
@@ -24,11 +24,11 @@ use std::{
 };
 use windows::Win32::{Foundation::HANDLE, Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED};
 
-/// How often the thread reads the open capture: three of the audio engine's 10 ms packets at a
-/// time, so it wakes a third as often as a capture that signals every packet would wake it,
-/// for 20 ms more latency, which a replay buffer never notices. The capture buffer holds 200 ms,
+/// How often the thread reads the open capture: six of the audio engine's 10 ms packets at a
+/// time, so it wakes a sixth as often as a capture that signals every packet would wake it,
+/// for 50 ms more latency, which a replay buffer never notices. The capture buffer holds 200 ms,
 /// so a late read loses nothing.
-const READ_INTERVAL: Duration = Duration::from_millis(30);
+const READ_INTERVAL: Duration = Duration::from_millis(60);
 /// The longest the thread sleeps while no device is open, before it fills in silence and tries
 /// the device again.
 const WAKE_INTERVAL: Duration = Duration::from_millis(100);
@@ -139,7 +139,11 @@ fn record(live: &Live, stop: &Signal) {
         }
     };
     let mut device = Device::new(watch);
+    let mut placed = false;
     loop {
+        if !placed {
+            placed = sys::thread::keep_off_capture_core();
+        }
         device.update(&devices);
         if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
             break;

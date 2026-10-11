@@ -76,6 +76,7 @@ fn raise_thread_instead(error: &windows::core::Error) {
 /// Opens the device, the capture and the encoder, then encodes one frame per tick of the frame
 /// clock until the session ends.
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+    sys::thread::note_capture_thread();
     let device = open_device(config)?;
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
     // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
