@@ -54,6 +54,11 @@ impl Ring {
         }
     }
 
+    /// The frame index of the oldest buffered packet.
+    pub(crate) fn first_index(&self) -> Option<u64> {
+        self.packets.front().map(|packet| packet.index)
+    }
+
     /// The buffered packets, oldest first; cheap, since packets are shared.
     pub(crate) fn snapshot(&self) -> Vec<Arc<Packet>> {
         self.packets.iter().cloned().collect()

@@ -14,6 +14,7 @@ use crate::{
     log,
     replay::{self, Live, Packet, Stream},
     service::{Ended, Target},
+    sys,
 };
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +78,9 @@ fn raise_thread_instead(error: &windows::core::Error) {
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     let device = open_device(config)?;
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
+    // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
+    // which is how the sound is lined up with the video.
+    live.set_origin(sys::clock::now());
     let mut capture = capture::start(config.backend, &device, pacer.period(), target)?;
     let (width, height) = encodable(capture.size());
     let mut encoder = Encoder::open(

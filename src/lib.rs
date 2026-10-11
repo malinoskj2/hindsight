@@ -7,6 +7,7 @@
 use anyhow::Context;
 use anyhow::Result;
 
+mod audio;
 #[cfg(windows)]
 mod cli;
 mod config;

@@ -1,6 +1,7 @@
-//! What a recording session shares with the rest of the application: the rolling buffer of
-//! encoded packets, the stream they belong to, and counters for the Status tab. Saving takes a
-//! snapshot of the buffer and writes it to an MP4 file while recording carries on.
+//! What a recording session shares with the rest of the application: the rolling buffers of
+//! encoded video packets and sound frames, the streams they belong to, and counters for the
+//! Status tab. Saving takes a snapshot of the buffers and writes it to an MP4 file while
+//! recording carries on.
 
 use crate::{config::Codec, log};
 use std::{
@@ -15,12 +16,15 @@ use std::{
 use thiserror::Error;
 
 mod annexb;
+mod audio;
 mod av1;
 mod h264;
 mod hevc;
 mod mp4;
 mod ring;
 
+pub(crate) use audio::{AudioClip, AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES};
+use audio::{AudioRing, tick_time};
 use mp4::MuxError;
 use ring::Ring;
 
@@ -59,6 +63,15 @@ pub(crate) struct Live {
     bytes: AtomicU64,
     /// Called once the stream is recorded, so the owner learns of it without polling.
     on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// The clock time of the frame clock's first tick, once the capture has started; see
+    /// [`audio`] for the clock both streams share.
+    origin: OnceLock<i64>,
+    /// The frame index of the oldest buffered packet, or `u64::MAX` before the first; the sound
+    /// is trimmed to it.
+    oldest: AtomicU64,
+    /// The encoded sound's shape, once the audio capture has started.
+    audio: OnceLock<Arc<AudioFormat>>,
+    sound: Mutex<AudioRing>,
 }
 
 impl Live {
@@ -71,6 +84,10 @@ impl Live {
             fresh: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             on_stream: OnceLock::new(),
+            origin: OnceLock::new(),
+            oldest: AtomicU64::new(u64::MAX),
+            audio: OnceLock::new(),
+            sound: Mutex::new(AudioRing::default()),
         }
     }
 
@@ -93,15 +110,54 @@ impl Live {
         self.stream.get().copied()
     }
 
+    /// Records the clock time (QPC, in 100 ns units) of the frame clock's first tick, which
+    /// places every packet's frame index on the clock the sound is stamped with.
+    pub(crate) fn set_origin(&self, time: i64) {
+        let _ = self.origin.set(time);
+    }
+
     /// Adds an encoded frame; `fresh` when it carried new screen content.
     pub(crate) fn push(&self, packet: Packet, fresh: bool) {
         self.bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
-        self.ring().push(packet);
+        let oldest = {
+            let mut ring = self.ring();
+            ring.push(packet);
+            ring.first_index()
+        };
+        self.oldest
+            .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
         self.encoded.fetch_add(1, Ordering::Relaxed);
         if fresh {
             self.fresh.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Records the encoded sound's shape once the audio encoder is configured.
+    pub(crate) fn set_audio(&self, format: AudioFormat) {
+        let _ = self.audio.set(Arc::new(format));
+    }
+
+    /// Adds an encoded sound frame, then drops the frames that no clip of the buffered video can
+    /// need.
+    pub(crate) fn push_audio(&self, frame: AudioFrame) {
+        let Some(format) = self.audio.get() else {
+            return;
+        };
+        self.bytes
+            .fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+        let start = self.video_time(self.oldest.load(Ordering::Relaxed));
+        let mut sound = self.sound();
+        sound.push(frame);
+        sound.trim(format, start);
+    }
+
+    /// The clock time of video frame `index`, once the clock and the frame rate are known;
+    /// `u64::MAX` stands for no frame.
+    fn video_time(&self, index: u64) -> Option<i64> {
+        let origin = *self.origin.get()?;
+        let frame_rate = self.stream()?.frame_rate;
+        (index != u64::MAX).then(|| tick_time(origin, frame_rate, index))
     }
 
     /// Encoded bytes that went into the buffer since the session started.
@@ -124,22 +180,42 @@ impl Live {
         (ring.frames(), ring.bytes())
     }
 
-    /// The buffer as it is now, if the stream has started.
+    /// The buffer as it is now, if the stream has started, with the sound from the first
+    /// packet's frame to the end of the last one's when there is sound.
     pub(crate) fn clip(&self) -> Option<Clip> {
         let stream = self.stream()?;
         let packets = self.ring().snapshot();
-        (!packets.is_empty()).then_some(Clip { stream, packets })
+        let (first, last) = (packets.first()?.index, packets.last()?.index);
+        let audio = self.audio_between(first, last + 1);
+        Some(Clip {
+            stream,
+            packets,
+            audio,
+        })
+    }
+
+    /// The sound from the start of video frame `first` to the start of frame `end`.
+    fn audio_between(&self, first: u64, end: u64) -> Option<AudioClip> {
+        let format = self.audio.get()?;
+        let (start, end) = (self.video_time(first)?, self.video_time(end)?);
+        Some(audio::cut(&self.sound(), format, start, end))
     }
 
     fn ring(&self) -> MutexGuard<'_, Ring> {
         self.ring.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn sound(&self) -> MutexGuard<'_, AudioRing> {
+        self.sound.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
-/// What a save writes: the stream and the packets buffered when it was requested.
+/// What a save writes: the stream and the packets buffered when it was requested, and the sound
+/// that plays alongside them.
 pub(crate) struct Clip {
     pub(crate) stream: Stream,
     pub(crate) packets: Vec<Arc<Packet>>,
+    pub(crate) audio: Option<AudioClip>,
 }
 
 impl Clip {
@@ -235,7 +311,10 @@ fn write_then_rename(clip: &Clip, path: &Path) -> Result<(), SaveError> {
 fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    mp4::write(&mut output, &clip.stream, &clip.packets)?;
+    match &clip.audio {
+        Some(audio) => mp4::write_with_audio(&mut output, &clip.stream, &clip.packets, audio)?,
+        None => mp4::write(&mut output, &clip.stream, &clip.packets)?,
+    }
     sync(output).map_err(SaveError::io("finish", path))
 }
 
@@ -381,6 +460,7 @@ mod tests {
                     frame_rate: 30,
                 },
                 packets: ring.snapshot(),
+                audio: None,
             };
             assert_eq!(clip.packets.len(), 45, "{codec}");
 
@@ -400,6 +480,104 @@ mod tests {
                 fs::write(Path::new(&directory).join(name), &file).unwrap();
             }
         }
+    }
+
+    /// Real H.264 and AAC encoder output through the buffer and the writer: the video's 1 s to
+    /// 2.5 s mark, at 30 fps, with the sound cut to the same span on the shared clock. Set
+    /// `HINDSIGHT_MUX_OUTPUT` to keep the file, e.g. to check both streams with ffprobe.
+    #[test]
+    fn real_encoder_output_muxes_with_sound() {
+        let live = Live::new(40);
+        live.set_stream(Stream {
+            codec: Codec::H264,
+            width: 128,
+            height: 72,
+            frame_rate: 30,
+        });
+        live.set_origin(0);
+        let frames = audio::tests::encoded_fixture();
+        assert_eq!(frames.len(), 119);
+        live.set_audio(AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            config: Box::new([0x11, 0x90]),
+            anchor: 0,
+            // ffmpeg's encoder, like most, puts one frame in front of the sound.
+            priming: FRAME_SAMPLES,
+            silence: Arc::clone(&frames[0]),
+        });
+        for packet in encoded_fixture(Codec::H264) {
+            live.push(packet, true);
+        }
+        for (number, data) in (0..).zip(frames) {
+            live.push_audio(AudioFrame { number, data });
+        }
+
+        let clip = live.clip().unwrap();
+        assert_eq!(clip.packets.len(), 45);
+        let audio = clip.audio.as_ref().unwrap();
+        // 1 s is output sample 49 024, in frame 47; frame 46 comes first, and 2.5 s (output
+        // sample 121 024) is in frame 118.
+        assert_eq!(audio.frames.len(), 119 - 46);
+        assert_eq!(audio.lead, 49_024 - 46 * 1024);
+
+        let mut file = Vec::new();
+        mp4::write_with_audio(&mut file, &clip.stream, &clip.packets, audio).unwrap();
+        if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
+            fs::write(Path::new(&directory).join("h264-aac.mp4"), &file).unwrap();
+        }
+        assert_eq!(fnv1a(&file), 0x5043_654E_42DB_C181);
+    }
+
+    #[test]
+    fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
+        let live = Live::new(60);
+        live.set_stream(STREAM);
+        live.set_origin(0);
+        live.set_audio(AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            config: Box::new([0x11, 0x90]),
+            anchor: 0,
+            priming: 0,
+            silence: Arc::from(&b"silence"[..]),
+        });
+        // Five seconds of 30 fps video with a keyframe a second, and the sound arriving
+        // alongside it, each frame once its start has been reached.
+        let mut next_frame: u64 = 0;
+        for index in 0..150 {
+            let key = index % 30 == 0;
+            let data = if key { keyframe() } else { inter_frame() };
+            live.push(
+                Packet {
+                    index,
+                    keyframe: key,
+                    data: data.into(),
+                },
+                true,
+            );
+            let now = tick_time(0, 30, index);
+            while i64::try_from(next_frame * 1024 * 10_000_000 / 48_000).unwrap() < now {
+                live.push_audio(AudioFrame {
+                    number: next_frame,
+                    data: Arc::from(&[1, 2, 3][..]),
+                });
+                next_frame += 1;
+            }
+        }
+
+        // The video keeps its last two seconds from the keyframe at 3 s; the sound keeps the
+        // frame before the one playing then (3 s is sample 144 000, in frame 140), and no more.
+        let clip = live.clip().unwrap();
+        assert_eq!(clip.packets[0].index, 90);
+        assert_eq!(live.sound().numbers()[0], 139);
+        let audio = clip.audio.unwrap();
+        assert_eq!(audio.lead, 144_000 - 139 * 1024);
+        // The video ends at 5 s, sample 240 000, in frame 234; the frames not yet captured
+        // when the clip was taken are silence.
+        assert_eq!(audio.frames.len(), 235 - 139);
+        assert_eq!(&*audio.frames[0], &[1, 2, 3]);
+        assert_eq!(&*audio.frames[233 - 139], b"silence");
     }
 
     #[test]
@@ -444,6 +622,7 @@ mod tests {
                 keyframe: false,
                 data: inter_frame().into(),
             })],
+            audio: None,
         };
 
         assert_matches!(
