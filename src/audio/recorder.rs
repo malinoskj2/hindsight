@@ -43,7 +43,6 @@ const FLUSH_SAMPLES: u64 = (aac::HELD_BACK + aac::PRIMING + FRAME_SAMPLES) as u6
 
 /// The sound capture of a running session; dropping it stops the capture and waits for its
 /// thread, which takes no longer than closing the device.
-#[expect(dead_code, reason = "sessions start it from the next commits")]
 pub(crate) struct Capture {
     stop: Arc<Signal>,
     join: Option<JoinHandle<()>>,
@@ -60,7 +59,6 @@ impl Drop for Capture {
 
 /// Starts recording the system's sound into `live` on a thread of its own, or logs why it
 /// cannot.
-#[expect(dead_code, reason = "sessions start it from the next commits")]
 pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
     let stop = match Signal::new() {
         Ok(signal) => Arc::new(signal),
@@ -351,4 +349,76 @@ fn encode(
             *next_frame += 1;
         })
         .map_err(Failure::Encoder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Codec,
+        replay::{Packet, Stream},
+    };
+
+    /// Records ten seconds of whatever the machine plays and checks that the frames keep pace
+    /// with the clock. Set `HINDSIGHT_AUDIO_OUTPUT` to a file to keep the sound as ADTS, e.g.
+    /// to listen to it or measure its loudness with ffmpeg. Run by hand:
+    /// `cargo test records_the_system_sound -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "records the machine's sound for ten seconds"]
+    fn records_the_system_sound() {
+        let live = Arc::new(Live::new(1_000));
+        live.set_stream(Stream {
+            codec: Codec::H264,
+            width: 64,
+            height: 64,
+            frame_rate: 60,
+        });
+        live.set_origin(clock::now());
+        let packet = |index| Packet {
+            index,
+            keyframe: true,
+            data: Box::new([0]),
+        };
+        live.push(packet(0), true);
+        let capture = start(&live).unwrap();
+        thread::sleep(Duration::from_secs(10));
+        live.push(packet(599), true);
+        drop(capture);
+
+        for entry in log::since(0) {
+            println!("{}", entry.line());
+        }
+        let audio = live.clip().unwrap().audio.unwrap();
+        let silent = audio
+            .frames
+            .iter()
+            .filter(|frame| Arc::ptr_eq(frame, &audio.format.silence))
+            .count();
+        println!(
+            "{} frames for 10 s of video, {silent} of them stand-ins for silence, lead {}",
+            audio.frames.len(),
+            audio.lead
+        );
+        // Ten seconds at 48 kHz are 468.75 frames, plus the one in front and the last partial.
+        assert!((469..=471).contains(&audio.frames.len()));
+        if let Some(path) = std::env::var_os("HINDSIGHT_AUDIO_OUTPUT") {
+            let mut adts = Vec::new();
+            for frame in &audio.frames {
+                let length = frame.len() + 7;
+                let [_, _, middle, low] = u32::try_from(length).unwrap().to_be_bytes();
+                // AAC-LC, 48 kHz, two channels, then the 13-bit frame length.
+                adts.extend([
+                    0xFF,
+                    0xF1,
+                    0x4C,
+                    0x80 | (middle >> 3),
+                    (middle << 5) | (low >> 3),
+                    ((low & 0x07) << 5) | 0x1F,
+                    0xFC,
+                ]);
+                adts.extend_from_slice(frame);
+            }
+            std::fs::write(path, adts).unwrap();
+        }
+    }
 }

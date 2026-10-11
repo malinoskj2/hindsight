@@ -21,6 +21,8 @@ By default hindsight records **full-screen apps**: whatever app is in front with
 
 The other mode, **Whole desktop, always**, records the primary monitor from the moment hindsight starts, everything on it included.
 
+**Sound** is recorded too: whatever the default output device plays (the game, voice chat, music), as Windows mixes it, captured with WASAPI loopback and stored as AAC at 160 kb/s beside the video, starting and ending with it. If you switch output devices or unplug a headset, recording follows the new default device within a couple of seconds and the gap is silent. The microphone isn't recorded. Turn off **Record system sound** in Settings for silent clips.
+
 ## Capture backends
 
 The **Capture** setting chooses how frames are taken. All three keep every frame on the GPU.
@@ -42,6 +44,7 @@ The **Capture** setting chooses how frames are taken. All three keep every frame
 | Save hotkey | Alt+F10 | Ctrl, Alt, Shift or Win with a key; F-keys may stand alone |
 | Clip folder | `Videos\hindsight` | Any absolute folder |
 | Theme | Classic Windows | Classic Windows, Ember, Selene or Nova |
+| Record system sound | On | On or off |
 
 **Theme** (in the General group) dresses the window in one of three characters: their colours, rounded group panels, tab strip and buttons, and an illustration beside the controls. It applies the moment you choose it, without restarting recording, and is remembered. Classic Windows, the default, is the plain dialog of Windows' own controls, unchanged. The artwork is in `assets/themes`.
 
@@ -69,6 +72,7 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 - **The GPU scheduler favours the copies.** The capture device raises its GPU thread priority and the process its GPU scheduling class (high, never realtime, which could starve the game of the GPU), so a game holding the GPU at 100% does not starve capture. Windows power throttling is turned off for the process.
 - **One keyframe every 30 frames**, as NVIDIA Instant Replay does, with the sequence header on every keyframe, so a clip can start at any of them and the buffer trims to within 30 frames of its length.
 - **The encoder is set up like Instant Replay's.** Preset P4 with high-quality tuning and no B-frames, single-pass VBR peaking at twice the bitrate you choose, and none of the rate-control extras (lookahead, adaptive quantization) that would cost the game GPU time. HEVC and AV1 stay within 16×16 to 32×32 blocks.
+- **Sound is the one stream the CPU encodes, and it is small.** The loopback capture wakes its own thread when the audio engine has a packet (every 10 ms while something plays), and Media Foundation's AAC encoder, the one Windows ships, turns it into 47 frames a second: about 0.7% of one core altogether in a first measurement (a release build capturing 30 s of system sound), and 20 kB a second, under 1 MB for 30 seconds, in the buffer. Long silences are not encoded at all. With **Record system sound** off none of this runs.
 
 Run as administrator for the highest GPU priority. To check parity yourself, compare CPU use and frame times (PresentMon or CapFrameX) with hindsight, with Instant Replay and with neither; PresentMon's present mode should stay *Hardware: Independent Flip*.
 
@@ -82,8 +86,9 @@ Run as administrator for the highest GPU priority. To check parity yourself, com
 - **The display or the app's window changed size** (a game switched modes): capture restarts by itself and the buffer starts over.
 - **An app in exclusive full screen** can't be captured as a window; hindsight notices within two seconds and captures its monitor instead.
 - On Windows 10 a yellow border marks the captured screen; Windows 11 lets hindsight turn it off.
+- **Clips have no sound**: the Logs tab says why. Without any output device the sound track is silent until one is connected; on Windows N editions install the Media Feature Pack, which brings the AAC encoder.
 
-HDR displays are captured as SDR for now, and audio is not recorded yet.
+HDR displays are captured as SDR for now.
 
 ## Build from source
 
@@ -92,7 +97,7 @@ cargo build --release
 ./scripts/build-windows.ps1   # dist\hindsight.exe and, with NSIS installed, the installer
 ```
 
-The capture and encoding code is Windows-only; everything else (the replay buffer, the MP4 writer for all three codecs, settings, hotkeys) builds and tests on any platform with `cargo test`. The MP4 writer is tested against real H.264, HEVC and AV1 encoder output in `tests/fixtures`.
+The capture and encoding code is Windows-only; everything else (the replay buffers, the MP4 writer for all three codecs and the sound track, settings, hotkeys) builds and tests on any platform with `cargo test`. The MP4 writer is tested against real H.264, HEVC, AV1 and AAC encoder output in `tests/fixtures`.
 
 ## License
 

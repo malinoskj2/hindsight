@@ -82,10 +82,6 @@ impl Signal {
     }
 
     /// Sets the event; it stays set.
-    #[expect(
-        dead_code,
-        reason = "sessions stop the audio thread from the next commits"
-    )]
     pub(crate) fn set(&self) {
         // SAFETY: the event is open.
         let _ = unsafe { SetEvent(*self.0) };

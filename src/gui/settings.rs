@@ -1,4 +1,4 @@
-//! The Settings tab: what to record and how, codec, frame rate, buffer length, bitrate, the
+//! The Settings tab: what to record and how, codec, frame rate, buffer length, bitrate, sound, the
 //! save hotkey and clip folder, the theme and the Start-with-Windows entry.
 
 use super::{
@@ -46,6 +46,7 @@ pub(super) struct SettingsPage {
     mode: gui::ComboBox,
     pub(super) backend: gui::ComboBox,
     folder: gui::Edit,
+    audio: gui::CheckBox,
     estimate: gui::Label,
     pub(super) apply: gui::Button,
     settings_error: gui::Label,
@@ -91,6 +92,7 @@ impl SettingsPage {
             mode: recording.mode,
             backend: recording.backend,
             folder: recording.folder,
+            audio: recording.audio,
             estimate: recording.estimate,
             apply: recording.apply,
             settings_error: recording.error,
@@ -226,13 +228,14 @@ impl SettingsPage {
             bitrate_mbps: required(&self.bitrate)?,
             hotkey: hotkey.trim().to_owned(),
             clip_directory: stored_folder(folder.trim()),
+            audio: self.audio.is_checked(),
             theme: chosen(&self.theme, &Theme::ALL),
         })
     }
 }
 
-/// The Recording group: the encoding, source and clip fields, the memory estimate, and the
-/// Apply button with the line that reports a problem with them.
+/// The Recording group: the encoding, source and clip fields, the sound switch, the memory
+/// estimate, and the Apply button with the line that reports a problem with them.
 struct RecordingControls {
     frame: Frame,
     codec: gui::ComboBox,
@@ -244,6 +247,7 @@ struct RecordingControls {
     mode: gui::ComboBox,
     backend: gui::ComboBox,
     folder: gui::Edit,
+    audio: gui::CheckBox,
     estimate: gui::Label,
     apply: gui::Button,
     error: gui::Label,
@@ -253,7 +257,7 @@ impl RecordingControls {
     /// Lays out the Recording group on `page`, filled in from `config`, its button in the look
     /// of `skin`.
     fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
-        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 214);
+        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 242);
         let codec = choice_field(
             page,
             text::CODEC,
@@ -296,12 +300,13 @@ impl RecordingControls {
             INNER_WIDTH - FIELD_OFFSET,
             &config.clip_directory().display().to_string(),
         );
-        let estimate = label(page, "", INNER_X, 164, INNER_WIDTH, 1);
-        let apply = button(page, text::APPLY, INNER_X, 182, BUTTON_WIDTH);
+        let audio = check_box(page, text::AUDIO, 166, config.audio);
+        let estimate = label(page, "", INNER_X, 192, INNER_WIDTH, 1);
+        let apply = button(page, text::APPLY, INNER_X, 210, BUTTON_WIDTH);
         skin_button(&apply, skin, ButtonRole::Primary);
         // The error line starts just right of the button.
         let error_x = BUTTON_WIDTH + 8;
-        let error = label(page, "", INNER_X + error_x, 180, INNER_WIDTH - error_x, 2);
+        let error = label(page, "", INNER_X + error_x, 208, INNER_WIDTH - error_x, 2);
         Self {
             frame,
             codec,
@@ -313,6 +318,7 @@ impl RecordingControls {
             mode,
             backend,
             folder,
+            audio,
             estimate,
             apply,
             error,
@@ -334,32 +340,18 @@ impl GeneralControls {
     /// Lays out the General group on `page`, filled in from `config` and the Run key's state.
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
         // Compact; the group adds a line for the error label when one occurs.
-        let frame = Frame::new(page, text::GROUP_GENERAL, 220, 72);
+        let frame = Frame::new(page, text::GROUP_GENERAL, 248, 72);
         let theme = choice_field(
             page,
             text::THEME,
             INNER_X,
-            240,
+            268,
             190,
             &Theme::ALL.map(Theme::name),
             index_of(&Theme::ALL, config.theme),
         );
-        let check_box = gui::CheckBox::new(
-            page,
-            gui::CheckBoxOpts {
-                text: text::START_WITH_WINDOWS,
-                position: gui::dpi(INNER_X, 268),
-                // Wide enough for the label in any font, rather than measured once at creation.
-                size: gui::dpi(INNER_WIDTH, LINE),
-                check_state: if start_with_windows {
-                    co::BST::CHECKED
-                } else {
-                    co::BST::UNCHECKED
-                },
-                ..Default::default()
-            },
-        );
-        let error = label(page, "", INNER_X, 290, INNER_WIDTH, 1);
+        let check_box = check_box(page, text::START_WITH_WINDOWS, 296, start_with_windows);
+        let error = label(page, "", INNER_X, 318, INNER_WIDTH, 1);
         let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
         Self {
             frame,
@@ -451,6 +443,25 @@ fn number_field(
         },
     );
     (edit, spin)
+}
+
+/// A check box across the group at height `y`, ticked when `checked`.
+fn check_box(page: &gui::TabPage, caption: &str, y: i32, checked: bool) -> gui::CheckBox {
+    gui::CheckBox::new(
+        page,
+        gui::CheckBoxOpts {
+            text: caption,
+            position: gui::dpi(INNER_X, y),
+            // Wide enough for the label in any font, rather than measured once at creation.
+            size: gui::dpi(INNER_WIDTH, LINE),
+            check_state: if checked {
+                co::BST::CHECKED
+            } else {
+                co::BST::UNCHECKED
+            },
+            ..Default::default()
+        },
+    )
 }
 
 /// A caption and a free-text edit.

@@ -3,6 +3,7 @@
 //! which full-screen app is in front, and reads its status once a second.
 
 use crate::{
+    audio,
     config::{Backend, Config, Mode, Theme},
     log,
     replay::{self, Clip, Live, SaveError, Stream},
@@ -291,6 +292,9 @@ impl Drop for Worker {
 struct Session {
     stop: Arc<AtomicBool>,
     join: JoinHandle<Result<Ended>>,
+    /// The sound capture feeding the same buffer, when there is one; dropping the session
+    /// stops it.
+    _audio: Option<audio::Capture>,
 }
 
 /// A clip being written.
@@ -532,12 +536,17 @@ impl Machine {
         }
     }
 
-    /// Banks the previous buffer and starts a capture session of `target` into a fresh one.
+    /// Banks the previous buffer and starts a capture session of `target` into a fresh one,
+    /// with the sound when the settings ask for it.
     fn start_session(&mut self, target: Target) {
         self.bank_live();
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
+        // Tests record without sound, so they do not depend on the machine's audio devices.
+        let audio = (self.config.audio && !cfg!(test))
+            .then(|| audio::start(&live))
+            .flatten();
         let spawned = self.spawn_capture(&target, &live, &stop);
 
         self.retry_at = None;
@@ -545,7 +554,11 @@ impl Machine {
         self.target = Some(target);
         match spawned {
             Ok(join) => {
-                self.session = Some(Session { stop, join });
+                self.session = Some(Session {
+                    stop,
+                    join,
+                    _audio: audio,
+                });
                 self.live = Some(live);
                 self.status.state = DisplayStatus::Starting;
                 self.status.error = None;

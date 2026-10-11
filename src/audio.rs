@@ -22,7 +22,20 @@ mod pcm;
 mod recorder;
 mod timeline;
 
+#[cfg(windows)]
+pub(crate) use recorder::{Capture, start};
+
 /// The sample rate the sound is encoded at, which Windows converts other rates to.
 const SAMPLE_RATE: u32 = 48_000;
 /// Stereo: Windows mixes more channels down, and mono is played on both sides.
 const CHANNELS: u16 = 2;
+
+/// Elsewhere there is no sound to capture.
+#[cfg(not(windows))]
+pub(crate) struct Capture;
+
+/// Elsewhere there is no sound to capture, so sessions record video only.
+#[cfg(not(windows))]
+pub(crate) fn start(_live: &std::sync::Arc<crate::replay::Live>) -> Option<Capture> {
+    None
+}

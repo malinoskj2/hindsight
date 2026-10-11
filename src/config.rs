@@ -1,8 +1,8 @@
 //! The user's settings: what to record, how it is captured, codec, buffer length, frame rate,
-//! bitrate, the hotkey that saves a clip and the clip folder. They are stored as JSON and checked
-//! before use, since the file can be edited by hand: the buffer covers 5 to 600 seconds, capture
-//! runs at 24 to 240 fps and the bitrate is 5 to 150 Mbps. Clips go to
-//! `%USERPROFILE%\Videos\hindsight` unless another folder is chosen.
+//! bitrate, whether to record sound, the hotkey that saves a clip and the clip folder. They are
+//! stored as JSON and checked before use, since the file can be edited by hand: the buffer
+//! covers 5 to 600 seconds, capture runs at 24 to 240 fps and the bitrate is 5 to 150 Mbps.
+//! Clips go to `%USERPROFILE%\Videos\hindsight` unless another folder is chosen.
 
 use crate::sys::hotkey::{Hotkey, ParseError};
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,8 @@ pub(crate) struct Config {
     pub(crate) clip_directory: String,
     /// The window's look; applied as soon as it is chosen, without restarting recording.
     pub(crate) theme: Theme,
+    /// Whether clips carry the system's sound, as the default output device plays it.
+    pub(crate) audio: bool,
 }
 
 impl Default for Config {
@@ -170,6 +172,7 @@ impl Default for Config {
             hotkey: "Alt+F10".to_owned(),
             clip_directory: String::new(),
             theme: Theme::Classic,
+            audio: true,
         }
     }
 }
@@ -288,7 +291,10 @@ mod tests {
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey, "Alt+F10");
         assert_eq!(config.theme, Theme::Classic);
+        // Settings saved before sound was recorded turn it on.
+        assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
+        assert!(!parse(r#"{"audio":false}"#).unwrap().audio);
 
         assert_eq!(parse(r#"{"mode":"desktop"}"#).unwrap().mode, Mode::Desktop);
         assert_eq!(
