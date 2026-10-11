@@ -2,6 +2,8 @@
 //! OBUs without its temporal delimiter, and an `av1C` record repeats the sequence header.
 
 use super::mp4::atom;
+use bitstream_io::{BigEndian, BitRead, BitReader};
+use std::io;
 
 const OBU_SEQUENCE_HEADER: u8 = 1;
 const OBU_TEMPORAL_DELIMITER: u8 = 2;
@@ -29,6 +31,9 @@ const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
 /// The `av1C` record's first byte: its marker bit and version 1.
 const AV1C_MARKER_AND_VERSION: u8 = 0x81;
 
+/// Reads bits most significant first; running out of bits is an error.
+type Bits<'a> = BitReader<&'a [u8], BigEndian>;
+
 /// Whether the temporal unit's first frame is a key frame.
 pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
     obus(temporal_unit)
@@ -36,9 +41,9 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
         .find(|obu| matches!(obu.kind, OBU_FRAME_HEADER | OBU_FRAME))
         .and_then(|obu| {
             let mut bits = Bits::new(obu.payload);
-            let show_existing_frame = bits.bit()?;
-            let frame_type = bits.read(2)?;
-            Some(show_existing_frame == 0 && frame_type == KEY_FRAME)
+            let show_existing_frame = bits.read_bit().ok()?;
+            let frame_type = bits.read::<2, u32>().ok()?;
+            Some(!show_existing_frame && frame_type == KEY_FRAME)
         })
         .unwrap_or(false)
 }
@@ -48,7 +53,7 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
     let obu = obus(temporal_unit)
         .into_iter()
         .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
-    let sequence = SequenceHeader::parse(obu.payload)?;
+    let sequence = SequenceHeader::parse(obu.payload).ok()?;
     let mut body = sequence.record_fields()?.to_vec();
     write_sized_obu(&mut body, &obu);
     Some(atom(*b"av1C", &body))
@@ -173,20 +178,20 @@ struct SequenceHeader {
 
 impl SequenceHeader {
     /// Reads `sequence_header_obu()` (AV1 specification, section 5.5) through `color_config()`.
-    fn parse(payload: &[u8]) -> Option<Self> {
+    fn parse(payload: &[u8]) -> io::Result<Self> {
         let mut bits = Bits::new(payload);
-        let profile = bits.read(3)?;
-        let _still_picture = bits.flag()?;
-        let reduced_still_picture_header = bits.flag()?;
+        let profile = bits.read::<3, u32>()?;
+        let _still_picture = bits.read_bit()?;
+        let reduced_still_picture_header = bits.read_bit()?;
 
         let (level, tier) = if reduced_still_picture_header {
-            (bits.read(5)?, false)
+            (bits.read::<5, u32>()?, false)
         } else {
             Self::first_operating_point(&mut bits)?
         };
         Self::skip_frame_size_and_tools(&mut bits, reduced_still_picture_header)?;
         let colour = ColourConfig::parse(&mut bits, profile)?;
-        Some(Self {
+        Ok(Self {
             profile,
             level,
             tier,
@@ -214,50 +219,50 @@ impl SequenceHeader {
 
     /// Reads the optional timing and decoder model information, then every operating point,
     /// and returns the first point's level and tier.
-    fn first_operating_point(bits: &mut Bits<'_>) -> Option<(u32, bool)> {
-        let timing_info_present = bits.flag()?;
+    fn first_operating_point(bits: &mut Bits<'_>) -> io::Result<(u32, bool)> {
+        let timing_info_present = bits.read_bit()?;
         if timing_info_present {
             Self::skip_timing_info(bits)?;
         }
-        let buffer_delay_length = if timing_info_present && bits.flag()? {
+        let buffer_delay_length = if timing_info_present && bits.read_bit()? {
             Some(Self::decoder_model_info(bits)?)
         } else {
             None
         };
-        let initial_display_delay_present = bits.flag()?;
-        let operating_points = bits.read(5)? + 1;
+        let initial_display_delay_present = bits.read_bit()?;
+        let operating_points = bits.read::<5, u32>()? + 1;
         let mut first = None;
         for _ in 0..operating_points {
-            let _idc = bits.read(12)?;
-            let point_level = bits.read(5)?;
-            let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.flag()?;
+            let _idc = bits.read::<12, u32>()?;
+            let point_level = bits.read::<5, u32>()?;
+            let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.read_bit()?;
             if let Some(buffer_delay_length) = buffer_delay_length
-                && bits.flag()?
+                && bits.read_bit()?
             {
                 bits.skip(2 * buffer_delay_length + 1)?;
             }
-            if initial_display_delay_present && bits.flag()? {
+            if initial_display_delay_present && bits.read_bit()? {
                 bits.skip(4)?;
             }
             first.get_or_insert((point_level, point_tier));
         }
-        first
+        first.ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
     /// Skips `timing_info()`: the tick rate, then the picture interval if it is fixed.
-    fn skip_timing_info(bits: &mut Bits<'_>) -> Option<()> {
+    fn skip_timing_info(bits: &mut Bits<'_>) -> io::Result<()> {
         bits.skip(64)?;
-        if bits.flag()? {
-            bits.uvlc()?;
+        if bits.read_bit()? {
+            uvlc(bits)?;
         }
-        Some(())
+        Ok(())
     }
 
     /// Reads `decoder_model_info()` and returns its `buffer_delay_length`.
-    fn decoder_model_info(bits: &mut Bits<'_>) -> Option<u32> {
-        let buffer_delay_length = bits.read(5)? + 1;
+    fn decoder_model_info(bits: &mut Bits<'_>) -> io::Result<u32> {
+        let buffer_delay_length = bits.read::<5, u32>()? + 1;
         bits.skip(32 + 5 + 5)?;
-        Some(buffer_delay_length)
+        Ok(buffer_delay_length)
     }
 
     /// Skips the frame size, the frame id lengths and the coding tool flags, which lie between
@@ -265,11 +270,11 @@ impl SequenceHeader {
     fn skip_frame_size_and_tools(
         bits: &mut Bits<'_>,
         reduced_still_picture_header: bool,
-    ) -> Option<()> {
-        let width_bits = bits.read(4)? + 1;
-        let height_bits = bits.read(4)? + 1;
+    ) -> io::Result<()> {
+        let width_bits = bits.read::<4, u32>()? + 1;
+        let height_bits = bits.read::<4, u32>()? + 1;
         bits.skip(width_bits + height_bits)?;
-        if !reduced_still_picture_header && bits.flag()? {
+        if !reduced_still_picture_header && bits.read_bit()? {
             // Frame id lengths.
             bits.skip(4 + 3)?;
         }
@@ -284,22 +289,26 @@ impl SequenceHeader {
 
     /// Skips the inter prediction tool flags, which only a sequence header that is not reduced
     /// to still pictures carries.
-    fn skip_inter_tools(bits: &mut Bits<'_>) -> Option<()> {
+    fn skip_inter_tools(bits: &mut Bits<'_>) -> io::Result<()> {
         // Inter-intra, masked compound, warped motion, dual filter.
         bits.skip(4)?;
-        let order_hint = bits.flag()?;
+        let order_hint = bits.read_bit()?;
         if order_hint {
             // Joint compound, reference frame motion vectors.
             bits.skip(2)?;
         }
-        let force_screen_content_tools = if bits.flag()? { 2 } else { bits.read(1)? };
-        if force_screen_content_tools > 0 && !bits.flag()? {
+        let force_screen_content_tools = if bits.read_bit()? {
+            2
+        } else {
+            bits.read::<1, u32>()?
+        };
+        if force_screen_content_tools > 0 && !bits.read_bit()? {
             bits.skip(1)?;
         }
         if order_hint {
             bits.skip(3)?;
         }
-        Some(())
+        Ok(())
     }
 }
 
@@ -317,12 +326,16 @@ struct ColourConfig {
 
 impl ColourConfig {
     /// Reads `color_config()` (section 5.5.2).
-    fn parse(bits: &mut Bits<'_>, profile: u32) -> Option<Self> {
-        let high_bitdepth = bits.flag()?;
-        let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.flag()?;
-        let monochrome = profile != PROFILE_HIGH && bits.flag()?;
-        let colours = if bits.flag()? {
-            (bits.read(8)?, bits.read(8)?, bits.read(8)?)
+    fn parse(bits: &mut Bits<'_>, profile: u32) -> io::Result<Self> {
+        let high_bitdepth = bits.read_bit()?;
+        let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.read_bit()?;
+        let monochrome = profile != PROFILE_HIGH && bits.read_bit()?;
+        let colours = if bits.read_bit()? {
+            (
+                bits.read::<8, u32>()?,
+                bits.read::<8, u32>()?,
+                bits.read::<8, u32>()?,
+            )
         } else {
             UNSPECIFIED_COLOUR
         };
@@ -333,7 +346,7 @@ impl ColourConfig {
         } else {
             Self::chroma(bits, profile, twelve_bit)?
         };
-        Some(Self {
+        Ok(Self {
             high_bitdepth,
             twelve_bit,
             monochrome,
@@ -345,103 +358,71 @@ impl ColourConfig {
 
     /// Reads the colour range, the subsampling and the chroma sample position of a colour
     /// image that is not sRGB.
-    fn chroma(bits: &mut Bits<'_>, profile: u32, twelve_bit: bool) -> Option<(bool, bool, u32)> {
-        let _color_range = bits.flag()?;
+    fn chroma(
+        bits: &mut Bits<'_>,
+        profile: u32,
+        twelve_bit: bool,
+    ) -> io::Result<(bool, bool, u32)> {
+        let _color_range = bits.read_bit()?;
         let (subsampling_x, subsampling_y) = match profile {
             PROFILE_MAIN => (true, true),
             PROFILE_HIGH => (false, false),
             _ if twelve_bit => {
-                let x = bits.flag()?;
-                (x, x && bits.flag()?)
+                let x = bits.read_bit()?;
+                (x, x && bits.read_bit()?)
             }
             _ => (true, false),
         };
         let chroma_sample_position = if subsampling_x && subsampling_y {
-            bits.read(2)?
+            bits.read::<2, u32>()?
         } else {
             0
         };
-        Some((subsampling_x, subsampling_y, chroma_sample_position))
+        Ok((subsampling_x, subsampling_y, chroma_sample_position))
     }
 }
 
-/// Reads bits most significant first.
-struct Bits<'a> {
-    data: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Bits<'a> {
-    const fn new(data: &'a [u8]) -> Self {
-        Self { data, position: 0 }
-    }
-
-    /// The next bit, as 0 or 1.
-    fn bit(&mut self) -> Option<u32> {
-        let byte = self.data.get(self.position / 8)?;
-        let bit = (byte >> (7 - self.position % 8)) & 1;
-        self.position += 1;
-        Some(u32::from(bit))
-    }
-
-    /// The next bit, as a flag.
-    fn flag(&mut self) -> Option<bool> {
-        self.bit().map(|bit| bit == 1)
-    }
-
-    /// The next `count` bits, as an unsigned value.
-    fn read(&mut self, count: u32) -> Option<u32> {
-        (0..count).try_fold(0, |value, _| Some((value << 1) | self.bit()?))
-    }
-
-    /// Moves past the next `count` bits, unless fewer are left.
-    fn skip(&mut self, count: u32) -> Option<()> {
-        let end = self.position + count as usize;
-        (end <= self.data.len() * 8).then(|| self.position = end)
-    }
-
-    /// `uvlc()`: leading zeros, a one, then as many value bits.
-    fn uvlc(&mut self) -> Option<u32> {
-        let mut zeros = 0;
-        while self.bit()? == 0 {
-            zeros += 1;
-            if zeros >= 32 {
-                return Some(u32::MAX);
-            }
+/// `uvlc()`: leading zeros, a one, then as many value bits.
+fn uvlc(bits: &mut Bits<'_>) -> io::Result<u32> {
+    let mut zeros = 0;
+    while !bits.read_bit()? {
+        zeros += 1;
+        if zeros >= 32 {
+            return Ok(u32::MAX);
         }
-        Some(self.read(zeros)? + ((1 << zeros) - 1))
     }
+    Ok(bits.read_var::<u32>(zeros)? + ((1 << zeros) - 1))
 }
 
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use bitstream_io::{BitWrite, BitWriter};
 
     /// Writes bits most significant first.
-    #[derive(Default)]
-    struct Writer {
-        bytes: Vec<u8>,
-        bits: usize,
-    }
+    struct Writer(BitWriter<Vec<u8>, BigEndian>);
 
     impl Writer {
+        fn new() -> Self {
+            Self(BitWriter::new(Vec::new()))
+        }
+
         fn put(&mut self, count: u32, value: u32) -> &mut Self {
-            for shift in (0..count).rev() {
-                if self.bits.is_multiple_of(8) {
-                    self.bytes.push(0);
-                }
-                let bit = u8::try_from((value >> shift) & 1).unwrap();
-                *self.bytes.last_mut().unwrap() |= bit << (7 - self.bits % 8);
-                self.bits += 1;
-            }
+            self.0.write_var(count, value).unwrap();
             self
+        }
+
+        /// The bits written, the last byte padded with zeros.
+        fn into_bytes(mut self) -> Vec<u8> {
+            self.0.byte_align().unwrap();
+            self.0.into_writer()
         }
     }
 
     /// A 1920×1080 main-profile sequence header at level 4.0 (8), with every optional part
     /// before `color_config()` present, BT.709 colour and chroma at the top-left sample.
     fn elaborate_sequence_header() -> Vec<u8> {
-        let mut bits = Writer::default();
+        let mut bits = Writer::new();
         bits.put(3, 0).put(1, 0).put(1, 0);
         // Timing info with an equal picture interval (uvlc 0 is a single 1 bit), then a
         // decoder model with 10-bit buffer delays.
@@ -479,7 +460,7 @@ pub(super) mod tests {
             .put(1, 0)
             .put(2, 1);
         bits.put(1, 0);
-        bits.bytes
+        bits.into_bytes()
     }
 
     fn obu(kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -564,7 +545,7 @@ pub(super) mod tests {
                 },
             }
         );
-        assert!(SequenceHeader::parse(&elaborate_sequence_header()[..20]).is_none());
+        assert!(SequenceHeader::parse(&elaborate_sequence_header()[..20]).is_err());
     }
 
     #[test]

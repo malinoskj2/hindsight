@@ -20,16 +20,8 @@ const DOT_RADIUS: f32 = 0.11;
 const SUPERSAMPLE: u32 = 4;
 
 /// Sizes stored in the `.ico` resource; Explorer and the Start menu pick the closest.
+#[cfg(windows)]
 const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
-/// The number of sizes, as the `ICONDIR` header stores it.
-const ENTRY_COUNT: u16 = 7;
-const _: () = assert!(ENTRY_COUNT as usize == ICO_SIZES.len());
-/// The `ICONDIR` header: reserved, type and entry count, two bytes each.
-const ICO_HEADER_BYTES: usize = 6;
-/// One `ICONDIRENTRY` per size.
-const ICO_ENTRY_BYTES: usize = 16;
-/// The `BITMAPINFOHEADER` that starts each image.
-const BITMAP_HEADER_BYTES: u32 = 40;
 
 /// How many of a pixel's subsamples fall inside the tile, and how many of those land on the
 /// glyph and on the dot.
@@ -77,23 +69,21 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
 }
 
 /// The icon as a Windows `.ico` file with 32-bit BMP entries for every size in `ICO_SIZES`.
+/// BMP rather than PNG entries, even at 256 pixels, so that every icon reader understands them.
+#[cfg(windows)]
 pub(crate) fn ico() -> Vec<u8> {
-    let header_bytes = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * ICO_SIZES.len();
-    let mut directory = Vec::with_capacity(header_bytes);
-    directory.extend_from_slice(&0_u16.to_le_bytes());
-    directory.extend_from_slice(&1_u16.to_le_bytes());
-    directory.extend_from_slice(&ENTRY_COUNT.to_le_bytes());
-
-    let mut images = Vec::new();
+    let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
     for size in ICO_SIZES {
-        let image = bmp_entry(size);
-        let offset = header_bytes + images.len();
-        directory.extend_from_slice(&directory_entry(size, image.len(), offset));
-        images.extend_from_slice(&image);
+        let image = ico::IconImage::from_rgba_data(size, size, rgba(size));
+        // Encoding into memory fails only for bit depths this image never uses.
+        let entry = ico::IconDirEntry::encode_as_bmp(&image).expect("the icon encodes as a BMP");
+        directory.add_entry(entry);
     }
-
-    directory.extend_from_slice(&images);
+    let mut bytes = Vec::new();
     directory
+        .write(&mut bytes)
+        .expect("writing to memory cannot fail");
+    bytes
 }
 
 /// One RGBA pixel: the share of its subsamples inside the tile is its alpha, and the shares of
@@ -151,62 +141,6 @@ fn to_byte(value: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
-/// The `ICONDIRENTRY` of a 32-bit image `size` pixels square, `length` bytes long and starting
-/// `offset` bytes into the file.
-fn directory_entry(size: u32, length: usize, offset: usize) -> [u8; ICO_ENTRY_BYTES] {
-    // 256 is stored as 0 in the one-byte dimension fields.
-    let dimension = u8::try_from(size).unwrap_or(0);
-    let mut entry = [0; ICO_ENTRY_BYTES];
-    entry[0] = dimension;
-    entry[1] = dimension;
-    entry[4..6].copy_from_slice(&1_u16.to_le_bytes());
-    entry[6..8].copy_from_slice(&32_u16.to_le_bytes());
-    entry[8..12].copy_from_slice(&length_field(length).to_le_bytes());
-    entry[12..16].copy_from_slice(&length_field(offset).to_le_bytes());
-    entry
-}
-
-/// A length or offset as a 32-bit `.ico` field; the icon is a few hundred kilobytes.
-fn length_field(bytes: usize) -> u32 {
-    u32::try_from(bytes).expect("icon data fits a 32-bit directory field")
-}
-
-/// A `BITMAPINFOHEADER` followed by bottom-up BGRA rows and an empty 1-bit mask.
-fn bmp_entry(size: u32) -> Vec<u8> {
-    let pixels = rgba(size);
-    let mask_bytes = (size.div_ceil(32) * 4 * size) as usize;
-    let mut entry = Vec::with_capacity(BITMAP_HEADER_BYTES as usize + pixels.len() + mask_bytes);
-    push_bitmap_header(&mut entry, size, mask_bytes);
-    push_bottom_up_bgra(&mut entry, &pixels, size);
-    entry.resize(entry.len() + mask_bytes, 0);
-    entry
-}
-
-/// Appends the `BITMAPINFOHEADER` of a 32-bit image `size` pixels square followed by a mask of
-/// `mask_bytes`; the height counts the mask's rows too, as icons require.
-fn push_bitmap_header(entry: &mut Vec<u8>, size: u32, mask_bytes: usize) {
-    entry.extend_from_slice(&BITMAP_HEADER_BYTES.to_le_bytes());
-    entry.extend_from_slice(&size.to_le_bytes());
-    entry.extend_from_slice(&(size * 2).to_le_bytes());
-    entry.extend_from_slice(&1_u16.to_le_bytes());
-    entry.extend_from_slice(&32_u16.to_le_bytes());
-    entry.extend_from_slice(&0_u32.to_le_bytes());
-    entry.extend_from_slice(&(size * size * 4 + length_field(mask_bytes)).to_le_bytes());
-    entry.extend_from_slice(&[0; 16]);
-}
-
-/// Appends the RGBA `pixels` of a `size`-wide image as BGRA rows, bottom row first.
-fn push_bottom_up_bgra(entry: &mut Vec<u8>, pixels: &[u8], size: u32) {
-    let row_bytes = (size * 4) as usize;
-    let bottom_up = pixels
-        .chunks_exact(row_bytes)
-        .rev()
-        .flat_map(|row| row.as_chunks::<4>().0);
-    for [red, green, blue, alpha] in bottom_up {
-        entry.extend_from_slice(&[*blue, *green, *red, *alpha]);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,28 +167,26 @@ mod tests {
         assert_eq!(at(48, 15), [0xEF, 0x44, 0x44, 0xFF]);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn the_ico_directory_lists_every_size_with_consistent_offsets() {
-        let bytes = ico();
-        assert_eq!(&bytes[..6], &[0, 0, 1, 0, 7, 0]);
+    fn the_ico_holds_every_size_as_a_32_bit_bmp_of_the_rendered_pixels() {
+        let directory = ico::IconDir::read(std::io::Cursor::new(ico())).unwrap();
 
-        let mut expected_offset = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * ICO_SIZES.len();
-        for (index, size) in ICO_SIZES.iter().enumerate() {
-            let start = ICO_HEADER_BYTES + ICO_ENTRY_BYTES * index;
-            let entry = &bytes[start..start + ICO_ENTRY_BYTES];
-            assert_eq!(u32::from(entry[0]), size % 256);
-            let length = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
-            let offset = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
-            assert_eq!(offset, expected_offset);
-            assert_eq!(
-                &bytes[offset..offset + 4],
-                &BITMAP_HEADER_BYTES.to_le_bytes()
-            );
-            expected_offset += length;
+        let sizes: Vec<u32> = directory
+            .entries()
+            .iter()
+            .map(ico::IconDirEntry::width)
+            .collect();
+        assert_eq!(sizes, ICO_SIZES);
+        for entry in directory.entries() {
+            assert!(!entry.is_png());
+            assert_eq!(entry.bits_per_pixel(), 32);
+            let image = entry.decode().unwrap();
+            assert_eq!(image.rgba_data(), rgba(entry.width()).as_slice());
         }
-        assert_eq!(expected_offset, bytes.len());
     }
 
+    #[cfg(windows)]
     #[test]
     fn the_committed_ico_matches_the_renderer() {
         let committed: &[u8] = include_bytes!("../../assets/hindsight.ico");

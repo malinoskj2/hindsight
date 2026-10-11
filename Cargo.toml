@@ -10,12 +10,14 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+bitstream-io = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+ico = { version = "0.6", default-features = false }
 tray-icon = { version = "0.26", default-features = false }
 winreg = "0.56"
 winsafe = { version = "0.0.29", default-features = false, features = ["dwm", "gdi", "gui", "user", "winmm"] }
@@ -41,6 +43,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 png = { version = "0.18", default-features = false }
+
+[target.'cfg(not(windows))'.dependencies]
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [build-dependencies]
 winresource = "0.1"
