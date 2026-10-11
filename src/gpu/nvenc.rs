@@ -463,10 +463,10 @@ impl Encoder {
         })
     }
 
-    /// Frees the slot the next frame goes into: when every slot is still in flight, waits for
-    /// the oldest and hands its packet to `output`.
+    /// Frees the slot the next frame goes into: while its own frame, or a repeat read from its
+    /// texture, is still in flight, waits for the oldest frame and hands its packet to `output`.
     pub(super) fn reserve(&mut self, output: &mut impl FnMut(Encoded)) -> Result<(), NvencError> {
-        if self.slots[self.next].in_flight.is_some() {
+        while self.slots[self.next].in_flight.is_some() || self.reads(Input::Slot(self.next)) {
             self.collect_one(Wait::Block, output)?;
         }
         Ok(())
@@ -518,9 +518,9 @@ impl Encoder {
     }
 
     /// Whether the encoder still needs the capture's surface `surface`: a frame in flight is
-    /// read from it, or it holds the latest picture, which a repeat copies.
+    /// read from it, or it holds the latest picture, which a repeat reads again.
     pub(super) fn holds_surface(&self, surface: usize) -> bool {
-        self.latest == Some(Input::Surface(surface)) || self.reads_surface(surface)
+        self.latest == Some(Input::Surface(surface)) || self.reads(Input::Surface(surface))
     }
 
     /// Waits until NVENC has finished reading the capture's surface `surface`, handing every
@@ -530,19 +530,19 @@ impl Encoder {
         surface: usize,
         output: &mut impl FnMut(Encoded),
     ) -> Result<(), NvencError> {
-        while self.reads_surface(surface) {
+        while self.reads(Input::Surface(surface)) {
             self.collect_one(Wait::Block, output)?;
         }
         Ok(())
     }
 
-    /// Whether a frame in flight is read from the capture's surface `surface`.
-    fn reads_surface(&self, surface: usize) -> bool {
+    /// Whether a frame in flight is read from `input`.
+    fn reads(&self, input: Input) -> bool {
         self.queue.iter().any(|&slot| {
             self.slots[slot]
                 .in_flight
                 .as_ref()
-                .is_some_and(|frame| frame.input == Input::Surface(surface))
+                .is_some_and(|frame| frame.input == input)
         })
     }
 
@@ -555,6 +555,21 @@ impl Encoder {
     /// [`register_surface`](Self::register_surface), as frame `index`.
     pub(super) fn submit_surface(&mut self, index: u64, surface: usize) -> Result<(), NvencError> {
         self.submit_input(index, true, Input::Surface(surface))
+    }
+
+    /// Encodes the newest submitted picture again as frame `index`, reading it where it is, and
+    /// reports whether it could: not while NVENC is still reading it for the frame before, since
+    /// a texture is mapped for one frame at a time. The caller then copies the picture into
+    /// [`input`](Self::input) and submits that instead.
+    pub(super) fn repeat(&mut self, index: u64) -> Result<bool, NvencError> {
+        let Some(latest) = self.latest else {
+            return Ok(false);
+        };
+        if self.reads(latest) {
+            return Ok(false);
+        }
+        self.submit_input(index, false, latest)?;
+        Ok(true)
     }
 
     /// Encodes `input` as frame `index` into the next slot's output buffer.
@@ -585,9 +600,9 @@ impl Encoder {
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
         map.registered_resource = registered;
         let map_input = entry_point(self.api.map_input_resource, "nvEncMapInputResource")?;
-        // SAFETY: the resource is registered and not currently mapped: a slot's texture is
-        // mapped only while its own frame is in flight, a capture surface only while the one
-        // frame read from it is: the capture does not draw into a surface again before
+        // SAFETY: the resource is registered and not currently mapped: a texture is mapped
+        // only while the one frame read from it is in flight (`reserve` and `repeat` check
+        // that first), and the capture does not draw into a surface again before
         // `release_surface` or `holds_surface` says the encoder is done with it.
         self.check("nvEncMapInputResource", unsafe {
             map_input(self.session, &raw mut map)

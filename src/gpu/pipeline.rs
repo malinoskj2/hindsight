@@ -143,7 +143,8 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         }
         capture.release_surfaces(&|surface| encoder.holds_surface(surface));
         match fill_input(&device, &mut *capture, &encoder, (width, height))? {
-            Input::Ready { fresh } => encoder.submit(index, fresh)?,
+            Input::Ready => encoder.submit(index, true)?,
+            Input::Repeat => repeat_latest(&device, &mut encoder, index)?,
             Input::InSurface(surface) => submit_surface(
                 &device,
                 &*capture,
@@ -195,6 +196,20 @@ fn submit_surface(
     encoder.submit_surface(index, surface)
 }
 
+/// Submits the newest picture again as frame `index`, since the screen did not change: NVENC
+/// reads it where it is, or, while it is still reading it for the frame before, from a copy in
+/// the encoder's input.
+fn repeat_latest(device: &Device, encoder: &mut Encoder, index: u64) -> Result<(), NvencError> {
+    if encoder.repeat(index)? {
+        return Ok(());
+    }
+    let latest = encoder
+        .latest()
+        .expect("a repeat is asked for only once a picture has been submitted");
+    device.copy(encoder.input(), latest);
+    encoder.submit(index, false)
+}
+
 /// Creates the device to capture and encode on, logs it, and raises its GPU thread priority
 /// where Windows allows.
 fn open_device(config: &Config) -> Result<Device> {
@@ -244,8 +259,10 @@ impl Keyframes {
 
 /// What a tick left in the encoder's input.
 enum Input {
-    /// A picture to submit, which is `fresh` unless it repeats the previous one.
-    Ready { fresh: bool },
+    /// A new picture to submit.
+    Ready,
+    /// The screen did not change: the newest picture is to be submitted again.
+    Repeat,
     /// A new picture to submit from the capture's surface with this index.
     InSurface(usize),
     /// Nothing has been captured yet; there is no picture to repeat.
@@ -255,29 +272,24 @@ enum Input {
 }
 
 /// Fills the input of the slot [`Encoder::reserve`] freed with the newest captured picture of
-/// `width` × `height`, or with the previous one when the screen did not change.
+/// `width` × `height`, unless the capture left it in a surface of its own or the screen did not
+/// change.
 fn fill_input(
     device: &Device,
     capture: &mut dyn capture::Source,
     encoder: &Encoder,
     (width, height): (u32, u32),
 ) -> Result<Input, CaptureError> {
-    let input = encoder.input();
-    let frame = match capture.take(device, input, width, height) {
+    let frame = match capture.take(device, encoder.input(), width, height) {
         Ok(frame) => frame,
         Err(CaptureError::Closed) => return Ok(Input::Ended(Ended::Closed)),
         Err(error) => return Err(error),
     };
     Ok(match frame {
-        Frame::Fresh => Input::Ready { fresh: true },
+        Frame::Fresh => Input::Ready,
         Frame::InSurface(surface) => Input::InSurface(surface),
-        Frame::Unchanged => match encoder.latest() {
-            Some(latest) => {
-                device.copy(input, latest);
-                Input::Ready { fresh: false }
-            }
-            None => Input::Empty,
-        },
+        Frame::Unchanged if encoder.latest().is_some() => Input::Repeat,
+        Frame::Unchanged => Input::Empty,
         Frame::Resized => Input::Ended(Ended::Resized),
     })
 }
