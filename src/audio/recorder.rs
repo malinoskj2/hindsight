@@ -1,6 +1,6 @@
 //! The audio thread of a session: it opens the default output device's loopback capture and
-//! the AAC encoder, then reads, places and encodes every packet as it arrives, until the
-//! session stops it. It keeps the sound unbroken on the shared clock through everything a
+//! the AAC encoder, then every few packets reads, places and encodes what has arrived, until
+//! the session stops it. It keeps the sound unbroken on the shared clock through everything a
 //! device does: silence fills a gap, a quiet device (Windows sends a loopback capture nothing
 //! while nothing plays), a lost device and the time a reopen takes; a packet marked as a
 //! discontinuity is simply stamped later than the run expects, which reads as a gap.
@@ -8,7 +8,7 @@
 use super::{
     CHANNELS, SAMPLE_RATE,
     aac::{self, Encoder, MediaFoundation},
-    loopback::{self, Com, Devices, Loopback, OpenError, Packet, Signal, Wake},
+    loopback::{self, Com, Devices, Loopback, OpenError, Packet, Signal, Wake, Watch},
     pcm::{self, Layout},
     timeline::Timeline,
 };
@@ -24,8 +24,13 @@ use std::{
 };
 use windows::Win32::{Foundation::HANDLE, Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED};
 
-/// The longest the thread sleeps while no sound arrives, before it fills in silence and looks
-/// at the device again.
+/// How often the thread reads the open capture: three of the audio engine's 10 ms packets at a
+/// time, so it wakes a third as often as a capture that signals every packet would wake it,
+/// for 20 ms more latency, which a replay buffer never notices. The capture buffer holds 200 ms,
+/// so a late read loses nothing.
+const READ_INTERVAL: Duration = Duration::from_millis(30);
+/// The longest the thread sleeps while no device is open, before it fills in silence and tries
+/// the device again.
 const WAKE_INTERVAL: Duration = Duration::from_millis(100);
 /// How far behind the present silence is filled in while nothing arrives, in clock ticks:
 /// 500 ms, far more than the capture's latency, so a packet that is merely late is not taken
@@ -33,7 +38,8 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(100);
 const SILENCE_LAG: i64 = CLOCK_RATE / 2;
 /// How often a device that could not be opened is tried again.
 const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
-/// How often the thread checks whether the default output device changed.
+/// How often the thread asks which output device is the default, when Windows could not be
+/// asked to say so itself.
 const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Silence encoded in a row before more is skipped rather than encoded: enough to push out
 /// everything the encoder holds back and its priming, with a frame to spare, so every frame it
@@ -122,10 +128,20 @@ fn record(live: &Live, stop: &Signal) {
         }
     };
 
-    let mut device = Device::default();
+    let watch = match devices.watch() {
+        Ok(watch) => Some(watch),
+        Err(error) => {
+            log::warning(format!(
+                "Windows will not report audio device changes ({error}); checking every {} s instead",
+                DEFAULT_CHECK_INTERVAL.as_secs()
+            ));
+            None
+        }
+    };
+    let mut device = Device::new(watch);
     loop {
         device.update(&devices);
-        if let Wake::Stop = loopback::wait(stop, device.event(), WAKE_INTERVAL) {
+        if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
             break;
         }
         let result = device
@@ -147,9 +163,11 @@ fn record(live: &Live, stop: &Signal) {
 
 /// The capture of the default output device, opened again whenever it fails or another device
 /// becomes the default.
-#[derive(Default)]
 struct Device {
     loopback: Option<Loopback>,
+    /// Windows' word on default-device changes, when it could be asked; otherwise the device
+    /// is polled.
+    watch: Option<Watch>,
     /// When the next attempt to open the device, or the next look at which one is the default,
     /// is due.
     due: Option<Instant>,
@@ -160,15 +178,39 @@ struct Device {
 }
 
 impl Device {
-    /// The event of the open capture, set when sound is ready.
-    fn event(&self) -> Option<HANDLE> {
-        self.loopback.as_ref().map(Loopback::event)
+    fn new(watch: Option<Watch>) -> Self {
+        Self {
+            loopback: None,
+            watch,
+            due: None,
+            opened_before: false,
+            reported: false,
+        }
+    }
+
+    /// How long to sleep before the next read: a few packets' worth while a device is open,
+    /// longer while there is none.
+    fn interval(&self) -> Duration {
+        if self.loopback.is_some() {
+            READ_INTERVAL
+        } else {
+            WAKE_INTERVAL
+        }
+    }
+
+    /// The event that ends a sleep early when the default device changes.
+    fn wake(&self) -> Option<HANDLE> {
+        self.watch.as_ref().map(Watch::event)
     }
 
     /// Opens the device when an attempt is due, and closes it when another one has become the
     /// default, so the next update opens that one.
     fn update(&mut self, devices: &Devices) {
         let now = Instant::now();
+        if self.watch.as_ref().is_some_and(Watch::changed) {
+            self.switch(devices, now);
+            return;
+        }
         if self.due.is_some_and(|due| now < due) {
             return;
         }
@@ -176,13 +218,19 @@ impl Device {
             self.open(devices, now);
             return;
         };
-        if devices.default_id().is_some_and(|id| id != open.id()) {
-            log::info("The default audio output changed; switching to it");
-            self.loopback = None;
-            self.open(devices, now);
+        if self.watch.is_none() && devices.default_id().is_some_and(|id| id != open.id()) {
+            self.switch(devices, now);
             return;
         }
         self.due = Some(now + DEFAULT_CHECK_INTERVAL);
+    }
+
+    /// Moves to the device that has become the default.
+    fn switch(&mut self, devices: &Devices, now: Instant) {
+        if self.loopback.take().is_some() {
+            log::info("The default audio output changed; switching to it");
+        }
+        self.open(devices, now);
     }
 
     /// Opens the default output device, logging the result once.

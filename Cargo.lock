@@ -304,6 +304,7 @@ dependencies = [
  "thiserror",
  "tray-icon",
  "windows",
+ "windows-core",
  "winreg",
  "winresource",
  "winsafe",

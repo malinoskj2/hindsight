@@ -1,22 +1,25 @@
 //! WASAPI loopback capture of the default output device: a copy of everything the system plays
-//! through it, delivered in packets of about 10 ms, each stamped with the performance-counter
-//! time of its first sample. The audio thread waits on the capture's event and on its own stop
-//! signal, so it sleeps until there is sound to read or it is told to finish.
+//! through it, in packets of about 10 ms (the audio engine's period), each stamped with the
+//! performance-counter time of its first sample. The capture is not event-driven: the audio
+//! thread wakes on its own timer a few packets at a time and drains whatever has gathered, which
+//! costs a third of the wake-ups of being woken for every packet, and the capture buffer holds
+//! far more than one timer period.
 
 use super::pcm::{Layout, Sample};
-use std::{ffi::c_void, time::Duration};
+use std::{ffi::c_void, sync::Arc, time::Duration};
 use windows::{
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-        Foundation::{HANDLE, WAIT_OBJECT_0},
+        Foundation::{HANDLE, PROPERTYKEY, WAIT_OBJECT_0},
         Media::{
             Audio::{
                 AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, IAudioCaptureClient, IAudioClient,
-                IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
-                WAVEFORMATEXTENSIBLE, eConsole, eRender,
+                AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                DEVICE_STATE, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IMMDevice,
+                IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
+                MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole,
+                eRender,
             },
             MediaFoundation::{MFAudioFormat_Float, MFAudioFormat_PCM},
         },
@@ -26,10 +29,12 @@ use windows::{
                 CoUninitialize, STGM_READ,
                 StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             },
-            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
+            Threading::{
+                CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+            },
         },
     },
-    core::{Owned, PCWSTR, PWSTR},
+    core::{Owned, PCWSTR, PWSTR, implement},
 };
 
 /// The format tags of float and extensible wave formats, which the audio headers name in
@@ -39,7 +44,7 @@ const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// The bytes an extensible format adds to the basic one.
 const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
 /// How much sound the capture buffer holds, in 100 ns units: 200 ms, so the thread may be late
-/// by many packets before anything is lost.
+/// by many of its read intervals before anything is lost.
 const BUFFER_DURATION: i64 = 2_000_000;
 /// 32-bit float samples, in bits.
 const FLOAT_BITS: u16 = 32;
@@ -64,7 +69,8 @@ impl Drop for Com {
     }
 }
 
-/// An event another thread sets to tell the audio thread to finish.
+/// An event one thread sets to tell the audio thread something: to finish, or that the default
+/// output device changed.
 pub(crate) struct Signal(Owned<HANDLE>);
 
 // SAFETY: an event handle may be waited on and set from any thread; the handle is only closed
@@ -81,10 +87,21 @@ impl Signal {
         Ok(Self(unsafe { Owned::new(event) }))
     }
 
-    /// Sets the event; it stays set.
+    /// Sets the event; it stays set until cleared.
     pub(crate) fn set(&self) {
         // SAFETY: the event is open.
         let _ = unsafe { SetEvent(*self.0) };
+    }
+
+    /// Whether the event is set, clearing it if so.
+    fn take(&self) -> bool {
+        // SAFETY: the event is open; a zero timeout only looks at its state.
+        let set = unsafe { WaitForSingleObject(*self.0, 0) } == WAIT_OBJECT_0;
+        if set {
+            // SAFETY: the event is open.
+            let _ = unsafe { ResetEvent(*self.0) };
+        }
+        set
     }
 }
 
@@ -92,14 +109,14 @@ impl Signal {
 pub(crate) enum Wake {
     /// The stop signal is set.
     Stop,
-    /// The capture has sound to read, or the timeout passed.
+    /// The timeout passed or `wake` is set: it is time to look at the device and read.
     Read,
 }
 
-/// Waits until `stop` is set, `ready` (a capture's event) is, or `timeout` passes.
-pub(crate) fn wait(stop: &Signal, ready: Option<HANDLE>, timeout: Duration) -> Wake {
+/// Waits until `stop` is set, `wake` (a change signal) is, or `timeout` passes.
+pub(crate) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wake {
     let mut handles = vec![*stop.0];
-    handles.extend(ready);
+    handles.extend(wake);
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     // SAFETY: both handles are open events for the length of the call.
     let woken = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
@@ -155,17 +172,8 @@ impl Devices {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(failed("activate the audio client"))?;
         let layout = initialize(&client)?;
-        // SAFETY: an unnamed auto-reset event, initially clear, with default security.
-        let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
-            .map_err(failed("create the audio event"))?;
-        // SAFETY: the event was just created, and only this `Owned` closes it.
-        let event = unsafe { Owned::new(event) };
-        // SAFETY: calls on the initialised client; the event outlives it, since both live in
-        // the returned capture and the client is stopped and released first.
+        // SAFETY: calls on the initialised client.
         let capture = unsafe {
-            client
-                .SetEventHandle(*event)
-                .map_err(failed("set the audio event"))?;
             let capture: IAudioCaptureClient = client
                 .GetService()
                 .map_err(failed("get the capture client"))?;
@@ -175,11 +183,114 @@ impl Devices {
         Ok(Loopback {
             client,
             capture,
-            event,
             layout,
             id: id(&device).unwrap_or_default(),
             name: friendly_name(&device).unwrap_or_else(|| "the default output".to_owned()),
         })
+    }
+
+    /// Asks Windows to say when the default output device changes, so the audio thread need
+    /// not keep asking. The watch ends when it is dropped.
+    pub(crate) fn watch(&self) -> windows::core::Result<Watch> {
+        let changed = Arc::new(Signal::new()?);
+        let listener: IMMNotificationClient = Listener(Arc::clone(&changed)).into();
+        // SAFETY: registers the listener with the live enumerator; `Watch` unregisters it
+        // before either is released.
+        unsafe { self.0.RegisterEndpointNotificationCallback(&listener) }?;
+        Ok(Watch {
+            devices: self.0.clone(),
+            listener,
+            changed,
+        })
+    }
+}
+
+/// A registered request to be told about device changes; sets its signal when the default
+/// output for games and media changes.
+pub(crate) struct Watch {
+    devices: IMMDeviceEnumerator,
+    listener: IMMNotificationClient,
+    changed: Arc<Signal>,
+}
+
+impl Watch {
+    /// The event set when the default output device has changed, for waiting on.
+    pub(crate) fn event(&self) -> HANDLE {
+        *self.changed.0
+    }
+
+    /// Whether the default output device changed since the last call.
+    pub(crate) fn changed(&self) -> bool {
+        self.changed.take()
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        // SAFETY: unregisters the listener this watch registered, while both are still alive.
+        let _ = unsafe {
+            self.devices
+                .UnregisterEndpointNotificationCallback(&self.listener)
+        };
+    }
+}
+
+use listener::Listener;
+
+/// The COM object Windows calls on its own thread about device changes. In a module of its own
+/// because the glue the `implement` macro writes takes a reference as a raw pointer and inlines
+/// always, two pedantic lints this crate has no say over.
+mod listener {
+    #![allow(clippy::ref_as_ptr, clippy::inline_always)]
+
+    use super::{
+        DEVICE_STATE, EDataFlow, ERole, IMMNotificationClient, IMMNotificationClient_Impl, PCWSTR,
+        PROPERTYKEY, Signal, eConsole, eRender, implement,
+    };
+    use std::sync::Arc;
+
+    /// Sets its signal when the default output device for games and media changes. Only that
+    /// matters: a device that goes away while open is noticed by the capture failing, and one
+    /// that is merely added or renamed changes nothing.
+    #[implement(IMMNotificationClient)]
+    pub(super) struct Listener(pub(super) Arc<Signal>);
+
+    impl IMMNotificationClient_Impl for Listener_Impl {
+        fn OnDeviceStateChanged(
+            &self,
+            _id: &PCWSTR,
+            _state: DEVICE_STATE,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDeviceAdded(&self, _id: &PCWSTR) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDeviceRemoved(&self, _id: &PCWSTR) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDefaultDeviceChanged(
+            &self,
+            flow: EDataFlow,
+            role: ERole,
+            _id: &PCWSTR,
+        ) -> windows::core::Result<()> {
+            if flow == eRender && role == eConsole {
+                self.0.set();
+            }
+            Ok(())
+        }
+
+        fn OnPropertyValueChanged(
+            &self,
+            _id: &PCWSTR,
+            _key: &PROPERTYKEY,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -188,7 +299,7 @@ impl Devices {
 /// asks Windows to convert to 48 kHz float stereo. Returns the layout of the samples it will
 /// deliver.
 fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
-    let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+    let flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
     // SAFETY: the mix format is allocated by COM, read while it lives, and freed below.
     let mix = unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?;
     let direct = mix_layout(mix);
@@ -329,18 +440,12 @@ pub(crate) struct Packet<'a> {
 pub(crate) struct Loopback {
     client: IAudioClient,
     capture: IAudioCaptureClient,
-    event: Owned<HANDLE>,
     layout: Layout,
     id: String,
     name: String,
 }
 
 impl Loopback {
-    /// The event set when sound is ready to read.
-    pub(crate) fn event(&self) -> HANDLE {
-        *self.event
-    }
-
     /// The layout of the samples in every packet.
     pub(crate) const fn layout(&self) -> Layout {
         self.layout
@@ -399,7 +504,7 @@ impl Loopback {
 
 impl Drop for Loopback {
     fn drop(&mut self) {
-        // SAFETY: stops the client before it and the event it signals are released.
+        // SAFETY: stops the client before it is released.
         let _ = unsafe { self.client.Stop() };
     }
 }

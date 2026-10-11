@@ -51,6 +51,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 png = { version = "0.18", default-features = false }
+# The `implement` macro behind the audio device listener names this crate directly.
+windows-core = "0.62"
 
 [target.'cfg(not(windows))'.dependencies]
 jiff = { version = "0.2", default-features = false, features = ["std"] }

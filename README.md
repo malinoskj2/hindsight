@@ -21,7 +21,7 @@ By default hindsight records **full-screen apps**: whatever app is in front with
 
 The other mode, **Whole desktop, always**, records the primary monitor from the moment hindsight starts, everything on it included.
 
-**Sound** is recorded too: whatever the default output device plays (the game, voice chat, music), as Windows mixes it, captured with WASAPI loopback and stored as AAC at 160 kb/s beside the video, starting and ending with it. If you switch output devices or unplug a headset, recording follows the new default device within a couple of seconds and the gap is silent. The microphone isn't recorded. Turn off **Record system sound** in Settings for silent clips.
+**Sound** is recorded too: whatever the default output device plays (the game, voice chat, music), as Windows mixes it, captured with WASAPI loopback and stored as AAC at 160 kb/s beside the video, starting and ending with it. If you switch output devices or unplug a headset, recording follows the new default device as soon as Windows reports the change and the gap is silent. The microphone isn't recorded. Turn off **Record system sound** in Settings for silent clips.
 
 ## Capture backends
 
@@ -72,7 +72,7 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 - **The GPU scheduler favours the copies.** The capture device raises its GPU thread priority and the process its GPU scheduling class (high, never realtime, which could starve the game of the GPU), so a game holding the GPU at 100% does not starve capture. Windows power throttling is turned off for the process.
 - **One keyframe every 30 frames**, as NVIDIA Instant Replay does, with the sequence header on every keyframe, so a clip can start at any of them and the buffer trims to within 30 frames of its length.
 - **The encoder is set up like Instant Replay's.** Preset P4 with high-quality tuning and no B-frames, single-pass VBR peaking at twice the bitrate you choose, and none of the rate-control extras (lookahead, adaptive quantization) that would cost the game GPU time. HEVC and AV1 stay within 16×16 to 32×32 blocks.
-- **Sound is the one stream the CPU encodes, and it is small.** The loopback capture wakes its own thread when the audio engine has a packet (every 10 ms while something plays), and Media Foundation's AAC encoder, the one Windows ships, turns it into 47 frames a second: about 1% of one core altogether (0.9% in hindsight and 0.2% in the Windows audio engine, measured with a game playing; see [the benchmarks](docs/benchmarks.md)), and 20 kB a second, under 1 MB for 30 seconds, in the buffer. Long silences are not encoded at all. With **Record system sound** off none of this runs.
+- **Sound is the one stream the CPU encodes, and it is small.** The loopback capture's thread wakes every 30 ms and reads the few packets the audio engine has gathered, and Media Foundation's AAC encoder, the one Windows ships, turns it into 47 frames a second: about 1% of one core altogether (0.9% in hindsight and 0.2% in the Windows audio engine, measured with a game playing; see [the benchmarks](docs/benchmarks.md)), and 20 kB a second, under 1 MB for 30 seconds, in the buffer. Long silences are not encoded at all. With **Record system sound** off none of this runs.
 
 Run as administrator for the highest GPU priority. To check parity yourself, compare CPU use and frame times (PresentMon or CapFrameX) with hindsight, with Instant Replay and with neither; PresentMon's present mode should stay *Hardware: Independent Flip*.
 
