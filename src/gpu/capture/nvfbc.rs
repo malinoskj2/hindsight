@@ -2,10 +2,13 @@
 //! The driver copies the display, cursor included, straight from the frame buffer it scans
 //! out, so it costs a game nothing that Windows composes.
 //!
-//! NvFBC on Windows writes into Direct3D 9 surfaces. Two are created on a Direct3D 9Ex device
-//! on the monitor's GPU, shared with the encoder's Direct3D 11 device: on each tick the grab
-//! the previous tick started is copied into the encoder's input texture on the GPU, and the
-//! next grab goes into the other surface, so the capture thread never waits for the GPU.
+//! NvFBC on Windows writes into Direct3D 9 surfaces. Three, as many as the driver takes, are
+//! created on a Direct3D 9Ex device on the monitor's GPU, shared with the encoder's Direct3D 11
+//! device: on each tick the grab the previous tick started is handed to the encoder, and the
+//! next grab goes into the next surface, so the capture thread never waits for the GPU. NVENC
+//! reads the surfaces in place once they are handed over; the surface the next grab goes into
+//! was last encoded two ticks earlier, which NVENC has almost always finished by then, and is
+//! waited for when it has not. Otherwise each grab is copied into the encoder's input texture.
 //! Every grab counts as a new frame, since the driver does not say whether the screen changed.
 //!
 //! The driver only lets a licensed application capture with NvFBC on a GeForce GPU: it must
@@ -52,8 +55,9 @@ use ffi::Zeroed;
 
 /// How long a grab may take on the GPU before the driver is judged to have stopped.
 const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
-/// Surfaces grabbed into in turn.
-const SLOT_COUNT: u32 = 2;
+/// Surfaces grabbed into in turn: the most the driver accepts (it refuses four), one for the
+/// grab on its way and two for the frames NVENC may still be reading.
+const SLOT_COUNT: u32 = 3;
 /// [`SLOT_COUNT`] as an array length.
 const SLOTS: usize = SLOT_COUNT as usize;
 
@@ -74,6 +78,8 @@ pub(super) struct Capture {
     pending: Option<usize>,
     /// The slot the next grab goes into.
     next: u32,
+    /// Whether the encoder reads the surfaces in place, so a finished grab is not copied.
+    handed_over: bool,
     size: (u32, u32),
     /// The captured monitor, checked for before a lost session is opened again.
     monitor: HMONITOR,
@@ -114,6 +120,7 @@ impl Capture {
         let slots = [
             create_slot(&d3d9_device, device, size)?,
             create_slot(&d3d9_device, device, size)?,
+            create_slot(&d3d9_device, device, size)?,
         ];
 
         let mut capture = Self {
@@ -125,6 +132,7 @@ impl Capture {
             session: None,
             pending: None,
             next: 0,
+            handed_over: false,
             size,
             monitor,
             window,
@@ -185,22 +193,24 @@ impl Capture {
         Ok(Frame::Unchanged)
     }
 
-    /// Copies the previous tick's grab into `target` once the GPU has finished it, and
-    /// reports whether there was one.
+    /// Waits for the GPU to finish the previous tick's grab and copies it into `target`, unless
+    /// the encoder reads it in place, and reports which slot it was in, if there was one.
     fn collect(
         &mut self,
         device: &Device,
         target: &ID3D11Texture2D,
         width: u32,
         height: u32,
-    ) -> Result<bool, CaptureError> {
+    ) -> Result<Option<usize>, CaptureError> {
         let Some(index) = self.pending.take() else {
-            return Ok(false);
+            return Ok(None);
         };
         let slot = &self.slots[index];
         wait_for(&slot.done)?;
-        device.copy_region(target, &slot.shared, width, height);
-        Ok(true)
+        if !self.handed_over {
+            device.copy_region(target, &slot.shared, width, height);
+        }
+        Ok(Some(index))
     }
 
     /// Starts a grab of the display into the next slot.
@@ -224,12 +234,16 @@ impl Capture {
     }
 
     /// Queues the query that tells when the grab just started into the next slot has finished
-    /// on the GPU, leaves that slot for the next tick to collect and sends the following grab
-    /// to the other slot.
+    /// on the GPU and sends both to the GPU, leaves that slot for the next tick to collect and
+    /// sends the following grab to the other slot.
     fn follow_grab(&mut self) -> Result<(), CaptureError> {
         let slot = &self.slots[self.next as usize];
         // SAFETY: marks the end of the grab's work on the device.
         unsafe { slot.done.Issue(D3DISSUE_END) }.map_err(failed("follow the NvFBC grab"))?;
+        // Left in Direct3D 9's command buffer, the grab's work and the query would only reach
+        // the GPU at the next tick's first look, which would then wait as long as a GPU busy
+        // with a game takes to get to them: about 0.8 ms of spinning per frame.
+        is_done(&slot.done)?;
         self.pending = Some(self.next as usize);
         self.next = (self.next + 1) % SLOT_COUNT;
         Ok(())
@@ -260,17 +274,30 @@ impl Source for Capture {
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
             Grab::Resized => return Ok(Frame::Resized),
-            Grab::Lost if collected => self.session = None,
+            Grab::Lost if collected.is_some() => self.session = None,
             Grab::Lost => {
                 self.session = None;
                 return self.reopen();
             }
         }
-        Ok(if collected {
-            Frame::Fresh
-        } else {
-            Frame::Unchanged
+        Ok(match collected {
+            Some(index) if self.handed_over => Frame::InSurface(index),
+            Some(_) => Frame::Fresh,
+            None => Frame::Unchanged,
         })
+    }
+
+    fn hand_over_surfaces(&mut self) -> bool {
+        self.handed_over = true;
+        true
+    }
+
+    fn surface(&self, index: usize) -> Option<ID3D11Texture2D> {
+        self.slots.get(index).map(|slot| slot.shared.clone())
+    }
+
+    fn next_surface(&self) -> Option<usize> {
+        self.handed_over.then_some(self.next as usize)
     }
 }
 
@@ -646,23 +673,25 @@ fn is_attached(monitor: HMONITOR) -> bool {
     unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
 }
 
+/// Whether the work before `query` has finished on the GPU; submits any of it still waiting in
+/// the device's command buffer.
+fn is_done(query: &IDirect3DQuery9) -> Result<bool, CaptureError> {
+    // The method's wrapper reports S_FALSE ("not yet") as success, so it is called directly.
+    // SAFETY: a live query; an event query takes no data buffer.
+    let result = unsafe {
+        (Interface::vtable(query).GetData)(query.as_raw(), ptr::null_mut(), 0, D3DGETDATA_FLUSH)
+    };
+    if result.is_err() {
+        return Err(failed("wait for the NvFBC grab")(result.into()));
+    }
+    Ok(result == S_OK)
+}
+
 /// Waits until the work before `query` has finished on the GPU, which it usually has: the
-/// grab was started a whole frame earlier.
+/// grab was sent to the GPU a whole frame earlier.
 fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
     let deadline = Instant::now() + GRAB_TIMEOUT;
-    loop {
-        // The method's wrapper reports S_FALSE ("not yet") as success, so it is called
-        // directly.
-        // SAFETY: a live query; an event query takes no data buffer.
-        let result = unsafe {
-            (Interface::vtable(query).GetData)(query.as_raw(), ptr::null_mut(), 0, D3DGETDATA_FLUSH)
-        };
-        if result == S_OK {
-            return Ok(());
-        }
-        if result.is_err() {
-            return Err(failed("wait for the NvFBC grab")(result.into()));
-        }
+    while !is_done(query)? {
         if Instant::now() >= deadline {
             return Err(CaptureError::Unsupported(
                 "the NVIDIA driver stopped completing NvFBC grabs".to_owned(),
@@ -670,6 +699,7 @@ fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
         }
         std::thread::yield_now();
     }
+    Ok(())
 }
 
 /// Wraps a driver status with the step that failed, for `map_err`; a refusal that trying again

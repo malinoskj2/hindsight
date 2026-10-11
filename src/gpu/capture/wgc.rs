@@ -1,6 +1,9 @@
 //! Windows Graphics Capture of a monitor or a window. Frames land in a free-threaded frame pool;
 //! on each tick the capture thread takes the newest one, copies it into the encoder's input
-//! texture on the GPU and hands the pool's buffer straight back to Windows.
+//! texture on the GPU and hands the pool's buffer straight back to Windows. Once the surfaces
+//! are handed over, the frame is not copied: NVENC reads the pool's buffer in place, and the
+//! frame is held, keeping Windows from drawing into that buffer, until the encoder is done with
+//! it; the pool then has buffers enough for the frames held besides the two it needs itself.
 
 use super::{CaptureError, Frame, Source, failed, monitor};
 use crate::{
@@ -39,6 +42,12 @@ use windows::{
 
 /// Buffers in the frame pool: one being written by Windows while the newest waits to be taken.
 const POOL_BUFFERS: i32 = 2;
+/// Frames the encoder may hold at once when it reads the pool's buffers in place: as many as it
+/// has frames in flight, the latest picture among them.
+const HELD_BUFFERS: i32 = 3;
+/// Distinct pool buffers this capture keeps track of; a pool that hands out more than it was
+/// created with has replaced its buffers, which are then copied rather than read in place.
+const MAX_SURFACES: usize = 8;
 
 /// A running Windows Graphics Capture of one monitor or window.
 pub(super) struct Capture {
@@ -53,6 +62,14 @@ pub(super) struct Capture {
     closed: Arc<AtomicBool>,
     /// The registration that sets `closed`, removed when dropped.
     closed_token: i64,
+    /// The device the pool was created on, to create it again with more buffers.
+    direct3d: IDirect3DDevice,
+    /// Whether the encoder reads the pool's buffers in place.
+    handed_over: bool,
+    /// The pool's buffers seen so far, by the index each is reported under.
+    surfaces: Vec<ID3D11Texture2D>,
+    /// The frame holding each of `surfaces`, while the encoder still needs it.
+    held: Vec<Option<Direct3D11CaptureFrame>>,
 }
 
 impl Capture {
@@ -86,6 +103,10 @@ impl Capture {
             captures_window: matches!(target, Target::Window { .. }),
             closed,
             closed_token,
+            direct3d,
+            handed_over: false,
+            surfaces: Vec::new(),
+            held: Vec::new(),
         })
     }
 }
@@ -122,10 +143,67 @@ impl Source for Capture {
         }
 
         let texture = frame_texture(&frame)?;
+        if self.handed_over
+            && let Some(index) = self.surface_index(&texture)
+        {
+            // Held until the encoder no longer needs the buffer.
+            if let Some(older) = self.held[index].replace(frame) {
+                let _ = older.Close();
+            }
+            return Ok(Frame::InSurface(index));
+        }
+        // Not handed over, or the pool replaced its buffers more often than any pool should.
         device.copy_region(target, &texture, width, height);
         // Returns the buffer to the pool; the copy above is already queued on the GPU.
         let _ = frame.Close();
         Ok(Frame::Fresh)
+    }
+
+    fn hand_over_surfaces(&mut self) -> bool {
+        // Nothing has been taken from the pool yet, so no frame is lost.
+        let recreated = self.pool.Recreate(
+            &self.direct3d,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            POOL_BUFFERS + HELD_BUFFERS,
+            self.size,
+        );
+        self.handed_over = recreated.is_ok();
+        self.handed_over
+    }
+
+    fn surface(&self, index: usize) -> Option<ID3D11Texture2D> {
+        self.surfaces.get(index).cloned()
+    }
+
+    fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
+        for (index, held) in self.held.iter_mut().enumerate() {
+            if held.is_some()
+                && !in_use(index)
+                && let Some(frame) = held.take()
+            {
+                let _ = frame.Close();
+            }
+        }
+    }
+}
+
+impl Capture {
+    /// The index `texture`, one of the pool's buffers, is reported under, given a new one the
+    /// first time it comes; `None` once more buffers than any pool keeps have come.
+    fn surface_index(&mut self, texture: &ID3D11Texture2D) -> Option<usize> {
+        if let Some(index) = self
+            .surfaces
+            .iter()
+            .position(|known| known.as_raw() == texture.as_raw())
+        {
+            return Some(index);
+        }
+        if self.surfaces.len() >= MAX_SURFACES {
+            return None;
+        }
+        self.surfaces.push(texture.clone());
+        self.held.push(None);
+        Some(self.surfaces.len() - 1)
     }
 }
 
@@ -133,6 +211,9 @@ impl Drop for Capture {
     fn drop(&mut self) {
         // Stops watching for the end of the capture before ending it, then frees the pool.
         let _ = self.item.RemoveClosed(self.closed_token);
+        for frame in self.held.iter_mut().filter_map(Option::take) {
+            let _ = frame.Close();
+        }
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }

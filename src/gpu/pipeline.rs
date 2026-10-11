@@ -93,6 +93,12 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
             bitrate: config.bitrate(),
         },
     )?;
+    // NVENC reads a capture's own surfaces in place where it can, which saves copying every
+    // frame into the encoder's input.
+    if capture.size() == (width, height) {
+        capture.hand_over_surfaces();
+    }
+    let mut copy_surfaces = false;
     let settings = encoder.settings();
     live.set_stream(Stream {
         codec: settings.codec,
@@ -125,8 +131,20 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         encoder.collect(&mut output)?;
 
         encoder.reserve(&mut output)?;
+        if let Some(surface) = capture.next_surface() {
+            encoder.release_surface(surface, &mut output)?;
+        }
+        capture.release_surfaces(&|surface| encoder.holds_surface(surface));
         match fill_input(&device, &mut *capture, &encoder, (width, height))? {
             Input::Ready { fresh } => encoder.submit(index, fresh)?,
+            Input::InSurface(surface) => submit_surface(
+                &device,
+                &*capture,
+                &mut encoder,
+                index,
+                surface,
+                &mut copy_surfaces,
+            )?,
             Input::Empty if first_frame_deadline.is_some_and(|deadline| index >= deadline) => {
                 break Ended::NoFrames;
             }
@@ -137,6 +155,37 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
 
     encoder.finish(&mut output)?;
     Ok(ended)
+}
+
+/// Submits the new picture in the capture's surface `surface` as frame `index`: in place,
+/// registering the surface with NVENC the first time it comes, or copied into the encoder's
+/// input once NVENC has refused a surface (`copy_instead`).
+fn submit_surface(
+    device: &Device,
+    capture: &dyn capture::Source,
+    encoder: &mut Encoder,
+    index: u64,
+    surface: usize,
+    copy_instead: &mut bool,
+) -> Result<(), NvencError> {
+    let texture = capture
+        .surface(surface)
+        .expect("a capture reports only surfaces of its own");
+    if !*copy_instead
+        && !encoder.has_surface(surface)
+        && let Err(error) = encoder.register_surface(surface, &texture)
+    {
+        log::warning(format!(
+            "NVENC could not read the captured surfaces directly ({error}); copying each frame instead"
+        ));
+        *copy_instead = true;
+    }
+    if *copy_instead {
+        let Settings { width, height, .. } = encoder.settings();
+        device.copy_region(encoder.input(), &texture, width, height);
+        return encoder.submit(index, true);
+    }
+    encoder.submit_surface(index, surface)
 }
 
 /// Creates the device to capture and encode on, logs it, and raises its GPU thread priority
@@ -190,6 +239,8 @@ impl Keyframes {
 enum Input {
     /// A picture to submit, which is `fresh` unless it repeats the previous one.
     Ready { fresh: bool },
+    /// A new picture to submit from the capture's surface with this index.
+    InSurface(usize),
     /// Nothing has been captured yet; there is no picture to repeat.
     Empty,
     /// The capture ended the session.
@@ -212,6 +263,7 @@ fn fill_input(
     };
     Ok(match frame {
         Frame::Fresh => Input::Ready { fresh: true },
+        Frame::InSurface(surface) => Input::InSurface(surface),
         Frame::Unchanged => match encoder.latest() {
             Some(latest) => {
                 device.copy(input, latest);

@@ -53,6 +53,9 @@ pub(crate) enum CaptureError {
 pub(super) enum Frame {
     /// A new picture was copied into the target.
     Fresh,
+    /// A new picture is in the source's own surface with this index, for the encoder to read
+    /// in place; nothing was copied. Only after [`Source::hand_over_surfaces`].
+    InSurface(usize),
     /// The screen has not changed since the last tick.
     Unchanged,
     /// The monitor's resolution, or the window's size, changed.
@@ -77,6 +80,28 @@ pub(super) trait Source {
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError>;
+
+    /// Switches the source, if it captures into textures of its own the size of
+    /// [`size`](Self::size), to leaving each new picture where it is and reporting it as
+    /// [`Frame::InSurface`] instead of copying it into the target; reports whether it did.
+    fn hand_over_surfaces(&mut self) -> bool {
+        false
+    }
+
+    /// The surface a [`Frame::InSurface`] named, which stays the same texture for the session.
+    fn surface(&self, _index: usize) -> Option<ID3D11Texture2D> {
+        None
+    }
+
+    /// The surface the next [`take`](Self::take) may capture into, for a source that chooses
+    /// it, which the encoder must have finished reading first.
+    fn next_surface(&self) -> Option<usize> {
+        None
+    }
+
+    /// Gives the surfaces the encoder no longer needs, those for which `in_use` is false, back
+    /// to a source that holds each until it is told so.
+    fn release_surfaces(&mut self, _in_use: &dyn Fn(usize) -> bool) {}
 }
 
 /// Paces a backend's attempts to open its capture again after Windows or the driver took it

@@ -6,6 +6,10 @@
 //! submits it, then picks up whichever earlier slots the GPU has finished; it only ever waits
 //! when every slot is still in flight. Frames are encoded straight from video memory, and only
 //! the compressed bitstream is copied to system memory.
+//!
+//! A capture that grabs into textures of its own can have them registered too
+//! ([`Encoder::register_surface`]), so NVENC reads each picture where the capture left it
+//! instead of from a copy in a slot's texture.
 
 use crate::config::Codec;
 use std::{collections::VecDeque, ffi::CStr, ptr};
@@ -117,12 +121,15 @@ pub(super) struct Encoder {
     session: ffi::Session,
     settings: Settings,
     slots: Vec<Slot>,
+    /// The capture's own textures registered for NVENC to read in place, by the capture's
+    /// index for each.
+    surfaces: Vec<Option<Surface>>,
     /// Slots submitted and not yet collected, oldest first.
     queue: VecDeque<usize>,
     /// The slot the next frame goes into.
     next: usize,
-    /// The slot of the newest submitted frame, whose texture holds the latest picture.
-    latest: Option<usize>,
+    /// The input of the newest submitted frame, whose texture holds the latest picture.
+    latest: Option<Input>,
     /// The device's lock, held around calls that touch its resources: the capture frame pool
     /// works on the same device from its own threads.
     device_lock: ID3D11Multithread,
@@ -132,11 +139,27 @@ pub(super) struct Encoder {
     library: Owned<HMODULE>,
 }
 
-/// A submitted frame, which keeps its slot's input mapped until it is collected.
+/// A submitted frame, which keeps its input mapped until it is collected.
 struct Frame {
     index: u64,
     fresh: bool,
+    input: Input,
     mapped: ffi::Mapped,
+}
+
+/// Where a frame's picture is read from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input {
+    /// The texture of the slot with this index.
+    Slot(usize),
+    /// The capture's surface with this index.
+    Surface(usize),
+}
+
+/// A texture of the capture's, registered with NVENC for the whole session.
+struct Surface {
+    texture: ID3D11Texture2D,
+    registered: ffi::Registered,
 }
 
 /// One input texture and what NVENC needs to encode it. The encoder releases the NVENC parts in
@@ -188,6 +211,7 @@ impl Encoder {
             session: ptr::null_mut(),
             settings,
             slots: Vec::with_capacity(SLOTS),
+            surfaces: Vec::new(),
             queue: VecDeque::with_capacity(SLOTS),
             next: 0,
             latest: None,
@@ -457,33 +481,114 @@ impl Encoder {
     /// The texture holding the newest submitted picture, to repeat when the screen did not
     /// change.
     pub(super) fn latest(&self) -> Option<&ID3D11Texture2D> {
-        self.latest.map(|slot| &self.slots[slot].texture)
+        self.latest.map(|input| match input {
+            Input::Slot(slot) => &self.slots[slot].texture,
+            Input::Surface(surface) => &self.registered_surface(surface).texture,
+        })
+    }
+
+    /// The capture's surface `surface`, which must have been registered.
+    fn registered_surface(&self, surface: usize) -> &Surface {
+        self.surfaces[surface]
+            .as_ref()
+            .expect("only registered surfaces are submitted")
+    }
+
+    /// Whether the capture's surface `surface` is registered.
+    pub(super) fn has_surface(&self, surface: usize) -> bool {
+        self.surfaces.get(surface).is_some_and(Option::is_some)
+    }
+
+    /// Registers `texture`, the capture's surface `surface` and the size of the encoded frame,
+    /// so that [`submit_surface`](Self::submit_surface) can encode it where it is.
+    pub(super) fn register_surface(
+        &mut self,
+        surface: usize,
+        texture: &ID3D11Texture2D,
+    ) -> Result<(), NvencError> {
+        let registered = self.register_texture(texture)?;
+        if self.surfaces.len() <= surface {
+            self.surfaces.resize_with(surface + 1, || None);
+        }
+        self.surfaces[surface] = Some(Surface {
+            texture: texture.clone(),
+            registered,
+        });
+        Ok(())
+    }
+
+    /// Whether the encoder still needs the capture's surface `surface`: a frame in flight is
+    /// read from it, or it holds the latest picture, which a repeat copies.
+    pub(super) fn holds_surface(&self, surface: usize) -> bool {
+        self.latest == Some(Input::Surface(surface)) || self.reads_surface(surface)
+    }
+
+    /// Waits until NVENC has finished reading the capture's surface `surface`, handing every
+    /// frame collected meanwhile to `output`, so that the capture may draw into it again.
+    pub(super) fn release_surface(
+        &mut self,
+        surface: usize,
+        output: &mut impl FnMut(Encoded),
+    ) -> Result<(), NvencError> {
+        while self.reads_surface(surface) {
+            self.collect_one(Wait::Block, output)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a frame in flight is read from the capture's surface `surface`.
+    fn reads_surface(&self, surface: usize) -> bool {
+        self.queue.iter().any(|&slot| {
+            self.slots[slot]
+                .in_flight
+                .as_ref()
+                .is_some_and(|frame| frame.input == Input::Surface(surface))
+        })
     }
 
     /// Encodes the texture [`input`](Self::input) returned as frame `index`.
     pub(super) fn submit(&mut self, index: u64, fresh: bool) -> Result<(), NvencError> {
+        self.submit_input(index, fresh, Input::Slot(self.next))
+    }
+
+    /// Encodes the new picture in the capture's surface `surface`, registered with
+    /// [`register_surface`](Self::register_surface), as frame `index`.
+    pub(super) fn submit_surface(&mut self, index: u64, surface: usize) -> Result<(), NvencError> {
+        self.submit_input(index, true, Input::Surface(surface))
+    }
+
+    /// Encodes `input` as frame `index` into the next slot's output buffer.
+    fn submit_input(&mut self, index: u64, fresh: bool, input: Input) -> Result<(), NvencError> {
         let _locked = Locked::new(&self.device_lock);
         let slot = self.next;
-        let map = self.map_input(slot)?;
+        let registered = match input {
+            Input::Slot(slot) => self.slots[slot].registered,
+            Input::Surface(surface) => self.registered_surface(surface).registered,
+        };
+        let map = self.map_input(registered)?;
         self.encode_picture(slot, index, &map)?;
         self.slots[slot].in_flight = Some(Frame {
             index,
             fresh,
+            input,
             mapped: map.mapped_resource,
         });
         self.queue.push_back(slot);
-        self.latest = Some(slot);
+        self.latest = Some(input);
         self.next = (slot + 1) % SLOTS;
         Ok(())
     }
 
-    /// Maps the registered texture of `slot` so NVENC can read it.
-    fn map_input(&self, slot: usize) -> Result<ffi::MapInputResource, NvencError> {
+    /// Maps the `registered` texture so NVENC can read it.
+    fn map_input(&self, registered: ffi::Registered) -> Result<ffi::MapInputResource, NvencError> {
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
-        map.registered_resource = self.slots[slot].registered;
+        map.registered_resource = registered;
         let map_input = entry_point(self.api.map_input_resource, "nvEncMapInputResource")?;
-        // SAFETY: the resource is registered and not currently mapped.
+        // SAFETY: the resource is registered and not currently mapped: a slot's texture is
+        // mapped only while its own frame is in flight, a capture surface only while the one
+        // frame read from it is: the capture does not draw into a surface again before
+        // `release_surface` or `holds_surface` says the encoder is done with it.
         self.check("nvEncMapInputResource", unsafe {
             map_input(self.session, &raw mut map)
         })?;
@@ -681,6 +786,17 @@ impl Encoder {
         }
     }
 
+    /// Unregisters the capture's surfaces, none of which may still be mapped.
+    fn unregister_surfaces(&self) {
+        let Some(unregister) = self.api.unregister_resource else {
+            return;
+        };
+        for surface in self.surfaces.iter().flatten() {
+            // SAFETY: the resource is registered and unmapped.
+            let _ = unsafe { unregister(self.session, surface.registered) };
+        }
+    }
+
     /// Undoes [`prepare_slot`](Self::prepare_slot) in reverse, after unmapping the input of a
     /// frame still in flight; each step is skipped when its part was never created.
     fn release_slot(&self, slot: &Slot) {
@@ -727,6 +843,8 @@ impl Drop for Encoder {
         for slot in &self.slots {
             self.release_slot(slot);
         }
+        // Every frame in flight was unmapped with its slot.
+        self.unregister_surfaces();
         if let Some(destroy) = self.api.destroy_encoder {
             // SAFETY: every buffer and registration of the session is gone.
             let _ = unsafe { destroy(self.session) };
