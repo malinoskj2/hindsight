@@ -11,7 +11,7 @@ use self::{
 };
 use crate::{
     APP_NAME,
-    config::{Backend, Config, Mode},
+    config::{Config, Mode},
     log,
     service::Worker,
     sys::{
@@ -438,11 +438,11 @@ impl Main {
         self.watch_foreground();
     }
 
-    /// Choosing NvFBC asks for the key NVIDIA issued, as NVIDIA's own setup does; without one
-    /// the previous choice comes back. The choice takes effect on Apply, like every setting.
+    /// Choosing either NvFBC backend asks for the key NVIDIA issued, as NVIDIA's own setup
+    /// does; without one the previous choice comes back. The choice takes effect on Apply,
+    /// like every setting.
     fn on_backend_chosen(&self) {
-        let accepted =
-            self.settings.chosen_backend() != Backend::Nvfbc || nvfbc_key::ask(&self.wnd);
+        let accepted = !self.settings.chosen_backend().uses_nvfbc() || nvfbc_key::ask(&self.wnd);
         self.settings.settle_backend(accepted);
     }
 

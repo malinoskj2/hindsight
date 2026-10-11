@@ -18,10 +18,24 @@
 //! Like Desktop Duplication, NvFBC sees whole monitors connected to the GPU, so a window target
 //! is recorded through its monitor. When the driver ends the session (a mode change, the
 //! secure desktop) it is opened again in place, keeping the buffer, unless the size changed.
+//!
+//! Three environment variables, read once when a capture starts and meant for measuring
+//! against Instant Replay with the benchmark harness (`docs/nvfbc-source.md`), change what the
+//! driver is asked for; unset, the capture behaves exactly as described above.
+//! `HINDSIGHT_NVFBC_PROCESS=<pid>` asks for that process's presented frames instead of the
+//! display's scanned-out frame, through the private structure Instant Replay itself passes (the
+//! driver may refuse it, and the process must present at the display's size).
+//! `HINDSIGHT_NVFBC_GRAB_MODE=scale|crop` grabs through the driver's scaling or cropping path
+//! at the display's own size instead of the plain full-size path. `HINDSIGHT_NVFBC_WAIT_TIMEOUT=<ms>`
+//! has each grab wait up to that long for a new picture instead of taking the current one.
+//! While any of them is set, the first grab's report (size, source process, wait mode) is logged.
 
+mod cuda;
 mod ffi;
 
-use super::{CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of};
+use super::{
+    CaptureError, Frame, ReopenThrottle, Source, Surface, failed, is_window_closed, monitor_of,
+};
 use crate::{gpu::device::Device, log, service::Target, sys::nvfbc_key};
 use std::{
     ptr::{self, NonNull},
@@ -50,6 +64,8 @@ use windows::{
 };
 
 // Re-exported because `CaptureError::Nvfbc` carries it.
+/// The same capture into CUDA memory, for an encoder on a CUDA context.
+pub(super) use cuda::Capture as CudaCapture;
 pub(in crate::gpu) use ffi::Status;
 use ffi::Zeroed;
 
@@ -60,6 +76,12 @@ const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
 const SLOT_COUNT: u32 = 3;
 /// [`SLOT_COUNT`] as an array length.
 const SLOTS: usize = SLOT_COUNT as usize;
+/// The variable naming the process whose frames to grab; see [`Switches`].
+const PROCESS_VARIABLE: &str = "HINDSIGHT_NVFBC_PROCESS";
+/// The variable naming the driver's grab path; see [`Switches`].
+const GRAB_MODE_VARIABLE: &str = "HINDSIGHT_NVFBC_GRAB_MODE";
+/// The variable giving how long a grab waits for a new picture; see [`Switches`].
+const WAIT_TIMEOUT_VARIABLE: &str = "HINDSIGHT_NVFBC_WAIT_TIMEOUT";
 
 /// A running NvFBC capture of one monitor.
 pub(super) struct Capture {
@@ -89,6 +111,10 @@ pub(super) struct Capture {
     reopen: ReopenThrottle,
     /// Whether the driver draws the mouse cursor into each grab.
     cursor: bool,
+    /// The experimental settings this capture was started with.
+    switches: Switches,
+    /// Whether the first grab's report has been logged, which only a switch asks for.
+    reported: bool,
 }
 
 /// What starting a grab came to.
@@ -103,6 +129,78 @@ enum Grab {
     Lost,
 }
 
+/// The experimental parameters the environment variables named in the module documentation
+/// choose, read once when a capture starts. All unset, the default, is today's behaviour.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Switches {
+    /// The process whose presented frames the session grabs instead of the display's.
+    process: Option<u32>,
+    /// Which of the driver's grab paths a frame takes.
+    grab_mode: GrabMode,
+    /// How many milliseconds a grab may wait for a new picture; `None` takes the current one.
+    wait_timeout: Option<u32>,
+}
+
+/// `NVFBC_TODX9VID_SOURCEMODE_*`, each asked for at the display's own size.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrabMode {
+    Full,
+    Scale,
+    Crop,
+}
+
+impl Switches {
+    /// Today's behaviour.
+    const DEFAULT: Self = Self {
+        process: None,
+        grab_mode: GrabMode::Full,
+        wait_timeout: None,
+    };
+
+    /// What the environment asks for; a variable that is unset, empty or unreadable leaves
+    /// its default.
+    fn from_environment() -> Self {
+        let variable = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+        };
+        let grab_mode = match variable(GRAB_MODE_VARIABLE).as_deref() {
+            Some("scale") => GrabMode::Scale,
+            Some("crop") => GrabMode::Crop,
+            _ => GrabMode::Full,
+        };
+        Self {
+            process: variable(PROCESS_VARIABLE).and_then(|value| value.parse().ok()),
+            grab_mode,
+            wait_timeout: variable(WAIT_TIMEOUT_VARIABLE).and_then(|value| value.parse().ok()),
+        }
+    }
+
+    /// Writes the switches to the log when any is set, so a measurement's log says which arm
+    /// it was.
+    fn report(self) {
+        if self == Self::DEFAULT {
+            return;
+        }
+        let grab_mode = match self.grab_mode {
+            GrabMode::Full => "full",
+            GrabMode::Scale => "scale",
+            GrabMode::Crop => "crop",
+        };
+        log::info(format!(
+            "NvFBC experimental switches: process {}, grab mode {grab_mode}, wait timeout {}",
+            self.process
+                .map_or("none".to_owned(), |pid| pid.to_string()),
+            self.wait_timeout
+                .map_or("none".to_owned(), |milliseconds| format!(
+                    "{milliseconds} ms"
+                )),
+        ));
+    }
+}
+
 impl Capture {
     /// Starts capturing the monitor `target` names, or the monitor its window fills, with the
     /// cursor drawn in if `cursor` is set.
@@ -113,6 +211,8 @@ impl Capture {
     ) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
         let key = saved_key()?;
+        let switches = Switches::from_environment();
+        switches.report();
 
         // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
         let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION) }
@@ -144,6 +244,8 @@ impl Capture {
             window,
             reopen: ReopenThrottle::default(),
             cursor,
+            switches,
+            reported: false,
         };
         capture.session = Some(
             capture
@@ -165,7 +267,8 @@ impl Capture {
         Ok(session)
     }
 
-    /// Asks the driver for a capture object on the device, presenting the key.
+    /// Asks the driver for a capture object on the device, presenting the key, and naming the
+    /// process whose frames to grab when a switch chose one.
     fn create_object(&self) -> Result<NonNull<ffi::ToDx9Vid>, Status> {
         let mut params = ffi::CreateParams::zeroed();
         params.version = ffi::CREATE_PARAMS_VER;
@@ -173,7 +276,17 @@ impl Capture {
         params.device = self.device.as_raw();
         params.private_data = self.key.as_ptr().cast();
         params.private_data_size = key_size(&self.key);
-        // SAFETY: the parameters are complete; the device and the key outlive the call.
+        let mut source = ffi::ProcessSource::zeroed();
+        if let Some(pid) = self.switches.process {
+            source.version = ffi::PROCESS_SOURCE_VER;
+            source.capture_mode = ffi::CAPTURE_MODE_PROCESS;
+            source.target_pid = pid;
+            params.private_data2 = (&raw const source).cast();
+            params.private_data2_size =
+                u32::try_from(size_of::<ffi::ProcessSource>()).expect("a few hundred bytes");
+        }
+        // SAFETY: the parameters are complete; the device, the key and the source outlive the
+        // call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
         NonNull::new(params.nvfbc).ok_or(Status::UNSUPPORTED)
     }
@@ -225,7 +338,14 @@ impl Capture {
         let Some(session) = &self.session else {
             return Ok(Grab::Lost);
         };
-        let (status, info) = session.grab_frame(self.next);
+        let (status, info) = session.grab_frame(self.next, self.size, self.switches);
+        if status == Status::SUCCESS && !self.reported && self.switches != Switches::DEFAULT {
+            self.reported = true;
+            log::info(format!(
+                "NvFBC first grab: {}x{} from process {}, wait mode {}",
+                info.width, info.height, info.source_pid, info.wait_mode_used
+            ));
+        }
         match status {
             Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
             Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
@@ -269,7 +389,7 @@ impl Source for Capture {
     fn take(
         &mut self,
         device: &Device,
-        target: &ID3D11Texture2D,
+        target: Option<&ID3D11Texture2D>,
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
@@ -277,7 +397,7 @@ impl Source for Capture {
             return Err(CaptureError::Closed);
         }
 
-        let collected = self.collect(device, target, width, height)?;
+        let collected = self.collect(device, super::target_of(target), width, height)?;
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
             Grab::Resized => return Ok(Frame::Resized),
@@ -299,8 +419,10 @@ impl Source for Capture {
         true
     }
 
-    fn surface(&self, index: usize) -> Option<ID3D11Texture2D> {
-        self.slots.get(index).map(|slot| slot.shared.clone())
+    fn surface(&self, index: usize) -> Option<Surface> {
+        self.slots
+            .get(index)
+            .map(|slot| Surface::Texture(slot.shared.clone()))
     }
 
     fn next_surface(&self) -> Option<usize> {
@@ -426,14 +548,35 @@ impl Session {
         unsafe { (self.methods().set_up)(self.object.as_ptr(), &raw mut setup) }.ok()
     }
 
-    /// Starts a grab of the whole display into the surface at `buffer_index` without waiting
-    /// for the screen to change, and returns the driver's status with its report on the grab.
-    fn grab_frame(&self, buffer_index: u32) -> (Status, ffi::FrameGrabInfo) {
+    /// Starts a grab of the whole display, which is `size` large, into the surface at
+    /// `buffer_index` without waiting for the screen to change, unless the switches say
+    /// otherwise, and returns the driver's status with its report on the grab.
+    fn grab_frame(
+        &self,
+        buffer_index: u32,
+        size: (u32, u32),
+        switches: Switches,
+    ) -> (Status, ffi::FrameGrabInfo) {
         let mut info = ffi::FrameGrabInfo::zeroed();
         let mut params = ffi::GrabFrameParams::zeroed();
         params.version = ffi::TODX9VID_GRAB_FRAME_PARAMS_VER;
-        params.flags = ffi::TODX9VID_NOWAIT;
-        params.grab_mode = ffi::TODX9VID_SOURCEMODE_FULL;
+        match switches.wait_timeout {
+            Some(milliseconds) => {
+                params.flags = ffi::TODX9VID_WAIT_WITH_TIMEOUT;
+                params.wait_time = milliseconds;
+            }
+            None => params.flags = ffi::TODX9VID_NOWAIT,
+        }
+        // Scaling and cropping name their output size; at the display's own size and from its
+        // corner they deliver the same picture as the full-size path.
+        params.grab_mode = match switches.grab_mode {
+            GrabMode::Full => ffi::TODX9VID_SOURCEMODE_FULL,
+            GrabMode::Scale => ffi::TODX9VID_SOURCEMODE_SCALE,
+            GrabMode::Crop => ffi::TODX9VID_SOURCEMODE_CROP,
+        };
+        if switches.grab_mode != GrabMode::Full {
+            (params.target_width, params.target_height) = size;
+        }
         params.buffer_index = buffer_index;
         params.grab_info = &raw mut info;
         // SAFETY: a live object, set up by `Capture::open_session` before it handed the session

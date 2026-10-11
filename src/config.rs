@@ -51,7 +51,9 @@ impl fmt::Display for Mode {
 
 /// How frames are captured. Windows Graphics Capture can record one app's window; DXGI Desktop
 /// Duplication and NVIDIA's NvFBC see whole monitors only, so a full-screen app is recorded
-/// through its monitor. NvFBC is for licensed vendors: it needs the key NVIDIA issued them.
+/// through its monitor. NvFBC is for licensed vendors: it needs the key NVIDIA issued them. It
+/// comes in two forms: grabbing into Direct3D 9 surfaces, or into CUDA memory that the encoder
+/// reads in place.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
@@ -59,17 +61,25 @@ pub(crate) enum Backend {
     Wgc,
     Dxgi,
     Nvfbc,
+    #[serde(rename = "nvfbc_cuda")]
+    NvfbcCuda,
 }
 
 impl Backend {
-    pub(crate) const ALL: [Self; 3] = [Self::Wgc, Self::Dxgi, Self::Nvfbc];
+    pub(crate) const ALL: [Self; 4] = [Self::Wgc, Self::Dxgi, Self::Nvfbc, Self::NvfbcCuda];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Wgc => "Windows Graphics Capture",
             Self::Dxgi => "DXGI Desktop Duplication",
             Self::Nvfbc => "NVIDIA NvFBC",
+            Self::NvfbcCuda => "NVIDIA NvFBC to CUDA",
         }
+    }
+
+    /// Whether the backend captures with NvFBC, and so needs the key NVIDIA issued.
+    pub(crate) const fn uses_nvfbc(self) -> bool {
+        matches!(self, Self::Nvfbc | Self::NvfbcCuda)
     }
 }
 
@@ -312,12 +322,39 @@ mod tests {
             parse(r#"{"backend":"nvfbc"}"#).unwrap().backend,
             Backend::Nvfbc
         );
+        assert_eq!(
+            parse(r#"{"backend":"nvfbc_cuda"}"#).unwrap().backend,
+            Backend::NvfbcCuda
+        );
+        assert!(parse(r#"{"backend":"nvfbccuda"}"#).is_err());
         assert_eq!(parse(r#"{"theme":"selene"}"#).unwrap().theme, Theme::Selene);
 
         assert!(parse(r#"{"backend":"gdi"}"#).is_err());
         assert!(parse(r#"{"codec":"vp9"}"#).is_err());
         assert!(parse(r#"{"theme":"neon"}"#).is_err());
         assert!(parse(r#"{"buffer_secs":120}"#).is_err());
+    }
+
+    #[test]
+    fn backends_round_trip_and_the_nvfbc_ones_need_the_key() {
+        for backend in Backend::ALL {
+            let config = Config {
+                backend,
+                ..Config::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), config);
+            assert_eq!(
+                backend.uses_nvfbc(),
+                backend.name().contains("NvFBC"),
+                "{backend:?}"
+            );
+        }
+        assert!(
+            serde_json::to_string(&Backend::NvfbcCuda)
+                .unwrap()
+                .contains("nvfbc_cuda")
+        );
     }
 
     #[test]

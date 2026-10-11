@@ -25,18 +25,19 @@ The other mode, **Whole desktop, always**, records the primary monitor from the 
 
 ## Capture backends
 
-The **Capture** setting chooses how frames are taken. All three keep every frame on the GPU.
+The **Capture** setting chooses how frames are taken. All of them keep every frame on the GPU.
 
 - **Windows Graphics Capture** (the default) can record just the app's window, includes the mouse cursor, and works on laptops whose display is connected to the integrated GPU.
 - **DXGI Desktop Duplication** is the older, lower-level API and does a little less work per frame. It sees whole monitors only, so a full-screen app is recorded through its monitor: anything you alt-tab to while the app is still running shows up in the clip. The cursor isn't drawn. It only works for monitors connected to the NVIDIA GPU, and not for rotated monitors. On either of those it stops with an error that tells you to switch back. A UAC prompt or the lock screen pauses it without dropping the buffer.
 - **NVIDIA NvFBC** (for licensed vendors) is the frame-buffer capture NVIDIA Instant Replay itself uses: the driver copies the display, cursor included, straight from the GPU. It is only for vendors NVIDIA has licensed: choosing it asks for the key NVIDIA issued you (in hexadecimal), which is saved for your Windows account in `HKEY_CURRENT_USER\Software\hindsight` and never in the settings file. Choosing it again lets you change the key; cancelling keeps the previous capture setting. Like Desktop Duplication it records whole monitors connected to the NVIDIA GPU, and not rotated ones. If NvFBC is turned off in the driver, run hindsight once as administrator to turn it on. A mode change or the secure desktop pauses it without dropping the buffer.
+- **NVIDIA NvFBC to CUDA** is the same capture grabbing into CUDA memory instead of Direct3D 9 surfaces, which the encoder reads in place from a CUDA session, so no Direct3D device sits between the frame buffer and NVENC. It needs the same key and has the same limits as NvFBC, plus an even display width and height. It is experimental: see `docs/nvfbc-cuda.md` for what to expect and how to check it.
 
 ## Settings
 
 | Setting | Default | Range |
 | --- | --- | --- |
 | Record | Full-screen apps | Full-screen apps, or the whole desktop always |
-| Backend | Windows Graphics Capture | Windows Graphics Capture, DXGI Desktop Duplication, or NVIDIA NvFBC |
+| Backend | Windows Graphics Capture | Windows Graphics Capture, DXGI Desktop Duplication, NVIDIA NvFBC, or NVIDIA NvFBC to CUDA |
 | Codec | H.264 | H.264, HEVC, AV1 (AV1 needs an RTX 40 series GPU or newer) |
 | Frame rate | 60 fps | 24–240 fps |
 | Buffer | 30 s | 5–600 s |

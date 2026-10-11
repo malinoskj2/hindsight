@@ -10,7 +10,12 @@
 //! A capture that grabs into textures of its own can have them registered too
 //! ([`Encoder::register_surface`]), so NVENC reads each picture where the capture left it
 //! instead of from a copy in a slot's texture.
+//!
+//! The session runs on the shared Direct3D 11 device, or, for a capture that grabs into CUDA
+//! memory, on that capture's CUDA context: then the slots have no textures of their own, and
+//! every frame is read from one of the capture's surfaces.
 
+use super::capture::{EncoderDevice, Surface};
 use crate::config::Codec;
 use std::{collections::VecDeque, ffi::CStr, ptr};
 use thiserror::Error;
@@ -125,9 +130,9 @@ pub(super) struct Encoder {
     session: ffi::Session,
     settings: Settings,
     slots: Vec<Slot>,
-    /// The capture's own textures registered for NVENC to read in place, by the capture's
+    /// The capture's own surfaces registered for NVENC to read in place, by the capture's
     /// index for each.
-    surfaces: Vec<Option<Surface>>,
+    surfaces: Vec<Option<RegisteredSurface>>,
     /// Slots submitted and not yet collected, oldest first.
     queue: VecDeque<usize>,
     /// The slot the next frame goes into.
@@ -160,16 +165,18 @@ enum Input {
     Surface(usize),
 }
 
-/// A texture of the capture's, registered with NVENC for the whole session.
-struct Surface {
-    texture: ID3D11Texture2D,
+/// A surface of the capture's, registered with NVENC for the whole session.
+struct RegisteredSurface {
+    handle: Surface,
     registered: ffi::Registered,
 }
 
 /// One input texture and what NVENC needs to encode it. The encoder releases the NVENC parts in
 /// [`Encoder::release_slot`]; the texture and the event are released when the slot is dropped.
 struct Slot {
-    texture: ID3D11Texture2D,
+    /// The texture a frame is drawn into; none on a CUDA session, which reads the capture's
+    /// surfaces only.
+    texture: Option<ID3D11Texture2D>,
     registered: ffi::Registered,
     bitstream: ffi::Bitstream,
     event: Owned<HANDLE>,
@@ -204,8 +211,14 @@ impl Drop for Locked<'_> {
 }
 
 impl Encoder {
-    /// Opens an encode session on `device` and prepares its slots.
-    pub(super) fn open(device: &ID3D11Device, settings: Settings) -> Result<Self, NvencError> {
+    /// Opens an encode session on `on`, the device the capture's surfaces are reachable from,
+    /// and prepares its slots. `device` is the shared Direct3D 11 device, whose lock is held
+    /// around the session's calls whichever device the session runs on.
+    pub(super) fn open(
+        device: &ID3D11Device,
+        on: EncoderDevice,
+        settings: Settings,
+    ) -> Result<Self, NvencError> {
         let device_lock: ID3D11Multithread = device
             .cast()
             .map_err(|error| NvencError::Windows("lock the device", error))?;
@@ -225,12 +238,12 @@ impl Encoder {
         };
         // From here on, `Drop` releases whatever has been created when a step fails.
         encoder.load_api()?;
-        encoder.open_session(device)?;
+        encoder.open_session(device, on)?;
         encoder.require_codec()?;
         encoder.require_size()?;
         encoder.initialize()?;
         for _ in 0..SLOTS {
-            let slot = encoder.create_slot(device)?;
+            let slot = encoder.create_slot(device, on)?;
             encoder.slots.push(slot);
         }
         Ok(encoder)
@@ -269,17 +282,20 @@ impl Encoder {
         Ok(())
     }
 
-    /// Opens the encode session on `device`, destroying whatever half-open session a failed
+    /// Opens the encode session on `on`, destroying whatever half-open session a failed
     /// attempt leaves behind.
-    fn open_session(&mut self, device: &ID3D11Device) -> Result<(), NvencError> {
+    fn open_session(&mut self, device: &ID3D11Device, on: EncoderDevice) -> Result<(), NvencError> {
         let mut params = ffi::OpenEncodeSessionExParams::zeroed();
         params.version = ffi::OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-        params.device_type = ffi::DEVICE_TYPE_DIRECTX;
-        params.device = device.as_raw();
+        (params.device_type, params.device) = match on {
+            EncoderDevice::Direct3D => (ffi::DEVICE_TYPE_DIRECTX, device.as_raw()),
+            EncoderDevice::Cuda(context) => (ffi::DEVICE_TYPE_CUDA, context.as_ptr()),
+        };
         params.api_version = ffi::API_VERSION;
         let open = entry_point(self.api.open_encode_session_ex, "nvEncOpenEncodeSessionEx")?;
-        // SAFETY: the device outlives the session (the pipeline drops the encoder first), and
-        // the session handle is written on success only.
+        // SAFETY: the device or context outlives the session (the pipeline drops the encoder
+        // before the device and the capture), and the session handle is written on success
+        // only.
         let status = unsafe { open(&raw mut params, &raw mut self.session) };
         if status == Status::SUCCESS {
             return Ok(());
@@ -396,9 +412,13 @@ impl Encoder {
         Ok(preset.config)
     }
 
-    /// Creates one slot, releasing what it registered with NVENC if a step fails.
-    fn create_slot(&self, device: &ID3D11Device) -> Result<Slot, NvencError> {
-        let texture = create_input_texture(device, self.settings)?;
+    /// Creates one slot, with an input texture when the session is on the Direct3D device,
+    /// releasing what it registered with NVENC if a step fails.
+    fn create_slot(&self, device: &ID3D11Device, on: EncoderDevice) -> Result<Slot, NvencError> {
+        let texture = match on {
+            EncoderDevice::Direct3D => Some(create_input_texture(device, self.settings)?),
+            EncoderDevice::Cuda(_) => None,
+        };
         let event = create_event()?;
         let mut slot = Slot {
             texture,
@@ -418,27 +438,61 @@ impl Encoder {
     /// handle in the slot as soon as it exists so that [`release_slot`](Self::release_slot) can
     /// undo a partial setup.
     fn prepare_slot(&self, slot: &mut Slot) -> Result<(), NvencError> {
-        slot.registered = self.register_texture(&slot.texture)?;
+        if let Some(texture) = &slot.texture {
+            slot.registered = self.register_texture(texture)?;
+        }
         slot.bitstream = self.create_bitstream()?;
         self.register_event(&slot.event)
     }
 
-    /// Registers `texture` as an input NVENC can map.
+    /// Registers `texture`, on the session's Direct3D device, as an input NVENC can map.
     fn register_texture(&self, texture: &ID3D11Texture2D) -> Result<ffi::Registered, NvencError> {
-        let mut resource = ffi::RegisterResource::zeroed();
-        resource.version = ffi::REGISTER_RESOURCE_VER;
-        resource.resource_type = ffi::INPUT_RESOURCE_TYPE_DIRECTX;
-        resource.width = self.settings.width;
-        resource.height = self.settings.height;
-        resource.resource_to_register = texture.as_raw();
-        resource.buffer_format = ffi::BUFFER_FORMAT_ARGB;
-        resource.buffer_usage = ffi::INPUT_IMAGE;
+        self.register_resource(ffi::INPUT_RESOURCE_TYPE_DIRECTX, texture.as_raw(), 0)
+    }
+
+    /// Registers the CUDA buffer at `pointer`, in the session's context, with rows `pitch`
+    /// bytes apart, as an input NVENC can map.
+    fn register_cuda_buffer(
+        &self,
+        pointer: u64,
+        pitch: u32,
+    ) -> Result<ffi::Registered, NvencError> {
+        // A device address is not a pointer into this process; the API merely types it as
+        // one.
+        let resource = ptr::without_provenance_mut(
+            usize::try_from(pointer).expect("a device address fits a 64-bit pointer"),
+        );
+        self.register_resource(
+            ffi::INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER,
+            resource,
+            pitch,
+        )
+    }
+
+    /// Registers `resource` of `resource_type`, holding BGRA of the encoded size with rows
+    /// `pitch` bytes apart where the type needs telling, as an input NVENC can map.
+    fn register_resource(
+        &self,
+        resource_type: u32,
+        resource: *mut std::ffi::c_void,
+        pitch: u32,
+    ) -> Result<ffi::Registered, NvencError> {
+        let mut params = ffi::RegisterResource::zeroed();
+        params.version = ffi::REGISTER_RESOURCE_VER;
+        params.resource_type = resource_type;
+        params.width = self.settings.width;
+        params.height = self.settings.height;
+        params.pitch = pitch;
+        params.resource_to_register = resource;
+        params.buffer_format = ffi::BUFFER_FORMAT_ARGB;
+        params.buffer_usage = ffi::INPUT_IMAGE;
         let register = entry_point(self.api.register_resource, "nvEncRegisterResource")?;
-        // SAFETY: the texture stays alive, and registered, as long as the slot.
+        // SAFETY: the resource stays alive, and registered, as long as the slot or surface
+        // that holds it.
         self.check("nvEncRegisterResource", unsafe {
-            register(self.session, &raw mut resource)
+            register(self.session, &raw mut params)
         })?;
-        Ok(resource.registered_resource)
+        Ok(params.registered_resource)
     }
 
     /// Creates an output buffer for one frame's bitstream.
@@ -478,22 +532,30 @@ impl Encoder {
     }
 
     /// The texture the next frame must be drawn into, once [`reserve`](Self::reserve) has freed
-    /// its slot.
-    pub(super) fn input(&self) -> &ID3D11Texture2D {
-        &self.slots[self.next].texture
+    /// its slot; none on a CUDA session, which only reads the capture's surfaces.
+    pub(super) fn input(&self) -> Option<&ID3D11Texture2D> {
+        self.slots[self.next].texture.as_ref()
     }
 
-    /// The texture holding the newest submitted picture, to repeat when the screen did not
-    /// change.
-    pub(super) fn latest(&self) -> Option<&ID3D11Texture2D> {
-        self.latest.map(|input| match input {
-            Input::Slot(slot) => &self.slots[slot].texture,
-            Input::Surface(surface) => &self.registered_surface(surface).texture,
-        })
+    /// Whether a picture has been submitted, which a tick without a new one repeats.
+    pub(super) const fn has_latest(&self) -> bool {
+        self.latest.is_some()
+    }
+
+    /// The texture holding the newest submitted picture, to copy when it cannot be mapped
+    /// again; none when the newest picture is in CUDA memory.
+    pub(super) fn latest_texture(&self) -> Option<&ID3D11Texture2D> {
+        match self.latest? {
+            Input::Slot(slot) => self.slots[slot].texture.as_ref(),
+            Input::Surface(surface) => match &self.registered_surface(surface).handle {
+                Surface::Texture(texture) => Some(texture),
+                Surface::CudaBuffer { .. } => None,
+            },
+        }
     }
 
     /// The capture's surface `surface`, which must have been registered.
-    fn registered_surface(&self, surface: usize) -> &Surface {
+    fn registered_surface(&self, surface: usize) -> &RegisteredSurface {
         self.surfaces[surface]
             .as_ref()
             .expect("only registered surfaces are submitted")
@@ -504,19 +566,25 @@ impl Encoder {
         self.surfaces.get(surface).is_some_and(Option::is_some)
     }
 
-    /// Registers `texture`, the capture's surface `surface` and the size of the encoded frame,
-    /// so that [`submit_surface`](Self::submit_surface) can encode it where it is.
+    /// Registers `handle`, the capture's surface `surface` holding pictures of the encoded
+    /// size, so that [`submit_surface`](Self::submit_surface) can encode it where it is. A
+    /// surface on the wrong device for the session is refused by NVENC.
     pub(super) fn register_surface(
         &mut self,
         surface: usize,
-        texture: &ID3D11Texture2D,
+        handle: &Surface,
     ) -> Result<(), NvencError> {
-        let registered = self.register_texture(texture)?;
+        let registered = match handle {
+            Surface::Texture(texture) => self.register_texture(texture)?,
+            Surface::CudaBuffer { pointer, pitch } => {
+                self.register_cuda_buffer(*pointer, *pitch)?
+            }
+        };
         if self.surfaces.len() <= surface {
             self.surfaces.resize_with(surface + 1, || None);
         }
-        self.surfaces[surface] = Some(Surface {
-            texture: texture.clone(),
+        self.surfaces[surface] = Some(RegisteredSurface {
+            handle: handle.clone(),
             registered,
         });
         Ok(())
@@ -575,6 +643,24 @@ impl Encoder {
         }
         self.submit_input(index, false, latest)?;
         Ok(true)
+    }
+
+    /// Encodes the newest submitted picture again as frame `index`, reading it where it is,
+    /// after waiting for NVENC to finish reading it for the frame before, handing every frame
+    /// collected meanwhile to `output`. For a picture that cannot be copied instead, since it
+    /// is in CUDA memory; the wait is at most one frame's encode.
+    pub(super) fn repeat_once_free(
+        &mut self,
+        index: u64,
+        output: &mut impl FnMut(Encoded),
+    ) -> Result<(), NvencError> {
+        let latest = self
+            .latest
+            .expect("a repeat is asked for only once a picture has been submitted");
+        while self.reads(latest) {
+            self.collect_one(Wait::Block, output)?;
+        }
+        self.submit_input(index, false, latest)
     }
 
     /// Encodes `input` as frame `index` into the next slot's output buffer.

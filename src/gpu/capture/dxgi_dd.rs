@@ -138,13 +138,14 @@ impl Source for Capture {
     fn take(
         &mut self,
         device: &Device,
-        target: &ID3D11Texture2D,
+        target: Option<&ID3D11Texture2D>,
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
         if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
+        let target = super::target_of(target);
 
         let Some(duplication) = &self.duplication else {
             return self.reopen(device);

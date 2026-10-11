@@ -5,7 +5,7 @@
 //! frame is held, keeping Windows from drawing into that buffer, until the encoder is done with
 //! it; the pool then has buffers enough for the frames held besides the two it needs itself.
 
-use super::{CaptureError, Frame, Source, failed, monitor};
+use super::{CaptureError, Frame, Source, Surface, failed, monitor};
 use crate::{
     gpu::{device::Device, pacer::HUNDRED_NANOSECONDS},
     service::Target,
@@ -125,13 +125,14 @@ impl Source for Capture {
     fn take(
         &mut self,
         device: &Device,
-        target: &ID3D11Texture2D,
+        target: Option<&ID3D11Texture2D>,
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(CaptureError::Closed);
         }
+        let target = super::target_of(target);
 
         let Some(frame) = newest_frame(&self.pool) else {
             return Ok(Frame::Unchanged);
@@ -172,8 +173,8 @@ impl Source for Capture {
         self.handed_over
     }
 
-    fn surface(&self, index: usize) -> Option<ID3D11Texture2D> {
-        self.surfaces.get(index).cloned()
+    fn surface(&self, index: usize) -> Option<Surface> {
+        self.surfaces.get(index).cloned().map(Surface::Texture)
     }
 
     fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {

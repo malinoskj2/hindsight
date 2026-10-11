@@ -109,12 +109,16 @@ pub(super) const PRESET_P4: GUID = GUID::from_values(
 // Field values for the session and frame structures, in the order those structures are declared
 // below.
 pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
+/// `NV_ENC_DEVICE_TYPE_CUDA`: the device is a `CUcontext`.
+pub(super) const DEVICE_TYPE_CUDA: u32 = 1;
 pub(super) const CAPS_WIDTH_MAX: u32 = 16;
 pub(super) const CAPS_HEIGHT_MAX: u32 = 17;
 pub(super) const RATE_CONTROL_VBR: u32 = 1;
 pub(super) const MULTI_PASS_DISABLED: u32 = 0;
 pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
+/// `NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`: a `CUdeviceptr` to pitch-linear rows.
+pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
 /// 32-bit words with blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
 pub(super) const INPUT_IMAGE: u32 = 0;
@@ -584,7 +588,8 @@ pub(super) struct RegisterResource {
     pub(super) resource_type: u32,
     pub(super) width: u32,
     pub(super) height: u32,
-    _pitch: u32,
+    /// Bytes between rows of a CUDA buffer; 0 for a Direct3D texture, which knows its own.
+    pub(super) pitch: u32,
     _sub_resource_index: u32,
     pub(super) resource_to_register: *mut c_void,
     pub(super) registered_resource: Registered,

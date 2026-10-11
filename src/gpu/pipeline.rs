@@ -3,7 +3,7 @@
 //! encoder slot and submitted, and whatever NVENC has finished goes into the replay buffer.
 
 use super::{
-    capture::{self, CaptureError, Frame},
+    capture::{self, CaptureError, Frame, Surface},
     device::{Device, DeviceError},
     nvenc::{Encoded, Encoder, NvencError, Settings},
     pacer::Pacer,
@@ -92,6 +92,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     let (width, height) = encodable(capture.size());
     let mut encoder = Encoder::open(
         &device.d3d,
+        capture.encoder_device(),
         Settings {
             codec: config.codec,
             width,
@@ -144,7 +145,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         capture.release_surfaces(&|surface| encoder.holds_surface(surface));
         match fill_input(&device, &mut *capture, &encoder, (width, height))? {
             Input::Ready => encoder.submit(index, true)?,
-            Input::Repeat => repeat_latest(&device, &mut encoder, index)?,
+            Input::Repeat => repeat_latest(&device, &mut encoder, index, &mut output)?,
             Input::InSurface(surface) => submit_surface(
                 &device,
                 &*capture,
@@ -167,7 +168,8 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
 
 /// Submits the new picture in the capture's surface `surface` as frame `index`: in place,
 /// registering the surface with NVENC the first time it comes, or copied into the encoder's
-/// input once NVENC has refused a surface (`copy_instead`).
+/// input once NVENC has refused a surface (`copy_instead`). A surface in CUDA memory cannot be
+/// copied, so a refusal of one is an error.
 fn submit_surface(
     device: &Device,
     capture: &dyn capture::Source,
@@ -176,21 +178,24 @@ fn submit_surface(
     surface: usize,
     copy_instead: &mut bool,
 ) -> Result<(), NvencError> {
-    let texture = capture
+    let handle = capture
         .surface(surface)
         .expect("a capture reports only surfaces of its own");
     if !*copy_instead
         && !encoder.has_surface(surface)
-        && let Err(error) = encoder.register_surface(surface, &texture)
+        && let Err(error) = encoder.register_surface(surface, &handle)
     {
+        if !matches!(handle, Surface::Texture(_)) || encoder.input().is_none() {
+            return Err(error);
+        }
         log::warning(format!(
             "NVENC could not read the captured surfaces directly ({error}); copying each frame instead"
         ));
         *copy_instead = true;
     }
-    if *copy_instead {
+    if *copy_instead && let (Surface::Texture(texture), Some(input)) = (&handle, encoder.input()) {
         let Settings { width, height, .. } = encoder.settings();
-        device.copy_region(encoder.input(), &texture, width, height);
+        device.copy_region(input, texture, width, height);
         return encoder.submit(index, true);
     }
     encoder.submit_surface(index, surface)
@@ -198,16 +203,24 @@ fn submit_surface(
 
 /// Submits the newest picture again as frame `index`, since the screen did not change: NVENC
 /// reads it where it is, or, while it is still reading it for the frame before, from a copy in
-/// the encoder's input.
-fn repeat_latest(device: &Device, encoder: &mut Encoder, index: u64) -> Result<(), NvencError> {
+/// the encoder's input; a picture in CUDA memory, which has no copy, is read again once NVENC
+/// is done with it.
+fn repeat_latest(
+    device: &Device,
+    encoder: &mut Encoder,
+    index: u64,
+    output: &mut impl FnMut(Encoded),
+) -> Result<(), NvencError> {
     if encoder.repeat(index)? {
         return Ok(());
     }
-    let latest = encoder
-        .latest()
-        .expect("a repeat is asked for only once a picture has been submitted");
-    device.copy(encoder.input(), latest);
-    encoder.submit(index, false)
+    match (encoder.input(), encoder.latest_texture()) {
+        (Some(input), Some(latest)) => {
+            device.copy(input, latest);
+            encoder.submit(index, false)
+        }
+        _ => encoder.repeat_once_free(index, output),
+    }
 }
 
 /// Creates the device to capture and encode on, logs it, and raises its GPU thread priority
@@ -288,7 +301,7 @@ fn fill_input(
     Ok(match frame {
         Frame::Fresh => Input::Ready,
         Frame::InSurface(surface) => Input::InSurface(surface),
-        Frame::Unchanged if encoder.latest().is_some() => Input::Repeat,
+        Frame::Unchanged if encoder.has_latest() => Input::Repeat,
         Frame::Unchanged => Input::Empty,
         Frame::Resized => Input::Ended(Ended::Resized),
     })

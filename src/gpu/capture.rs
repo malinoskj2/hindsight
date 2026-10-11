@@ -5,13 +5,18 @@
 //! - [`dxgi_dd`], DXGI Desktop Duplication, records whole monitors only; a window target is
 //!   recorded through the monitor it fills.
 //! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
-//!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues.
+//!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues. It
+//!   grabs into Direct3D 9 surfaces, or, as [`nvfbc::CudaCapture`], into CUDA memory that an
+//!   encoder on a CUDA context reads in place.
 
 mod dxgi_dd;
 mod nvfbc;
 mod wgc;
 
-use super::device::Device;
+use super::{
+    cuda::{Context, CudaError},
+    device::Device,
+};
 use crate::{config::Backend, service::Target};
 use std::{
     ffi::c_void,
@@ -47,6 +52,33 @@ pub(crate) enum CaptureError {
     /// The NvFBC driver failed in the named step.
     #[error("{0} failed with {1}")]
     Nvfbc(&'static str, nvfbc::Status),
+    /// The CUDA driver failed in the named step.
+    #[error("{0}: {1}")]
+    Cuda(&'static str, CudaError),
+    /// The driver ended the capture in a way only a fresh session mends; the encoder's state
+    /// cannot be carried over.
+    #[error("{0}")]
+    Restart(&'static str),
+}
+
+/// A surface of a source's own, which the encoder reads in place once it is handed over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Surface {
+    /// A texture on the shared Direct3D 11 device.
+    Texture(ID3D11Texture2D),
+    /// Rows of 32-bit BGRA in CUDA device memory, `pitch` bytes apart, which only an encoder
+    /// on the source's CUDA context can read.
+    CudaBuffer { pointer: u64, pitch: u32 },
+}
+
+/// The device the encoder must open its session on to read a source's surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EncoderDevice {
+    /// The shared Direct3D 11 device, which also holds the encoder's own input textures.
+    Direct3D,
+    /// The CUDA context the source's buffers live in; the encoder then has no input textures
+    /// of its own and reads the source's surfaces only.
+    Cuda(Context),
 }
 
 /// What a tick found.
@@ -72,14 +104,20 @@ pub(super) trait Source {
     fn captures_window(&self) -> bool;
 
     /// Copies the newest captured frame into the top-left `width` × `height` of `target`, if
-    /// one arrived since the last call.
+    /// one arrived since the last call. There is no target when the encoder runs on a CUDA
+    /// context, which only the surfaces of a source that asked for such an encoder reach.
     fn take(
         &mut self,
         device: &Device,
-        target: &ID3D11Texture2D,
+        target: Option<&ID3D11Texture2D>,
         width: u32,
         height: u32,
     ) -> Result<Frame, CaptureError>;
+
+    /// The device the encoder must run on to read this source's surfaces.
+    fn encoder_device(&self) -> EncoderDevice {
+        EncoderDevice::Direct3D
+    }
 
     /// Switches the source, if it captures into textures of its own the size of
     /// [`size`](Self::size), to leaving each new picture where it is and reporting it as
@@ -88,8 +126,8 @@ pub(super) trait Source {
         false
     }
 
-    /// The surface a [`Frame::InSurface`] named, which stays the same texture for the session.
-    fn surface(&self, _index: usize) -> Option<ID3D11Texture2D> {
+    /// The surface a [`Frame::InSurface`] named, which stays the same memory for the session.
+    fn surface(&self, _index: usize) -> Option<Surface> {
         None
     }
 
@@ -144,12 +182,20 @@ pub(super) fn start(
         Backend::Wgc => Box::new(wgc::Capture::start(device, period, target, cursor)?),
         Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target)?),
         Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target, cursor)?),
+        Backend::NvfbcCuda => Box::new(nvfbc::CudaCapture::start(device, target, cursor)?),
     })
 }
 
 /// Wraps a Windows error with the step that failed, for `map_err`.
 fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
     move |error| CaptureError::Windows(step, error)
+}
+
+/// The texture a source that copies its frames was given to copy into: the pipeline passes
+/// one whenever the encoder runs on the Direct3D device, the only encoder such a source
+/// runs with.
+fn target_of(target: Option<&ID3D11Texture2D>) -> &ID3D11Texture2D {
+    target.expect("a source that copies frames runs with an encoder on the Direct3D device")
 }
 
 /// The monitor a whole-monitor backend records for `target`, and the window it stands in for
