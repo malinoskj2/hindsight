@@ -706,6 +706,10 @@ const _: () = assert!(offset_of!(PicParams, input_buffer) == 40);
 const _: () = assert!(offset_of!(PicParams, completion_event) == 56);
 const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
 
+/// `NV_ENC_LOCK_BITSTREAM`'s `doNotWait`: the lock fails at once rather than waiting for a
+/// frame NVENC has not finished.
+pub(super) const LOCK_DO_NOT_WAIT: u32 = 1;
+
 /// `NV_ENC_LOCK_BITSTREAM`.
 #[repr(C)]
 pub(super) struct LockBitstream {

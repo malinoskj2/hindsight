@@ -16,7 +16,7 @@ therefore larger as a share.
 3. Use **AV1** on an RTX 40 series card or newer, HEVC on older ones, H.264 only when you need the
    clips to play everywhere.
 4. Keep the buffer in **RAM** unless you are short of it; then use **VRAM** if your card has room
-   to spare, or **Disk** on an SSD.
+   to spare, or **Disk** on an SSD (it writes the bitrate continuously, so mind the drive's endurance).
 5. Turn **Record system sound** off if you never use the sound.
 
 ## What each setting costs
@@ -25,7 +25,7 @@ Costs are against no recorder, cs2 at 690 fps, unless the row says otherwise.
 
 | Setting | Choice | What it costs | When to choose it |
 |---|---|---|---|
-| Backend | NVIDIA NvFBC | 2.6% of the game's frame rate and 7% of one CPU core at AV1 240 fps | You have the key; it costs the game least, about a fifth less than NVIDIA Instant Replay |
+| Backend | NVIDIA NvFBC | 2.3% of the game's frame rate and about 5.5% of one CPU core at AV1 240 fps | You have the key; it costs the game least, about a fifth less than NVIDIA Instant Replay and a third less CPU |
 | | Windows Graphics Capture | about twice NvFBC's cost to the game at 240 fps, mostly in the desktop compositor | No NvFBC key; laptops whose display hangs off the integrated GPU; recording one window |
 | | DXGI Desktop Duplication | the most: it copies every frame and keeps the compositor busy | Only when the other two fail |
 | | NVIDIA NvFBC to CUDA | more CPU than NvFBC (twice) and a little more of the game | Not recommended; kept for experiments |
@@ -38,8 +38,8 @@ Costs are against no recorder, cs2 at 690 fps, unless the row says otherwise.
 | Buffer length | any | none while recording; it sets the buffer's memory | As long as you need |
 | Buffer in | RAM (default) | none | Unless you are short of RAM |
 | | VRAM | 0.4% of one core more, the game nothing; takes the buffer's size of the card's memory | Plenty of VRAM to spare and RAM to save |
-| | Disk | see below | Short of RAM and of VRAM, with an SSD |
-| Record system sound | on | about 1% of one core | Off if you never use the sound |
+| | Disk | the same CPU and game cost as RAM; writes the bitrate to the drive continuously (45 GB an hour at 100 Mb/s); hindsight's RAM stays near 120 MB | Short of RAM and of VRAM, with an SSD that can take the writes |
+| Record system sound | on | under 1% of one core: the sound is kept raw and encoded only when a clip is saved; it takes 57 MB of RAM for 5 minutes | Off if you never use the sound |
 | Record the mouse cursor | either | no measurable difference | As you like |
 
 Buffer sizes: bitrate × length. At 100 Mb/s, 300 s is about 3.75 GB; at 50 Mb/s, 30 s is about

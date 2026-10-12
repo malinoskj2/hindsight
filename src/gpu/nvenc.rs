@@ -16,10 +16,9 @@
 //! every frame is read from one of the capture's surfaces. Such a session can also write each
 //! frame's bitstream into a buffer of the application's in video memory ([`Output::VideoMemory`]),
 //! from which it is moved into the replay buffer there without ever crossing to system memory.
-//! Likewise, for NvFBC grabbing NV12, which Direct3D 9 holds only in plain surfaces that
-//! Direct3D 11 cannot open, the session runs on NvFBC's Direct3D 9Ex device and reads the NV12
-//! surfaces in place, signalling the BT.601 matrix NvFBC converted them with; NvFBC's ARGB
-//! surfaces can be read the same way, on its device, when the capture asks for that.
+//! Likewise, for NvFBC the session runs on NvFBC's own Direct3D 9Ex device and reads its
+//! surfaces in place, so the grabs need no synchronising with another device; when NvFBC grabs
+//! NV12 the session signals the BT.601 matrix the driver converted them with.
 
 use super::{
     capture::{EncoderDevice, Surface},
@@ -28,7 +27,6 @@ use super::{
 };
 use crate::{
     config::Codec,
-    log,
     replay::{Matrix, Slot as StoreSlot},
 };
 use std::{collections::VecDeque, ffi::CStr, ptr};
@@ -178,25 +176,6 @@ impl Encoded {
     }
 }
 
-/// The variable that has each finished frame's bitstream locked without waiting; see
-/// [`lock_flags_from_environment`].
-const LOCK_NO_WAIT_VARIABLE: &str = "HINDSIGHT_NVENC_LOCK_NOWAIT";
-
-/// The flags each bitstream is locked with: `doNotWait` when `HINDSIGHT_NVENC_LOCK_NOWAIT=1`,
-/// otherwise none, the default. A frame is only read once its completion event has fired, so
-/// there is nothing left to wait for; measured on a static picture
-/// (`d3d12_cost`), the lock and unlock cost about 30,000 cycles instead of 105,000, though the
-/// unmap that follows rises by 15,000. Meant for measuring live before it becomes the default.
-fn lock_flags_from_environment() -> u32 {
-    let asked = std::env::var(LOCK_NO_WAIT_VARIABLE).is_ok_and(|value| value.trim() == "1");
-    if asked {
-        log::info(
-            "NVENC locks each finished bitstream without waiting (HINDSIGHT_NVENC_LOCK_NOWAIT=1)",
-        );
-    }
-    u32::from(asked)
-}
-
 /// A frame's output buffer in video memory, registered and mapped for the session.
 struct VideoOutput {
     staging: DevicePointer,
@@ -224,8 +203,6 @@ pub(super) struct Encoder {
     device_lock: ID3D11Multithread,
     /// NVENC stopped answering; teardown does not wait for it again.
     stalled: bool,
-    /// The flags each finished frame's bitstream is locked with.
-    lock_flags: u32,
     /// The ring in video memory the frames go to, when they do; dropped after the slots have
     /// let go of its staging buffers.
     ring: Option<CudaRing>,
@@ -334,7 +311,6 @@ impl Encoder {
             latest: None,
             device_lock,
             stalled: false,
-            lock_flags: lock_flags_from_environment(),
             ring,
             library,
         };
@@ -1014,12 +990,18 @@ impl Encoder {
     }
 
     /// Copies the completed frame out of the output buffer of `slot`, with the picture type
-    /// NVENC chose for it.
+    /// NVENC chose for it. Called only once the slot's completion event has fired.
     fn read_bitstream(&self, slot: usize) -> Result<(Option<u32>, Payload), NvencError> {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = self.slots[slot].bitstream;
-        lock.flags = self.lock_flags;
+        // The completion event has fired, so there is nothing left to wait for, and a lock
+        // that waits still pays for it: on a static picture at AV1 240 fps (`d3d12_cost`) the
+        // lock, copy and unlock took about 106,000 thread cycles a frame waiting and 23,000 to
+        // 37,000 without, while the unmap after them rose by 12,000 to 18,000, about 50,000 to
+        // 80,000 saved a frame. Live, with NVENC on NvFBC's device, the two together brought
+        // the backend from 287 to 261 Mcycles/s (2026-10-12, `docs/day-run.md`).
+        lock.flags = ffi::LOCK_DO_NOT_WAIT;
         let lock_bitstream = entry_point(self.api.lock_bitstream, "nvEncLockBitstream")?;
         let unlock_bitstream = entry_point(self.api.unlock_bitstream, "nvEncUnlockBitstream")?;
         // SAFETY: the buffer's frame has completed; it stays locked only while it is copied.

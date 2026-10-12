@@ -20,7 +20,7 @@ mod ffi;
 
 use super::{
     Library, display_size, ffi as nvfbc_ffi, find_adapter, is_attached, key_size, nvfbc_failed,
-    prepare, saved_key,
+    prepare, require_even, saved_key,
 };
 use crate::{
     gpu::{
@@ -141,7 +141,7 @@ impl Capture {
         let adapter = find_adapter(&d3d9, device, monitor)?;
         let size = display_size(&d3d9, adapter)?;
         drop(d3d9);
-        require_even(size)?;
+        require_even(size, "NVIDIA NvFBC to CUDA")?;
 
         let library = Library::load()?;
         let create = prepare(&library, &key, adapter)?;
@@ -504,17 +504,6 @@ impl Drop for Session {
     }
 }
 
-/// Refuses a display with an odd width or height: NVENC encodes even sizes, and a grab is
-/// read in place, uncropped.
-fn require_even((width, height): (u32, u32)) -> Result<(), CaptureError> {
-    if width % 2 == 0 && height % 2 == 0 {
-        return Ok(());
-    }
-    Err(CaptureError::Unsupported(format!(
-        "the display is {width}×{height}; NvFBC to CUDA encodes its grabs in place and needs an even width and height, so choose NVIDIA NvFBC"
-    )))
-}
-
 /// The CUDA driver with the encoding GPU's primary context retained and current on this
 /// thread, for the session to run in; which device and driver were found is logged.
 fn open_primary_context(device: &Device) -> Result<(Driver, CudaDevice, Context), CaptureError> {
@@ -566,23 +555,5 @@ fn cuda_failed(step: &'static str) -> impl Fn(CudaError) -> CaptureError {
             CaptureError::Unsupported(error.to_string())
         }
         CudaError::Call(..) => CaptureError::Cuda(step, error),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn odd_displays_are_refused() {
-        assert!(require_even((2560, 1440)).is_ok());
-        assert!(matches!(
-            require_even((1367, 768)),
-            Err(CaptureError::Unsupported(_))
-        ));
-        assert!(matches!(
-            require_even((1366, 767)),
-            Err(CaptureError::Unsupported(_))
-        ));
     }
 }

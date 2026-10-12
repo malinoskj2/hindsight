@@ -3,13 +3,26 @@
 //! out, so it costs a game nothing that Windows composes.
 //!
 //! NvFBC on Windows writes into Direct3D 9 surfaces. Three, as many as the driver takes, are
-//! created on a Direct3D 9Ex device on the monitor's GPU, shared with the encoder's Direct3D 11
-//! device: on each tick the grab the previous tick started is handed to the encoder, and the
-//! next grab goes into the next surface, so the capture thread never waits for the GPU. NVENC
-//! reads the surfaces in place once they are handed over; the surface the next grab goes into
-//! was last encoded two ticks earlier, which NVENC has almost always finished by then, and is
-//! waited for when it has not. Otherwise each grab is copied into the encoder's input texture.
-//! Every grab counts as a new frame, since the driver does not say whether the screen changed.
+//! created on a Direct3D 9Ex device on the monitor's GPU, and NVENC runs on that same device,
+//! reading the surfaces in place, as NVIDIA's `NvFBCDX9NvEnc` sample does: on each tick the
+//! grab the previous tick started is handed to the encoder, and the next grab goes into the next
+//! surface. The surface the next grab goes into was last encoded two ticks earlier, which NVENC
+//! has almost always finished by then, and is waited for when it has not. Every grab counts as
+//! a new frame, since the driver does not say whether the screen changed. The device is used
+//! from the capture thread only, by the grabs and by the encoder alike.
+//!
+//! Nothing on the CPU waits for a grab to land. A device carries out its work on one resource
+//! in the order it was submitted, so the grab's blit is done before NVENC's read of the same
+//! surface begins, and NVENC's own submission sends the blit to the GPU; the sample likewise
+//! encodes each surface straight after the grab. An earlier design encoded on a Direct3D 11
+//! device through shared textures, which Direct3D 9Ex shares unsynchronised, and so followed
+//! every grab with an event query it flushed and polled: about 120,000 thread cycles a frame.
+//! Encoding on this device instead brought the whole backend from 287 to about 261 Mcycles/s
+//! at AV1 1080p240 and cs2's lost frames from 22.2 to 18.3 fps, with no torn or repeated
+//! frames in a tearing test (measured live 2026-10-12, `docs/day-run.md`).
+//!
+//! The encoder reads every grab where it lies, uncropped, so the display's width and height
+//! must be even; an odd-sized display is refused, and Windows Graphics Capture records it.
 //!
 //! The driver only lets a licensed application capture with NvFBC on a GeForce GPU: it must
 //! present the key NVIDIA issued, which is entered in Settings and read from the registry. NvFBC
@@ -32,28 +45,12 @@
 //! logged.
 //!
 //! `HINDSIGHT_NVFBC_FORMAT=nv12` has the driver grab NV12, as Instant Replay does, instead of
-//! ARGB. Direct3D 9 makes NV12 only as offscreen plain surfaces, which Direct3D 11 cannot open
-//! (nor can Direct3D 9 open an NV12 texture Direct3D 11 shares), so the surfaces are not shared:
-//! NVENC runs on this capture's Direct3D 9Ex device and reads them there, which needs a display
-//! of even width and height, and a grab can never be copied. The driver converts with the
-//! BT.601 matrix, which the clip then signals (`docs/backend-overhead.md`, "NV12 from NvFBC").
-//! The device is used from the capture thread only, by the grabs and by the encoder alike.
-//!
-//! `HINDSIGHT_NVFBC_ENCODER=d3d9` has NVENC read the ARGB grabs the same way, on this capture's
-//! Direct3D 9Ex device, as NVIDIA's `NvFBCDX9NvEnc` sample does, instead of through the shared
-//! textures on the Direct3D 11 device. The picture and the stream stay as they are (ARGB
-//! converted by NVENC, BT.709), and with one device reading and writing the surfaces the grab
-//! needs no completion query (`HINDSIGHT_GRAB_SYNC=none`). It too needs an even display.
-//!
-//! How each grab is known to have landed before NVENC reads its surface, and the switches that
-//! compare the ways of doing it (`HINDSIGHT_GRAB_SYNC`, `HINDSIGHT_GRAB_SYNC_STATS`), are
-//! described in [`sync`].
+//! ARGB, into offscreen plain surfaces, the only kind Direct3D 9 makes in NV12. The driver
+//! converts with the BT.601 matrix, which the clip then signals (`docs/backend-overhead.md`,
+//! "NV12 from NvFBC"); ARGB is converted by NVENC, with BT.709.
 
 mod cuda;
 mod ffi;
-mod sync;
-#[cfg(test)]
-mod sync_cost;
 
 use super::{
     CaptureError, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed, is_window_closed,
@@ -61,19 +58,18 @@ use super::{
 };
 use crate::{gpu::device::Device, log, replay::Matrix, service::Target, sys::nvfbc_key};
 use std::ptr::{self, NonNull};
-use sync::{Call, GrabSync, Stats, timed};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HANDLE, HMODULE, HWND, LUID},
+        Foundation::{FreeLibrary, HMODULE, HWND, LUID},
         Graphics::{
             Direct3D9::{
                 D3D_SDK_VERSION, D3DCREATE_FPU_PRESERVE, D3DCREATE_MULTITHREADED,
                 D3DCREATE_NOWINDOWCHANGES, D3DCREATE_SOFTWARE_VERTEXPROCESSING, D3DDEVTYPE_HAL,
                 D3DDISPLAYMODEEX, D3DDISPLAYROTATION, D3DDISPLAYROTATION_IDENTITY, D3DFMT_A8R8G8B8,
                 D3DFMT_UNKNOWN, D3DFORMAT, D3DPOOL_DEFAULT, D3DPRESENT_INTERVAL_IMMEDIATE,
-                D3DPRESENT_PARAMETERS, D3DQUERYTYPE_EVENT, D3DSWAPEFFECT_DISCARD,
-                D3DUSAGE_RENDERTARGET, Direct3DCreate9Ex, IDirect3D9Ex, IDirect3DDevice9Ex,
-                IDirect3DQuery9, IDirect3DSurface9, IDirect3DTexture9,
+                D3DPRESENT_PARAMETERS, D3DSWAPEFFECT_DISCARD, D3DUSAGE_RENDERTARGET,
+                Direct3DCreate9Ex, IDirect3D9Ex, IDirect3DDevice9Ex, IDirect3DSurface9,
+                IDirect3DTexture9,
             },
             Direct3D11::ID3D11Texture2D,
             Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
@@ -102,8 +98,6 @@ const GRAB_MODE_VARIABLE: &str = "HINDSIGHT_NVFBC_GRAB_MODE";
 const WAIT_TIMEOUT_VARIABLE: &str = "HINDSIGHT_NVFBC_WAIT_TIMEOUT";
 /// The variable naming the pixel format the driver grabs into; see [`PixelFormat`].
 const FORMAT_VARIABLE: &str = "HINDSIGHT_NVFBC_FORMAT";
-/// The variable naming the device NVENC reads ARGB grabs on; see [`EncoderOn`].
-const ENCODER_VARIABLE: &str = "HINDSIGHT_NVFBC_ENCODER";
 /// `MAKEFOURCC('N', 'V', '1', '2')`, which Direct3D 9 takes as a format although its headers
 /// name no constant for it.
 const D3DFMT_NV12: D3DFORMAT = D3DFORMAT(u32::from_le_bytes(*b"NV12"));
@@ -121,11 +115,12 @@ pub(super) struct Capture {
     slots: [Slot; SLOTS],
     /// `None` while the driver has taken it away.
     session: Option<Session>,
-    /// The slot whose grab is on its way, to be copied on the next tick.
+    /// The slot whose grab is on its way, to be handed to the encoder on the next tick.
     pending: Option<usize>,
     /// The slot the next grab goes into.
     next: u32,
-    /// Whether the encoder reads the surfaces in place, so a finished grab is not copied.
+    /// Whether the pipeline has agreed to have the encoder read the surfaces in place, the
+    /// only way their grabs reach it.
     handed_over: bool,
     size: (u32, u32),
     /// The captured monitor, checked for before a lost session is opened again.
@@ -141,44 +136,14 @@ pub(super) struct Capture {
     reported: bool,
     /// What the driver grabs into the surfaces.
     format: PixelFormat,
-    /// The device NVENC reads the surfaces on: Direct3D 9 for NV12, and for ARGB when asked.
-    encoder: EncoderOn,
-    /// How a grab is known to have landed before its surface is handed over.
-    sync: GrabSync,
-    /// The cycles spent on each grab and its synchronisation, when they are counted.
-    stats: Option<Stats>,
-}
-
-/// What a capture is started with besides its target: the settings the environment variables
-/// named in the module documentation and in [`sync`] choose.
-struct Setup {
-    switches: Switches,
-    format: PixelFormat,
-    encoder: EncoderOn,
-    /// The mode asked for, before [`GrabSync::effective`] checks it against the format.
-    sync: GrabSync,
-    stats: Option<Stats>,
-}
-
-impl Setup {
-    /// What the environment asks for.
-    fn from_environment() -> Self {
-        Self {
-            switches: Switches::from_environment(),
-            format: PixelFormat::from_environment(),
-            encoder: EncoderOn::from_environment(),
-            sync: GrabSync::from_environment(),
-            stats: Stats::from_environment(),
-        }
-    }
 }
 
 /// The pixel format the driver grabs into, which `HINDSIGHT_NVFBC_FORMAT` chooses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PixelFormat {
-    /// BGRA in textures shared with the Direct3D 11 device, the default.
+    /// BGRA in render-target textures, converted by NVENC with BT.709, the default.
     Argb,
-    /// NV12 in plain surfaces only the Direct3D 9 device sees, converted with BT.601.
+    /// NV12 in offscreen plain surfaces, converted by the driver with BT.601.
     Nv12,
 }
 
@@ -202,32 +167,6 @@ impl PixelFormat {
         match self {
             Self::Argb => ffi::TODX9VID_ARGB,
             Self::Nv12 => ffi::TODX9VID_NV12,
-        }
-    }
-}
-
-/// The device NVENC reads ARGB grabs on, which `HINDSIGHT_NVFBC_ENCODER` chooses; NV12 grabs
-/// are always read on the Direct3D 9Ex device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EncoderOn {
-    /// The shared Direct3D 11 device, through textures opened from the surfaces, the default.
-    Direct3D11,
-    /// The capture's own Direct3D 9Ex device, reading the surfaces themselves.
-    Direct3D9,
-}
-
-impl EncoderOn {
-    /// What the environment asks for.
-    fn from_environment() -> Self {
-        Self::parse(std::env::var(ENCODER_VARIABLE).ok().as_deref())
-    }
-
-    /// The device a value of the variable names, without regard to case or surrounding
-    /// whitespace; anything but `d3d9` leaves Direct3D 11.
-    fn parse(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
-            Some(value) if value.eq_ignore_ascii_case("d3d9") => Self::Direct3D9,
-            _ => Self::Direct3D11,
         }
     }
 }
@@ -334,50 +273,21 @@ impl Capture {
         target: &Target,
         cursor: bool,
     ) -> Result<Self, CaptureError> {
-        Self::start_with(device, target, cursor, Setup::from_environment())
-    }
-
-    /// Starts capturing as [`Capture::start`] does, with the settings `setup` gives.
-    fn start_with(
-        device: &Device,
-        target: &Target,
-        cursor: bool,
-        setup: Setup,
-    ) -> Result<Self, CaptureError> {
-        let Setup {
-            switches,
-            format,
-            encoder,
-            sync,
-            stats,
-        } = setup;
-        let encoder = if format == PixelFormat::Nv12 {
-            EncoderOn::Direct3D9
-        } else {
-            encoder
-        };
-        let encodes_on_d3d9 = encoder == EncoderOn::Direct3D9;
+        let switches = Switches::from_environment();
+        let format = PixelFormat::from_environment();
         let (monitor, window) = monitor_of(target);
         let key = saved_key()?;
         switches.report();
-        let effective = sync.effective(encodes_on_d3d9);
-        GrabSync::report(sync, effective);
 
         // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
         let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION) }
             .map_err(failed("start Direct3D 9 for NvFBC"))?;
         let adapter = find_adapter(&d3d9, device, monitor)?;
         let size = display_size(&d3d9, adapter)?;
-        if encodes_on_d3d9 {
-            require_even(size)?;
-        }
+        require_even(size, "NVIDIA NvFBC")?;
         if format == PixelFormat::Nv12 {
             log::info(
-                "NvFBC grabs NV12 (HINDSIGHT_NVFBC_FORMAT=nv12): NVENC runs on NvFBC's Direct3D 9 device and the clip signals the BT.601 matrix",
-            );
-        } else if encodes_on_d3d9 {
-            log::info(
-                "NvFBC's ARGB grabs are encoded on its Direct3D 9 device (HINDSIGHT_NVFBC_ENCODER=d3d9)",
+                "NvFBC grabs NV12 (HINDSIGHT_NVFBC_FORMAT=nv12): the clip signals the BT.601 matrix",
             );
         }
 
@@ -385,9 +295,9 @@ impl Capture {
         let create = prepare(&library, &key, adapter)?;
         let d3d9_device = create_device(&d3d9, adapter)?;
         let slots = [
-            create_slot(&d3d9_device, device, size, format)?,
-            create_slot(&d3d9_device, device, size, format)?,
-            create_slot(&d3d9_device, device, size, format)?,
+            create_slot(&d3d9_device, size, format)?,
+            create_slot(&d3d9_device, size, format)?,
+            create_slot(&d3d9_device, size, format)?,
         ];
 
         let mut capture = Self {
@@ -408,9 +318,6 @@ impl Capture {
             switches,
             reported: false,
             format,
-            encoder,
-            sync: effective,
-            stats,
         };
         capture.session = Some(capture.open_session()?);
         Ok(capture)
@@ -478,48 +385,13 @@ impl Capture {
         Ok(Frame::Unchanged)
     }
 
-    /// Waits for the GPU to finish the previous tick's grab and copies it into `target`, unless
-    /// the encoder reads it in place, and reports which slot it was in, if there was one.
-    fn collect(
-        &mut self,
-        device: &Device,
-        target: Option<&ID3D11Texture2D>,
-        width: u32,
-        height: u32,
-    ) -> Result<Option<usize>, CaptureError> {
-        let Some(index) = self.pending.take() else {
-            return Ok(None);
-        };
-        let slot = &self.slots[index];
-        self.sync.settle(&slot.done, &mut self.stats)?;
-        Stats::report_when_due(&mut self.stats, self.sync);
-        if !self.handed_over {
-            // A grab encoded on the Direct3D 9 device has no target to be copied into, and an
-            // NV12 one no Direct3D 11 side to copy from; `start` refused a display the pipeline
-            // would not hand the surfaces over for.
-            let shared = slot
-                .shared
-                .as_ref()
-                .filter(|_| self.encoder == EncoderOn::Direct3D11)
-                .ok_or_else(|| {
-                    CaptureError::Unsupported(
-                        "NvFBC's grabs encoded on its Direct3D 9 device can only be encoded in place"
-                            .into(),
-                    )
-                })?;
-            device.copy_region(super::target_of(target), &shared.texture, width, height);
-        }
-        Ok(Some(index))
-    }
-
-    /// Starts a grab of the display into the next slot.
+    /// Starts a grab of the display into the next slot; one that started is left for the next
+    /// tick to hand over, and the following grab moves on to the slot after it.
     fn grab(&mut self) -> Result<Grab, CaptureError> {
         let Some(session) = &self.session else {
             return Ok(Grab::Lost);
         };
-        let (status, info) = timed(&mut self.stats, Call::Grab, || {
-            session.grab_frame(self.next, self.size, self.switches)
-        });
+        let (status, info) = session.grab_frame(self.next, self.size, self.switches);
         if status == Status::SUCCESS && !self.reported && self.switches != Switches::DEFAULT {
             self.reported = true;
             log::info(format!(
@@ -531,24 +403,16 @@ impl Capture {
             Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
             Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
             Status::SUCCESS => {
-                self.follow_grab()?;
+                // No wait for the grab to land: NVENC reads the surface on the same device,
+                // which carries the blit out first (see the module documentation).
+                self.pending = Some(self.next as usize);
+                self.next = (self.next + 1) % SLOT_COUNT;
                 Ok(Grab::Started)
             }
             Status::INVALIDATED_SESSION => Ok(Grab::Lost),
             Status::PROTECTED_CONTENT => Ok(Grab::Withheld),
             status => Err(nvfbc_failed("grab the display with NvFBC")(status)),
         }
-    }
-
-    /// Follows the grab just started into the next slot as the sync mode says (usually with
-    /// the query that tells when it has finished on the GPU, sent there with it), leaves that
-    /// slot for the next tick to collect and moves the following grab on to the slot after it.
-    fn follow_grab(&mut self) -> Result<(), CaptureError> {
-        let slot = &self.slots[self.next as usize];
-        self.sync.follow(&slot.done, &mut self.stats)?;
-        self.pending = Some(self.next as usize);
-        self.next = (self.next + 1) % SLOT_COUNT;
-        Ok(())
     }
 }
 
@@ -563,16 +427,24 @@ impl Source for Capture {
 
     fn take(
         &mut self,
-        device: &Device,
-        target: Option<&ID3D11Texture2D>,
-        width: u32,
-        height: u32,
+        _device: &Device,
+        _target: Option<&ID3D11Texture2D>,
+        _width: u32,
+        _height: u32,
     ) -> Result<Frame, CaptureError> {
         if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
+        if !self.handed_over {
+            // A surface on the Direct3D 9 device cannot be copied into a Direct3D 11 texture,
+            // and the pipeline hands surfaces over whenever the display's size is encodable,
+            // which `start` made sure of.
+            return Err(CaptureError::Unsupported(
+                "NVIDIA NvFBC can only encode its grabs in place".to_owned(),
+            ));
+        }
 
-        let collected = self.collect(device, target, width, height)?;
+        let collected = self.pending.take();
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
             Grab::Resized => return Ok(Frame::Resized),
@@ -584,11 +456,7 @@ impl Source for Capture {
                 return self.reopen();
             }
         }
-        Ok(match collected {
-            Some(index) if self.handed_over => Frame::InSurface(index),
-            Some(_) => Frame::Fresh,
-            None => Frame::Unchanged,
-        })
+        Ok(collected.map_or(Frame::Unchanged, Frame::InSurface))
     }
 
     fn hand_over_surfaces(&mut self) -> bool {
@@ -598,14 +466,9 @@ impl Source for Capture {
 
     fn surface(&self, index: usize) -> Option<Surface> {
         let slot = self.slots.get(index)?;
-        Some(match &slot.shared {
-            Some(shared) if self.encoder == EncoderOn::Direct3D11 => {
-                Surface::Texture(shared.texture.clone())
-            }
-            _ => Surface::Direct3D9 {
-                surface: slot.surface.clone(),
-                nv12: self.format == PixelFormat::Nv12,
-            },
+        Some(Surface::Direct3D9 {
+            surface: slot.surface.clone(),
+            nv12: self.format == PixelFormat::Nv12,
         })
     }
 
@@ -614,11 +477,7 @@ impl Source for Capture {
     }
 
     fn encoder_device(&self) -> EncoderDevice {
-        if self.encoder == EncoderOn::Direct3D9 {
-            EncoderDevice::Direct3D9(self.device.clone())
-        } else {
-            EncoderDevice::Direct3D
-        }
+        EncoderDevice::Direct3D9(self.device.clone())
     }
 
     fn colour_matrix(&self) -> Matrix {
@@ -704,22 +563,12 @@ impl EntryPoints {
     }
 }
 
-/// A Direct3D 9 surface NvFBC grabs into, the same memory opened on the encoder's device when
-/// it can be, and a query that tells when the grab has finished on the GPU.
+/// A Direct3D 9 surface NvFBC grabs into and NVENC reads.
 struct Slot {
     surface: IDirect3DSurface9,
-    /// `None` for an NV12 surface, which only the Direct3D 9 device can see.
-    shared: Option<Shared>,
-    done: IDirect3DQuery9,
-}
-
-/// An ARGB slot's surface as a texture shared with the encoder's Direct3D 11 device.
-struct Shared {
-    /// The texture the slot's surface is the only level of, kept alive for as long as the
-    /// surface.
-    _texture: IDirect3DTexture9,
-    /// The same memory opened on the encoder's device.
-    texture: ID3D11Texture2D,
+    /// The texture an ARGB surface is the only level of, kept alive for as long as the
+    /// surface; `None` for an NV12 plain surface, which stands alone.
+    _texture: Option<IDirect3DTexture9>,
 }
 
 /// A capture object of the driver's, released when dropped.
@@ -817,8 +666,8 @@ fn key_size(key: &[u8]) -> u32 {
     u32::try_from(key.len()).unwrap_or(u32::MAX)
 }
 
-/// The Direct3D 9 adapter that shows `monitor`, which must be on the encoding GPU for the
-/// surfaces to be shared with it.
+/// The Direct3D 9 adapter that shows `monitor`, which must be the GPU the pipeline's device is
+/// on: the encoder reads the grabs there, and the rest of the session stays on that GPU.
 fn find_adapter(
     d3d9: &IDirect3D9Ex,
     device: &Device,
@@ -954,41 +803,33 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
     .map_err(failed("create the Direct3D 9 device for NvFBC"))
 }
 
-/// A surface the size of the display for grabs in `format`: for ARGB shared with the encoder's
-/// device, for NV12 a plain surface only `d3d9` sees.
+/// A surface on `d3d9` the size of the display for grabs in `format`: for ARGB the one level
+/// of a render-target texture, for NV12 a plain surface.
 fn create_slot(
     d3d9: &IDirect3DDevice9Ex,
-    device: &Device,
     size: (u32, u32),
     format: PixelFormat,
 ) -> Result<Slot, CaptureError> {
-    let (surface, shared) = match format {
+    match format {
         PixelFormat::Argb => {
-            let (texture, handle) = create_shared_texture(d3d9, size)?;
+            let texture = create_texture(d3d9, size)?;
             // SAFETY: the texture has one level.
             let surface =
                 unsafe { texture.GetSurfaceLevel(0) }.map_err(failed("open the NvFBC surface"))?;
-            let shared = Shared {
-                _texture: texture,
-                texture: open_shared(device, handle)?,
-            };
-            (surface, Some(shared))
+            Ok(Slot {
+                surface,
+                _texture: Some(texture),
+            })
         }
-        PixelFormat::Nv12 => (create_nv12_surface(d3d9, size)?, None),
-    };
-    // SAFETY: creates a query on a live device.
-    let done = unsafe { d3d9.CreateQuery(D3DQUERYTYPE_EVENT) }
-        .map_err(failed("create the NvFBC completion query"))?;
-    Ok(Slot {
-        surface,
-        shared,
-        done,
-    })
+        PixelFormat::Nv12 => Ok(Slot {
+            surface: create_nv12_surface(d3d9, size)?,
+            _texture: None,
+        }),
+    }
 }
 
 /// An NV12 plain surface of `width` × `height` that the driver can grab into. Direct3D 9 makes
-/// NV12 neither as a texture nor as a render target, and does not share a plain surface with
-/// Direct3D 11, so the surface is not shared.
+/// NV12 neither as a texture nor as a render target.
 fn create_nv12_surface(
     d3d9: &IDirect3DDevice9Ex,
     (width, height): (u32, u32),
@@ -1010,17 +851,16 @@ fn create_nv12_surface(
     .map_err(failed("create an NV12 surface for NvFBC"))
 }
 
-/// A render-target texture of `width` × `height` that the driver can grab into, and the
-/// handle that shares it with other devices.
-fn create_shared_texture(
+/// A render-target texture of `width` × `height` that the driver can grab into. It is not
+/// shared: NVENC reads it on the same device.
+fn create_texture(
     d3d9: &IDirect3DDevice9Ex,
     (width, height): (u32, u32),
-) -> Result<(IDirect3DTexture9, HANDLE), CaptureError> {
+) -> Result<IDirect3DTexture9, CaptureError> {
     let mut texture = None;
-    let mut handle = HANDLE::default();
-    // SAFETY: a shared texture must be in the default pool, as it is; both out-parameters are
-    // written on success.
-    let texture = unsafe {
+    // SAFETY: an unshared texture in the default pool, so the handle pointer may be null; the
+    // out-parameter is written on success.
+    unsafe {
         d3d9.CreateTexture(
             width,
             height,
@@ -1029,23 +869,11 @@ fn create_shared_texture(
             D3DFMT_A8R8G8B8,
             D3DPOOL_DEFAULT,
             &raw mut texture,
-            &raw mut handle,
+            ptr::null_mut(),
         )
     }
     .and_then(|()| texture.ok_or_else(windows::core::Error::empty))
-    .map_err(failed("create a surface for NvFBC"))?;
-    Ok((texture, handle))
-}
-
-/// The texture behind a handle a Direct3D 9Ex device on the encoding GPU shared, opened on the
-/// encoder's device.
-fn open_shared(device: &Device, handle: HANDLE) -> Result<ID3D11Texture2D, CaptureError> {
-    let mut shared: Option<ID3D11Texture2D> = None;
-    // SAFETY: a shared handle from a Direct3D 9Ex device on the same adapter; the
-    // out-parameter is written on success.
-    unsafe { device.d3d.OpenSharedResource(handle, &raw mut shared) }
-        .and_then(|()| shared.ok_or_else(windows::core::Error::empty))
-        .map_err(failed("share the NvFBC surface with the encoder"))
+    .map_err(failed("create a surface for NvFBC"))
 }
 
 /// The surfaces of `slots` as the driver is handed them at setup.
@@ -1068,14 +896,14 @@ fn is_attached(monitor: HMONITOR) -> bool {
     unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
 }
 
-/// Refuses a display with an odd width or height for grabs encoded on the Direct3D 9 device:
-/// NVENC encodes even sizes, and such a grab can only be read in place, uncropped.
-fn require_even((width, height): (u32, u32)) -> Result<(), CaptureError> {
+/// Refuses a display with an odd width or height for `backend`, named as Settings names it:
+/// NVENC encodes even sizes, and both NvFBC backends have their grabs read in place, uncropped.
+fn require_even((width, height): (u32, u32), backend: &str) -> Result<(), CaptureError> {
     if width % 2 == 0 && height % 2 == 0 {
         return Ok(());
     }
     Err(CaptureError::Unsupported(format!(
-        "the display is {width}×{height}; NvFBC's grabs encoded on its Direct3D 9 device are read in place and need an even width and height, so unset HINDSIGHT_NVFBC_FORMAT and HINDSIGHT_NVFBC_ENCODER"
+        "the display is {width}×{height}; {backend} encodes its grabs in place and needs an even width and height, so choose Windows Graphics Capture"
     )))
 }
 
@@ -1136,24 +964,19 @@ mod tests {
     }
 
     #[test]
-    fn only_d3d9_moves_the_encoder() {
-        assert_eq!(EncoderOn::parse(None), EncoderOn::Direct3D11);
-        assert_eq!(EncoderOn::parse(Some("d3d11")), EncoderOn::Direct3D11);
-        assert_eq!(EncoderOn::parse(Some(" D3D9 ")), EncoderOn::Direct3D9);
-    }
-
-    #[test]
     fn nv12_names_its_fourcc() {
         assert_eq!(D3DFMT_NV12.0, 0x3231_564E);
     }
 
     #[test]
-    fn odd_displays_are_refused_for_nv12() {
-        assert!(require_even((2560, 1440)).is_ok());
-        assert!(matches!(
-            require_even((1366, 767)),
-            Err(CaptureError::Unsupported(_))
-        ));
+    fn odd_displays_are_refused_with_a_way_out() {
+        assert!(require_even((2560, 1440), "NVIDIA NvFBC").is_ok());
+        for size in [(1367, 768), (1366, 767)] {
+            let Err(CaptureError::Unsupported(message)) = require_even(size, "NVIDIA NvFBC") else {
+                panic!("an odd size is refused as unsupported");
+            };
+            assert!(message.contains("Windows Graphics Capture"));
+        }
     }
 
     #[test]

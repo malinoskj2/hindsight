@@ -1,7 +1,7 @@
 //! A by-hand measurement, not part of the program: what each NVENC call costs the calling
 //! thread per frame when the session runs on a Direct3D 11 device, as hindsight's does, and when
 //! it runs on a Direct3D 12 device, or on a Direct3D 9Ex device reading a BGRA render-target
-//! surface as NvFBC's (`HINDSIGHT_NVFBC_ENCODER=d3d9`), instead; and what locking the bitstream
+//! surface as NvFBC's grabs are, instead; and what locking the bitstream
 //! without waiting (`doNotWait`, the completion event having fired) changes.
 //!
 //! Run it on a machine with an NVIDIA GPU, with nothing else measuring:
@@ -922,7 +922,11 @@ impl Bench {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = output;
-        lock.flags = u32::from(self.case.lock_no_wait);
+        lock.flags = if self.case.lock_no_wait {
+            ffi::LOCK_DO_NOT_WAIT
+        } else {
+            0
+        };
         let lock_bitstream = self.session.api.lock_bitstream.expect("nvEncLockBitstream");
         let copy = &mut self.copy;
         let session = &self.session;

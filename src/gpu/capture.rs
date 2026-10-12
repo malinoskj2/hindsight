@@ -6,9 +6,9 @@
 //!   recorded through the monitor it fills.
 //! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
 //!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues. It
-//!   grabs into Direct3D 9 surfaces (NV12 ones, behind a switch, which only an encoder on its
-//!   own Direct3D 9 device reads), or, as [`nvfbc::CudaCapture`], into CUDA memory that an
-//!   encoder on a CUDA context reads in place.
+//!   grabs into Direct3D 9 surfaces that an encoder on its Direct3D 9Ex device reads in place,
+//!   or, as [`nvfbc::CudaCapture`], into CUDA memory that an encoder on a CUDA context reads
+//!   in place.
 //!
 //! A monitor in HDR is described by [`display`]; Windows Graphics Capture and Desktop
 //! Duplication then take its FP16 scRGB picture and [`tonemap`] turns it into 8-bit SDR for
