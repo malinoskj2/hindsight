@@ -1,6 +1,4 @@
-//! The notification-area icon and its menu. Its callbacks run on the window's own thread
-//! (the library delivers them from a hidden window's message handler), so they hand the
-//! action straight to the window through a thread-local callback.
+//! The notification-area icon and its menu; callbacks arrive on the window's own thread.
 
 use crate::APP_NAME;
 use std::{cell::RefCell, rc::Rc};
@@ -10,10 +8,8 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 
-/// The side of the icon in the notification area, in pixels.
 const ICON_SIZE: u32 = 32;
 
-/// The callback of the tray.
 type Handler = Rc<dyn Fn(TrayAction)>;
 
 thread_local! {
@@ -30,7 +26,6 @@ pub(crate) enum TrayError {
     Image(#[from] tray_icon::BadIcon),
 }
 
-/// What the user asked for from the icon or its menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrayAction {
     Show,
@@ -38,8 +33,6 @@ pub(crate) enum TrayAction {
     Quit,
 }
 
-/// Calls its handler, on the creating thread, with each action chosen from the icon or its
-/// menu. The icon is removed when dropped.
 pub(crate) struct Tray {
     _icon: TrayIcon,
 }
@@ -59,8 +52,7 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
-        // Installed only once nothing can fail any more: a handler left behind by a failed
-        // setup would keep the window, and through it the worker, alive for good.
+        // Installed last: a handler left behind by a failed setup would keep the window alive.
         set_handler(Rc::new(on_action));
         route_events([
             (show.id().clone(), TrayAction::Show),
@@ -79,13 +71,10 @@ impl Drop for Tray {
     }
 }
 
-/// The application icon at the notification area's size.
 fn app_icon() -> Result<Icon, tray_icon::BadIcon> {
     Icon::from_rgba(super::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
 }
 
-/// Sends a choice from the menu, whose items' ids map to `actions`, and a click that opens the
-/// window to the callback.
 fn route_events(actions: [(MenuId, TrayAction); 3]) {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if let Some(&(_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
@@ -99,8 +88,6 @@ fn route_events(actions: [(MenuId, TrayAction); 3]) {
     }));
 }
 
-/// Whether a click on the icon shows the window: a left click once the button is released, or
-/// a left double click.
 fn opens_window(event: &TrayIconEvent) -> bool {
     matches!(
         event,
@@ -115,18 +102,15 @@ fn opens_window(event: &TrayIconEvent) -> bool {
     )
 }
 
-/// Makes `handler` this thread's callback, replacing any other.
 fn set_handler(handler: Handler) {
     HANDLER.with(|slot| *slot.borrow_mut() = Some(handler));
 }
 
-/// Forgets this thread's callback.
 fn clear_handler() {
     HANDLER.with(|slot| slot.borrow_mut().take());
 }
 
-/// Calls this thread's callback, if there is one. It is cloned out first, so it may itself
-/// replace or drop the tray.
+/// The handler is cloned out first, so it may itself replace or drop the tray.
 fn dispatch(action: TrayAction) {
     let handler = HANDLER.with(|slot| slot.borrow().clone());
     if let Some(handler) = handler {

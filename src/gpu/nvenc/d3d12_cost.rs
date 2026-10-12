@@ -1,37 +1,5 @@
-//! A by-hand measurement, not part of the program: what each NVENC call costs the calling
-//! thread per frame when the session runs on a Direct3D 11 device, as hindsight's does, and when
-//! it runs on a Direct3D 12 device, or on a Direct3D 9Ex device reading a BGRA render-target
-//! surface as NvFBC's grabs are, instead; and what locking the bitstream
-//! without waiting (`doNotWait`, the completion event having fired) changes.
-//!
-//! Run it on a machine with an NVIDIA GPU, with nothing else measuring:
-//!
-//! ```text
-//! cargo test --release d3d12_encode_cost -- --ignored --nocapture
-//! ```
-//!
-//! With `HINDSIGHT_COST_CASES` set, only the cases whose names contain its value run.
-//!
-//! Every case encodes the same static 1920×1080 BGRA texture to AV1 with hindsight's settings
-//! (`configure` and `initialize_params`: P4, high-quality tuning, VBR at 100 Mb/s, a keyframe
-//! every 30 frames, no B-frames), paced at 240 frames a second over a ring of three output
-//! buffers as the encoder's slots are, and reports the thread cycles of each call per frame and
-//! the whole process's cycles per frame. The first frames are left out of the statistics, since
-//! the session warms up on them.
-//!
-//! Sources for the Direct3D 12 path:
-//! - `nvEncodeAPI.h` of SDK 12.1 as `FFmpeg/nv-codec-headers` carries it (tag n12.1.14.0):
-//!   `NV_ENC_FENCE_POINT_D3D12`, `NV_ENC_INPUT_RESOURCE_D3D12`, `NV_ENC_OUTPUT_RESOURCE_D3D12`,
-//!   and the note on `NvEncMapInputResource` that on Direct3D 12 mapping does not wait for the
-//!   work that wrote the input, so fences must;
-//! - NVIDIA's blog post "Encoding for DirectX 12 with Video Codec SDK 11.1": input and output
-//!   are synchronized with fences, and `NvEncLockBitstream` takes the same
-//!   `NV_ENC_OUTPUT_RESOURCE_D3D12` that `NvEncEncodePicture` was given;
-//! - the walkthrough at <https://www.cnblogs.com/TiredInkRaven/p/18656474>, which follows the
-//!   SDK's `NvEncoderD3D12.cpp`: the session opens with `NV_ENC_DEVICE_TYPE_DIRECTX` on an
-//!   `ID3D12Device`; the output is a buffer in a readback heap, twice the picture's bytes,
-//!   registered as `NV_ENC_OUTPUT_BITSTREAM` in `NV_ENC_BUFFER_FORMAT_U8` with its byte count as
-//!   the width and a height of 1, and mapped like an input.
+//! By-hand measurement of what each NVENC call costs the calling thread per frame on Direct3D
+//! 11, 12 and 9Ex sessions: `cargo test --release d3d12_encode_cost -- --ignored --nocapture`.
 
 use super::{
     Settings, configure, create_input_texture,
@@ -81,16 +49,10 @@ const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const FRAME_RATE: u32 = 240;
 const FRAMES: usize = 2400;
-/// Frames encoded before the statistics start.
 const WARMUP: usize = 60;
-/// Output buffers in the ring, as the encoder has slots.
 const SLOTS: usize = 3;
-/// How long a frame may take before the measurement gives up on the driver.
 const TIMEOUT_MS: u32 = 2000;
 
-/// The calls a frame's cost is split into, in the order they are reported. A frame's map and
-/// unmap are the input's, plus on Direct3D 12 without persistent mapping the output buffer's;
-/// the fence wait is waiting on the completion event or the output fence before the lock.
 const CALLS: [&str; 6] = ["map", "encode", "wait", "lock+copy", "unlock", "unmap"];
 const MAP: usize = 0;
 const ENCODE: usize = 1;
@@ -99,10 +61,9 @@ const LOCK: usize = 3;
 const UNLOCK: usize = 4;
 const UNMAP: usize = 5;
 
-/// Thread cycles spent in each of [`CALLS`] for one frame.
 type Costs = [u64; CALLS.len()];
 
-/// `NV_ENC_FENCE_POINT_D3D12`.
+/// `NV_ENC_FENCE_POINT_D3D12` (`nvEncodeAPI.h`, SDK 12.1, nv-codec-headers n12.1.14.0).
 #[repr(C)]
 struct FencePoint {
     version: u32,
@@ -118,8 +79,7 @@ struct FencePoint {
 const FENCE_WAIT: u32 = 1 << 0;
 const FENCE_SIGNAL: u32 = 1 << 1;
 
-/// `NV_ENC_INPUT_RESOURCE_D3D12` and `NV_ENC_OUTPUT_RESOURCE_D3D12`, which have one layout: a
-/// mapped buffer and the fence point NVENC waits on or signals around reading or writing it.
+/// `NV_ENC_INPUT_RESOURCE_D3D12` and `NV_ENC_OUTPUT_RESOURCE_D3D12`, which share one layout.
 #[repr(C)]
 struct ResourceD3D12 {
     version: u32,
@@ -137,10 +97,8 @@ const _: () = assert!(size_of::<FencePoint>() == 64);
 const _: () = assert!(size_of::<ResourceD3D12>() == 272);
 const _: () = assert!(std::mem::offset_of!(ResourceD3D12, fence_point) == 16);
 
-/// The version of both resource structures and of the fence point.
 const D3D12_STRUCT_VER: u32 = ffi::struct_version(1);
 
-/// One way of running the session.
 #[derive(Clone, Copy)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -149,17 +107,10 @@ const D3D12_STRUCT_VER: u32 = ffi::struct_version(1);
 struct Case {
     name: &'static str,
     d3d12: bool,
-    /// A Direct3D 9Ex session reading a surface of a BGRA render-target texture, as NvFBC's
-    /// grabs are, on a device made as NvFBC's is (software vertex processing).
     d3d9: bool,
-    /// Lock each bitstream with `doNotWait` set.
     lock_no_wait: bool,
-    /// Completion events, as hindsight runs; otherwise the lock waits for the frame.
     asynchronous: bool,
-    /// Map the input (and on Direct3D 12 the output buffers) once, not once per frame.
     persistent_map: bool,
-    /// On Direct3D 12, have NVENC wait on the input fence before reading the picture, as a
-    /// capture writing it would need; without, the input names no fence at all.
     input_fence: bool,
 }
 
@@ -260,7 +211,6 @@ const CASES: [Case; 10] = [
 #[ignore = "encodes on the GPU for about a minute; run by hand"]
 fn d3d12_encode_cost() {
     let mut results = Vec::new();
-    // `HINDSIGHT_COST_CASES=d3d12` runs only the cases whose names contain it.
     let only = std::env::var("HINDSIGHT_COST_CASES").unwrap_or_default();
     for case in CASES
         .into_iter()
@@ -291,7 +241,6 @@ fn d3d12_encode_cost() {
     }
 }
 
-/// Thread cycles the calling thread has run so far.
 fn thread_cycles() -> u64 {
     let mut cycles = 0;
     // SAFETY: the pseudo-handle of the calling thread and one integer to write.
@@ -300,7 +249,6 @@ fn thread_cycles() -> u64 {
     cycles
 }
 
-/// Cycles every thread of this process, the driver's included, has run so far.
 fn process_cycles() -> u64 {
     let mut cycles = 0;
     // SAFETY: the pseudo-handle of this process and one integer to write.
@@ -309,7 +257,6 @@ fn process_cycles() -> u64 {
     cycles
 }
 
-/// Runs `body`, adding the thread cycles it took to `costs[call]`.
 fn timed<T>(costs: &mut Costs, call: usize, body: impl FnOnce() -> T) -> T {
     let start = thread_cycles();
     let result = body();
@@ -317,7 +264,6 @@ fn timed<T>(costs: &mut Costs, call: usize, body: impl FnOnce() -> T) -> T {
     result
 }
 
-/// An open encode session and the library it came from.
 struct Session {
     api: Box<ffi::FunctionList>,
     handle: ffi::Session,
@@ -325,7 +271,6 @@ struct Session {
 }
 
 impl Session {
-    /// Opens a session on `device`, of NVENC's `device_type`.
     fn open(device_type: u32, device: *mut c_void) -> Result<Self, String> {
         let library = load_library().map_err(|error| error.to_string())?;
         let (_, create_instance) = resolve_exports(*library).map_err(|error| error.to_string())?;
@@ -357,7 +302,6 @@ impl Session {
         })
     }
 
-    /// Panics unless `status` is success, with the session's own account of the failure.
     fn check(&self, call: &str, status: Status) {
         assert!(
             status == Status::SUCCESS,
@@ -366,7 +310,6 @@ impl Session {
         );
     }
 
-    /// The session's account of its last failure.
     fn last_error(&self) -> String {
         self.api
             .get_last_error_string
@@ -383,7 +326,6 @@ impl Session {
             })
     }
 
-    /// Initializes the session as hindsight does, synchronously unless `asynchronous`.
     fn initialize(&self, settings: Settings, asynchronous: bool) -> Result<(), String> {
         let mut preset = ffi::PresetConfig::zeroed();
         preset.version = ffi::PRESET_CONFIG_VER;
@@ -422,7 +364,6 @@ impl Session {
         }
     }
 
-    /// Registers `resource`, `width` × `height` in `format`, for `usage`.
     fn register(
         &self,
         resource: *mut c_void,
@@ -445,7 +386,6 @@ impl Session {
         params.registered_resource
     }
 
-    /// Maps `registered`, returning the mapping and its format.
     fn map(&self, registered: ffi::Registered) -> (ffi::Mapped, u32) {
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
@@ -457,7 +397,6 @@ impl Session {
         (map.mapped_resource, map.mapped_buffer_format)
     }
 
-    /// Undoes a [`map`](Self::map).
     fn unmap(&self, mapped: ffi::Mapped) {
         let unmap = self
             .api
@@ -468,7 +407,6 @@ impl Session {
         self.check("nvEncUnmapInputResource", status);
     }
 
-    /// Calls one of the entries that take back a handle the session gave out.
     fn with_pointer(&self, call: &str, entry: Option<ffi::WithPointer>, pointer: *mut c_void) {
         let entry = entry.expect("an entry the driver provides");
         // SAFETY: `pointer` is the kind of handle the entry takes, still live.
@@ -486,14 +424,13 @@ impl Drop for Session {
     }
 }
 
-/// The device the session runs on, and the picture it encodes, which lives there.
 enum Backend {
     D3d11 {
         _device: Device,
         texture: ID3D11Texture2D,
     },
     D3d9 {
-        // The surface is the texture's only level; both go before the device.
+        // Dropped before the device.
         surface: IDirect3DSurface9,
         _texture: IDirect3DTexture9,
         _device: IDirect3DDevice9Ex,
@@ -501,26 +438,21 @@ enum Backend {
     D3d12 {
         device: ID3D12Device,
         texture: ID3D12Resource,
-        /// Signalled to 1 once, as if a capture had finished writing the picture; NVENC waits
-        /// on it before every frame.
+        /// Signalled to 1 once; NVENC waits on it before every frame.
         input_fence: ID3D12Fence,
-        /// NVENC signals it to a frame's number + 1 when that frame is written.
+        /// NVENC signals it to the frame's number + 1 once the frame is written.
         output_fence: ID3D12Fence,
         fence_event: Owned<HANDLE>,
     },
 }
 
-/// Where a slot's frames go.
 enum Output {
-    /// A bitstream buffer NVENC made in system memory.
     Bitstream(ffi::Bitstream),
-    /// A buffer in a readback heap, registered and, when mapped once, mapped.
     Readback {
         _buffer: ID3D12Resource,
         registered: ffi::Registered,
         mapped: Option<ffi::Mapped>,
-        /// What `NvEncEncodePicture` and `NvEncLockBitstream` are given; boxed so its address
-        /// holds while the frame is in flight.
+        /// Boxed: NVENC holds its address while the frame is in flight.
         resource: Box<ResourceD3D12>,
     },
 }
@@ -531,19 +463,13 @@ struct Slot {
     in_flight: Option<InFlight>,
 }
 
-/// A frame NVENC has been given but not yet returned.
 struct InFlight {
-    /// The frame's own input mapping, undone when it is collected.
     input: Option<ffi::Mapped>,
-    /// The frame's own output mapping, likewise.
     output: Option<ffi::Mapped>,
-    /// The value the output fence reaches when the frame is written.
     fence_value: u64,
-    /// The input structure on Direct3D 12, kept in place while the frame is in flight.
     _input_resource: Option<Box<ResourceD3D12>>,
 }
 
-/// What one case measured.
 struct Report {
     frames: Vec<Costs>,
     process_cycles: u64,
@@ -553,7 +479,6 @@ struct Report {
 }
 
 impl Report {
-    /// Mean cycles per measured frame of the sum of every NVENC call.
     fn path_mean(&self) -> u64 {
         mean(
             &self
@@ -607,13 +532,11 @@ fn median(mut values: Vec<u64>) -> u64 {
     values.get(values.len() / 2).copied().unwrap_or(0)
 }
 
-/// One case's session, picture and ring of outputs.
 struct Bench {
-    // Declared first so it is dropped before the resources it was given.
+    // Dropped before the resources it was given.
     session: Session,
     case: Case,
     registered_input: ffi::Registered,
-    /// The input's mapping for the session when it is mapped once.
     input_mapping: Option<(ffi::Mapped, u32)>,
     slots: Vec<Slot>,
     backend: Backend,
@@ -673,7 +596,6 @@ impl Bench {
         Ok(bench)
     }
 
-    /// Registers the picture and creates the ring of outputs.
     fn prepare(&mut self) {
         let texture = match &self.backend {
             Backend::D3d11 { texture, .. } => texture.as_raw(),
@@ -736,8 +658,7 @@ impl Bench {
         }
     }
 
-    /// A readback buffer twice the picture's bytes, registered as an output, as
-    /// `NvEncoderD3D12.cpp` makes them.
+    /// Twice the picture's bytes, as `NvEncoderD3D12.cpp` sizes them.
     fn create_readback(&self, device: &ID3D12Device) -> Output {
         let bytes = 2 * WIDTH * HEIGHT * 4;
         let buffer = create_resource(
@@ -768,7 +689,6 @@ impl Bench {
         }
     }
 
-    /// Encodes every frame at the frame rate and measures the frames after the warmup.
     fn run(&mut self) -> Report {
         let period = Duration::from_secs(1) / FRAME_RATE;
         let mut frames = Vec::with_capacity(FRAMES - WARMUP);
@@ -809,7 +729,6 @@ impl Bench {
         report
     }
 
-    /// Hands frame `index` to NVENC to encode into `slot`.
     fn submit(&mut self, slot: usize, index: u64, costs: &mut Costs) {
         let (input, format, own_input) = if let Some((mapped, format)) = self.input_mapping {
             (mapped, format, false)
@@ -874,8 +793,7 @@ impl Bench {
             }
         }
         let encode = self.session.api.encode_picture.expect("nvEncEncodePicture");
-        // SAFETY: the input is mapped, the output is not in flight, and every structure the
-        // parameters point to stays in place until the frame is collected.
+        // SAFETY: input mapped, output idle, and every pointed-to structure lives until collected.
         let status = timed(costs, ENCODE, || unsafe {
             encode(self.session.handle, &raw mut picture)
         });
@@ -888,8 +806,6 @@ impl Bench {
         });
     }
 
-    /// Waits for the frame in `slot`, copies its bitstream out and undoes its own mappings;
-    /// returns the bitstream's bytes.
     fn collect(&mut self, slot: usize, costs: &mut Costs) -> usize {
         let frame = self.slots[slot]
             .in_flight
@@ -931,8 +847,7 @@ impl Bench {
         let copy = &mut self.copy;
         let session = &self.session;
         let bytes = timed(costs, LOCK, || {
-            // SAFETY: the frame is done or the lock waits for it; the buffer stays locked only
-            // while it is copied.
+            // SAFETY: the frame is done or the lock waits for it; unlocked right after the copy.
             let status = unsafe { lock_bitstream(session.handle, &raw mut lock) };
             session.check("nvEncLockBitstream", status);
             copy.clear();
@@ -956,7 +871,6 @@ impl Bench {
         bytes
     }
 
-    /// Undoes every mapping and registration while the resources are still alive.
     fn teardown(&mut self) {
         let session = &self.session;
         if let Some((mapped, _)) = self.input_mapping.take() {
@@ -991,8 +905,6 @@ impl Bench {
     }
 }
 
-/// A Direct3D 9Ex device on the adapter of hindsight's device, made as NvFBC's is, with a BGRA
-/// render-target texture of the picture's size whose surface NVENC reads.
 fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
     // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
     let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION)? };
@@ -1059,7 +971,6 @@ fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
     })
 }
 
-/// A fence point on `fence` with `flags`, waiting for `wait_value` or signalling `signal_value`.
 fn fence_point(fence: &ID3D12Fence, flags: u32, wait_value: u64, signal_value: u64) -> FencePoint {
     FencePoint {
         version: D3D12_STRUCT_VER,
@@ -1072,7 +983,6 @@ fn fence_point(fence: &ID3D12Fence, flags: u32, wait_value: u64, signal_value: u
     }
 }
 
-/// Blocks until `fence` reaches `value`.
 fn await_fence(fence: &ID3D12Fence, value: u64, event: HANDLE) {
     // SAFETY: reads a live fence.
     if unsafe { fence.GetCompletedValue() } >= value {
@@ -1088,8 +998,6 @@ fn await_fence(fence: &ID3D12Fence, value: u64, event: HANDLE) {
     );
 }
 
-/// A Direct3D 12 device on the adapter of hindsight's device, with a BGRA picture and the
-/// fences NVENC synchronizes on.
 fn open_d3d12(device: &Device) -> windows::core::Result<Backend> {
     // SAFETY: reads the adapter of a live device.
     let adapter = unsafe { device.dxgi()?.GetAdapter()? };
@@ -1119,7 +1027,6 @@ fn open_d3d12(device: &Device) -> windows::core::Result<Backend> {
     let input_fence: ID3D12Fence = unsafe { d3d12.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
     // SAFETY: as above.
     let output_fence: ID3D12Fence = unsafe { d3d12.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
-    // The picture never changes: it is "written" once, before the first frame.
     // SAFETY: a live fence.
     unsafe { input_fence.Signal(1)? };
     // SAFETY: an unnamed auto-reset event with default security.
@@ -1134,7 +1041,6 @@ fn open_d3d12(device: &Device) -> windows::core::Result<Backend> {
     })
 }
 
-/// A buffer of `bytes`, laid out as rows.
 fn buffer_description(bytes: u64) -> D3D12_RESOURCE_DESC {
     D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -1152,7 +1058,6 @@ fn buffer_description(bytes: u64) -> D3D12_RESOURCE_DESC {
     }
 }
 
-/// A committed resource described by `description` in a heap of `heap`.
 fn create_resource(
     device: &ID3D12Device,
     heap: D3D12_HEAP_TYPE,

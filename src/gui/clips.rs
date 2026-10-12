@@ -1,8 +1,5 @@
-//! The Clips tab: every clip in the clip folder as a thumbnail, newest first, which a click
-//! opens in whatever plays videos on this machine, and a right-click offers to open, show in
-//! Explorer or send to the Recycle Bin. The thumbnails are the ones Explorer shows, made by the
-//! shell on a thread of its own since a video's first one takes it a while; a placeholder stands
-//! in until each arrives.
+//! The Clips tab: the clip folder as thumbnails, newest first, with the shell's thumbnails made
+//! on a thread of their own.
 
 use super::{
     layout::{self, BLACK, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE},
@@ -25,21 +22,14 @@ use std::{
 };
 use winsafe::{self as w, co, gui, prelude::*};
 
-/// A thumbnail's size, in logical pixels: 16:9, as the clips are.
 const THUMB_WIDTH: i32 = 128;
 const THUMB_HEIGHT: i32 = 72;
-/// The cell each clip takes: three across the list, with two lines of caption under the
-/// thumbnail.
 const CELL_WIDTH: i32 = 134;
 const CELL_HEIGHT: i32 = THUMB_HEIGHT + 2 * LINE + 8;
-/// Clips across the list.
 const COLUMNS: i32 = 3;
-/// What the names of clips start with and end with, as `replay` names them.
 const CLIP_PREFIX: &str = "hindsight_";
 const CLIP_EXTENSION: &str = "mp4";
-/// Length of the time in a clip's name, `YYYY-MM-DD_HH-MM-SS`.
 const STAMP_LENGTH: usize = 19;
-/// The placeholder's card and its play mark.
 const CARD: w::COLORREF = w::COLORREF::from_rgb(0xE4, 0xE4, 0xE4);
 const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 
@@ -58,7 +48,6 @@ impl ClipsPage {
             gui::ListViewOpts {
                 position: gui::dpi(GROUP_X, FILL_Y),
                 size: gui::dpi(GROUP_WIDTH, FILL_HEIGHT),
-                // Rows of large icons from the top, arranged afresh as items come and go.
                 control_style: co::LVS::ICON
                     | co::LVS::ALIGNTOP
                     | co::LVS::SINGLESEL
@@ -78,25 +67,20 @@ impl ClipsPage {
         me
     }
 
-    /// The tab page the list sits on.
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
     }
 
-    /// The list fills the page and grows with it.
     pub(super) fn list(&self) -> &gui::ListView {
         &self.list
     }
 
-    /// Finishes the parts that need the control to exist: the cells' pitch and the image list.
     pub(super) fn on_create(&self) {
-        // The image list first: giving the control one resets its icon spacing.
+        // Image list first: setting it resets the icon spacing.
         self.install_image_list();
         self.set_icon_spacing();
     }
 
-    /// Dresses the list in the chosen look: a character theme's panel and text colours, or
-    /// Windows' own.
     pub(super) fn apply_look(&self, skin: &Skin) {
         let (background, text) = skin.list_colours().unwrap_or_else(|| {
             (
@@ -107,11 +91,8 @@ impl ClipsPage {
         self.set_colours(background, text);
     }
 
-    /// Shows the clips of `folder` while the tab is in view (`shown`), reading the folder again
-    /// when the tab comes back into view, when it is not the one listed or when `status` says a
-    /// clip was saved since. Clips put in the folder by hand are so picked up on the next visit
-    /// to the tab, not while it is being looked at. Thumbnails made meanwhile are taken in
-    /// whether the tab is in view or not, so they are there when it is.
+    /// Rereads the folder when the tab comes into view, the folder changes or a clip was saved;
+    /// finished thumbnails are taken in either way.
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
         self.receive_thumbnails();
         let rebuild = {
@@ -136,8 +117,6 @@ impl ClipsPage {
         }
     }
 
-    /// Wires a click to opening the clip, a right-click to the clip's menu, and the line the
-    /// empty list shows.
     fn events(&self) {
         let me = self.clone();
         self.list.on().nm_click(move |click| {
@@ -149,7 +128,7 @@ impl ClipsPage {
         let me = self.clone();
         self.list.on().nm_r_click(move |click| {
             me.on_right_click(click.iItem);
-            // Handled: the list need not go on to send a context-menu message of its own.
+            // Returning 1 suppresses WM_CONTEXTMENU.
             Ok(1)
         });
         self.list.on().lvn_get_empty_markup(|markup| {
@@ -159,15 +138,12 @@ impl ClipsPage {
         });
     }
 
-    /// The file of item `index`; none for a click beside the items, which reports -1.
     fn clip_path(&self, index: i32) -> Option<PathBuf> {
         let index = usize::try_from(index).ok()?;
         let state = self.state.borrow();
         state.clips.get(index).map(|clip| clip.path.clone())
     }
 
-    /// Selects item `index` and shows its menu at the mouse, then does what was chosen; a
-    /// right-click beside the items shows nothing.
     fn on_right_click(&self, index: i32) {
         let Some(path) = self.clip_path(index) else {
             return;
@@ -175,8 +151,7 @@ impl ClipsPage {
         if let Ok(item) = u32::try_from(index) {
             let _ = self.list.items().get(item).select(true);
         }
-        // The menu runs a message loop of its own, in which the refresh timer may rebuild the
-        // list; the path was taken beforehand, so the choice still applies to this clip.
+        // TrackPopupMenu pumps messages; the timer may rebuild the list meanwhile, hence `path`.
         match self.choose_command() {
             Ok(Some(ClipCommand::Open)) => open(&path),
             Ok(Some(ClipCommand::Reveal)) => {
@@ -190,7 +165,6 @@ impl ClipsPage {
         }
     }
 
-    /// Shows the clip menu at the mouse until the user picks from it or dismisses it.
     fn choose_command(&self) -> w::SysResult<Option<ClipCommand>> {
         let mut menu = w::HMENU::CreatePopupMenu()?;
         let items: Vec<w::MenuItem> = ClipCommand::ALL
@@ -202,13 +176,9 @@ impl ClipsPage {
             .collect();
         let chosen = menu
             .append_item(&items)
-            .and_then(|()| {
-                // Bold, as Explorer marks what a click on the item does.
-                menu.SetMenuDefaultItem(w::IdPos::Id(ClipCommand::Open.id()))
-            })
+            .and_then(|()| menu.SetMenuDefaultItem(w::IdPos::Id(ClipCommand::Open.id())))
             .and_then(|()| w::GetCursorPos())
             .and_then(|at| {
-                // The choice comes back from the call rather than as a command message.
                 menu.TrackPopupMenu(
                     co::TPM::RETURNCMD | co::TPM::NONOTIFY | co::TPM::RIGHTBUTTON,
                     at,
@@ -219,8 +189,6 @@ impl ClipsPage {
         Ok(chosen?.and_then(ClipCommand::from_id))
     }
 
-    /// Sends the clip at `path` to the Recycle Bin and lists the folder afresh, or logs why it
-    /// stays.
     fn delete(&self, path: &Path) {
         if let Err(error) = shell::recycle(path, self.list.hwnd()) {
             log::warning(text::clip_delete_failed(path, error));
@@ -237,8 +205,6 @@ impl ClipsPage {
         }
     }
 
-    /// Lists `clips` afresh, each with the thumbnail already made for it or the placeholder,
-    /// and asks for the thumbnails still missing, newest first.
     fn rebuild(&self, clips: Vec<Clip>) {
         let mut state = self.state.borrow_mut();
         self.list.set_redraw(false);
@@ -260,10 +226,8 @@ impl ClipsPage {
         state.request_missing_thumbnails();
     }
 
-    /// Puts `count` items on a grid of [`COLUMNS`] set in from the list's edges by the same
-    /// amount on each side, so the thumbnails sit as far from the right border as from the
-    /// left. Left to arrange them itself, the list starts at its left edge and leaves the
-    /// slack on the right, and it keeps that even when told a work area.
+    /// Places the items on a centred grid: left to itself the list keeps its slack on the
+    /// right, even when given a work area.
     #[expect(unsafe_code)]
     fn place_items(&self, count: usize) {
         let hwnd = self.list.hwnd();
@@ -291,15 +255,12 @@ impl ClipsPage {
         }
     }
 
-    /// Where the list draws an item's thumbnail relative to the position the item is given,
-    /// found by putting the first item at the origin and asking where its icon went; the
-    /// origin itself when there is no item to ask about.
+    /// The thumbnail's offset from an item's position, found by placing item 0 at the origin.
     #[expect(unsafe_code)]
     fn icon_offset(&self) -> w::POINT {
         let hwnd = self.list.hwnd();
         let origin = w::POINT::with(0, 0);
-        // SAFETY: LVM_SETITEMPOSITION32 reads the point during the call; with no item at the
-        // index it does nothing.
+        // SAFETY: LVM_SETITEMPOSITION32 reads the point during the call.
         unsafe {
             hwnd.SendMessage(w::msg::LvmSetItemPosition32 {
                 index: 0,
@@ -318,7 +279,7 @@ impl ClipsPage {
         if found.is_err() {
             return origin;
         }
-        // The rectangle is the icon's padded area, with the thumbnail centred in it.
+        // The rectangle is the padded icon area; the thumbnail is centred in it.
         let (width, height) = thumbnail_size();
         w::POINT::with(
             icon.left + (icon.right - icon.left - width) / 2,
@@ -326,7 +287,6 @@ impl ClipsPage {
         )
     }
 
-    /// Takes in the thumbnails the shell thread has finished, showing each on its clip's item.
     fn receive_thumbnails(&self) {
         let mut state = self.state.borrow_mut();
         let made: Vec<_> = match &state.fetcher {
@@ -334,8 +294,7 @@ impl ClipsPage {
             None => return,
         };
         for (path, result) in made {
-            // A clip deleted while its thumbnail was being made needs neither the picture nor
-            // the failure its absence caused.
+            // Deleted while its thumbnail was being made.
             if !state.requested.contains(&path) {
                 continue;
             }
@@ -353,7 +312,6 @@ impl ClipsPage {
         }
     }
 
-    /// Copies `thumbnail` into the list's image list and returns where it sits.
     fn add_image(&self, thumbnail: &Thumbnail) -> Result<u32, ThumbnailError> {
         self.list
             .image_list(co::LVSIL::NORMAL)
@@ -361,8 +319,6 @@ impl ClipsPage {
             .map_err(ThumbnailError::ImageList)
     }
 
-    /// Makes the image list the thumbnails go in, the placeholder first, and gives it to the
-    /// list, which owns it from then on.
     #[expect(unsafe_code)]
     fn install_image_list(&self) {
         let size = thumbnail_size();
@@ -383,8 +339,7 @@ impl ClipsPage {
             Ok(index) => self.state.borrow_mut().placeholder = Some(index),
             Err(error) => log::warning(text::thumbnails_unavailable(error)),
         }
-        // SAFETY: LVM_SETIMAGELIST takes the handle by value; the control keeps it and destroys
-        // it with itself, which is why the guard lets go of it here.
+        // SAFETY: LVM_SETIMAGELIST takes the handle by value; the control owns it from here.
         unsafe {
             self.list.hwnd().SendMessage(w::msg::LvmSetImageList {
                 kind: co::LVSIL::NORMAL,
@@ -393,11 +348,9 @@ impl ClipsPage {
         }
     }
 
-    /// Sets the pitch of the cells so three fit across the list.
     #[expect(unsafe_code)]
     fn set_icon_spacing(&self) {
-        // SAFETY: LVM_SETICONSPACING takes the two lengths packed by value and returns the
-        // previous ones.
+        // SAFETY: LVM_SETICONSPACING takes both lengths packed by value.
         unsafe {
             self.list.hwnd().SendMessage(w::msg::LvmSetIconSpacing {
                 size: w::SIZE::with(gui::dpi_x(CELL_WIDTH), gui::dpi_y(CELL_HEIGHT)),
@@ -405,7 +358,6 @@ impl ClipsPage {
         }
     }
 
-    /// Paints the list's background and its captions in the given colours.
     #[expect(unsafe_code)]
     fn set_colours(&self, background: w::COLORREF, text: w::COLORREF) {
         let hwnd = self.list.hwnd();
@@ -421,8 +373,7 @@ impl ClipsPage {
         }
     }
 
-    /// Appends an item captioned `caption` showing image `image` of the image list, or no
-    /// image. (The control's own helper wants a column header, which an icon view has not.)
+    /// Raw `LVM_INSERTITEM`: the control's helper wants a column header, which an icon view lacks.
     #[expect(unsafe_code)]
     fn insert_item(&self, caption: &str, image: Option<u32>) -> w::SysResult<u32> {
         let mut item = w::LVITEM::default();
@@ -440,32 +391,20 @@ impl ClipsPage {
     }
 }
 
-/// What the list shows and what is on its way.
 #[derive(Default)]
 struct State {
-    /// The folder listed, once one has been; a different one means reading again.
     folder: Option<PathBuf>,
-    /// The last clip saved when the folder was listed; a later one means reading again.
     last_clip: Option<PathBuf>,
-    /// The folder must be read again before the list is next in view.
     stale: bool,
-    /// Whether the tab was in view at the last update; coming into view reads the folder again.
     in_view: bool,
-    /// The clips as listed, in the order of the items.
     clips: Vec<Clip>,
-    /// Where the placeholder sits in the image list, once added.
     placeholder: Option<u32>,
-    /// Where each clip's thumbnail sits in the image list, once made; kept across rebuilds.
     thumbnails: HashMap<PathBuf, u32>,
-    /// The clips whose thumbnails have been asked for, made or not.
     requested: HashSet<PathBuf>,
-    /// The thread that makes thumbnails, started when the first is wanted.
     fetcher: Option<Fetcher>,
 }
 
 impl State {
-    /// Asks the shell thread for the thumbnails of the listed clips that have neither one nor
-    /// a request out, newest first. Nothing is asked when the thread cannot be started.
     fn request_missing_thumbnails(&mut self) {
         let missing: Vec<PathBuf> = self
             .clips
@@ -489,31 +428,24 @@ impl State {
         }
     }
 
-    /// Lets go of what is kept for the clip at `path`, which is gone: should a file come back
-    /// at that path, restored or new, its thumbnail is made afresh. Its picture stays in the
-    /// image list unused, since removing one there renumbers every picture after it.
+    /// The image stays in the image list: removing one renumbers those after it.
     fn forget(&mut self, path: &Path) {
         self.thumbnails.remove(path);
         self.requested.remove(path);
     }
 }
 
-/// What the menu on a clip offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClipCommand {
-    /// Play it, as a click does.
     Open,
-    /// Show it selected in an Explorer window.
     Reveal,
-    /// Send it to the Recycle Bin.
     Delete,
 }
 
 impl ClipCommand {
-    /// In the menu's order.
     const ALL: [Self; 3] = [Self::Open, Self::Reveal, Self::Delete];
 
-    /// The menu item's id. A menu reports no choice as 0, so the ids start at 1.
+    /// From 1: the menu reports no choice as 0.
     fn id(self) -> u16 {
         match self {
             Self::Open => 1,
@@ -522,7 +454,6 @@ impl ClipCommand {
         }
     }
 
-    /// The command whose menu item has `id`, as the menu reports a choice.
     fn from_id(id: i32) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -538,16 +469,13 @@ impl ClipCommand {
     }
 }
 
-/// The thread that makes thumbnails, and the channels to and from it. The thread ends when
-/// this is dropped, after the request it is on.
+/// Dropping this closes the request channel and ends the thread.
 struct Fetcher {
     requests: Sender<PathBuf>,
     results: Receiver<(PathBuf, Result<Thumbnail, shell::ThumbnailError>)>,
 }
 
 impl Fetcher {
-    /// Starts the thread, making thumbnails `size` physical pixels across; `None`, logged,
-    /// when no thread can be started, which leaves the placeholders standing.
     fn start(size: (i32, i32)) -> Option<Self> {
         let (requests, requests_in) = mpsc::channel();
         let (results_out, results) = mpsc::channel();
@@ -560,18 +488,14 @@ impl Fetcher {
     }
 }
 
-/// A clip in the folder, as the list shows it.
 #[derive(Debug, PartialEq, Eq)]
 struct Clip {
     path: PathBuf,
-    /// The time in its name, when the name is one the recorder gives.
     name: Option<ClipName>,
-    /// In bytes.
     size: u64,
 }
 
 impl Clip {
-    /// The clip at `path` of `size` bytes, if it is a video file.
     fn new(path: PathBuf, size: u64) -> Option<Self> {
         let file_name = path.file_name()?.to_str()?;
         if !file_name
@@ -584,7 +508,6 @@ impl Clip {
         Some(Self { path, name, size })
     }
 
-    /// The file's name, for a clip that was named by hand.
     fn file_name(&self) -> String {
         self.path
             .file_name()
@@ -592,7 +515,6 @@ impl Clip {
             .unwrap_or_default()
     }
 
-    /// The caption under the thumbnail: the time taken, or else the file's name, and the size.
     fn caption(&self) -> String {
         let title = self
             .name
@@ -601,25 +523,20 @@ impl Clip {
         text::clip_caption(&title, self.size)
     }
 
-    /// What newest-first sorts by: clips named by the recorder before the rest, later times
-    /// and later attempts at the same time first, the rest by name.
+    /// Sort key: the recorder's names before the rest, then by name.
     fn order(&self) -> (Option<&ClipName>, String) {
         (self.name.as_ref(), self.file_name())
     }
 }
 
-/// The time in a clip's name, `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4` as `replay` names them,
-/// where `-n` counts a second clip saved in the same second.
+/// The time in `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4`; `-n` counts a second clip in one second.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ClipName {
-    /// `YYYY-MM-DD_HH-MM-SS`, which sorts as time does.
     stamp: String,
-    /// 1 for the first clip of its second.
     attempt: u32,
 }
 
 impl ClipName {
-    /// The time in `file_name`, or `None` for a name the recorder did not give.
     fn parse(file_name: &str) -> Option<Self> {
         let rest = file_name
             .strip_prefix(CLIP_PREFIX)?
@@ -640,14 +557,12 @@ impl ClipName {
         })
     }
 
-    /// The time as the caption shows it: `YYYY-MM-DD HH:MM:SS`.
     fn title(&self) -> String {
         let (date, time) = self.stamp.split_at(10);
         format!("{date} {}", time[1..].replace('-', ":"))
     }
 }
 
-/// Whether `stamp` is `YYYY-MM-DD_HH-MM-SS` in digits.
 fn is_stamp(stamp: &str) -> bool {
     stamp.len() == STAMP_LENGTH
         && stamp.bytes().enumerate().all(|(index, byte)| match index {
@@ -657,7 +572,6 @@ fn is_stamp(stamp: &str) -> bool {
         })
 }
 
-/// The clips in `folder`, newest first; none when it cannot be read.
 fn list_clips(folder: &Path) -> Vec<Clip> {
     let Ok(entries) = fs::read_dir(folder) else {
         return Vec::new();
@@ -676,26 +590,20 @@ fn list_clips(folder: &Path) -> Vec<Clip> {
     clips
 }
 
-/// Opens the clip at `path` with the user's video player, or logs why it could not.
 fn open(path: &Path) {
     if let Err(error) = shell::open(path) {
         log::warning(text::clip_open_failed(path, error));
     }
 }
 
-/// Sorts `clips` newest first.
 fn newest_first(clips: &mut [Clip]) {
     clips.sort_by(|a, b| b.order().cmp(&a.order()));
 }
 
-/// A thumbnail's size in physical pixels.
 fn thumbnail_size() -> (i32, i32) {
     (gui::dpi_x(THUMB_WIDTH), gui::dpi_y(THUMB_HEIGHT))
 }
 
-/// The position to give each item of a grid, in order, so that its thumbnail lands on the
-/// grid that starts at `area`'s top-left corner in cells of `cell`: the list draws the
-/// thumbnail `offset` from the position it is given.
 fn grid_positions(
     area: w::RECT,
     (cell_width, cell_height): (i32, i32),
@@ -709,11 +617,8 @@ fn grid_positions(
     })
 }
 
-/// The rectangle, in the list's client coordinates, that the thumbnails of `count` clips
-/// span: [`COLUMNS`] cells of `cell` less the `gutter` beyond the last thumbnail, centred in
-/// the client's `width` (less the scroll bar once the rows overflow its `height`), with the
-/// same margin above and below as beside. It covers the client at least, so a short list
-/// scrolls nowhere.
+/// The thumbnails' rectangle, centred in the client (less the scroll bar once the rows
+/// overflow) and never shorter than the client.
 fn work_area(
     (width, height): (i32, i32),
     (cell_width, cell_height): (i32, i32),
@@ -739,8 +644,6 @@ fn work_area(
 mod tests {
     use super::*;
 
-    /// The list's sunken edge, either side, and its vertical scroll bar, in logical pixels, as
-    /// Windows draws them; the cells must fit inside what they leave.
     const EDGE: i32 = 2;
     const SCROLL_BAR: i32 = 17;
 
@@ -833,7 +736,6 @@ mod tests {
         state.forget(&gone);
         assert!(!state.thumbnails.contains_key(&gone));
         assert!(!state.requested.contains(&gone));
-        // The picture after it keeps its place in the image list.
         assert_eq!(state.thumbnails.get(&kept), Some(&2));
         assert!(state.requested.contains(&kept));
     }
@@ -841,7 +743,6 @@ mod tests {
     #[test]
     fn items_go_across_then_down_from_the_areas_corner() {
         let area = work_area((426, 360), (134, 116), 6, 17, 4);
-        // The list draws a thumbnail one pixel in from the item's position.
         let positions: Vec<_> = grid_positions(area, (134, 116), w::POINT::with(1, 1))
             .take(4)
             .map(|point| (point.x, point.y))
@@ -853,14 +754,11 @@ mod tests {
     fn the_grid_is_centred_and_makes_way_for_the_scroll_bar_only_when_the_rows_overflow() {
         let client = (426, 360);
         let cell = (134, 116);
-        // Two rows of three thumbnails spanning 396: 30 pixels of slack shared out, and the
-        // client is not overflowed.
         let short = work_area(client, cell, 6, 17, 6);
         assert_eq!(
             (short.left, short.top, short.right, short.bottom),
             (15, 15, 411, 360)
         );
-        // Four rows overflow: the scroll bar takes its width from the slack first.
         let long = work_area(client, cell, 6, 17, 12);
         assert_eq!(
             (long.left, long.top, long.right, long.bottom),
@@ -878,7 +776,6 @@ mod tests {
             "{CELL_WIDTH} by three in {inside}"
         );
         assert!(4 * CELL_WIDTH > inside - SCROLL_BAR, "never four across");
-        // Three pixels either side of a thumbnail, and two lines of caption below it.
         assert_eq!(
             (CELL_WIDTH - THUMB_WIDTH, CELL_HEIGHT - THUMB_HEIGHT),
             (6, 2 * LINE + 8)

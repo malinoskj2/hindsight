@@ -8,15 +8,13 @@ use crate::log;
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
-/// Characters after which the view is cleared before the next batch of entries is appended;
-/// older lines remain in the session log file.
+/// Characters after which the view is cleared; the session log file keeps everything.
 const VIEW_LIMIT: i32 = 200_000;
 
 #[derive(Clone)]
 pub(super) struct LogsPage {
     page: gui::TabPage,
     view: gui::Edit,
-    /// Where the view has reached in the journal.
     tail: Rc<Tail>,
 }
 
@@ -47,23 +45,19 @@ impl LogsPage {
         }
     }
 
-    /// The tab page the view sits on.
     pub(super) fn page(&self) -> &gui::TabPage {
         &self.page
     }
 
-    /// The view fills the page and grows with it.
     pub(super) fn view(&self) -> &gui::Edit {
         &self.view
     }
 
-    /// Finishes the parts that need the controls to exist.
     pub(super) fn on_create(&self) {
         // A multi-line edit otherwise stops accepting text after 32 K characters.
         self.view.limit_text(None);
     }
 
-    /// Copies the journal entries recorded since the last call into the view.
     pub(super) fn update(&self) {
         let entries = log::since(self.tail.sequence.get());
         if let Some(latest) = entries.last() {
@@ -77,7 +71,6 @@ impl LogsPage {
         }
     }
 
-    /// Appends entries at the end of the view, which scrolls to show them.
     fn append(&self, entries: &[log::Entry]) {
         if entries.is_empty() {
             return;
@@ -95,22 +88,19 @@ impl LogsPage {
         self.view.replace_selection(&text);
     }
 
-    /// Scrolls to the newest line. A read-only edit without focus does not follow its caret
-    /// by itself, and a hidden one ignores the request, so this runs once the tab is showing.
+    /// A read-only edit without focus does not follow its caret, and a hidden one ignores the
+    /// scroll, so this runs once the tab is showing.
     #[expect(unsafe_code)]
     fn scroll_to_end(&self) {
         let length = self.view.hwnd().GetWindowTextLength().unwrap_or(0);
         self.view.set_selection(length, length);
-        // SAFETY: EM_SCROLLCARET takes no parameters and is sent to this control's own handle.
+        // SAFETY: EM_SCROLLCARET takes no parameters.
         unsafe { self.view.hwnd().SendMessage(w::msg::EmScrollCaret {}) };
     }
 }
 
-/// How far the view has followed the journal.
 #[derive(Default)]
 struct Tail {
-    /// The last journal entry copied into the view.
     sequence: Cell<u64>,
-    /// Lines were appended while the tab was hidden; scroll once it shows.
     need_scroll: Cell<bool>,
 }

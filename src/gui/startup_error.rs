@@ -10,14 +10,10 @@ use crate::{APP_NAME, config::Theme, sys::window};
 use anyhow::Result;
 use winsafe::{gui, prelude::*};
 
-/// Height of the window; it is as wide as the application's.
 const HEIGHT: i32 = 170;
-/// Where the error message starts.
 const MESSAGE_Y: i32 = 28;
-/// Lines the error message may take before it is cut off.
 const MESSAGE_LINES: i32 = 4;
 
-/// Shows `message` with its explanation until the user closes the window.
 pub(super) fn show(message: &str) -> Result<()> {
     let dialog = ErrorDialog::new(message);
     dialog.events();
@@ -29,7 +25,6 @@ pub(super) fn show(message: &str) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("show the startup error: {error}"))
 }
 
-/// The window and the controls a handler needs.
 struct ErrorDialog {
     wnd: gui::WindowMain,
     frames: Vec<Frame>,
@@ -37,7 +32,6 @@ struct ErrorDialog {
 }
 
 impl ErrorDialog {
-    /// Declares the window and its controls, with `message` as the error shown.
     fn new(message: &str) -> Self {
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: APP_NAME,
@@ -69,7 +63,6 @@ impl ErrorDialog {
         }
     }
 
-    /// Wires the window's creation.
     fn events(&self) {
         let create_wnd = self.wnd.clone();
         let create_frames = self.frames.clone();
@@ -80,8 +73,6 @@ impl ErrorDialog {
         });
     }
 
-    /// Installs the handlers that draw the window in the classic look, with the error line
-    /// red and the title and the help line black.
     fn draw(&self) {
         let message = self.message.clone();
         layout::draw(

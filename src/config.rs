@@ -1,8 +1,4 @@
-//! The user's settings: what to record, how it is captured, codec, buffer length, frame rate,
-//! bitrate, whether to record sound, the hotkey that saves a clip and the clip folder. They are
-//! stored as JSON and checked before use, since the file can be edited by hand: the buffer
-//! covers 5 to 600 seconds, capture runs at 24 to 240 fps and the bitrate is 5 to 150 Mbps.
-//! Clips go to `%USERPROFILE%\Videos\hindsight` unless another folder is chosen.
+//! The user's settings, stored as JSON and validated before use.
 
 use crate::sys::hotkey::{Hotkey, ParseError};
 use serde::{Deserialize, Serialize};
@@ -21,8 +17,6 @@ const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
 const VIDEOS_DIRECTORY: &str = "Videos";
 const CLIP_DIRECTORY: &str = "hindsight";
 
-/// What is recorded: any app that fills its monitor, while one is in front, or the primary
-/// monitor the whole time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
@@ -48,11 +42,7 @@ impl fmt::Display for Mode {
     }
 }
 
-/// How frames are captured. Windows Graphics Capture can record one app's window; DXGI Desktop
-/// Duplication and NVIDIA's NvFBC see whole monitors only, so a full-screen app is recorded
-/// through its monitor. NvFBC is for licensed vendors: it needs the key NVIDIA issued them. It
-/// comes in two forms: grabbing into Direct3D 9 surfaces, or into CUDA memory that the encoder
-/// reads in place.
+/// NvFBC needs NVIDIA's vendor key; `NvfbcCuda` grabs into CUDA memory the encoder reads in place.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
@@ -76,7 +66,6 @@ impl Backend {
         }
     }
 
-    /// Whether the backend captures with NvFBC, and so needs the key NVIDIA issued.
     pub(crate) const fn uses_nvfbc(self) -> bool {
         matches!(self, Self::Nvfbc | Self::NvfbcCuda)
     }
@@ -88,8 +77,7 @@ impl fmt::Display for Backend {
     }
 }
 
-/// The video codecs NVENC offers, as Instant Replay does. AV1 needs an RTX 40 series GPU or
-/// newer.
+/// AV1 needs an RTX 40 series GPU or newer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Codec {
@@ -117,11 +105,6 @@ impl fmt::Display for Codec {
     }
 }
 
-/// Where the replay buffer is kept: in system memory; in the GPU's own, which leaves the
-/// system's free for the game and costs the GPU's instead; or in a file on disk, which leaves
-/// both free and costs the drive the bitrate in writes for as long as recording runs. A save
-/// reads a buffer in GPU memory back through system memory, so for a moment it takes as much
-/// of both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Memory {
@@ -142,7 +125,6 @@ impl Memory {
         }
     }
 
-    /// Where the buffer is, as the words that follow "buffer" in log lines and estimates.
     pub(crate) const fn place(self) -> &'static str {
         match self {
             Self::Ram => "in RAM",
@@ -158,8 +140,6 @@ impl fmt::Display for Memory {
     }
 }
 
-/// How the window looks. Classic is the plain Windows dialog; the others dress it in a
-/// character's colours and artwork.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Theme {
@@ -189,27 +169,21 @@ impl fmt::Display for Theme {
     }
 }
 
-/// Every setting, as stored; a field the file leaves out takes its default.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub(crate) mode: Mode,
     pub(crate) backend: Backend,
     pub(crate) codec: Codec,
-    /// Seconds of gameplay a saved clip covers, at least.
     pub(crate) buffer_seconds: u32,
     pub(crate) frame_rate: u32,
     pub(crate) bitrate_mbps: u32,
-    /// The chord that saves a clip, such as `Alt+F10`.
     pub(crate) hotkey: String,
-    /// Where clips are saved; empty for the default folder.
+    /// Empty for the default folder.
     pub(crate) clip_directory: String,
-    /// The window's look; applied as soon as it is chosen, without restarting recording.
     pub(crate) theme: Theme,
-    /// Whether clips carry the system's sound, as the default output device plays it.
     pub(crate) audio: bool,
-    /// Whether the mouse cursor is drawn into the picture, where the backend can (NvFBC and
-    /// Windows Graphics Capture; Desktop Duplication never draws it).
+    /// Drawn where the backend can; Desktop Duplication never draws it.
     pub(crate) cursor: bool,
     pub(crate) buffer_memory: Memory,
 }
@@ -234,7 +208,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Checks the settings a hand-edited file could get wrong, reporting the first bad one.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if !(MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&self.buffer_seconds) {
             return Err(ConfigError::Buffer);
@@ -256,18 +229,15 @@ impl Config {
         Ok(self.hotkey.parse()?)
     }
 
-    /// The bitrate in bits per second. Saturates rather than overflows, since the Settings tab
-    /// estimates the buffer from whatever is typed before the value is checked.
+    /// Saturates: the Settings tab estimates from unvalidated input.
     pub(crate) const fn bitrate(&self) -> u32 {
         self.bitrate_mbps.saturating_mul(BITS_PER_MEGABIT)
     }
 
-    /// Frames the buffer keeps, at least: the clip length at the capture rate.
     pub(crate) const fn buffer_frames(&self) -> u64 {
         self.buffer_seconds as u64 * self.frame_rate as u64
     }
 
-    /// Where clips are saved: the chosen folder, or the default one.
     pub(crate) fn clip_directory(&self) -> PathBuf {
         if self.clip_directory.is_empty() {
             default_clip_directory()
@@ -276,13 +246,11 @@ impl Config {
         }
     }
 
-    /// Encoded bytes the buffer holds at the configured bitrate, for the Settings estimate.
     pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
         self.buffer_seconds as u64 * self.bitrate() as u64 / BITS_PER_BYTE
     }
 }
 
-/// Why a setting was rejected.
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
     #[error(
@@ -309,7 +277,6 @@ pub(crate) enum ConfigError {
     ClipDirectory,
 }
 
-/// `%USERPROFILE%\Videos\hindsight`, or the temporary directory when there is no profile.
 pub(crate) fn default_clip_directory() -> PathBuf {
     std::env::var_os(CLIP_DIRECTORY_ENV)
         .map_or_else(std::env::temp_dir, |profile| {
@@ -347,14 +314,11 @@ mod tests {
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey, "Alt+F10");
         assert_eq!(config.theme, Theme::Classic);
-        // Settings saved before sound was recorded turn it on.
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
         assert!(!parse(r#"{"audio":false}"#).unwrap().audio);
-        // The cursor stays out of the picture unless asked for.
         assert!(!config.cursor);
         assert!(parse(r#"{"cursor":true}"#).unwrap().cursor);
-        // The buffer stays in system memory unless asked to go to the GPU's.
         assert_eq!(config.buffer_memory, Memory::Ram);
         assert_eq!(
             parse(r#"{"buffer_memory":"vram"}"#).unwrap().buffer_memory,
@@ -489,7 +453,6 @@ mod tests {
 
     #[test]
     fn an_absurd_bitrate_typed_into_the_estimate_does_not_overflow() {
-        // The Settings tab estimates from the typed value before it is validated.
         let config = Config {
             bitrate_mbps: u32::MAX,
             buffer_seconds: MAX_BUFFER_SECONDS,

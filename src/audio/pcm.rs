@@ -1,17 +1,12 @@
-//! Conversion of what WASAPI's shared mode delivers, 32-bit float or 16-bit integer samples
-//! with one or more channels, into the interleaved 16-bit stereo the AAC encoder takes.
+//! Converts WASAPI's float or 16-bit samples to the interleaved 16-bit stereo the encoder takes.
 
-/// How a sample is stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sample {
-    /// 32-bit IEEE float, full scale at ±1.0: the audio engine's own format.
     Float,
-    /// 16-bit signed integer.
     Int16,
 }
 
 impl Sample {
-    /// The bytes one sample of one channel takes.
     const fn bytes(self) -> usize {
         match self {
             Self::Float => 4,
@@ -20,7 +15,6 @@ impl Sample {
     }
 }
 
-/// The shape of the samples a capture delivers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub(crate) sample: Sample,
@@ -28,17 +22,13 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// The bytes one frame, a sample of every channel, takes.
     pub(crate) const fn frame_bytes(self) -> usize {
         self.sample.bytes() * self.channels as usize
     }
 }
 
-/// Appends the frames in `data`, laid out as `layout` says, to `output` as left and right
-/// 16-bit samples. Mono is played on both sides; channels past the first two are dropped (a
-/// capture of more channels asks Windows to mix them down instead).
+/// Mono is doubled; channels past the first two are dropped.
 pub(crate) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
-    // A layout of no channels is read as mono, so every frame holds the sample read from it.
     let channels = usize::from(layout.channels.max(1));
     let width = layout.sample.bytes();
     for frame in data.chunks_exact(width * channels) {
@@ -52,12 +42,11 @@ pub(crate) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) 
     }
 }
 
-/// One little-endian sample, as a 16-bit integer.
 fn read(bytes: &[u8], sample: Sample) -> i16 {
     match sample {
         Sample::Float => {
             let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            // Rounded and clamped to the integer range; NaN becomes silence.
+            // NaN survives the clamp and casts to 0.
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "clamped to the i16 range first"

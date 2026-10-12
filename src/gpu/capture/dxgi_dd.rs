@@ -1,19 +1,5 @@
-//! DXGI Desktop Duplication of a monitor. Windows writes each new desktop image into a surface
-//! it shares with this process; on each tick the newest one, if any, is copied into the
-//! encoder's input texture on the GPU and the surface handed straight back.
-//!
-//! Duplication sees whole monitors, and only those connected to the GPU it runs on. A window
-//! target is recorded through the monitor it fills, so anything that comes in front of it is
-//! recorded too, and the session ends when the window is destroyed. The cursor is not drawn
-//! into the picture.
-//!
-//! Windows takes the duplication away whenever the desktop changes under it: a display mode
-//! change, or the secure desktop of a UAC prompt or the lock screen. It is opened again in
-//! place, keeping the buffer, unless the monitor's size changed.
-//!
-//! A monitor in HDR is duplicated as FP16 scRGB, which a tone-map pass turns into the 8-bit
-//! input instead of the copy; Windows would otherwise convert it to 8 bits by clipping. HDR
-//! turned on or off changes the duplication's format, which restarts the session.
+//! DXGI Desktop Duplication of a whole monitor on the encoding GPU, cursor not drawn; a
+//! window target is recorded through the monitor it fills.
 
 use super::{
     CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of,
@@ -43,8 +29,7 @@ use windows::{
     core::{HRESULT, Interface},
 };
 
-/// Refusals that pass: the secure desktop is up, too many apps duplicate the monitor, the
-/// session is being switched, or the desktop is still changing.
+/// Retried: secure desktop up, too many duplications, session switch, desktop still changing.
 const PASSING_REFUSALS: [HRESULT; 4] = [
     E_ACCESSDENIED,
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
@@ -52,45 +37,30 @@ const PASSING_REFUSALS: [HRESULT; 4] = [
     DXGI_ERROR_ACCESS_LOST,
 ];
 
-/// The formats a duplication of a monitor in HDR may deliver, preferred first: the FP16 scRGB
-/// desktop, or 8-bit BGRA when the desktop is not composed in FP16.
+/// Preferred first.
 const SCRGB_FORMATS: [DXGI_FORMAT; 2] =
     [DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM];
 
-/// A running Desktop Duplication of one monitor.
 pub(super) struct Capture {
-    /// The duplicated monitor, as an output of the encoding GPU.
     output: IDXGIOutput1,
-    /// `None` while Windows has taken it away.
     duplication: Option<IDXGIOutputDuplication>,
     size: (u32, u32),
-    /// The window whose monitor is recorded, when the target is one.
     window: Option<HWND>,
-    /// Whether the current duplication has delivered a picture; its first one is always new.
+    /// A fresh duplication's first frame is always new.
     primed: bool,
     reopen: ReopenThrottle,
-    /// The pass that turns the scRGB desktop of a monitor in HDR into the encoder's 8-bit
-    /// input; `None` for a monitor in SDR, which is duplicated as 8-bit BGRA.
     tone_map: Option<ToneMapper>,
-    /// The format the duplication delivers: FP16 when a tone-mapped monitor is in HDR, BGRA
-    /// otherwise.
     format: DXGI_FORMAT,
 }
 
-/// What asking Windows for the next desktop image came to.
 enum Acquired {
-    /// A frame is held until it is released: its description, and its surface when it has one.
+    /// Held until released.
     Frame(DXGI_OUTDUPL_FRAME_INFO, Option<IDXGIResource>),
-    /// Nothing changed since the last frame.
     Nothing,
-    /// Windows took the duplication away.
     Lost,
 }
 
 impl Capture {
-    /// Starts duplicating the monitor `target` names, or the monitor its window fills. With
-    /// `tone_map`, given for a monitor in HDR, the desktop is asked for as FP16 scRGB and
-    /// passed through it into the encoder's input.
     pub(super) fn start(
         device: &Device,
         target: &Target,
@@ -119,8 +89,6 @@ impl Capture {
         })
     }
 
-    /// Opens the duplication again after Windows took it away. While Windows refuses, the
-    /// last picture is repeated; a new size or orientation ends the session.
     fn reopen(&mut self, device: &Device) -> Result<Frame, CaptureError> {
         let Some(now) = self.reopen.attempt() else {
             return Ok(Frame::Unchanged);
@@ -137,7 +105,7 @@ impl Capture {
         if size(&description) != self.size || is_rotated(&description) {
             return Ok(Frame::Resized);
         }
-        // HDR turned on or off: the session starts again, deciding afresh how to capture.
+        // HDR toggled: restart the session.
         if description.ModeDesc.Format != self.format {
             log::info("The captured display's colour format changed");
             return Ok(Frame::Resized);
@@ -147,8 +115,6 @@ impl Capture {
         Ok(Frame::Unchanged)
     }
 
-    /// Schedules the next attempt after Windows refused to duplicate the monitor for now,
-    /// unless the monitor has left the desktop, which ends the session.
     fn retry_later(&mut self, now: Instant) -> Result<Frame, CaptureError> {
         // SAFETY: reads the description of a live output.
         let attached = unsafe { self.output.GetDesc() }
@@ -217,14 +183,12 @@ impl Source for Capture {
         } else {
             Ok(Frame::Unchanged)
         };
-        // Hands the surface back to Windows; the copy above is already queued on the GPU.
-        // SAFETY: releases the frame acquired above.
+        // SAFETY: releases the frame acquired above; the copy is already queued.
         let _ = unsafe { duplication.ReleaseFrame() };
         frame
     }
 }
 
-/// The output of the device's adapter that shows `monitor`.
 fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, CaptureError> {
     let adapter = device
         .dxgi()
@@ -252,9 +216,6 @@ fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, Captu
     )))
 }
 
-/// Opens a duplication of `output` for the device, with its description.
-/// With `scrgb` the duplication is asked for FP16 scRGB, which it delivers while the monitor
-/// is in HDR; where Windows cannot do that, the desktop comes as 8-bit BGRA as it always did.
 fn duplicate(
     output: &IDXGIOutput1,
     device: &Device,
@@ -278,9 +239,7 @@ fn duplicate(
     Ok((duplication, description))
 }
 
-/// A duplication of `output` that delivers FP16 scRGB when the desktop is composed in it
-/// (HDR on), and BGRA when it is not. `DuplicateOutput1` serves only callers aware of each
-/// monitor's DPI, which this thread becomes for the call.
+/// `DuplicateOutput1` refuses a thread that is not per-monitor DPI aware.
 fn duplicate_scrgb(
     output: &IDXGIOutput1,
     device: &Device,
@@ -289,8 +248,7 @@ fn duplicate_scrgb(
     // SAFETY: changes the calling thread's DPI awareness only, and is undone below.
     let previous =
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    // SAFETY: duplicates a live output for a live device on the output's adapter, with a
-    // list of formats that outlives the call.
+    // SAFETY: live output and device on its adapter; the format list outlives the call.
     let duplication = unsafe { output.DuplicateOutput1(&device.d3d, 0, &SCRGB_FORMATS) };
     if !previous.is_invalid() {
         // SAFETY: puts back the thread's awareness from before.
@@ -299,8 +257,6 @@ fn duplicate_scrgb(
     duplication
 }
 
-/// The error for a monitor that could not be duplicated when the session started; a monitor
-/// Windows will never duplicate reads as unsupported.
 fn first_duplication_failed(error: windows::core::Error) -> CaptureError {
     if error.code() == DXGI_ERROR_UNSUPPORTED {
         return CaptureError::Unsupported(
@@ -311,19 +267,15 @@ fn first_duplication_failed(error: windows::core::Error) -> CaptureError {
     failed("duplicate the monitor")(error)
 }
 
-/// The duplicated monitor's size in pixels.
 fn size(description: &DXGI_OUTDUPL_DESC) -> (u32, u32) {
     (description.ModeDesc.Width, description.ModeDesc.Height)
 }
 
-/// Whether the desktop image arrives turned: duplication delivers a rotated monitor's image
-/// in the panel's own orientation.
+/// Duplication delivers a rotated monitor in the panel's own orientation.
 fn is_rotated(description: &DXGI_OUTDUPL_DESC) -> bool {
     ![DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED].contains(&description.Rotation)
 }
 
-/// Takes the next desktop image from `duplication` without waiting; a frame it returns is held
-/// until it is released.
 fn acquire(duplication: &IDXGIOutputDuplication) -> Result<Acquired, CaptureError> {
     let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
     let mut resource: Option<IDXGIResource> = None;

@@ -1,8 +1,4 @@
-//! Capture and encoding on the GPU. Frames go from Windows Graphics Capture, DXGI Desktop
-//! Duplication or NvFBC into textures the encoder owns, or into CUDA memory NVENC reads in
-//! place, and from there straight to NVENC; only compressed packets reach system memory.
-//!
-//! The submodules marked below are the only ones that call into native code directly.
+//! Capture and encoding on the GPU; only compressed packets reach system memory.
 
 #[expect(unsafe_code)]
 mod capture;
@@ -23,6 +19,4 @@ mod vram;
 
 pub(crate) use pipeline::record;
 
-// The page and read-back sizes the two replay-buffer stores in GPU memory (`vram`,
-// `cuda_output`) share with the one on disk.
 use crate::replay::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, reserved_pages};

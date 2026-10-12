@@ -1,9 +1,4 @@
-//! What a monitor shows: whether Windows runs it in HDR (advanced colour), the colour space,
-//! bits per colour and luminance range DXGI reports for it, and the SDR white level the user
-//! set for it, which says how bright desktop white is drawn while HDR is on.
-//!
-//! A monitor is looked up among the outputs of every adapter, not only the encoding GPU's, so
-//! that a Windows Graphics Capture of a monitor on another GPU learns its colour too.
+//! How a monitor is driven: HDR, colour space, luminance range and SDR white level.
 
 use std::fmt;
 use windows::{
@@ -32,30 +27,23 @@ use windows::{
     core::Interface,
 };
 
-/// The value `DISPLAYCONFIG_SDR_WHITE_LEVEL` reports for 80 nits, the brightness of 1.0 in
-/// scRGB: the level is given in thousandths of that.
+/// `DISPLAYCONFIG_SDR_WHITE_LEVEL` is in thousandths of 80 nits.
 const WHITE_LEVEL_UNIT: f32 = 1000.0;
-/// Nits of scRGB 1.0, the reference white of sRGB.
 pub(super) const SCRGB_NITS: f32 = 80.0;
 
-/// How a monitor is driven, as DXGI and the display configuration report it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Display {
-    /// The GDI device name, such as `\\.\DISPLAY1`.
+    /// GDI device name, such as `\\.\DISPLAY1`.
     pub(super) name: String,
     pub(super) color_space: DXGI_COLOR_SPACE_TYPE,
     pub(super) bits_per_color: u32,
     pub(super) min_nits: f32,
     pub(super) max_nits: f32,
     pub(super) max_full_frame_nits: f32,
-    /// The brightness Windows draws SDR white at, in nits, when the display configuration
-    /// reports one.
     pub(super) sdr_white_nits: Option<f32>,
 }
 
 impl Display {
-    /// Whether Windows drives the monitor in HDR, composing the desktop in scRGB and sending
-    /// it out as PQ-coded BT.2020.
     pub(super) fn is_hdr(&self) -> bool {
         is_hdr(self.color_space)
     }
@@ -82,13 +70,11 @@ impl fmt::Display for Display {
     }
 }
 
-/// Whether a monitor in `color_space` is in HDR: Windows sends PQ-coded BT.2020 to it only
-/// while advanced colour is on.
+/// Windows drives a monitor in PQ BT.2020 only while advanced colour is on.
 pub(super) fn is_hdr(color_space: DXGI_COLOR_SPACE_TYPE) -> bool {
     color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
 }
 
-/// A short name for the colour spaces a monitor is driven in.
 fn color_space_name(color_space: DXGI_COLOR_SPACE_TYPE) -> String {
     match color_space {
         DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 => "SDR (sRGB, BT.709)".to_owned(),
@@ -98,30 +84,25 @@ fn color_space_name(color_space: DXGI_COLOR_SPACE_TYPE) -> String {
     }
 }
 
-/// Nits of a `DISPLAYCONFIG_SDR_WHITE_LEVEL` value.
 pub(super) fn white_level_nits(level: u32) -> f32 {
     level as f32 * SCRGB_NITS / WHITE_LEVEL_UNIT
 }
 
-/// How `monitor` is driven, or `None` when no adapter lists it or it cannot be described.
 pub(super) fn describe(monitor: HMONITOR) -> Option<Display> {
     output_of(monitor).map(|description| from_description(&description))
 }
 
-/// Whether `monitor` is in HDR now, without the slower look-up of its white level; `None`
-/// when no adapter lists it. A fresh DXGI factory is made for each call, since an output of
-/// an older one keeps reporting the colour space it had then.
+/// Skips the white-level look-up. A fresh DXGI factory each call: an older factory's outputs
+/// keep reporting the colour space they had then.
 pub(super) fn is_in_hdr(monitor: HMONITOR) -> Option<bool> {
     output_of(monitor).map(|description| is_hdr(description.ColorSpace))
 }
 
-/// Every monitor of every adapter, with how it is driven.
 #[cfg(test)]
 fn all() -> windows::core::Result<Vec<Display>> {
     Ok(outputs()?.iter().map(from_description).collect())
 }
 
-/// DXGI's description of the output that shows `monitor`.
 fn output_of(monitor: HMONITOR) -> Option<DXGI_OUTPUT_DESC1> {
     outputs()
         .ok()?
@@ -129,7 +110,6 @@ fn output_of(monitor: HMONITOR) -> Option<DXGI_OUTPUT_DESC1> {
         .find(|description| description.Monitor == monitor)
 }
 
-/// DXGI's description of every output of every adapter.
 fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
     // SAFETY: creates a factory; no other preconditions.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
@@ -148,8 +128,7 @@ fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
                 Err(error) => return Err(error),
             };
-            // IDXGIOutput6 needs Windows 10 1803; an output without it is left out, and so
-            // taken for SDR.
+            // IDXGIOutput6 needs Windows 10 1803; an output without it counts as SDR.
             if let Ok(output) = output.cast::<IDXGIOutput6>() {
                 // SAFETY: reads the description of a live output.
                 descriptions.push(unsafe { output.GetDesc1() }?);
@@ -159,7 +138,6 @@ fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
     Ok(descriptions)
 }
 
-/// A [`Display`] from DXGI's description of an output.
 fn from_description(description: &DXGI_OUTPUT_DESC1) -> Display {
     let name = utf16_name(&description.DeviceName);
     Display {
@@ -173,7 +151,6 @@ fn from_description(description: &DXGI_OUTPUT_DESC1) -> Display {
     }
 }
 
-/// A nul-terminated UTF-16 device name.
 fn utf16_name(units: &[u16]) -> String {
     let length = units
         .iter()
@@ -182,8 +159,6 @@ fn utf16_name(units: &[u16]) -> String {
     String::from_utf16_lossy(&units[..length])
 }
 
-/// The SDR white level, in nits, of the active display path whose source is the GDI device
-/// `name`.
 fn sdr_white_level(name: &str) -> Option<f32> {
     active_paths()?
         .iter()
@@ -191,7 +166,6 @@ fn sdr_white_level(name: &str) -> Option<f32> {
         .and_then(white_level)
 }
 
-/// The active paths from the desktop's sources to the monitors.
 fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     let (mut path_count, mut mode_count) = (0, 0);
     // SAFETY: both out-parameters are live.
@@ -207,8 +181,7 @@ fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     }
     let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
     let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
-    // SAFETY: each array holds as many elements as the count passed with it says; the counts
-    // are rewritten with how many were filled in.
+    // SAFETY: each array holds as many elements as the count passed with it.
     let queried = unsafe {
         QueryDisplayConfig(
             QDC_ONLY_ACTIVE_PATHS,
@@ -226,12 +199,10 @@ fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     Some(paths)
 }
 
-/// The size of a display configuration request, which its header states.
 fn request_size<T>() -> u32 {
     u32::try_from(size_of::<T>()).expect("a display configuration request is a few hundred bytes")
 }
 
-/// The GDI device name of a path's source.
 fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     let mut request = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -247,7 +218,6 @@ fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     (status == 0).then(|| utf16_name(&request.viewGdiDeviceName))
 }
 
-/// The SDR white level, in nits, of a path's monitor.
 fn white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<f32> {
     let mut request = DISPLAYCONFIG_SDR_WHITE_LEVEL {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -290,7 +260,6 @@ mod tests {
         assert_eq!(utf16_name(&units), r"\\.\DISPLAY1");
     }
 
-    /// Prints how every monitor is driven. Reads only; changes no setting.
     #[test]
     #[ignore = "prints this machine's displays"]
     fn print_displays() {

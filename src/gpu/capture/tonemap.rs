@@ -1,13 +1,5 @@
-//! The pass that turns the picture of a display in HDR into what the encoder takes. Windows
-//! composes such a display in FP16 scRGB (linear light, BT.709 primaries, 1.0 = 80 nits, SDR
-//! white at the user's SDR white level); the encoder takes 8-bit sRGB, signalled as BT.709.
-//!
-//! The pass scales the picture so SDR white lands on 1.0, keeps everything up to a knee below
-//! it as it is, and rolls the highlights above the knee off with a Reinhard curve whose white
-//! point is the display's peak, so a highlight at the peak lands on 1.0 and the ones between
-//! keep their gradation instead of clipping to a flat white. Then it applies the sRGB transfer,
-//! the same coding an SDR display's captures have. It runs as a pixel shader drawing one
-//! triangle over the encoder's input texture, which is a render target already.
+//! The pixel-shader pass that tone-maps a display's FP16 scRGB picture to the encoder's 8-bit
+//! sRGB: SDR white to 1.0, a Reinhard roll-off above a knee, the display's peak landing on 1.0.
 
 use crate::gpu::device::Device;
 use std::ffi::c_void;
@@ -28,39 +20,25 @@ use windows::{
     core::{Interface, PCSTR, s},
 };
 
-/// The shader's source; see the file for how it is compiled.
 const SHADER: &str = include_str!("tonemap.hlsl");
-/// The level, in units of SDR white, above which highlights are compressed. Below it the
-/// picture is kept exactly; SDR white itself comes out at about 0.90 in linear light (243 of
-/// 255 once coded), the price of leaving room above it for the highlights.
+/// In units of SDR white; below it the picture is kept exactly.
 const KNEE: f32 = 0.8;
-/// The SDR white level assumed when Windows does not report one, in nits.
 const DEFAULT_WHITE_NITS: f32 = 200.0;
-/// The peak assumed when the display reports none above its SDR white, in nits: what most
-/// HDR monitors and games aim for.
 const DEFAULT_PEAK_NITS: f32 = 1000.0;
-/// Nits of scRGB 1.0.
 const SCRGB_NITS: f32 = super::display::SCRGB_NITS;
-/// Views kept per kind before the cache is emptied; a capture has a handful of surfaces and
-/// the encoder a handful of inputs, so only a source that keeps replacing its surfaces fills it.
 const MAX_VIEWS: usize = 16;
 
-/// The tone curve's parameters, as the shader's constant buffer holds them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Curve {
     /// scRGB to units of SDR white.
     scale: f32,
     knee: f32,
-    /// The Reinhard curve's strength above the knee.
     rolloff: f32,
-    /// SDR white and the peak in nits, for the log.
     white_nits: f32,
     peak_nits: f32,
 }
 
 impl Curve {
-    /// The curve for a display whose SDR white is `white_nits` (200 when unknown) and whose
-    /// peak is `peak_nits` (1000 when unknown or not above the white).
     pub(super) fn new(white_nits: Option<f32>, peak_nits: f32) -> Self {
         let white = white_nits
             .filter(|nits| *nits > 0.0)
@@ -70,9 +48,8 @@ impl Curve {
         } else {
             DEFAULT_PEAK_NITS.max(white)
         };
-        // The Reinhard curve x / (1 + x b) rises with slope 1, so it meets the straight part
-        // smoothly at the knee; b is chosen so that the peak, `headroom` times SDR white,
-        // lands on 1.0. A display with no headroom gets b = 0 and plain clipping.
+        // Reinhard x / (1 + x b) has slope 1 at 0, meeting the straight part smoothly; b puts
+        // the peak on 1.0, and no headroom gives b = 0.
         let headroom = peak / white;
         let rolloff = 1.0 / (1.0 - KNEE) - 1.0 / (headroom - KNEE);
         Self {
@@ -84,18 +61,15 @@ impl Curve {
         }
     }
 
-    /// The SDR white level the curve maps to 1.0 before its roll-off, in nits.
     pub(super) const fn white_nits(&self) -> f32 {
         self.white_nits
     }
 
-    /// The brightness the curve maps to 1.0, in nits.
     pub(super) const fn peak_nits(&self) -> f32 {
         self.peak_nits
     }
 
-    /// The sRGB-coded colour, each component in 0 to 1, the shader writes for the scRGB
-    /// colour `rgb`. The shader is the one that runs; this is its reference.
+    /// The shader's reference.
     #[cfg(test)]
     fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
         let mut rgb = rgb.map(|component| (component * self.scale).max(0.0));
@@ -108,13 +82,11 @@ impl Curve {
         rgb.map(|component| srgb(component.clamp(0.0, 1.0)))
     }
 
-    /// The constant buffer's contents.
     const fn constants(&self) -> [f32; 4] {
         [self.scale, self.knee, self.rolloff, 0.0]
     }
 }
 
-/// The sRGB transfer of a linear level in 0 to 1.
 #[cfg(test)]
 fn srgb(level: f32) -> f32 {
     if level <= 0.003_130_8 {
@@ -124,29 +96,25 @@ fn srgb(level: f32) -> f32 {
     }
 }
 
-/// The compiled pass and the views it draws through, for one session.
 pub(super) struct ToneMapper {
     vertex: ID3D11VertexShader,
     pixel: ID3D11PixelShader,
     constants: ID3D11Buffer,
-    /// The device's lock, held while the pass sets its state and draws, so the capture
-    /// API's own threads cannot change the immediate context in between.
+    /// Held while the pass sets state and draws, against the capture API's own threads.
     lock: ID3D11Multithread,
     sources: Views<ID3D11ShaderResourceView>,
     targets: Views<ID3D11RenderTargetView>,
-    /// A copy of the source the shader can read, for a source created without that right.
+    /// A readable copy, for a source created without shader-resource binding.
     readable: Option<ID3D11Texture2D>,
 }
 
 impl ToneMapper {
-    /// Compiles the pass for `curve` on the device.
     pub(super) fn new(device: &Device, curve: Curve) -> windows::core::Result<Self> {
         let vertex_code = compile(s!("fullscreen"), s!("vs_5_0"))?;
         let pixel_code = compile(s!("tonemap"), s!("ps_5_0"))?;
         let mut vertex = None;
         let mut pixel = None;
-        // SAFETY: the bytecode was compiled for these stages a moment ago; the out-parameters
-        // are live.
+        // SAFETY: bytecode compiled for these stages; the out-parameters are live.
         unsafe {
             device
                 .d3d
@@ -166,8 +134,7 @@ impl ToneMapper {
         })
     }
 
-    /// Queues the pass that tone-maps the top-left `width` × `height` of `source`, an scRGB
-    /// texture, into `target`, an 8-bit BGRA render target at least that large.
+    /// Queues the pass over the top-left `width` × `height` of `source` into `target`.
     pub(super) fn convert(
         &mut self,
         device: &Device,
@@ -193,9 +160,8 @@ impl ToneMapper {
             MaxDepth: 1.0,
         };
         let context = &device.context;
-        // SAFETY: every object bound belongs to this device and outlives the draw, which is
-        // queued before the views are unbound; the device's lock is held throughout and left
-        // on every path, since nothing in between can fail.
+        // SAFETY: every bound object belongs to this device and outlives the queued draw;
+        // nothing in between can fail, so the lock is left on every path.
         unsafe {
             self.lock.Enter();
             context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -207,7 +173,7 @@ impl ToneMapper {
             context.RSSetViewports(Some(&[viewport]));
             context.OMSetRenderTargets(Some(&[Some(output)]), None::<&ID3D11DepthStencilView>);
             context.Draw(3, 0);
-            // Unbound so the encoder and the capture may use both textures freely.
+            // Unbind so the encoder and the capture may use both textures.
             context.PSSetShaderResources(0, Some(&[None]));
             context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
             self.lock.Leave();
@@ -215,8 +181,6 @@ impl ToneMapper {
         Ok(())
     }
 
-    /// `source` itself when a shader may read it, or else a copy of its top-left `width` ×
-    /// `height` in a texture of the pass's own that it may.
     fn readable_source(
         &mut self,
         device: &Device,
@@ -244,8 +208,6 @@ impl ToneMapper {
     }
 }
 
-/// Views of textures, made the first time each texture comes and kept with it, so the same
-/// texture is never viewed twice.
 struct Views<V> {
     entries: Vec<(ID3D11Texture2D, V)>,
 }
@@ -259,7 +221,6 @@ impl<V> Default for Views<V> {
 }
 
 impl<V: Clone> Views<V> {
-    /// The view of `texture`, made with `create` if there is none yet.
     fn get(
         &mut self,
         texture: &ID3D11Texture2D,
@@ -277,7 +238,6 @@ impl<V: Clone> Views<V> {
     }
 }
 
-/// Compiles the entry point `entry` of the shader for `target`.
 fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
     let mut code = None;
     let mut errors = None;
@@ -310,7 +270,6 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
     created(code)
 }
 
-/// The bytes a blob holds.
 fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
     // SAFETY: a blob's pointer and size describe its own buffer, which lives as long as it.
     unsafe {
@@ -318,17 +277,14 @@ fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
     }
 }
 
-/// An object a call returned through an out-parameter, which it fills on success.
 fn created<T>(object: Option<T>) -> windows::core::Result<T> {
     object.ok_or_else(windows::core::Error::empty)
 }
 
-/// A Direct3D flag as the `u32` the descriptions hold.
 const fn bind_flag(flag: i32) -> u32 {
     flag.cast_unsigned()
 }
 
-/// The constant buffer holding `curve`, fixed for the session.
 fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Result<ID3D11Buffer> {
     let constants = curve.constants();
     let description = D3D11_BUFFER_DESC {
@@ -342,8 +298,7 @@ fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Resul
         ..Default::default()
     };
     let mut buffer = None;
-    // SAFETY: the description and the initial data, 16 bytes as described, are live for the
-    // call; the out-parameter too.
+    // SAFETY: the description, the 16 bytes of data and the out-parameter are live.
     unsafe {
         device.CreateBuffer(
             &raw const description,
@@ -354,7 +309,6 @@ fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Resul
     created(buffer)
 }
 
-/// A texture's description.
 fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     let mut description = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: writes the description of a live texture into a live structure.
@@ -362,7 +316,6 @@ fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     description
 }
 
-/// A `width` × `height` texture of `source`'s format that a shader may read.
 fn readable_texture(
     device: &ID3D11Device,
     source: &D3D11_TEXTURE2D_DESC,
@@ -387,7 +340,6 @@ fn readable_texture(
     created(texture)
 }
 
-/// A view through which the shader reads all of `texture`.
 fn shader_resource_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -398,7 +350,6 @@ fn shader_resource_view(
     created(view)
 }
 
-/// A view through which the pass draws into `texture`.
 fn render_target_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -428,20 +379,16 @@ mod tests {
         },
     };
 
-    /// Tolerance on a coded level for values computed two ways in single precision.
     const EPSILON: f32 = 1e-4;
 
-    /// The display these tests assume: SDR white at 200 nits, a 1000-nit peak.
     fn curve() -> Curve {
         Curve::new(Some(200.0), 1000.0)
     }
 
-    /// scRGB grey at `nits`.
     fn grey(nits: f32) -> [f32; 3] {
         [nits / SCRGB_NITS; 3]
     }
 
-    /// Linear light of a coded level, the inverse of [`srgb`].
     fn linear(coded: f32) -> f32 {
         if coded <= 0.040_45 {
             coded / 12.92
@@ -471,7 +418,6 @@ mod tests {
     #[test]
     fn levels_below_the_knee_pass_unchanged() {
         let curve = curve();
-        // Half of SDR white, 100 nits, is 0.5 in linear light.
         let [red, ..] = curve.apply(grey(100.0));
         assert!((red - srgb(0.5)).abs() < EPSILON);
         assert!(curve.apply(grey(0.0))[0].abs() < EPSILON);
@@ -480,7 +426,6 @@ mod tests {
 
     #[test]
     fn sdr_white_lands_just_below_full_scale() {
-        // 0.8 + 0.2 / (1 + 0.2 × (1 / 0.2 − 1 / 4.2)), with 1000 nits over 200 = 5.
         let [red, ..] = curve().apply(grey(200.0));
         assert!((linear(red) - 0.902_44).abs() < 1e-3, "{}", linear(red));
         assert!((red * 255.0).round() >= 243.0);
@@ -500,7 +445,6 @@ mod tests {
             .map(|nits| curve.apply(grey(nits as f32))[0])
             .collect();
         assert!(levels.windows(2).all(|pair| pair[1] > pair[0]));
-        // In linear light the slope just above the knee is the slope below it, 1.
         let at_knee = linear(curve.apply(grey(160.0))[0]);
         let above = linear(curve.apply(grey(160.2))[0]);
         let slope = (above - at_knee) / (0.2 / 200.0);
@@ -509,7 +453,6 @@ mod tests {
 
     #[test]
     fn a_bright_colour_keeps_its_hue() {
-        // An orange highlight at 600 nits in its brightest component.
         let [red, green, blue] = curve().apply([600.0 / SCRGB_NITS, 300.0 / SCRGB_NITS, 0.0]);
         assert!((linear(green) / linear(red) - 0.5).abs() < 1e-3);
         assert!(blue.abs() < EPSILON);
@@ -529,7 +472,6 @@ mod tests {
         assert!((curve.apply(grey(1000.0))[0] - 1.0).abs() < EPSILON);
     }
 
-    /// A Direct3D 11 device on WARP, the software rasteriser every Windows has.
     fn software_device() -> Device {
         let mut d3d = None;
         let mut context = None;
@@ -555,7 +497,6 @@ mod tests {
         }
     }
 
-    /// A one-row texture of `format` holding `pixels`, which take `bytes` each.
     fn texture(
         device: &Device,
         format: DXGI_FORMAT,
@@ -597,7 +538,6 @@ mod tests {
         texture.expect("a texture")
     }
 
-    /// The BGRA bytes of a one-row texture, read back through a staging copy.
     fn read_back(device: &Device, texture: &ID3D11Texture2D) -> Vec<u8> {
         let mut description = texture_description(texture);
         description.Usage = D3D11_USAGE_STAGING;
@@ -614,8 +554,7 @@ mod tests {
         let staging = staging.expect("a staging texture");
         device.copy(&staging, texture);
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: maps the staging texture for reading; its first row holds Width × 4 bytes,
-        // read before it is unmapped.
+        // SAFETY: the first row holds Width × 4 bytes, read before it is unmapped.
         unsafe {
             device
                 .context
@@ -631,8 +570,6 @@ mod tests {
         }
     }
 
-    /// Runs the pass on WARP over a row of scRGB colours, in a source a shader may read or
-    /// not, and checks every pixel against [`Curve::apply`].
     fn compare_with_reference(source_bind: i32) {
         let device = software_device();
         let curve = curve();

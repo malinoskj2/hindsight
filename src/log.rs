@@ -1,5 +1,4 @@
-//! What the app did and what went wrong: kept in memory for the Logs tab and mirrored to a
-//! file in the state directory, so a problem can be read back or attached to a bug report.
+//! In-memory log for the Logs tab, mirrored to a file in the state directory.
 
 use std::{
     collections::VecDeque,
@@ -14,7 +13,6 @@ use std::{
 const CAPACITY: usize = 500;
 pub(crate) const FILE_NAME: &str = "hindsight.log";
 
-/// How serious an entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Level {
     Info,
@@ -23,7 +21,6 @@ pub(crate) enum Level {
 }
 
 impl Level {
-    /// The level as a line shows it.
     fn tag(self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -33,33 +30,27 @@ impl Level {
     }
 }
 
-/// One recorded message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
-    /// Increases by one per entry; lets a reader fetch only what it has not seen.
     pub(crate) sequence: u64,
-    /// Wall-clock time, `HH:MM:SS`: local time on Windows, UTC elsewhere.
+    /// `HH:MM:SS`, local time on Windows, UTC elsewhere.
     pub(crate) time: String,
     pub(crate) level: Level,
     pub(crate) message: String,
 }
 
 impl Entry {
-    /// One line: time, level and message.
     pub(crate) fn line(&self) -> String {
         format!("{}  {:<7}  {}", self.time, self.level.tag(), self.message)
     }
 }
 
-/// The entries still in memory, and the sequence number the next one gets.
 struct Journal {
     entries: VecDeque<Entry>,
     next_sequence: u64,
 }
 
 impl Journal {
-    /// Adds an entry under the next sequence number, forgetting the oldest one past
-    /// [`CAPACITY`], and returns the entry's line.
     fn append(&mut self, time: String, level: Level, message: String) -> String {
         let entry = Entry {
             sequence: self.next_sequence,
@@ -82,8 +73,7 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
     next_sequence: 1,
 });
 
-/// The mirror file, apart from the journal so that readers never wait on the disk. A writer
-/// takes this lock first and the journal lock inside it, which keeps the file in sequence order.
+/// Locked before the journal, which keeps the file in sequence order.
 static MIRROR: Mutex<Option<File>> = Mutex::new(None);
 
 pub(crate) fn info(message: impl Display) {
@@ -98,7 +88,6 @@ pub(crate) fn error(message: impl Display) {
     record(Level::Error, message);
 }
 
-/// Entries recorded after `sequence` (0 for all that are still in memory), oldest first.
 pub(crate) fn since(sequence: u64) -> Vec<Entry> {
     journal()
         .entries
@@ -108,13 +97,10 @@ pub(crate) fn since(sequence: u64) -> Vec<Entry> {
         .collect()
 }
 
-/// Writes the entries so far to `path`, replacing the file from an earlier run, and every
-/// later entry as it is recorded.
 pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
     let mut created = File::create(path)?;
     let mut file = mirror();
-    // No entry is recorded while the mirror lock is held, so nothing falls between the copy and
-    // the switch to the new file.
+    // Holding the mirror lock keeps entries from slipping between the copy and the switch.
     let lines: Vec<String> = journal().entries.iter().map(Entry::line).collect();
     for line in lines {
         writeln!(created, "{line}")?;
@@ -123,14 +109,12 @@ pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Adds an entry to the journal and, when mirroring, its line to the file.
 fn record(level: Level, message: impl Display) {
     let time = timestamp();
     let message = message.to_string();
     let mut file = mirror();
     let line = journal().append(time, level, message);
     if let Some(file) = file.as_mut() {
-        // A full disk must not take the application down with it.
         let _ = writeln!(file, "{line}");
     }
 }
@@ -143,20 +127,17 @@ fn mirror() -> MutexGuard<'static, Option<File>> {
     MIRROR.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Stops mirroring and hands back the file, so a test can let its directory go.
 #[cfg(test)]
 fn detach_mirror() -> Option<File> {
     mirror().take()
 }
 
-/// The local time for a log entry, `HH:MM:SS`.
 #[cfg(windows)]
 fn timestamp() -> String {
     let now = winsafe::GetLocalTime();
     format!("{:02}:{:02}:{:02}", now.wHour, now.wMinute, now.wSecond)
 }
 
-/// The local date and time for a file name, `YYYY-MM-DD_HH-MM-SS`.
 #[cfg(windows)]
 pub(crate) fn file_stamp() -> String {
     let now = winsafe::GetLocalTime();
@@ -166,20 +147,17 @@ pub(crate) fn file_stamp() -> String {
     )
 }
 
-/// The local date, `YYYY-MM-DD`.
 #[cfg(windows)]
 pub(crate) fn today() -> String {
     let now = winsafe::GetLocalTime();
     format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
 }
 
-/// The UTC time for a log entry, `HH:MM:SS`.
 #[cfg(not(windows))]
 fn timestamp() -> String {
     jiff::Timestamp::now().strftime("%H:%M:%S").to_string()
 }
 
-/// The UTC date and time for a file name, `YYYY-MM-DD_HH-MM-SS`.
 #[cfg(not(windows))]
 pub(crate) fn file_stamp() -> String {
     jiff::Timestamp::now()
@@ -190,8 +168,6 @@ pub(crate) fn file_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The journal is process-wide, so every test reasons relative to its own entries.
 
     #[test]
     fn entries_are_sequenced_and_formatted_as_lines() {
@@ -259,7 +235,6 @@ mod tests {
         assert!(written.contains("info     log test: before mirror\n"));
         assert!(written.contains("info     log test: after mirror\n"));
 
-        // Windows cannot delete the directory while the journal still holds the file open.
         assert!(detach_mirror().is_some());
         directory.close().unwrap();
     }

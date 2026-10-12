@@ -1,13 +1,5 @@
-//! Windows Graphics Capture of a monitor or a window. Frames land in a free-threaded frame pool;
-//! on each tick the capture thread takes the newest one, copies it into the encoder's input
-//! texture on the GPU and hands the pool's buffer straight back to Windows. Once the surfaces
-//! are handed over, the frame is not copied: NVENC reads the pool's buffer in place, and the
-//! frame is held, keeping Windows from drawing into that buffer, until the encoder is done with
-//! it; the pool then has buffers enough for the frames held besides the two it needs itself.
-//!
-//! A display in HDR is captured as FP16 scRGB instead, which Windows would otherwise clip to
-//! 8 bits; each frame then goes through the tone-map pass into the encoder's input, never in
-//! place, and the capture restarts if HDR is turned off.
+//! Windows Graphics Capture of a monitor or a window; once handed over, NVENC reads the pool's
+//! buffers in place, and a display in HDR is tone-mapped from FP16 instead.
 
 use super::{
     CaptureError, Frame, Source, Surface, display, failed, monitor, monitor_of, tonemap::ToneMapper,
@@ -47,52 +39,34 @@ use windows::{
     core::{Interface, factory},
 };
 
-/// Buffers in the frame pool: one being written by Windows while the newest waits to be taken.
 const POOL_BUFFERS: i32 = 2;
-/// Frames the encoder may hold at once when it reads the pool's buffers in place: as many as it
-/// has frames in flight, the latest picture among them.
+/// As many as the encoder has frames in flight.
 const HELD_BUFFERS: i32 = 3;
-/// Distinct pool buffers this capture keeps track of; a pool that hands out more than it was
-/// created with has replaced its buffers, which are then copied rather than read in place.
+/// A pool handing out more has replaced its buffers, which are then copied instead.
 const MAX_SURFACES: usize = 8;
-/// How often a capture of a display in HDR checks that it still is, so that turning HDR off
-/// restarts the session with 8-bit capture rather than tone-mapping an SDR picture.
 const HDR_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A running Windows Graphics Capture of one monitor or window.
 pub(super) struct Capture {
     item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
     captures_window: bool,
-    /// Set when Windows ends the capture: the monitor was unplugged, the window closed or the
-    /// device was lost.
     closed: Arc<AtomicBool>,
-    /// The registration that sets `closed`, removed when dropped.
     closed_token: i64,
-    /// The device the pool was created on, to create it again with more buffers.
     direct3d: IDirect3DDevice,
-    /// Whether the encoder reads the pool's buffers in place.
     handed_over: bool,
-    /// The pool's buffers seen so far, by the index each is reported under.
     surfaces: Vec<ID3D11Texture2D>,
-    /// The frame holding each of `surfaces`, while the encoder still needs it.
+    /// Holds each surface's frame while the encoder still needs it.
     held: Vec<Option<Direct3D11CaptureFrame>>,
-    /// The pass that turns the scRGB frames of a display in HDR into the encoder's 8-bit
-    /// input; `None` for a display in SDR, whose frames come as 8-bit BGRA.
     tone_map: Option<ToneMapper>,
-    /// The monitor whose HDR state a tone-mapped capture keeps checking, and when it next does.
     monitor: HMONITOR,
     next_hdr_check: Instant,
 }
 
 impl Capture {
-    /// Starts capturing `target`, with the cursor if `cursor` is set, at most twice per
-    /// `period`: the display delivers frames only on its own refresh, so a limit of exactly one
-    /// period would skip to every other refresh whenever the two rates do not divide evenly.
-    /// With `tone_map`, given for a display in HDR, frames are taken as FP16 scRGB and passed
-    /// through it into the encoder's input.
+    /// Frames are limited to twice per `period`: a limit of one period skips every other
+    /// refresh when the rates do not divide evenly.
     pub(super) fn start(
         device: &Device,
         period: Duration,
@@ -173,14 +147,12 @@ impl Source for Capture {
         if self.handed_over
             && let Some(index) = self.surface_index(&texture)
         {
-            // Held until the encoder no longer needs the buffer.
             if let Some(older) = self.held[index].replace(frame) {
                 let _ = older.Close();
             }
             return Ok(Frame::InSurface(index));
         }
-        // Not handed over (always so in HDR), or the pool replaced its buffers more often than
-        // any pool should.
+        // Not handed over (always so in HDR), or the pool replaced its buffers.
         let copied = if let Some(mapper) = &mut self.tone_map {
             mapper
                 .convert(device, &texture, target, width, height)
@@ -189,17 +161,16 @@ impl Source for Capture {
             device.copy_region(target, &texture, width, height);
             Ok(())
         };
-        // Returns the buffer to the pool; the copy above is already queued on the GPU.
         let _ = frame.Close();
         copied.map(|()| Frame::Fresh)
     }
 
     fn hand_over_surfaces(&mut self) -> bool {
-        // NVENC cannot read FP16 frames; they go through the tone-map pass instead.
+        // NVENC cannot read FP16 frames.
         if self.tone_map.is_some() {
             return false;
         }
-        // Nothing has been taken from the pool yet, so no frame is lost.
+        // Nothing has been taken from the pool yet.
         let recreated = self.pool.Recreate(
             &self.direct3d,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -227,9 +198,7 @@ impl Source for Capture {
 }
 
 impl Capture {
-    /// Whether a capture tone-mapping a display in HDR finds, on one of its checks every
-    /// [`HDR_CHECK_INTERVAL`], that the display has left HDR. A capture of a display in SDR
-    /// never checks: one that enters HDR is recorded clipped until the session restarts.
+    /// An SDR capture never checks: a display entering HDR is recorded clipped.
     fn hdr_turned_off(&mut self) -> bool {
         if self.tone_map.is_none() {
             return false;
@@ -242,8 +211,6 @@ impl Capture {
         display::is_in_hdr(self.monitor) == Some(false)
     }
 
-    /// The index `texture`, one of the pool's buffers, is reported under, given a new one the
-    /// first time it comes; `None` once more buffers than any pool keeps have come.
     fn surface_index(&mut self, texture: &ID3D11Texture2D) -> Option<usize> {
         if let Some(index) = self
             .surfaces
@@ -263,7 +230,6 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // Stops watching for the end of the capture before ending it, then frees the pool.
         let _ = self.item.RemoveClosed(self.closed_token);
         for frame in self.held.iter_mut().filter_map(Option::take) {
             let _ = frame.Close();
@@ -273,10 +239,7 @@ impl Drop for Capture {
     }
 }
 
-/// Puts the calling thread in the multithreaded apartment, where the free-threaded capture
-/// objects live, and checks that this Windows offers Graphics Capture at all.
 fn prepare_thread() -> Result<(), CaptureError> {
-    // A thread already in the apartment stays.
     // SAFETY: initializes WinRT for the calling thread only.
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
     if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
@@ -288,14 +251,12 @@ fn prepare_thread() -> Result<(), CaptureError> {
     Ok(())
 }
 
-/// The capture item for the monitor or window `target` names.
 fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(failed("open the capture interop"))?;
     match *target {
         Target::Monitor { handle, .. } => {
-            // SAFETY: the handle was read from the window being captured moments ago, or
-            // names the primary monitor; a stale one makes the call fail, not misbehave.
+            // SAFETY: a stale handle makes the call fail, not misbehave.
             unsafe { interop.CreateForMonitor(monitor(handle)) }
                 .map_err(failed("capture the monitor"))
         }
@@ -307,8 +268,6 @@ fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {
     }
 }
 
-/// A flag Windows sets when it ends the capture of `item`, and the token that stops it from
-/// being set.
 fn watch_closed(item: &GraphicsCaptureItem) -> Result<(Arc<AtomicBool>, i64), CaptureError> {
     let closed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&closed);
@@ -321,7 +280,6 @@ fn watch_closed(item: &GraphicsCaptureItem) -> Result<(Arc<AtomicBool>, i64), Ca
     Ok((closed, token))
 }
 
-/// The shared device, wrapped for the Windows Runtime capture API.
 fn winrt_device(device: &Device) -> Result<IDirect3DDevice, CaptureError> {
     let dxgi = device
         .dxgi()
@@ -332,8 +290,6 @@ fn winrt_device(device: &Device) -> Result<IDirect3DDevice, CaptureError> {
         .map_err(failed("share the device with capture"))
 }
 
-/// Starts capturing `item` into `pool`, with the cursor only if `cursor` is set and without
-/// the border, at most twice per `period`.
 fn start_session(
     pool: &Direct3D11CaptureFramePool,
     item: &GraphicsCaptureItem,
@@ -343,8 +299,7 @@ fn start_session(
     let session = pool
         .CreateCaptureSession(item)
         .map_err(failed("create the capture session"))?;
-    // Each of these needs a newer Windows than capture itself; without them the defaults
-    // stay: the cursor is captured anyway, the border shows, frames come at the display rate.
+    // Each needs a newer Windows than capture itself; without it the default stays.
     let _ = session.SetIsCursorCaptureEnabled(cursor);
     let _ = session.SetIsBorderRequired(false);
     let _ = session.SetMinUpdateInterval(TimeSpan {
@@ -354,8 +309,7 @@ fn start_session(
     Ok(session)
 }
 
-/// The newest frame waiting in `pool`, if any; older ones are handed back unseen, since only
-/// the newest matters. The pool reports having no frame as an error.
+/// The pool reports having no frame as an error.
 fn newest_frame(pool: &Direct3D11CaptureFramePool) -> Option<Direct3D11CaptureFrame> {
     let mut newest = None;
     while let Ok(frame) = pool.TryGetNextFrame() {
@@ -366,7 +320,6 @@ fn newest_frame(pool: &Direct3D11CaptureFramePool) -> Option<Direct3D11CaptureFr
     newest
 }
 
-/// The Direct3D 11 texture a captured frame's surface wraps.
 fn frame_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D, CaptureError> {
     frame
         .Surface()
@@ -376,9 +329,6 @@ fn frame_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D, Capt
         .map_err(failed("read the captured frame"))
 }
 
-/// The format the frame pool delivers: FP16 scRGB, the display's own picture, when a tone-map
-/// pass will take it to SDR; otherwise 8-bit BGRA, which Windows converts an HDR display's
-/// picture to by clipping it.
 fn pixel_format(tone_map: Option<&ToneMapper>) -> DirectXPixelFormat {
     if tone_map.is_some() {
         DirectXPixelFormat::R16G16B16A16Float

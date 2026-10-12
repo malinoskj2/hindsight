@@ -1,5 +1,4 @@
-//! The frame clock: a high-resolution waitable timer that wakes the capture thread once per
-//! output frame. The thread sleeps in the kernel in between; nothing spins.
+//! The frame clock: a high-resolution waitable timer the capture thread sleeps on between frames.
 
 use std::time::{Duration, Instant};
 use windows::{
@@ -13,14 +12,11 @@ use windows::{
     core::{Owned, PCWSTR},
 };
 
-/// Nanoseconds in the 100 ns unit Windows measures timer due times and capture intervals in.
 pub(super) const HUNDRED_NANOSECONDS: u128 = 100;
 
-/// A high-resolution waitable timer the calling thread sleeps on, armed once at a time.
 pub(super) struct Timer(Owned<HANDLE>);
 
 impl Timer {
-    /// Creates the timer, unarmed.
     pub(super) fn new() -> windows::core::Result<Self> {
         // SAFETY: an unnamed timer with default security.
         let timer = unsafe {
@@ -35,13 +31,11 @@ impl Timer {
         Ok(Self(unsafe { Owned::new(timer) }))
     }
 
-    /// Arms the timer to fire once after `duration` and sleeps until it does.
     pub(super) fn sleep(&self, duration: Duration) -> windows::core::Result<()> {
         // Relative due times are negative, in 100 ns units.
         let relative =
             -i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
-        // SAFETY: the timer is open; `relative` outlives the call; a one-shot timer (period 0)
-        // with no completion routine.
+        // SAFETY: open timer; one-shot, no completion routine; `relative` outlives the call.
         unsafe { SetWaitableTimer(*self.0, &raw const relative, 0, None, None, false) }?;
         // SAFETY: waits on the open timer.
         if unsafe { WaitForSingleObject(*self.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -51,17 +45,14 @@ impl Timer {
     }
 }
 
-/// Ticks `frame_rate` times a second, counted from its creation.
 pub(super) struct Pacer {
     timer: Timer,
     start: Instant,
     period: Duration,
-    /// The tick the next call returns, unless the thread has fallen behind it.
     next: u64,
 }
 
 impl Pacer {
-    /// Starts a clock whose first tick is due at once.
     pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
         Ok(Self {
             timer: Timer::new()?,
@@ -71,13 +62,10 @@ impl Pacer {
         })
     }
 
-    /// The time between ticks.
     pub(super) const fn period(&self) -> Duration {
         self.period
     }
 
-    /// Sleeps until the next tick and returns its number. A thread that fell more than a frame
-    /// behind gets the current tick at once: missed ticks are skipped, not caught up in a burst.
     pub(super) fn wait(&mut self) -> windows::core::Result<u64> {
         let elapsed = self.start.elapsed();
         let current = tick(elapsed, self.period);
@@ -96,7 +84,6 @@ impl Pacer {
     }
 }
 
-/// The tick that `elapsed` falls in: the number of whole periods it spans.
 fn tick(elapsed: Duration, period: Duration) -> u64 {
     u64::try_from(elapsed.as_nanos() / period.as_nanos()).unwrap_or(u64::MAX)
 }

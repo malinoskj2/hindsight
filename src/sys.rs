@@ -1,9 +1,4 @@
-//! OS-level helpers, one Win32 facility each. Hotkey parsing, the icon, the save sounds and
-//! thread scheduling are portable in interface; the performance-counter clock, hotkey
-//! registration, full-screen app detection, the Start with Windows entry, the NvFBC key, the
-//! shell's thumbnails, file opening, showing in Explorer and recycling, the tray icon, a drive's
-//! free space, the window chrome and handing a second launch to the running copy are
-//! Windows-only.
+//! OS-level helpers, one Win32 facility each.
 
 #[cfg(windows)]
 #[expect(unsafe_code)]

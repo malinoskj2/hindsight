@@ -2,13 +2,9 @@
 
 /// The three-byte start code; a four-byte one has a zero byte in front.
 const START_CODE: [u8; 3] = [0, 0, 1];
-/// The byte inserted after two zero bytes so that a payload never contains a start code.
 const EMULATION_PREVENTION: u8 = 3;
 
-/// NAL units of an Annex B stream, without their start codes; empty ones are left out. Lazy,
-/// since telling a keyframe needs only the first few units of every frame.
 pub(super) fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
-    // The stream from the next start code on, or nothing once the last unit has been given.
     let mut rest = start_code(stream).map(|at| &stream[at..]);
     std::iter::from_fn(move || {
         loop {
@@ -23,14 +19,11 @@ pub(super) fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-/// Where the first start code in `data` begins.
 fn start_code(data: &[u8]) -> Option<usize> {
     data.windows(START_CODE.len())
         .position(|window| window == START_CODE)
 }
 
-/// The unit's payload with emulation prevention bytes (the `03` in `00 00 03`) removed, up to
-/// `limit` bytes; enough to read the fixed-position fields at the start of a parameter set.
 pub(super) fn unescape(unit: &[u8], limit: usize) -> Vec<u8> {
     let mut payload = Vec::with_capacity(limit.min(unit.len()));
     let mut zeros = 0;
@@ -48,7 +41,6 @@ pub(super) fn unescape(unit: &[u8], limit: usize) -> Vec<u8> {
     payload
 }
 
-/// Splits a stream into access units, each starting at a NAL unit `starts_unit` accepts.
 #[cfg(test)]
 pub(super) fn access_units(stream: &[u8], starts_unit: impl Fn(&[u8]) -> bool) -> Vec<&[u8]> {
     let mut starts: Vec<usize> = (0..stream.len().saturating_sub(START_CODE.len()))
@@ -56,7 +48,6 @@ pub(super) fn access_units(stream: &[u8], starts_unit: impl Fn(&[u8]) -> bool) -
             stream[index..].starts_with(&START_CODE)
                 && starts_unit(&stream[index + START_CODE.len()..])
         })
-        // A four-byte start code begins one byte earlier.
         .map(|index| {
             if index > 0 && stream[index - 1] == 0 {
                 index - 1
@@ -94,7 +85,6 @@ mod tests {
         );
         assert_eq!(nal_units(&[0, 0, 0, 0]).count(), 0);
         assert_eq!(nal_units(&[]).count(), 0);
-        // Start codes with nothing between them, and a trailing one, yield no units.
         assert_eq!(
             nal_units(&[0, 0, 1, 0, 0, 1, 5, 0, 0, 1]).collect::<Vec<_>>(),
             [&[5][..]]

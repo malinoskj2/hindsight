@@ -2,8 +2,10 @@
 /dist/
 *.user
 
-# Raw benchmark captures (hundreds of MB); the summaries next to them are tracked.
-docs/benchmarks/raw/
 
 # FrameView drops its logs where it is started.
 FvSDK*.csv
+
+# Private notes and the docs that were taken out of the repository.
+/.private/
+/todo.md

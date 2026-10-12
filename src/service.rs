@@ -1,6 +1,4 @@
-//! The recording worker: a thread that keeps one capture session running, starts it again when
-//! it ends on its own, and saves clips from its buffer. The window sends it commands, tells it
-//! which full-screen app is in front, and reads its status once a second.
+//! The recording worker: keeps one capture session running and saves clips from its buffer.
 
 use crate::{
     audio,
@@ -25,24 +23,16 @@ use std::{
 
 mod text;
 
-/// The span the frame rate is measured over; a publish sooner than that keeps the last rate, so
-/// the figure changes about every ten seconds.
 const RATE_SPAN: Duration = Duration::from_secs(10);
-/// The span of the first measurement after recording starts, so the figure appears promptly.
 const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
-/// How long to wait before starting a session again after it failed (the display was turned
-/// off, the driver was updated, the GPU was reset).
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
-/// How often the progress tone plays while a clip is being written.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// What a session captures. Handles are the OS's, carried as integers so the worker stays
-/// portable; a stale one makes capture fail, which the worker treats like any other failure.
+/// Handles are the OS's, carried as integers so the worker stays portable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Target {
-    /// A whole monitor; handle 0 is the primary one.
+    /// Handle 0 is the primary monitor.
     Monitor { handle: isize, name: String },
-    /// One app's window, and the monitor it is on, to fall back to.
     Window {
         window: isize,
         monitor: isize,
@@ -64,7 +54,6 @@ impl Target {
         }
     }
 
-    /// The window's monitor, for when the window itself cannot be captured.
     fn monitor(&self) -> Self {
         match self {
             Self::Monitor { .. } => self.clone(),
@@ -76,47 +65,33 @@ impl Target {
     }
 }
 
-/// Why a capture session ended without an error worth retrying.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
-    /// It was asked to stop.
     Stopped,
-    /// The captured display or window changed size; the encoder needs a new session.
     Resized,
-    /// The captured window closed or the display went away.
     Closed,
-    /// A window capture delivered no frame at all: the app presents in a way Windows cannot
-    /// compose, so its monitor must be captured instead.
+    /// The app presents in a way Windows cannot compose; its monitor must be captured instead.
     NoFrames,
-    /// This machine cannot record with these settings (no NVIDIA GPU, a driver too old, a
-    /// codec the GPU lacks); trying again would fail the same way.
+    /// Trying again would fail the same way.
     Unsupported(String),
 }
 
-/// Runs a capture session of a target into `live` until `stop` is set or it fails.
 pub(crate) type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 
-/// The recorder of real sessions: the GPU pipeline.
 #[cfg(windows)]
 const RECORDER: Recorder = crate::gpu::record;
-/// The recorder of real sessions: capture needs Windows, so every session fails.
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
-/// Writes a clip into a directory and returns its path.
 type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
-/// Plays a tone about a save.
 type Chime = Box<dyn Fn(Tone) + Send>;
 
-/// What saving a clip goes through: the writer, on the save thread, and the tones, played from
-/// the worker. Tests replace both, to make a save slow or fail and to hear the tones.
 struct Saver {
     write: Writer,
     chime: Chime,
 }
 
 impl Saver {
-    /// The saver of real clips: the MP4 writer and the sound card.
     fn real() -> Self {
         Self {
             write: replay::save,
@@ -125,45 +100,29 @@ impl Saver {
     }
 }
 
-/// What the worker is doing, for the Status tab to put into words.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) enum DisplayStatus {
-    /// A session is starting and its encoder has not reported the stream yet.
     #[default]
     Starting,
-    /// No full-screen app is in front.
     Waiting,
-    /// A session is recording into the buffer.
     Recording,
-    /// A session failed, and the worker waits before it tries again.
     Retrying,
-    /// The user stopped recording, or a session ended because it was asked to.
     Stopped,
-    /// These settings cannot record on this machine.
     Unsupported,
 }
 
-/// The worker's figures as the window reads them.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Status {
     pub(crate) state: DisplayStatus,
     pub(crate) recording: bool,
-    /// What the current or latest session captures.
     pub(crate) source: Option<String>,
-    /// The capture backend of the current or latest session.
     pub(crate) backend: Option<Backend>,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
-    /// Bytes of the clips saved to disk in every run; `None` when the totals cannot be read or
-    /// kept.
     pub(crate) saved_bytes: Option<u64>,
-    /// Bytes that went into the replay buffer in every run, this session's included.
     pub(crate) buffered_lifetime_bytes: Option<u64>,
-    /// Frames per second encoded, over the last refresh.
     pub(crate) encode_rate: Option<f64>,
-    /// Bytes that went into the replay buffer since the app started.
     pub(crate) session_written_bytes: u64,
-    /// Bytes of the clips saved since the app started.
     pub(crate) session_saved_bytes: u64,
     pub(crate) saving: bool,
     pub(crate) last_clip: Option<PathBuf>,
@@ -174,20 +133,14 @@ pub(crate) struct Status {
 #[derive(Debug)]
 enum Command {
     Start(Config),
-    /// A full-screen app is in front; recorded in that mode, unless it already is.
     Target(Target),
     Save,
-    /// The window changed its look; remembered without touching the session.
     Theme(Theme),
-    /// Sent by a capture or save thread that has something to report, and by the stream
-    /// listener once the encoder is configured: the worker looks at its sessions and publishes.
     Wake,
-    /// The window wants fresh figures for the Status tab.
     Publish,
     Exit,
 }
 
-/// The window's handle on the recording worker; dropping it stops the worker and waits for it.
 pub(crate) struct Worker {
     commands: Sender<Command>,
     status: Arc<Mutex<Status>>,
@@ -195,7 +148,6 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    /// Starts the worker thread; the error is that thread failing to start.
     pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
         Self::spawn_with(RECORDER, RETRY_INTERVAL, Some(store), config)
     }
@@ -242,33 +194,27 @@ impl Worker {
             .clone()
     }
 
-    /// Saves `config` and starts recording with it, replacing the current session.
     pub(crate) fn start(&self, config: Config) {
         self.request(Command::Start(config));
     }
 
-    /// Tells the worker which full-screen app is in front.
     pub(crate) fn target(&self, target: Target) {
         self.request(Command::Target(target));
     }
 
-    /// Saves the replay buffer as a clip.
     pub(crate) fn save(&self) {
         self.request(Command::Save);
     }
 
-    /// Saves the chosen look in the settings; recording carries on undisturbed.
     pub(crate) fn set_theme(&self, theme: Theme) {
         self.request(Command::Theme(theme));
     }
 
-    /// Asks for fresh figures; they are read with [`Worker::status`] afterwards.
     pub(crate) fn refresh(&self) {
         self.request(Command::Publish);
     }
 
     fn request(&self, command: Command) {
-        // The worker only goes away with this handle; a send cannot fail before then.
         let _ = self.commands.send(command);
     }
 }
@@ -282,32 +228,22 @@ impl Drop for Worker {
     }
 }
 
-/// A running capture session.
 struct Session {
     stop: Arc<AtomicBool>,
-    /// Set by the capture thread as it ends; its outcome can then be joined without a wait.
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<Ended>>,
-    /// The sound capture feeding the same buffer, when there is one; dropping the session
-    /// stops it.
     _audio: Option<audio::Capture>,
 }
 
-/// A clip being written.
 struct Saving {
     seconds: f64,
-    /// Set by the save thread as it ends; its outcome can then be joined without a wait.
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<PathBuf, SaveError>>,
-    /// When the progress tone plays next.
     next_tick: Instant,
 }
 
-/// Marks a capture or save thread as done and wakes the worker when it is dropped, which is as
-/// the thread's closure ends, whether it returned or panicked. The worker then joins the
-/// thread, which is handing back its result by then. `JoinHandle::is_finished` alone would not
-/// do: it says no until the result is stored, so a wake sent from inside the closure could
-/// find the thread unfinished and its outcome would wait for the next publish.
+/// Dropped as a capture or save thread's closure ends: marks it done and wakes the worker.
+/// `JoinHandle::is_finished` would not do, as it says no until the result is stored.
 struct Ending {
     done: Arc<AtomicBool>,
     wake: Sender<Command>,
@@ -316,54 +252,39 @@ struct Ending {
 impl Drop for Ending {
     fn drop(&mut self) {
         self.done.store(true, Ordering::Release);
-        // Once the worker is gone there is nobody to wake.
         let _ = self.wake.send(Command::Wake);
     }
 }
 
-/// Counters at the previous refresh, for the rates.
 #[derive(Clone, Copy)]
 struct Sample {
     at: Instant,
     encoded: u64,
 }
 
-/// The session and its buffer as one publish sees them.
 struct Reading {
     running: bool,
     stream: Option<Stream>,
-    /// Bytes in the current buffer, read once so the session and lifetime figures agree.
     live_bytes: u64,
     sample: Sample,
 }
 
-/// The worker thread's state: the settings, the session and its buffer, the clip being written
-/// and the figures for the Status tab.
 struct Machine {
     recorder: Recorder,
     retry_interval: Duration,
     store: Option<Store>,
-    /// The lifetime totals, not counting the buffer of the latest session until it is banked;
-    /// `None` when they cannot be read, so nothing is written over them.
     totals: Option<Totals>,
-    /// Bytes that went into the buffers of the sessions banked so far, since the app started.
     session_buffered: u64,
-    /// Bytes of the clips saved since the app started.
     session_saved: u64,
     config: Config,
     output: Arc<Mutex<Status>>,
     status: Status,
     session: Option<Session>,
-    /// What the current or latest session captures.
     target: Option<Target>,
-    /// The latest session's buffer; it stays saveable after the session fails.
     live: Option<Arc<Live>>,
-    /// When a failed session is tried again (whole-desktop mode), or when targets are accepted
-    /// again (full-screen mode).
     retry_at: Option<Instant>,
     saving: Option<Saving>,
     sample: Option<Sample>,
-    /// Lets the capture and save threads wake the worker when they finish or start streaming.
     wake: Sender<Command>,
     saver: Saver,
 }
@@ -418,9 +339,6 @@ impl Machine {
         self.shut_down();
     }
 
-    /// Waits for the next command. Nothing wakes the worker while it is idle: it sleeps until a
-    /// command or a thread wakes it, until a failed session is due to be tried again, or until
-    /// the progress tone of a clip being written is due.
     fn receive(&self, commands: &Receiver<Command>) -> Result<Command, RecvTimeoutError> {
         let tick = self.saving.as_ref().map(|saving| saving.next_tick);
         match self.retry_at.into_iter().chain(tick).min() {
@@ -429,8 +347,6 @@ impl Machine {
         }
     }
 
-    /// Ends the session, finishes a clip being written and banks the buffer before the worker
-    /// exits.
     fn shut_down(&mut self) {
         self.stop_session();
         if let Some(saving) = self.saving.take() {
@@ -440,8 +356,6 @@ impl Machine {
         self.publish();
     }
 
-    /// Writes `config` to the settings file and starts recording with it, replacing the current
-    /// session. Settings that cannot be written are not applied.
     fn apply(&mut self, config: Config) {
         if let Err(message) = self.write_settings(&config) {
             self.report_error(message);
@@ -453,9 +367,6 @@ impl Machine {
         self.begin();
     }
 
-    /// A full-screen app is in front. In full-screen mode it becomes the target, unless it
-    /// already is, the user has stopped recording, a failure is cooling down, or the settings
-    /// cannot work on this machine.
     fn offer(&mut self, target: Target) {
         if self.config.mode != Mode::Fullscreen
             || self.retry_at.is_some()
@@ -472,9 +383,6 @@ impl Machine {
         self.start_session(target);
     }
 
-    /// Starts writing the buffer to a clip, unless a clip is already being written or there is
-    /// nothing to save. The first progress tone plays at once, so the user hears that the hotkey
-    /// registered.
     fn save(&mut self) {
         if self.saving.is_some() {
             log::info(text::ALREADY_SAVING);
@@ -504,8 +412,6 @@ impl Machine {
         }
     }
 
-    /// Writes the settings with the new look to the settings file. The other settings stay as
-    /// last applied, and the session is not restarted.
     fn remember_theme(&mut self, theme: Theme) {
         self.config.theme = theme;
         if let Err(message) = self.write_settings(&self.config) {
@@ -513,8 +419,6 @@ impl Machine {
         }
     }
 
-    /// Writes `config` to the settings file, when there is one; the error is the message to
-    /// report.
     fn write_settings(&self, config: &Config) -> Result<(), String> {
         match &self.store {
             Some(store) => store
@@ -524,8 +428,6 @@ impl Machine {
         }
     }
 
-    /// Starts recording as the mode says: the primary monitor at once, or nothing until a
-    /// full-screen app is reported.
     fn begin(&mut self) {
         self.retry_at = None;
         match self.config.mode {
@@ -538,14 +440,11 @@ impl Machine {
         }
     }
 
-    /// Banks the previous buffer and starts a capture session of `target` into a fresh one,
-    /// with the sound when the settings ask for it.
     fn start_session(&mut self, target: Target) {
         self.bank_live();
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        // Tests record without sound, so they do not depend on the machine's audio devices.
         let audio = (self.config.audio && !cfg!(test))
             .then(|| audio::start(&live))
             .flatten();
@@ -571,8 +470,6 @@ impl Machine {
         }
     }
 
-    /// Starts a thread that records `target` into `live` until `stop` is set; `ending` marks
-    /// the session done and wakes the worker when it ends.
     fn spawn_capture(
         &self,
         target: &Target,
@@ -595,8 +492,6 @@ impl Machine {
             })
     }
 
-    /// A callback that wakes the worker, for the stream listener; once the worker is gone it
-    /// does nothing.
     fn waker(&self) -> impl Fn() + Send + Sync + 'static {
         let wake = self.wake.clone();
         move || {
@@ -604,8 +499,6 @@ impl Machine {
         }
     }
 
-    /// A flag and the guard that sets it: the guard goes to a capture or save thread, whose end
-    /// sets the flag and wakes the worker.
     fn ending(&self) -> (Arc<AtomicBool>, Ending) {
         let done = Arc::new(AtomicBool::new(false));
         let ending = Ending {
@@ -615,17 +508,13 @@ impl Machine {
         (done, ending)
     }
 
-    /// Starts a capture session of the current target again, after a resize or a retry.
     fn restart_session(&mut self) {
-        // `start_session` puts the target back.
         match self.target.take() {
             Some(target) => self.start_session(target),
             None => self.begin(),
         }
     }
 
-    /// Stops the running capture session, if there is one, and waits for it; a session that
-    /// failed on its way out is logged.
     fn stop_session(&mut self) {
         let Some(session) = self.session.take() else {
             return;
@@ -638,22 +527,17 @@ impl Machine {
         }
     }
 
-    /// Reports a failed session. Whole-desktop recording is tried again after a while; in
-    /// full-screen mode the worker waits that long before it accepts a target again.
     fn fail(&mut self, error: &str) {
         self.report_error(text::session_failed(error));
         self.status.state = DisplayStatus::Retrying;
         self.retry_at = Some(Instant::now() + self.retry_interval);
     }
 
-    /// Logs `message` and shows it on the Status tab.
     fn report_error(&mut self, message: String) {
         log::error(&message);
         self.status.error = Some(message);
     }
 
-    /// Notices a session that ended by itself, a retry that is due, a save that finished and a
-    /// progress tone that is due.
     fn poll(&mut self) {
         if let Some(session) = self
             .session
@@ -666,7 +550,7 @@ impl Machine {
             self.retry();
         }
 
-        // A finished save is reported before the tick, so no blip plays after its outcome.
+        // Before the tick, so no blip plays after the outcome.
         if let Some(saving) = self
             .saving
             .take_if(|saving| saving.done.load(Ordering::Acquire))
@@ -676,7 +560,6 @@ impl Machine {
         self.tick_save();
     }
 
-    /// Acts on how a session that ended by itself finished.
     fn session_ended(&mut self, outcome: thread::Result<Result<Ended>>) {
         match outcome {
             Ok(Ok(Ended::Stopped)) => self.status.state = DisplayStatus::Stopped,
@@ -702,8 +585,6 @@ impl Machine {
         }
     }
 
-    /// A window capture delivered no frame, so its monitor is captured instead; a monitor that
-    /// delivers none is a failure.
     fn fall_back_to_monitor(&mut self) {
         let Some(window @ Target::Window { .. }) = &self.target else {
             self.fail(text::NO_FRAMES);
@@ -714,21 +595,16 @@ impl Machine {
         self.start_session(monitor);
     }
 
-    /// Ends the wait after a failure: whole-desktop recording starts again, and full-screen mode
-    /// accepts targets again.
     fn retry(&mut self) {
         match self.config.mode {
             Mode::Desktop => {
                 log::info(text::RESTARTING);
                 self.restart_session();
             }
-            // The window may be gone; the next report of a full-screen app starts again.
             Mode::Fullscreen => self.begin(),
         }
     }
 
-    /// Starts a thread that writes `snapshot` as a clip to the clip directory; `ending` marks
-    /// the save done and wakes the worker when it ends.
     fn spawn_save(
         &self,
         snapshot: Snapshot,
@@ -743,13 +619,10 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                // The sound is encoded and packets kept in GPU memory are read back here, off
-                // the worker, in background mode like the writing.
                 write(&snapshot, &directory)
             })
     }
 
-    /// Plays the progress tone while a clip is being written, once a second after the first.
     fn tick_save(&mut self) {
         let now = Instant::now();
         let Some(saving) = self
@@ -763,7 +636,6 @@ impl Machine {
         (self.saver.chime)(Tone::Progress);
     }
 
-    /// Waits for a clip being written and reports how it went.
     fn finish_save(&mut self, saving: Saving) {
         match saving.join.join() {
             Ok(Ok(path)) => self.clip_saved(saving.seconds, path),
@@ -772,7 +644,6 @@ impl Machine {
         }
     }
 
-    /// Logs a clip written to `path`, counts it and plays the saved sound.
     fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
         log::info(text::clip_saved(seconds, &path));
         self.add_saved(&path);
@@ -781,14 +652,11 @@ impl Machine {
         (self.saver.chime)(Tone::Saved);
     }
 
-    /// Reports a clip that could not be written and plays the failed sound.
     fn report_failed_save(&mut self, message: String) {
         self.report_error(message);
         (self.saver.chime)(Tone::Failed);
     }
 
-    /// Adds a saved clip's size to the lifetime total and writes the totals to disk. A clip
-    /// whose size cannot be read is logged and counted as nothing.
     fn add_saved(&mut self, path: &Path) {
         let bytes = match std::fs::metadata(path) {
             Ok(metadata) => metadata.len(),
@@ -804,8 +672,6 @@ impl Machine {
         self.persist_totals();
     }
 
-    /// Adds the buffer of the latest session to the lifetime total and forgets the buffer.
-    /// Called before a new session replaces it, and when the worker stops.
     fn bank_live(&mut self) {
         let Some(live) = self.live.take() else {
             return;
@@ -818,8 +684,6 @@ impl Machine {
         self.persist_totals();
     }
 
-    /// Writes the totals to disk, if they were read; a failure is logged and the next write
-    /// tries again.
     fn persist_totals(&self) {
         if let (Some(store), Some(totals)) = (&self.store, &self.totals)
             && let Err(error) = store.save_totals(totals)
@@ -828,7 +692,6 @@ impl Machine {
         }
     }
 
-    /// Brings the status up to date and hands a copy to the window.
     fn publish(&mut self) {
         let reading = self.read_live();
         self.mark_recording(&reading);
@@ -838,7 +701,6 @@ impl Machine {
         *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
     }
 
-    /// Reads the session and its buffer once, so every figure of a publish agrees.
     fn read_live(&self) -> Reading {
         let live = self.live.as_deref();
         let running = self.session.is_some();
@@ -856,7 +718,6 @@ impl Machine {
         }
     }
 
-    /// Logs a starting session as recording once its encoder has reported the stream.
     fn mark_recording(&mut self, reading: &Reading) {
         if let Some(stream) = &reading.stream
             && reading.running
@@ -867,7 +728,6 @@ impl Machine {
         }
     }
 
-    /// Fills in what is being recorded, how, and whether a clip is being written.
     fn describe_session(&mut self, reading: &Reading) {
         self.status.recording = reading.running;
         self.status.source = self.target.as_ref().map(|target| target.name().to_owned());
@@ -877,8 +737,6 @@ impl Machine {
         self.status.saving = self.saving.is_some();
     }
 
-    /// Fills in the bytes buffered and saved, since the app started and in every run, counting
-    /// `live_bytes` in the current buffer.
     fn count_bytes(&mut self, live_bytes: u64) {
         self.status.session_written_bytes = self.session_buffered.saturating_add(live_bytes);
         self.status.session_saved_bytes = self.session_saved;
@@ -888,15 +746,12 @@ impl Machine {
             .map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
     }
 
-    /// Updates the encode rate from the counters at `current`. It is cleared while nothing
-    /// records, and starts over with the next session.
     fn measure_rate(&mut self, running: bool, current: Sample) {
         let Some(previous) = self.sample.filter(|_| running) else {
             self.status.encode_rate = None;
             self.sample = running.then_some(current);
             return;
         };
-        // A publish soon after the last one keeps its rate: the figure moves slowly.
         let elapsed = current.at.duration_since(previous.at);
         let span = if self.status.encode_rate.is_some() {
             RATE_SPAN
@@ -912,7 +767,6 @@ impl Machine {
     }
 }
 
-/// The lifetime totals kept in `store`; unreadable ones are logged and not kept.
 fn load_totals(store: &Store) -> Option<Totals> {
     store
         .load_totals()
@@ -926,7 +780,6 @@ mod tests {
     use crate::replay::{Matrix, Packet};
     use std::sync::atomic::AtomicUsize;
 
-    /// Encodes a fake keyframe every 10 frames until stopped.
     #[expect(clippy::unnecessary_wraps)]
     fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         live.set_stream(Stream {
@@ -971,21 +824,17 @@ mod tests {
         ))
     }
 
-    /// Ends at once, as if the display went away.
     #[expect(clippy::unnecessary_wraps)]
     fn closing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
         Ok(Ended::Closed)
     }
 
-    /// Sessions in order: the first window ends as if its app closed, a second window yields
-    /// no frames, and a monitor records steadily.
     static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
     fn scripted(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
         SESSIONS.fetch_add(1, Ordering::Relaxed);
         match target {
             Target::Window { window: 1, .. } => {
-                // Long enough for the status tick to see it recording.
                 steady_until(config, live, stop, Duration::from_millis(1500));
                 Ok(Ended::Closed)
             }
@@ -1008,7 +857,6 @@ mod tests {
         });
     }
 
-    /// A worker of `recorder`'s sessions with the real saver; a test's thread always starts.
     fn spawn(
         recorder: Recorder,
         retry_interval: Duration,
@@ -1018,7 +866,6 @@ mod tests {
         Worker::spawn_with(recorder, retry_interval, store, config).unwrap()
     }
 
-    /// A worker of `recorder`'s sessions saving through `saver`; a test's thread always starts.
     fn spawn_saving(
         recorder: Recorder,
         retry_interval: Duration,
@@ -1032,7 +879,6 @@ mod tests {
     fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            // Like the window's status timer: figures that grow without an event need a request.
             worker.refresh();
             let status = worker.status();
             if done(&status) {
@@ -1089,14 +935,12 @@ mod tests {
 
     #[test]
     fn a_thread_that_ends_wakes_the_worker_without_a_refresh() {
-        // Nothing asks for figures here: a session's end must reach the status on its own.
         let worker = spawn(closing, RETRY_INTERVAL, None, desktop());
         thread::sleep(Duration::from_millis(300));
         let status = worker.status();
         assert_eq!(status.state, DisplayStatus::Retrying, "{status:?}");
         assert!(status.error.unwrap().contains(text::DISPLAY_GONE));
 
-        // Likewise a save's outcome.
         let directory = tempfile::tempdir().unwrap();
         let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
         wait_for(&worker, |status| status.session_written_bytes > 0);
@@ -1170,19 +1014,16 @@ mod tests {
         assert!(!status.recording);
         assert!(status.source.is_none());
 
-        // The app comes to the front; reporting it again does not restart the session.
         worker.target(window(1));
         wait_for(&worker, |status| status.state == DisplayStatus::Recording);
         worker.target(window(1));
         worker.target(window(1));
-        // Its session ends as if it closed; the buffer stays saveable.
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
         assert_eq!(SESSIONS.load(Ordering::Relaxed), 1);
         assert_eq!(status.source.as_deref(), Some("game1.exe"));
         worker.save();
         wait_for(&worker, |status| status.last_clip.is_some());
 
-        // A second app cannot be captured as a window, so its monitor is captured instead.
         worker.target(window(2));
         let status = wait_for(&worker, |status| {
             status.state == DisplayStatus::Recording && status.session_written_bytes > 0
@@ -1203,7 +1044,6 @@ mod tests {
         worker.target(window(1));
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
         assert!(status.error.is_some());
-        // During the cooldown the same app is not tried again; afterwards it is.
         worker.target(window(1));
         thread::sleep(Duration::from_millis(20));
         assert_eq!(worker.status().state, DisplayStatus::Retrying);
@@ -1253,7 +1093,6 @@ mod tests {
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
         worker.set_theme(Theme::Nova);
-        // Commands are handled in order, so by the time the worker has exited it has saved.
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Recording);
         assert!(status.recording, "the session carries on");
         drop(worker);
@@ -1268,10 +1107,8 @@ mod tests {
         );
     }
 
-    /// The tones a test saver played, with when.
     type Heard = Arc<Mutex<Vec<(Instant, Tone)>>>;
 
-    /// A saver with the writer `write` whose tones are written down instead of played.
     fn listening(write: Writer) -> (Saver, Heard) {
         let heard = Heard::default();
         let ear = Arc::clone(&heard);
@@ -1290,8 +1127,6 @@ mod tests {
             .collect()
     }
 
-    /// Asserts that `heard` is progress blips at least most of a second apart, then `outcome`
-    /// once, and returns the number of blips.
     fn assert_ticks_then(heard: &Heard, outcome: Tone) -> usize {
         let heard = heard.lock().unwrap();
         let (last, blips) = heard.split_last().expect("a tone played");
@@ -1304,13 +1139,11 @@ mod tests {
         blips.len()
     }
 
-    /// Writes the clip after two and a half seconds.
     fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
         thread::sleep(Duration::from_millis(2500));
         replay::save(snapshot, directory)
     }
 
-    /// Fails after a second and a half.
     fn failing_write(_: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
         thread::sleep(Duration::from_millis(1500));
         Err(SaveError::Io {
@@ -1340,7 +1173,6 @@ mod tests {
         let blips = assert_ticks_then(&heard, Tone::Saved);
         assert!((2..=3).contains(&blips), "{blips} blips in 2.5 seconds");
 
-        // The ticking stopped with the save.
         thread::sleep(PROGRESS_INTERVAL + Duration::from_millis(300));
         assert_eq!(tones(&heard).len(), blips + 1);
     }

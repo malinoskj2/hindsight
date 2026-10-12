@@ -1,5 +1,5 @@
-//! AV1 in MP4 (the AV1 Codec ISO Media File Format Binding): each sample is a temporal unit of
-//! OBUs without its temporal delimiter, and an `av1C` record repeats the sequence header.
+//! AV1 in MP4: each sample is a temporal unit without its temporal delimiter, and `av1C`
+//! repeats the sequence header.
 
 use super::mp4;
 use bitstream_io::{BigEndian, BitRead, BitReader};
@@ -11,29 +11,23 @@ const OBU_TEMPORAL_DELIMITER: u8 = 2;
 const OBU_FRAME_HEADER: u8 = 3;
 const OBU_FRAME: u8 = 6;
 const OBU_PADDING: u8 = 15;
-/// Where `obu_type` sits in the first header byte.
 const OBU_TYPE_SHIFT: u8 = 3;
 const OBU_TYPE_MASK: u8 = 0x0F;
 const OBU_EXTENSION_FLAG: u8 = 0x04;
 const OBU_HAS_SIZE_FIELD: u8 = 0x02;
-/// The longest `leb128()` value the specification allows, in bytes.
 const MAX_LEB128_BYTES: usize = 8;
 const KEY_FRAME: u32 = 0;
 const PROFILE_MAIN: u32 = 0;
 const PROFILE_HIGH: u32 = 1;
 const PROFILE_PROFESSIONAL: u32 = 2;
-/// Levels above 3.3 (`seq_level_idx` 7) signal a tier; lower ones are always in the main tier.
+/// Levels above 3.3 signal a tier.
 const MAX_LEVEL_WITHOUT_TIER: u32 = 7;
-/// `color_primaries`, `transfer_characteristics` and `matrix_coefficients` of sRGB, which the
-/// sequence header codes without chroma subsampling.
+/// sRGB, which the sequence header codes without chroma subsampling.
 const SRGB: (u32, u32, u32) = (1, 13, 0);
-/// The same three when the sequence header leaves them out: unspecified.
 const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
 
-/// Reads bits most significant first; running out of bits is an error.
 type Bits<'a> = BitReader<&'a [u8], BigEndian>;
 
-/// Whether the temporal unit's first frame is a key frame.
 pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
     obus(temporal_unit)
         .find(|obu| matches!(obu.kind, OBU_FRAME_HEADER | OBU_FRAME))
@@ -46,7 +40,6 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// The `av1C` record for the sequence header in `temporal_unit`, if it carries one.
 pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
     let obu = obus(temporal_unit).find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload).ok()?;
@@ -55,7 +48,6 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
     mp4::record(&record)
 }
 
-/// Appends `obu` to `output` with a size field, whether or not it came with one.
 fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
     output.push(obu.header[0] | OBU_HAS_SIZE_FIELD);
     output.extend_from_slice(&obu.header[1..]);
@@ -63,7 +55,6 @@ fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
     output.extend_from_slice(obu.payload);
 }
 
-/// The OBUs a stored sample keeps, whole: everything but temporal delimiters and padding.
 pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
     obus(temporal_unit)
         .filter(|obu| !matches!(obu.kind, OBU_TEMPORAL_DELIMITER | OBU_PADDING))
@@ -71,10 +62,8 @@ pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-/// Splits a low-overhead bitstream into temporal units at their temporal delimiters.
 #[cfg(test)]
 pub(super) fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
-    // OBUs follow one another without gaps, so each one starts where the previous ones end.
     let mut offset = 0;
     let mut starts = Vec::new();
     for obu in obus(stream) {
@@ -90,7 +79,6 @@ pub(super) fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-/// One OBU: its type, its header, its payload, and the whole of it from the header on.
 struct Obu<'a> {
     kind: u8,
     header: &'a [u8],
@@ -98,8 +86,6 @@ struct Obu<'a> {
     bytes: &'a [u8],
 }
 
-/// The OBUs of a low-overhead bitstream; stops at the first malformed one. Lazy, since telling
-/// a keyframe needs only the first frame of every temporal unit.
 fn obus(mut data: &[u8]) -> impl Iterator<Item = Obu<'_>> {
     std::iter::from_fn(move || {
         let obu = first_obu(data)?;
@@ -108,7 +94,6 @@ fn obus(mut data: &[u8]) -> impl Iterator<Item = Obu<'_>> {
     })
 }
 
-/// The OBU at the start of `data`, unless `data` is empty or the OBU is malformed.
 fn first_obu(data: &[u8]) -> Option<Obu<'_>> {
     let &first = data.first()?;
     let header_length = if first & OBU_EXTENSION_FLAG == 0 {
@@ -132,12 +117,10 @@ fn first_obu(data: &[u8]) -> Option<Obu<'_>> {
     })
 }
 
-/// The `obu_type` in an OBU's first header byte.
 const fn obu_type(header: u8) -> u8 {
     (header >> OBU_TYPE_SHIFT) & OBU_TYPE_MASK
 }
 
-/// An unsigned LEB128 value and the bytes it took.
 fn leb128(data: &[u8]) -> Option<(usize, usize)> {
     let mut value: u64 = 0;
     for (index, byte) in data.iter().take(MAX_LEB128_BYTES).enumerate() {
@@ -149,7 +132,6 @@ fn leb128(data: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Appends `value` to `output` as an unsigned LEB128 value.
 fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
     loop {
         let byte = u8::try_from(value & 0x7F).expect("a 7-bit value fits a byte");
@@ -162,7 +144,6 @@ fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
     }
 }
 
-/// The fields of a sequence header the `av1C` record repeats; the flags mirror the bitstream's.
 #[derive(Debug, PartialEq, Eq)]
 struct SequenceHeader {
     profile: u32,
@@ -172,7 +153,7 @@ struct SequenceHeader {
 }
 
 impl SequenceHeader {
-    /// Reads `sequence_header_obu()` (AV1 specification, section 5.5) through `color_config()`.
+    /// `sequence_header_obu()` (spec 5.5) through `color_config()`.
     fn parse(payload: &[u8]) -> io::Result<Self> {
         let mut bits = Bits::new(payload);
         let profile = bits.read::<3, u32>()?;
@@ -194,8 +175,6 @@ impl SequenceHeader {
         })
     }
 
-    /// The `av1C` record without its sequence header OBU: the profile, level, tier and colour
-    /// format, and no initial presentation delay.
     fn record(&self) -> Option<Av1c> {
         let colour = &self.colour;
         Some(Av1c {
@@ -213,8 +192,6 @@ impl SequenceHeader {
         })
     }
 
-    /// Reads the optional timing and decoder model information, then every operating point,
-    /// and returns the first point's level and tier.
     fn first_operating_point(bits: &mut Bits<'_>) -> io::Result<(u32, bool)> {
         let timing_info_present = bits.read_bit()?;
         if timing_info_present {
@@ -245,7 +222,6 @@ impl SequenceHeader {
         first.ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
-    /// Skips `timing_info()`: the tick rate, then the picture interval if it is fixed.
     fn skip_timing_info(bits: &mut Bits<'_>) -> io::Result<()> {
         bits.skip(64)?;
         if bits.read_bit()? {
@@ -254,15 +230,12 @@ impl SequenceHeader {
         Ok(())
     }
 
-    /// Reads `decoder_model_info()` and returns its `buffer_delay_length`.
     fn decoder_model_info(bits: &mut Bits<'_>) -> io::Result<u32> {
         let buffer_delay_length = bits.read::<5, u32>()? + 1;
         bits.skip(32 + 5 + 5)?;
         Ok(buffer_delay_length)
     }
 
-    /// Skips the frame size, the frame id lengths and the coding tool flags, which lie between
-    /// the operating points and `color_config()` and which the `av1C` record does not repeat.
     fn skip_frame_size_and_tools(
         bits: &mut Bits<'_>,
         reduced_still_picture_header: bool,
@@ -283,8 +256,6 @@ impl SequenceHeader {
         bits.skip(3)
     }
 
-    /// Skips the inter prediction tool flags, which only a sequence header that is not reduced
-    /// to still pictures carries.
     fn skip_inter_tools(bits: &mut Bits<'_>) -> io::Result<()> {
         // Inter-intra, masked compound, warped motion, dual filter.
         bits.skip(4)?;
@@ -308,7 +279,6 @@ impl SequenceHeader {
     }
 }
 
-/// The parts of `color_config()` the `av1C` record repeats.
 #[derive(Debug, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools)]
 struct ColourConfig {
@@ -321,7 +291,7 @@ struct ColourConfig {
 }
 
 impl ColourConfig {
-    /// Reads `color_config()` (section 5.5.2).
+    /// `color_config()` (spec 5.5.2).
     fn parse(bits: &mut Bits<'_>, profile: u32) -> io::Result<Self> {
         let high_bitdepth = bits.read_bit()?;
         let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.read_bit()?;
@@ -352,8 +322,6 @@ impl ColourConfig {
         })
     }
 
-    /// Reads the colour range, the subsampling and the chroma sample position of a colour
-    /// image that is not sRGB.
     fn chroma(
         bits: &mut Bits<'_>,
         profile: u32,
@@ -395,7 +363,6 @@ pub(super) mod tests {
     use super::*;
     use bitstream_io::{BitWrite, BitWriter};
 
-    /// Writes bits most significant first.
     struct Writer(BitWriter<Vec<u8>, BigEndian>);
 
     impl Writer {
@@ -408,25 +375,18 @@ pub(super) mod tests {
             self
         }
 
-        /// The bits written, the last byte padded with zeros.
         fn into_bytes(mut self) -> Vec<u8> {
             self.0.byte_align().unwrap();
             self.0.into_writer()
         }
     }
 
-    /// A 1920×1080 main-profile sequence header at level 4.0 (8), with every optional part
-    /// before `color_config()` present, BT.709 colour and chroma at the top-left sample.
     fn elaborate_sequence_header() -> Vec<u8> {
         let mut bits = Writer::new();
         bits.put(3, 0).put(1, 0).put(1, 0);
-        // Timing info with an equal picture interval (uvlc 0 is a single 1 bit), then a
-        // decoder model with 10-bit buffer delays.
         bits.put(1, 1).put(32, 1).put(32, 60).put(1, 1).put(1, 1);
         bits.put(1, 1).put(5, 9).put(32, 1).put(5, 4).put(5, 4);
         bits.put(1, 1);
-        // Two operating points; the first at level 8 in the high tier with its own decoder
-        // model and display delay.
         bits.put(5, 1);
         bits.put(12, 0x103)
             .put(5, 8)
@@ -437,16 +397,13 @@ pub(super) mod tests {
             .put(1, 0);
         bits.put(1, 1).put(4, 3);
         bits.put(12, 0x101).put(5, 4).put(1, 0).put(1, 0);
-        // 11-bit sizes.
         bits.put(4, 10).put(4, 10).put(11, 1919).put(11, 1079);
         bits.put(1, 1).put(4, 5).put(3, 2);
         bits.put(3, 0b011);
         bits.put(4, 0b0011).put(1, 1).put(2, 0b11);
-        // Screen content tools chosen per frame, integer motion vectors forced off.
         bits.put(1, 0).put(1, 1).put(1, 0).put(1, 0);
         bits.put(3, 6);
         bits.put(3, 0b011);
-        // color_config: 8-bit, not monochrome, BT.709, limited range, chroma position 1.
         bits.put(1, 0)
             .put(1, 0)
             .put(1, 1)
@@ -466,22 +423,18 @@ pub(super) mod tests {
         bytes
     }
 
-    /// A keyframe temporal unit: delimiter, sequence header, then the frame.
     pub(in crate::replay) fn keyframe() -> Vec<u8> {
         [
             obu(OBU_TEMPORAL_DELIMITER, &[]),
             obu(OBU_SEQUENCE_HEADER, &elaborate_sequence_header()),
-            // show_existing_frame 0, KEY_FRAME, show_frame.
             obu(OBU_FRAME, &[0b0001_0000, 0xAB, 0xCD]),
         ]
         .concat()
     }
 
-    /// A temporal unit holding a delimiter and one frame that refers to earlier ones.
     pub(in crate::replay) fn inter_frame() -> Vec<u8> {
         [
             obu(OBU_TEMPORAL_DELIMITER, &[]),
-            // show_existing_frame 0, INTER_FRAME, show_frame.
             obu(OBU_FRAME, &[0b0011_0000, 0x12]),
         ]
         .concat()
@@ -491,7 +444,6 @@ pub(super) mod tests {
     fn keyframes_are_told_from_inter_frames() {
         assert!(is_keyframe(&keyframe()));
         assert!(!is_keyframe(&inter_frame()));
-        // A frame shown again from the reference buffer is not a new key frame.
         assert!(!is_keyframe(&obu(OBU_FRAME_HEADER, &[0b1000_0000])));
     }
 

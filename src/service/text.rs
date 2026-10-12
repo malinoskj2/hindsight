@@ -1,6 +1,4 @@
-//! The worker's log lines, some of which the Status tab also shows. Kept apart from the worker
-//! so its logic reads without the wording, and the wording can change without touching it.
-//! They are grouped as the worker meets them: the settings, the session, saving and the totals.
+//! The worker's log lines, some of which the Status tab also shows.
 
 use crate::{config::Config, replay::Stream};
 use std::{fmt::Display, path::Path};

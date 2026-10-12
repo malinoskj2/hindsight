@@ -1,6 +1,4 @@
-//! The Direct3D 11 device that capture and NVENC share. It is created on the NVIDIA adapter, so
-//! NVENC reads the captured textures where they already are, even on a laptop whose display
-//! hangs off the integrated GPU.
+//! The Direct3D 11 device capture and NVENC share, created on the NVIDIA adapter.
 
 use thiserror::Error;
 use windows::{
@@ -22,26 +20,20 @@ use windows::{
     core::Interface,
 };
 
-/// The PCI vendor id DXGI reports for NVIDIA adapters.
 const NVIDIA_VENDOR_ID: u32 = 0x10DE;
-/// The highest GPU thread priority; Windows grants more than 0 only to an elevated process.
+/// Windows grants more than 0 only to an elevated process.
 const GPU_THREAD_PRIORITY: i32 = 7;
 
-/// Why the shared device could not be created.
 #[derive(Debug, Error)]
 pub(crate) enum DeviceError {
-    /// No hardware adapter from NVIDIA is installed.
     #[error("no NVIDIA GPU was found; NVENC needs one")]
     NoNvidiaAdapter,
-    /// Listing the adapters failed.
     #[error("list the graphics adapters: {0}")]
     Enumerate(windows::core::Error),
-    /// Creating the device on the named adapter failed.
     #[error("create the Direct3D 11 device on {0}: {1}")]
     Create(String, windows::core::Error),
 }
 
-/// The shared device, its immediate context and the name of the adapter it runs on.
 pub(super) struct Device {
     pub(super) d3d: ID3D11Device,
     pub(super) context: ID3D11DeviceContext,
@@ -49,7 +41,6 @@ pub(super) struct Device {
 }
 
 impl Device {
-    /// Creates the device on the first NVIDIA adapter.
     pub(super) fn create() -> Result<Self, DeviceError> {
         let (adapter, name) = nvidia_adapter()?;
         let created = |error| DeviceError::Create(name.clone(), error);
@@ -64,14 +55,11 @@ impl Device {
         })
     }
 
-    /// Copies `source` into `target` on the GPU; both have the same size and format.
     pub(super) fn copy(&self, target: &ID3D11Texture2D, source: &ID3D11Texture2D) {
         // SAFETY: two live textures of the same shape on this device.
         unsafe { self.context.CopyResource(target, source) };
     }
 
-    /// Copies the top-left `width` × `height` of `source` into `target` on the GPU; both are
-    /// of one format and at least that large.
     pub(super) fn copy_region(
         &self,
         target: &ID3D11Texture2D,
@@ -102,29 +90,24 @@ impl Device {
         }
     }
 
-    /// The device's DXGI interface, through which its adapter is reached.
     pub(super) fn dxgi(&self) -> windows::core::Result<IDXGIDevice> {
         self.d3d.cast()
     }
 
-    /// The locally unique id of the device's adapter, which other graphics APIs report too.
     pub(super) fn luid(&self) -> windows::core::Result<LUID> {
         Ok(self.adapter_description()?.AdapterLuid)
     }
 
-    /// Bytes of memory on the adapter itself, as DXGI reports them.
     pub(super) fn dedicated_video_memory(&self) -> windows::core::Result<usize> {
         Ok(self.adapter_description()?.DedicatedVideoMemory)
     }
 
-    /// DXGI's description of the device's adapter.
     fn adapter_description(&self) -> windows::core::Result<DXGI_ADAPTER_DESC> {
         let device = self.dxgi()?;
         // SAFETY: reads the adapter of a live device and then its description.
         unsafe { device.GetAdapter()?.GetDesc() }
     }
 
-    /// Lets the device's copies run ahead of a game that keeps the GPU busy.
     pub(super) fn raise_priority(&self) -> windows::core::Result<()> {
         let device = self.dxgi()?;
         // SAFETY: a plain setter on a live device.
@@ -132,7 +115,6 @@ impl Device {
     }
 }
 
-/// The first hardware adapter from NVIDIA, and its name.
 fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     // SAFETY: creates a factory; no other preconditions.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(DeviceError::Enumerate)?;
@@ -152,13 +134,11 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     Err(DeviceError::NoNvidiaAdapter)
 }
 
-/// Whether an adapter is an NVIDIA GPU rather than another vendor's or a software renderer.
 fn is_nvidia_hardware(description: &DXGI_ADAPTER_DESC1) -> bool {
     let software = description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
     description.VendorId == NVIDIA_VENDOR_ID && !software
 }
 
-/// An adapter's name, which its description holds as nul-terminated UTF-16.
 fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
     let length = description
         .Description
@@ -168,15 +148,13 @@ fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
     String::from_utf16_lossy(&description.Description[..length])
 }
 
-/// A Direct3D 11 device on `adapter` with BGRA support, which Windows Graphics Capture
-/// requires of it, and its immediate context.
+/// BGRA support is required by Windows Graphics Capture.
 fn create_device(
     adapter: &IDXGIAdapter1,
 ) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
     let mut device = None;
     let mut context = None;
-    // SAFETY: the adapter is live; both out-parameters outlive the call and are written on
-    // success.
+    // SAFETY: live adapter; the out-parameters outlive the call.
     unsafe {
         D3D11CreateDevice(
             adapter,
@@ -196,8 +174,6 @@ fn create_device(
     }
 }
 
-/// Switches on the internal locking of the device behind `context`, so threads other than the
-/// capture thread may use it too.
 fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result<()> {
     let multithread: ID3D11Multithread = context.cast()?;
     // SAFETY: switches on the device's internal locking; returns the previous setting.

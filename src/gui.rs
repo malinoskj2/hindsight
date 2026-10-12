@@ -1,5 +1,4 @@
-//! The desktop window: a plain Windows dialog made of the system's own common controls, so
-//! fonts, tabs, group boxes and buttons are drawn by Windows exactly like any control panel.
+//! The main window: a plain Win32 dialog built from the system's common controls.
 
 use self::{
     clips::ClipsPage,
@@ -40,19 +39,14 @@ mod theme;
 
 /// Resource id of the icon embedded by `build.rs`.
 const ICON_RESOURCE: u16 = 1;
-/// Id of the timer that refreshes the pages while the window can be seen.
 const STATUS_TIMER: usize = 1;
-/// How often the pages refresh, in milliseconds.
 const STATUS_INTERVAL_MS: u32 = 1000;
-/// Where the Clips tab stands in the strip.
 const CLIPS_TAB: u32 = 1;
 
-/// Height of the tab control, in logical pixels.
 const TAB_HEIGHT: i32 = 406;
-/// The tab and its margins; a footer row is added only while it has something to say.
+/// The footer row is added only while it is shown.
 const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
 
-/// Shows the application window, or the startup error, until the user quits.
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
     match startup {
         Ok((worker, config)) => Main::create_and_run(worker, config, start_hidden),
@@ -60,8 +54,6 @@ pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Resu
     }
 }
 
-/// The application window, its tab of pages and footer row, the look they are drawn in, and
-/// the state the handlers share.
 #[derive(Clone)]
 struct Main {
     wnd: gui::WindowMain,
@@ -76,7 +68,6 @@ struct Main {
 }
 
 impl Main {
-    /// Declares the window, wires it up and runs it until the user quits.
     fn create_and_run(worker: Worker, config: Config, start_hidden: bool) -> Result<()> {
         let main = Self::create(worker, config, start_hidden);
         main.draw();
@@ -85,10 +76,7 @@ impl Main {
         main.run(start_hidden)
     }
 
-    /// Declares the window and every control on it, in tab order, and the state the handlers
-    /// share; Windows creates them all when the window runs.
     fn create(worker: Worker, config: Config, start_hidden: bool) -> Self {
-        // The look chosen last time; a character theme widens the window for its artwork.
         let skin = Skin::new(config.theme);
         let width = WINDOW_WIDTH + skin.extra_width();
         let wnd = main_window(width, start_hidden);
@@ -125,8 +113,6 @@ impl Main {
         }
     }
 
-    /// Installs the handlers that draw the window's own parts and its strip of tabs; the pages
-    /// install their own.
     fn draw(&self) {
         let skin = self.skin.clone();
         let tab = self.tab.clone();
@@ -138,7 +124,6 @@ impl Main {
             }
             Ok(())
         });
-        // The footer's hint is muted; the window has no other labels.
         let footer = self.footer.clone();
         layout::draw(
             &self.wnd,
@@ -156,8 +141,6 @@ impl Main {
         );
     }
 
-    /// Wires the window's own messages: creation, visibility, the status timer, a change of
-    /// tab, the hotkey, another launch, closing and destruction.
     fn window_events(&self) {
         let me = self.clone();
         self.wnd.on().wm_create(move |_| {
@@ -165,7 +148,6 @@ impl Main {
             Ok(0)
         });
 
-        // The Clips tab reads its folder when it comes into view, not before.
         let me = self.clone();
         self.tab.on().tcn_sel_change(move || {
             me.refresh();
@@ -190,7 +172,6 @@ impl Main {
             Ok(0)
         });
 
-        // Another launch of the app: this window is the one to show.
         let me = self.clone();
         self.wnd.on().wm(instance::show_message(), move |_| {
             me.show();
@@ -210,8 +191,6 @@ impl Main {
         });
     }
 
-    /// Wires the Settings tab's controls whose effect reaches beyond the page: Apply, the
-    /// choices that act at once, and the Run-key switch. The page wires its own estimate.
     fn settings_events(&self) {
         let me = self.clone();
         self.settings.apply.on().bn_clicked(move || {
@@ -242,7 +221,6 @@ impl Main {
         self.settings.estimate_events();
     }
 
-    /// Runs the window until it is destroyed, shown at once unless it starts in the tray.
     fn run(&self, start_hidden: bool) -> Result<()> {
         let show = if start_hidden {
             co::SW::HIDE
@@ -255,8 +233,6 @@ impl Main {
             .map_err(|error| anyhow::anyhow!("run the application window: {error}"))
     }
 
-    /// Finishes the window once its controls exist: the look, the pages, the hotkey, the
-    /// foreground hook and the tray icon, then a first refresh.
     fn on_create(&self) {
         self.apply_look();
         self.status.on_create();
@@ -265,7 +241,6 @@ impl Main {
         self.logs.on_create();
         self.footer.on_create();
         self.show_initial_startup_error();
-        // A hotkey that cannot be registered is logged and shown on the Status tab.
         let configured = self.shared.borrow().config.clone();
         let _ = self.register_hotkey(&configured);
         self.watch_foreground_changes();
@@ -273,7 +248,6 @@ impl Main {
         self.refresh();
     }
 
-    /// Shows the Run-key error found before the window existed, if there was one.
     fn show_initial_startup_error(&self) {
         let initial_error = self.shared.borrow_mut().initial_startup_error.take();
         if let Some(error) = initial_error
@@ -283,8 +257,6 @@ impl Main {
         }
     }
 
-    /// Hooks foreground changes so a full-screen app is noticed at once, and looks at the app
-    /// in front now.
     fn watch_foreground_changes(&self) {
         let me = self.clone();
         let hook = ForegroundHook::install(move || me.watch_foreground());
@@ -295,7 +267,6 @@ impl Main {
         self.watch_foreground();
     }
 
-    /// Adds the notification-area icon, or shows the footer row saying closing will quit.
     fn add_tray_icon(&self) {
         let me = self.clone();
         match Tray::new(move |action| me.on_tray(action)) {
@@ -310,9 +281,7 @@ impl Main {
         }
     }
 
-    /// The status refresh runs only while the window can be seen: Windows sends this for the
-    /// visible creation, for hiding to the tray and for every later `ShowWindow` that changes
-    /// visibility, so a window parked in the tray wakes nothing.
+    /// The refresh timer runs only while the window is visible.
     fn on_show_window(&self, being_shown: bool) {
         if being_shown {
             let _ = self
@@ -325,27 +294,22 @@ impl Main {
         }
     }
 
-    /// Asks the worker for fresh figures and shows the ones it published last.
     fn on_timer(&self) {
         self.shared.borrow().worker.refresh();
         self.refresh();
     }
 
-    /// Saves a clip when the hotkey pressed, identified by `id`, is the save hotkey.
     fn on_hotkey(&self, id: usize) {
         if usize::try_from(hotkey::SAVE_HOTKEY_ID) == Ok(id) {
             self.save();
         }
     }
 
-    /// Brings the window back from the tray or from behind other windows.
     fn show(&self) {
         self.wnd.hwnd().ShowWindow(co::SW::RESTORE);
         self.wnd.hwnd().SetForegroundWindow();
     }
 
-    /// Closing hides to the tray; quitting (or closing without a tray) destroys the window,
-    /// and with it the worker, which stops recording first.
     fn on_close(&self) {
         let to_tray = {
             let shared = self.shared.borrow();
@@ -356,17 +320,13 @@ impl Main {
             self.wnd.hwnd().ShowWindow(co::SW::HIDE);
             return;
         }
-        // Destroying the window frees its handlers, the one running this included, so the
-        // call goes through a copy on the stack and nothing touches `self` after it.
+        // DestroyWindow frees this handler: go through a stack copy and touch nothing after.
         let wnd = self.wnd.clone();
         let _ = wnd.hwnd().DestroyWindow();
     }
 
-    /// Breaks the reference cycles through the tray's and the hook's callbacks so the worker
-    /// is dropped, which stops recording and finishes a clip being saved.
     fn on_destroy(&self) {
-        // Dropped outside the borrow: the tray destroys a window of its own as it goes, and
-        // anything that fires from that must find the shared state free.
+        // Drop outside the borrow: the tray's teardown can re-enter and borrow `shared`.
         let (tray, hook) = {
             let mut shared = self.shared.borrow_mut();
             (shared.tray.take(), shared.foreground_hook.take())
@@ -375,7 +335,6 @@ impl Main {
         drop(hook);
     }
 
-    /// Does what was chosen from the tray icon's menu.
     fn on_tray(&self, action: TrayAction) {
         match action {
             TrayAction::Show => self.show(),
@@ -388,8 +347,6 @@ impl Main {
         }
     }
 
-    /// Tells the worker about the full-screen app in front, if the mode records those. The
-    /// worker ignores an app it is already recording.
     fn watch_foreground(&self) {
         let shared = self.shared.borrow();
         if shared.config.mode == Mode::Fullscreen
@@ -399,7 +356,6 @@ impl Main {
         }
     }
 
-    /// Saves a clip of the replay buffer, showing the save under way if the window is visible.
     fn save(&self) {
         self.shared.borrow().worker.save();
         if self.wnd.hwnd().IsWindowVisible() {
@@ -407,8 +363,6 @@ impl Main {
         }
     }
 
-    /// Applies the settings as entered, or shows the problem with them: the hotkey changes,
-    /// and recording restarts with the new configuration.
     fn apply_settings(&self) {
         let config = match self.settings.configuration() {
             Ok(config) => config,
@@ -430,16 +384,11 @@ impl Main {
         self.watch_foreground();
     }
 
-    /// Choosing either NvFBC backend asks for the key NVIDIA issued, as NVIDIA's own setup
-    /// does; without one the previous choice comes back. The choice takes effect on Apply,
-    /// like every setting.
     fn on_backend_chosen(&self) {
         let accepted = !self.settings.chosen_backend().uses_nvfbc() || nvfbc_key::ask(&self.wnd);
         self.settings.settle_backend(accepted);
     }
 
-    /// A new look was chosen in the Settings tab: it shows at once and is remembered, and
-    /// recording carries on as it was.
     fn on_theme_chosen(&self) {
         let theme = self.settings.chosen_theme();
         if theme == self.skin.theme() {
@@ -458,14 +407,11 @@ impl Main {
         self.apply_look();
     }
 
-    /// Dresses the window in the chosen look: the title bar, the group titles, and a redraw of
-    /// everything.
     fn apply_look(&self) {
         match self.skin.title_bar_colours() {
             Some((caption, text)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
             None => window::match_dialog_title_bar(self.wnd.hwnd()),
         }
-        // Classic shows the titles as labels; a character theme paints them on its panels.
         let classic = !self.skin.is_themed();
         for frame in self.status.frames().iter().chain(self.settings.frames()) {
             frame.show_title_label(classic);
@@ -474,8 +420,6 @@ impl Main {
         self.redraw();
     }
 
-    /// Widens the window, the tab and its pages by `delta` physical pixels (narrows them when
-    /// negative).
     fn widen(&self, delta: i32) {
         for window in self.tab_and_pages() {
             resize_width_by(window, delta);
@@ -483,8 +427,6 @@ impl Main {
         resize_width_by(self.wnd.hwnd(), delta);
     }
 
-    /// Makes the hotkey of `config` save a clip in place of the current one, which stays in
-    /// effect when the new one cannot be registered.
     fn switch_hotkey(&self, config: &Config) -> Result<(), String> {
         let result = self.register_hotkey(config);
         if result.is_err() {
@@ -494,7 +436,6 @@ impl Main {
         result
     }
 
-    /// Makes the configured hotkey save a clip, or logs and remembers why it could not.
     fn register_hotkey(&self, config: &Config) -> Result<(), String> {
         let result = config
             .parsed_hotkey()
@@ -509,9 +450,6 @@ impl Main {
         result
     }
 
-    /// Shows the worker's latest status on the Status tab, the clip folder on the Clips tab
-    /// while it is in view, and new journal entries on the Logs tab, refitting the window when
-    /// the Status tab changed height.
     fn refresh(&self) {
         let (status, config, hotkey_error) = {
             let shared = self.shared.borrow();
@@ -529,7 +467,6 @@ impl Main {
         self.logs.update();
     }
 
-    /// Whether the Clips tab is the one showing in a window that can be seen.
     fn clips_in_view(&self) -> bool {
         self.wnd.hwnd().IsWindowVisible()
             && self
@@ -539,8 +476,6 @@ impl Main {
                 .is_some_and(|item| item.index() == CLIPS_TAB)
     }
 
-    /// Gives the tab and the pages the larger of the pages' extra heights, moving the footer
-    /// along; the window gets that plus the footer row when it is shown. Repaints.
     fn fit_window(&self) {
         let pages = self.status.extra().max(self.settings.extra());
         let (page_delta, window_delta) = self.shared.borrow_mut().heights.fit(pages);
@@ -556,11 +491,10 @@ impl Main {
         if window_delta != 0 {
             resize_height_by(self.wnd.hwnd(), window_delta);
         }
-        // Moved controls and the strip a shorter window uncovers keep stale pixels otherwise.
+        // Moved controls keep stale pixels otherwise.
         self.redraw();
     }
 
-    /// The tab control and its pages, which share one size.
     fn tab_and_pages(&self) -> [&w::HWND; 5] {
         [
             self.tab.hwnd(),
@@ -571,7 +505,6 @@ impl Main {
         ]
     }
 
-    /// Repaints the whole window, every control included.
     fn redraw(&self) {
         if let Ok(client) = self.wnd.hwnd().GetClientRect() {
             let _ = self.wnd.hwnd().RedrawWindow(
@@ -583,24 +516,19 @@ impl Main {
     }
 }
 
-/// What the handlers share. Every borrow is short-lived and none is taken while painting:
-/// the colours the paint-time handlers read live beside their labels.
+/// Never borrowed while painting; paint-time handlers read colours kept beside their labels.
 struct Shared {
     worker: Worker,
     config: Config,
     tray: Option<Tray>,
-    /// Reports foreground changes while it lives.
     foreground_hook: Option<ForegroundHook>,
     quitting: bool,
-    /// Why the save hotkey is not registered, while it is not.
     hotkey_error: Option<String>,
-    /// A Run-key error found before the window existed, shown once it does.
     initial_startup_error: Option<String>,
     heights: Heights,
 }
 
 impl Shared {
-    /// What the handlers share before the window exists: no tray, hook or hotkey yet.
     fn new(worker: Worker, config: Config, initial_startup_error: Option<String>) -> Self {
         Self {
             worker,
@@ -615,8 +543,6 @@ impl Shared {
     }
 }
 
-/// The height added to the fixed layout: the tab and its pages get the larger of the pages'
-/// expanded groups, the window that plus the footer row once it is shown.
 #[derive(Default)]
 struct Heights {
     footer: i32,
@@ -625,8 +551,6 @@ struct Heights {
 }
 
 impl Heights {
-    /// Records what the pages now need and returns how much the pages and the window must
-    /// change, in logical pixels.
     fn fit(&mut self, pages: i32) -> (i32, i32) {
         let window = pages + self.footer;
         let deltas = (pages - self.pages, window - self.window);
@@ -636,7 +560,6 @@ impl Heights {
     }
 }
 
-/// The main window, `width` logical pixels across, declared hidden when it starts in the tray.
 fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
     // A window created visible would flash before `--tray` hides it.
     let visibility = if start_hidden {
@@ -646,7 +569,6 @@ fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
     };
     gui::WindowMain::new(gui::WindowMainOpts {
         title: APP_NAME,
-        // A later launch finds this window by its class and asks it to come forward.
         class_name: instance::WINDOW_CLASS,
         size: gui::dpi(width, WINDOW_HEIGHT),
         class_icon: gui::Icon::Id(ICON_RESOURCE),
@@ -660,8 +582,6 @@ fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
     })
 }
 
-/// Whether the app starts with Windows, and the message to show once the window exists when
-/// the Run key could not be read.
 fn startup_setting() -> (bool, Option<String>) {
     match startup::enabled() {
         Ok(enabled) => (enabled, None),
@@ -677,11 +597,9 @@ mod tests {
     fn the_window_grows_by_the_footer_only_once_it_is_shown() {
         let mut heights = Heights::default();
         assert_eq!(heights.fit(40), (40, 40));
-        // The same need again changes nothing.
         assert_eq!(heights.fit(40), (0, 0));
         heights.footer = footer::HEIGHT;
         assert_eq!(heights.fit(40), (0, footer::HEIGHT));
-        // Giving the room back shrinks the pages and the window alike; the footer stays.
         assert_eq!(heights.fit(0), (-40, -40));
         assert_eq!(heights.window, footer::HEIGHT);
     }

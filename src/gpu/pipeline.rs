@@ -1,6 +1,4 @@
-//! One capture session: on every tick of the frame clock, the newest picture from the chosen
-//! capture backend (or, when the screen did not change, the previous one) is copied into a free
-//! encoder slot and submitted, and whatever NVENC has finished goes into the replay buffer.
+//! One capture session: a frame per tick of the clock, from the capture through NVENC into the replay buffer.
 
 use super::{
     capture::{self, CaptureError, EncoderDevice, Frame, Surface},
@@ -23,12 +21,9 @@ use std::{
     time::Duration,
 };
 
-/// How long a window capture may go without a first frame before it is judged unable to see
-/// the window (exclusive full screen, which DWM does not compose), in seconds.
+/// A window capture that shows nothing this long cannot see the window (exclusive full screen).
 const FIRST_FRAME_TIMEOUT_SECONDS: u64 = 2;
 
-/// Records `target` into `live` until `stop` is set, the target changes size or goes away, or
-/// something fails.
 pub(crate) fn record(
     config: &Config,
     target: &Target,
@@ -42,8 +37,6 @@ pub(crate) fn record(
     }
 }
 
-/// Raises the thread's scheduling priorities for the session, and returns its multimedia-class
-/// membership, which lasts as long as the session.
 fn prepare_thread() -> Option<priority::MultimediaThread> {
     let multimedia = match priority::join_multimedia_class() {
         Ok(multimedia) => Some(multimedia),
@@ -65,7 +58,6 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
     multimedia
 }
 
-/// Falls back to a high thread priority when joining the multimedia class failed with `error`.
 fn raise_thread_instead(error: &windows::core::Error) {
     log::warning(format!(
         "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
@@ -77,14 +69,11 @@ fn raise_thread_instead(error: &windows::core::Error) {
     }
 }
 
-/// Opens the device, the frame clock, the capture and the encoder, then encodes one frame per
-/// tick of the clock until the session ends.
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     sys::thread::note_capture_thread();
     let device = open_device(config)?;
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
-    // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
-    // which is how the sound is lined up with the video.
+    // Frame `i` is this instant plus `i` periods; the audio is lined up against it.
     live.set_origin(sys::clock::now());
     let mut session = Session::open(config, device, pacer.period(), target, live)?;
     let settings = session.encoder.settings();
@@ -111,8 +100,6 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     Ok(ended)
 }
 
-/// Puts a finished frame into the buffer, wherever the encoder left its bitstream: in the
-/// packet, or in a slot of the ring in video memory.
 fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
     let keyframe = keyframes.classify(&encoded);
     match encoded.data {
@@ -130,25 +117,16 @@ fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
     }
 }
 
-/// The capture and the encoder of one session, and what a tick needs to move a picture from
-/// the one to the other. The encoder is declared first, so that it is dropped before the
-/// capture, whose surfaces (and CUDA context) it reads, and before the device.
+/// The encoder is declared first: it is dropped before the capture it reads and the device.
 struct Session {
     encoder: Encoder,
     capture: Box<dyn capture::Source>,
     device: Device,
-    /// NVENC refused to read the capture's surfaces in place, so each new picture is copied
-    /// into the encoder's input instead.
     copy_surfaces: bool,
-    /// The tick by which a window capture must have delivered a first frame, or the window is
-    /// judged invisible to it.
     first_frame_deadline: Option<u64>,
 }
 
 impl Session {
-    /// Starts capturing `target` on `device`, paced to `period`, and opens the encoder on the
-    /// device the capture's surfaces are reachable from, sending its frames where `config`
-    /// asks.
     fn open(
         config: &Config,
         device: Device,
@@ -173,8 +151,7 @@ impl Session {
             },
             output,
         )?;
-        // NVENC reads a capture's own surfaces in place where it can, which saves copying
-        // every frame into the encoder's input.
+        // Surfaces are read in place only when nothing needs cropping.
         if capture.size() == (width, height) {
             capture.hand_over_surfaces();
         }
@@ -190,10 +167,6 @@ impl Session {
         })
     }
 
-    /// Encodes frame `index`: hands `output` what NVENC has finished, frees a slot, and submits
-    /// the newest picture, new or repeated, from wherever the capture left it. Reports how the
-    /// session ended when the capture ended it, or when a window capture has shown nothing by
-    /// its deadline.
     fn tick(&mut self, index: u64, output: &mut impl FnMut(Encoded)) -> Result<Option<Ended>> {
         let Self {
             encoder,
@@ -224,10 +197,6 @@ impl Session {
     }
 }
 
-/// Submits the new picture in the capture's surface `surface` as frame `index`: in place,
-/// registering the surface with NVENC the first time it comes, or copied into the encoder's
-/// input once NVENC has refused a surface (`copy_instead`). A surface in CUDA memory or on a
-/// Direct3D 9 device cannot be copied, so a refusal of one is an error.
 fn submit_surface(
     device: &Device,
     capture: &dyn capture::Source,
@@ -259,10 +228,6 @@ fn submit_surface(
     encoder.submit_surface(index, surface)
 }
 
-/// Submits the newest picture again as frame `index`, since the screen did not change: NVENC
-/// reads it where it is, or, while it is still reading it for the frame before, from a copy in
-/// the encoder's input; a picture in CUDA memory or on a Direct3D 9 device, which has no copy,
-/// is read again once NVENC is done with it.
 fn repeat_latest(
     device: &Device,
     encoder: &mut Encoder,
@@ -281,11 +246,6 @@ fn repeat_latest(
     }
 }
 
-/// Where the encoder's frames go, as `config` asks: into RAM; into a file on disk, which `live`
-/// is given as its store; into GPU memory written by the encoder itself, when the session is
-/// on a device's primary CUDA context; or, with any other session, into GPU memory through a
-/// Direct3D device of the buffer's own, which `live` is given as its store. When the disk or
-/// GPU memory cannot be had the buffer stays in RAM, with a warning.
 fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
     match config.buffer_memory {
         Memory::Ram => return Output::Memory,
@@ -323,9 +283,6 @@ fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
     Output::Memory
 }
 
-/// Gives `live` a store in the buffer file in the state directory, sized for the buffer
-/// `config` asks for; when the drive lacks the room or the file cannot be made, the buffer
-/// stays in RAM, with a warning.
 fn keep_on_disk(config: &Config, live: &Live) {
     match DiskStore::create(&storage::buffer_file(), config.estimated_buffer_bytes()) {
         Ok(store) => {
@@ -338,8 +295,6 @@ fn keep_on_disk(config: &Config, live: &Live) {
     }
 }
 
-/// Creates the device to capture and encode on, logs it, and raises its GPU thread priority
-/// where Windows allows.
 fn open_device(config: &Config) -> Result<Device> {
     let device = Device::create()?;
     log::info(format!(
@@ -354,16 +309,12 @@ fn open_device(config: &Config) -> Result<Device> {
     Ok(device)
 }
 
-/// NVENC encodes 4:2:0 video, whose dimensions must be even; an odd row or column is dropped.
+/// 4:2:0 needs even dimensions.
 const fn encodable((width, height): (u32, u32)) -> (u32, u32) {
     (width & !1, height & !1)
 }
 
-/// Decides which encoded frames are keyframes.
-///
-/// NVENC reports the picture type it chose. Parsing the bitstream instead costs about 100 µs
-/// per frame for H.264 and HEVC, most of the CPU budget, so it is used only until the driver
-/// has shown that it flags keyframes, which the first one does within a second.
+/// Parses the bitstream only until the driver has shown that it flags keyframes.
 struct Keyframes {
     codec: Codec,
     driver_flags_keyframes: bool,
@@ -377,8 +328,6 @@ impl Keyframes {
         }
     }
 
-    /// Whether `encoded` is a keyframe, which a clip can start with. A frame left in video
-    /// memory carries no picture type, so its first bytes are parsed for every frame.
     fn classify(&mut self, encoded: &Encoded) -> bool {
         let idr = encoded.is_idr();
         self.driver_flags_keyframes |= idr;
@@ -386,23 +335,14 @@ impl Keyframes {
     }
 }
 
-/// What a tick left in the encoder's input.
 enum Input {
-    /// A new picture to submit.
     Ready,
-    /// The screen did not change: the newest picture is to be submitted again.
     Repeat,
-    /// A new picture to submit from the capture's surface with this index.
     InSurface(usize),
-    /// Nothing has been captured yet; there is no picture to repeat.
     Empty,
-    /// The capture ended the session.
     Ended(Ended),
 }
 
-/// Fills the input of the slot [`Encoder::reserve`] freed with the newest captured picture of
-/// the encoded size, unless the capture left it in a surface of its own or the screen did not
-/// change.
 fn fill_input(
     device: &Device,
     capture: &mut dyn capture::Source,
@@ -423,7 +363,6 @@ fn fill_input(
     })
 }
 
-/// Whether `error` comes from the machine or the settings rather than the moment.
 fn is_permanent(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<DeviceError>(),

@@ -10,13 +10,10 @@ use winreg::{
     enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE},
 };
 
-/// The command-line flag, without its dashes, that starts hidden in the tray, since nobody is
-/// there to look at the window at logon. The command-line parser declares it from this too.
+/// Starts hidden in the tray; the command-line parser declares the flag from this.
 pub(crate) const TRAY_FLAG_NAME: &str = "tray";
-/// The key whose values Windows runs at logon, under `HKEY_CURRENT_USER`.
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
-/// Whether the entry is there; it is not when the `Run` key itself is missing.
 pub(crate) fn enabled() -> io::Result<bool> {
     let value = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(RUN_KEY, KEY_READ)
@@ -28,12 +25,10 @@ pub(crate) fn enabled() -> io::Result<bool> {
     }
 }
 
-/// Adds the entry for this executable, or removes it.
 pub(crate) fn set(enabled: bool) -> io::Result<()> {
     if enabled {
         return add();
     }
-    // An entry that is already gone, or a `Run` key that was never made, is what was asked for.
     let removed = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
         .and_then(|key| key.delete_value(APP_NAME));
@@ -43,7 +38,6 @@ pub(crate) fn set(enabled: bool) -> io::Result<()> {
     }
 }
 
-/// Adds the entry for this executable, making the `Run` key if it is missing.
 fn add() -> io::Result<()> {
     let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)?;
@@ -51,7 +45,6 @@ fn add() -> io::Result<()> {
     key.set_value(APP_NAME, &command(executable.as_os_str()))
 }
 
-/// The entry's command line: the quoted executable, started in the tray.
 fn command(executable: &OsStr) -> OsString {
     let mut command = OsString::from("\"");
     command.push(executable);

@@ -1,18 +1,4 @@
-//! Capture of a monitor or a window into the encoder's input texture. Each backend is a
-//! [`Source`]; the pipeline drives whichever one the settings choose without knowing which:
-//!
-//! - [`wgc`], Windows Graphics Capture, records a monitor or a single window.
-//! - [`dxgi_dd`], DXGI Desktop Duplication, records whole monitors only; a window target is
-//!   recorded through the monitor it fills.
-//! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
-//!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues. It
-//!   grabs into Direct3D 9 surfaces that an encoder on its Direct3D 9Ex device reads in place,
-//!   or, as [`nvfbc::CudaCapture`], into CUDA memory that an encoder on a CUDA context reads
-//!   in place.
-//!
-//! A monitor in HDR is described by [`display`]; Windows Graphics Capture and Desktop
-//! Duplication then take its FP16 scRGB picture and [`tonemap`] turns it into 8-bit SDR for
-//! the encoder (`docs/hdr.md`). NvFBC records it as 8-bit, clipped.
+//! Capture of a monitor or a window into the encoder's input, by one of several backends.
 
 mod display;
 mod dxgi_dd;
@@ -41,96 +27,70 @@ use windows::Win32::{
     UI::WindowsAndMessaging::IsWindow,
 };
 
-/// How often a backend that lost its capture to Windows or the driver tries to open it again
-/// while it is refused.
 const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Why a capture could not start, or why a running one stopped.
 #[derive(Debug, Error)]
 pub(crate) enum CaptureError {
-    /// This machine or display cannot be captured this way; trying again would fail the same
-    /// way.
     #[error("{0}")]
     Unsupported(String),
-    /// The captured monitor or window is gone.
     #[error("the captured display or window went away")]
     Closed,
-    /// A Windows call failed in the named step.
     #[error("{0}: {1}")]
     Windows(&'static str, windows::core::Error),
-    /// The NvFBC driver failed in the named step.
     #[error("{0} failed with {1}")]
     Nvfbc(&'static str, nvfbc::Status),
-    /// The CUDA driver failed in the named step.
     #[error("{0}: {1}")]
     Cuda(&'static str, CudaError),
-    /// The driver ended the capture in a way only a fresh session mends; the encoder's state
-    /// cannot be carried over.
     #[error("{0}")]
     Restart(&'static str),
 }
 
-/// A surface of a source's own, which the encoder reads in place once it is handed over.
+/// A source-owned surface the encoder reads in place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Surface {
-    /// A texture on the shared Direct3D 11 device.
     Texture(ID3D11Texture2D),
-    /// Rows of 32-bit BGRA in CUDA device memory, `pitch` bytes apart, which only an encoder
-    /// on the source's CUDA context can read.
-    CudaBuffer { pointer: u64, pitch: u32 },
-    /// A surface on the source's Direct3D 9Ex device, read by an encoder on that device: NV12
-    /// (`nv12`), which Direct3D 11 cannot open, or 32-bit BGRA, which an encoder on the source's
-    /// device reads without synchronising two devices.
+    /// BGRA rows `pitch` bytes apart in the source's CUDA context.
+    CudaBuffer {
+        pointer: u64,
+        pitch: u32,
+    },
+    /// On the source's Direct3D 9Ex device; NV12 when `nv12`, else BGRA.
     Direct3D9 {
         surface: IDirect3DSurface9,
         nv12: bool,
     },
 }
 
-/// The device the encoder must open its session on to read a source's surfaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum EncoderDevice {
-    /// The shared Direct3D 11 device, which also holds the encoder's own input textures.
     Direct3D,
-    /// The CUDA context the source's buffers live in; the encoder then has no input textures
-    /// of its own and reads the source's surfaces only. `primary` names the device whose
-    /// primary context it is, when it is one: memory that must outlive the source (the replay
-    /// buffer) can then be kept in it by retaining the context again.
+    /// `primary` is the device whose primary context this is, so memory that must outlive
+    /// the source can retain it again.
     Cuda {
         context: Context,
         primary: Option<super::cuda::Device>,
     },
-    /// The source's own Direct3D 9Ex device, on which its surfaces live; the encoder then
-    /// has no input textures of its own either. Used from the capture thread only, like the
-    /// source that owns it.
+    /// Capture thread only.
     Direct3D9(IDirect3DDevice9Ex),
 }
 
-/// What a tick found.
 pub(super) enum Frame {
-    /// A new picture was copied into the target.
     Fresh,
-    /// A new picture is in the source's own surface with this index, for the encoder to read
-    /// in place; nothing was copied. Only after [`Source::hand_over_surfaces`].
+    /// Left in the source's own surface with this index; only after
+    /// [`Source::hand_over_surfaces`].
     InSurface(usize),
-    /// The screen has not changed since the last tick.
     Unchanged,
-    /// The monitor's resolution, or the window's size, changed.
     Resized,
 }
 
-/// A running capture of one target.
 pub(super) trait Source {
-    /// The captured monitor's or window's size in pixels.
     fn size(&self) -> (u32, u32);
 
-    /// Whether this captures a single window, which may never deliver a frame: Windows cannot
-    /// compose an app in exclusive full screen.
+    /// A window capture may never deliver a frame: exclusive full screen is not composed.
     fn captures_window(&self) -> bool;
 
-    /// Copies the newest captured frame into the top-left `width` × `height` of `target`, if
-    /// one arrived since the last call. There is no target when the encoder runs on a CUDA
-    /// context, which only the surfaces of a source that asked for such an encoder reach.
+    /// Copies the newest frame into the top-left `width` × `height` of `target`; there is no
+    /// target when the encoder runs on CUDA.
     fn take(
         &mut self,
         device: &Device,
@@ -139,69 +99,56 @@ pub(super) trait Source {
         height: u32,
     ) -> Result<Frame, CaptureError>;
 
-    /// The device the encoder must run on to read this source's surfaces.
     fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Direct3D
     }
 
-    /// The matrix the source's pictures reach the encoder converted with, if they arrive as YUV;
-    /// BGRA is converted by NVENC with BT.709.
+    /// For YUV surfaces; BGRA is converted by NVENC with BT.709.
     fn colour_matrix(&self) -> Matrix {
         Matrix::Bt709
     }
 
-    /// Switches the source, if it captures into textures of its own the size of
-    /// [`size`](Self::size), to leaving each new picture where it is and reporting it as
-    /// [`Frame::InSurface`] instead of copying it into the target; reports whether it did.
+    /// Switches to leaving each picture in a surface of its own, reported as
+    /// [`Frame::InSurface`]; reports whether it did.
     fn hand_over_surfaces(&mut self) -> bool {
         false
     }
 
-    /// The surface a [`Frame::InSurface`] named, which stays the same memory for the session.
+    /// Stays the same memory for the session.
     fn surface(&self, _index: usize) -> Option<Surface> {
         None
     }
 
-    /// The surface the next [`take`](Self::take) may capture into, for a source that chooses
-    /// it, which the encoder must have finished reading first.
+    /// The surface the next [`take`](Self::take) captures into; the encoder must be done with it.
     fn next_surface(&self) -> Option<usize> {
         None
     }
 
-    /// Gives the surfaces the encoder no longer needs, those for which `in_use` is false, back
-    /// to a source that holds each until it is told so.
+    /// Hands back the surfaces for which `in_use` is false.
     fn release_surfaces(&mut self, _in_use: &dyn Fn(usize) -> bool) {}
 }
 
-/// Paces a backend's attempts to open its capture again after Windows or the driver took it
-/// away, so a refusal is retried every [`REOPEN_INTERVAL`] rather than on every tick.
 #[derive(Default)]
 struct ReopenThrottle {
-    /// When the next attempt is due, after a refusal.
     due: Option<Instant>,
 }
 
 impl ReopenThrottle {
-    /// The current time if an attempt is due now, `None` while waiting out a refusal.
+    /// `Some(now)` when an attempt is due.
     fn attempt(&self) -> Option<Instant> {
         let now = Instant::now();
         self.due.is_none_or(|due| now >= due).then_some(now)
     }
 
-    /// Lets the next attempt, after a successful one, go ahead at once.
     fn succeeded(&mut self) {
         self.due = None;
     }
 
-    /// Holds the next attempt back after the one started at `now` was refused.
     fn refused(&mut self, now: Instant) {
         self.due = Some(now + REOPEN_INTERVAL);
     }
 }
 
-/// Starts capturing `target` with `backend`, delivering frames no faster than about twice per
-/// `period` where the backend can be asked to, with the mouse cursor drawn in when `cursor`
-/// is set and the backend can (Desktop Duplication never draws it).
 pub(super) fn start(
     backend: Backend,
     device: &Device,
@@ -232,20 +179,14 @@ pub(super) fn start(
     })
 }
 
-/// How a backend captures the colour of a display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Colour {
-    /// 8-bit BGRA, which an SDR display shows as it is.
     Sdr,
-    /// FP16 scRGB from a display in HDR, tone-mapped to 8-bit SDR for the encoder.
     ToneMapped,
-    /// 8-bit BGRA from a display in HDR: the backend has no way to deliver more, and the
-    /// highlights are clipped.
+    /// 8-bit from a display in HDR: the backend cannot deliver more.
     Clipped,
 }
 
-/// How `backend` captures a display that is in HDR when `hdr` is set: Windows Graphics
-/// Capture and Desktop Duplication can hand over scRGB; NvFBC cannot.
 const fn colour(backend: Backend, hdr: bool) -> Colour {
     match (backend, hdr) {
         (_, false) => Colour::Sdr,
@@ -254,8 +195,6 @@ const fn colour(backend: Backend, hdr: bool) -> Colour {
     }
 }
 
-/// The tone-map pass for a display in HDR, or `None`, with a warning, when it cannot be
-/// prepared; the capture then takes 8-bit BGRA as for an SDR display.
 fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::ToneMapper> {
     let curve = tonemap::Curve::new(display.sdr_white_nits, display.max_nits);
     match tonemap::ToneMapper::new(device, curve) {
@@ -276,7 +215,6 @@ fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::T
     }
 }
 
-/// Warns, once per run, that NvFBC records a display in HDR as 8-bit SDR.
 fn warn_hdr_clipped() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -286,20 +224,15 @@ fn warn_hdr_clipped() {
     }
 }
 
-/// Wraps a Windows error with the step that failed, for `map_err`.
 fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
     move |error| CaptureError::Windows(step, error)
 }
 
-/// The texture a source that copies its frames was given to copy into: the pipeline passes
-/// one whenever the encoder runs on the Direct3D device, the only encoder such a source
-/// runs with.
 fn target_of(target: Option<&ID3D11Texture2D>) -> &ID3D11Texture2D {
     target.expect("a source that copies frames runs with an encoder on the Direct3D device")
 }
 
-/// The monitor a whole-monitor backend records for `target`, and the window it stands in for
-/// when the target is one.
+/// The monitor to record, and the window it stands in for when the target is one.
 fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     match *target {
         Target::Monitor { handle, .. } => (monitor(handle), None),
@@ -311,7 +244,6 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     }
 }
 
-/// The monitor a target's handle names; 0 is the primary one.
 fn monitor(handle: isize) -> HMONITOR {
     if handle == 0 {
         // SAFETY: (0, 0) always lies on the primary monitor.
@@ -321,7 +253,6 @@ fn monitor(handle: isize) -> HMONITOR {
     }
 }
 
-/// Whether the window a whole-monitor backend records through its monitor has been destroyed.
 fn is_window_closed(window: Option<HWND>) -> bool {
     // SAFETY: IsWindow accepts any handle, live or not.
     window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())

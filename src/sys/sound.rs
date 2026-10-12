@@ -1,7 +1,4 @@
-//! The tones that say how a save is going: a short blip each second while a clip is written,
-//! then whether it was saved. They are generated here at a low level, so they are heard without
-//! taking over from the game, and they play on their own thread so a save never waits on the
-//! sound card.
+//! The tones that say how a save is going, played on a thread of their own.
 
 use std::{f64::consts::TAU, io::Cursor};
 #[cfg(windows)]
@@ -15,33 +12,23 @@ use std::{
 #[cfg(windows)]
 use winsafe::{self as w, Snd};
 
-/// Samples per second; plenty for a few short tones.
 const SAMPLE_RATE: u32 = 22_050;
-/// About -14 dBFS: clear over a game, not startling.
 const AMPLITUDE: f64 = 0.2;
-/// How long each tone takes to fade in and out.
 const FADE_MILLISECONDS: u32 = 5;
 
-/// One short blip between the other two in pitch: a clip is being written.
 const PROGRESS: &[(u32, u32)] = &[(990, 35)];
-/// Two rising tones: a clip was written.
 const SAVED: &[(u32, u32)] = &[(880, 90), (0, 30), (1320, 120)];
-/// Three falling tones, low and ending long: the save failed, or there was nothing to save.
 const FAILED: &[(u32, u32)] = &[(440, 120), (0, 30), (330, 120), (0, 30), (220, 300)];
 
-/// What a tone says about a save.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tone {
-    /// A clip is still being written.
     Progress,
-    /// The clip was saved.
     Saved,
-    /// The save failed, or there was nothing to save.
     Failed,
 }
 
 impl Tone {
-    /// The `(frequency Hz, milliseconds)` tones that make up the sound.
+    /// `(frequency Hz, milliseconds)` pairs; a frequency of 0 is silence.
     fn tones(self) -> &'static [(u32, u32)] {
         match self {
             Self::Progress => PROGRESS,
@@ -51,17 +38,12 @@ impl Tone {
     }
 }
 
-/// The number of the latest tone asked for; a tone that is no longer the latest when its turn
-/// comes is dropped.
 #[cfg(windows)]
 static REQUESTED: AtomicU64 = AtomicU64::new(0);
-/// Held while a tone plays, so tones play one at a time in the order they were asked for.
 #[cfg(windows)]
 static PLAYING: Mutex<()> = Mutex::new(());
 
-/// Plays `tone` on a thread of its own. A tone still playing is let finish, so a progress blip
-/// never cuts off the outcome that follows it; of the tones asked for meanwhile only the latest
-/// plays. A failed spawn or playback only loses the sound.
+/// A tone still playing finishes; of those asked for meanwhile only the latest plays.
 #[cfg(windows)]
 pub(crate) fn play(tone: Tone) {
     let turn = REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
@@ -82,12 +64,9 @@ pub(crate) fn play(tone: Tone) {
         });
 }
 
-/// Plays `tone`: there is no sound card to play it on outside Windows.
 #[cfg(not(windows))]
 pub(crate) fn play(_tone: Tone) {}
 
-/// A mono 16-bit WAV of the `(frequency Hz, milliseconds)` tones, where a frequency of 0 is
-/// silence. Each tone fades in and out so it does not click.
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -96,7 +75,6 @@ fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
         sample_format: hound::SampleFormat::Int,
     };
     let mut wav = Cursor::new(Vec::new());
-    // Writing into memory cannot fail.
     let mut writer = hound::WavWriter::new(&mut wav, spec).expect("a WAV header fits in memory");
     for &(frequency, milliseconds) in tones {
         let count = SAMPLE_RATE * milliseconds / 1000;
@@ -110,8 +88,6 @@ fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     wav.into_inner()
 }
 
-/// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MILLISECONDS`; a
-/// frequency of 0 is silence.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the scaled sample is within the i16 range, and the rounding is intended"
@@ -132,7 +108,6 @@ fn sample(frequency: u32, index: u32, count: u32) -> i16 {
 mod tests {
     use super::*;
 
-    /// The 16-bit samples after the 44-byte header.
     fn samples(wav: &[u8]) -> Vec<i16> {
         let (pairs, _) = wav[44..].as_chunks::<2>();
         pairs.iter().map(|&pair| i16::from_le_bytes(pair)).collect()
@@ -163,12 +138,10 @@ mod tests {
         );
     }
 
-    /// The milliseconds of sound in `tones`, silences included.
     fn length(tones: &[(u32, u32)]) -> u32 {
         tones.iter().map(|&(_, milliseconds)| milliseconds).sum()
     }
 
-    /// The pitches of `tones`, silences left out.
     fn pitches(tones: &[(u32, u32)]) -> Vec<u32> {
         tones
             .iter()

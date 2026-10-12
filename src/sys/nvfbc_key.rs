@@ -1,8 +1,4 @@
-//! The NvFBC key: the private data NVIDIA issues to a licensed vendor, which the driver
-//! requires before it lets an application capture with NvFBC on a GeForce GPU. It is entered
-//! as hexadecimal or as four 0x-prefixed dwords when the NvFBC backend is chosen, and kept as
-//! binary in the user's registry, outside the settings file, so a shared or synced
-//! configuration never carries it.
+//! The NvFBC key, kept in the registry rather than the settings file so a sync never carries it.
 
 use crate::APP_NAME;
 use std::{borrow::Cow, fmt::Write, io};
@@ -12,11 +8,8 @@ use winreg::{
     enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, RegType},
 };
 
-/// The longest key accepted, in bytes; NVIDIA's are far shorter.
 pub(crate) const MAX_BYTES: usize = 256;
-/// The number of `0x`-prefixed dwords accepted as a key.
 const DWORD_COUNT: usize = 4;
-/// The registry value the key is kept in, under `app_key`.
 const VALUE_NAME: &str = "NvFBCKey";
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -37,9 +30,7 @@ pub(crate) enum ParseError {
     NotDword,
 }
 
-/// The key's bytes from its spelling: either hexadecimal digits, with spaces and line breaks
-/// ignored, or four `0x`-prefixed dwords separated by spaces or commas. Each dword is stored
-/// most significant byte first, as written.
+/// Hex digits, whitespace ignored, or four `0x` dwords stored most significant byte first.
 pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     let tokens = text
         .split(|character: char| character.is_whitespace() || character == ',')
@@ -54,14 +45,12 @@ pub(crate) fn parse(text: &str) -> Result<Vec<u8>, ParseError> {
     parse_hex(text)
 }
 
-/// The digits after a `0x` or `0X` prefix, if the token has one.
 fn strip_hex_prefix(token: &str) -> Option<&str> {
     token
         .strip_prefix("0x")
         .or_else(|| token.strip_prefix("0X"))
 }
 
-/// The key's bytes from `DWORD_COUNT` dwords, each written `0x` followed by 1 to 8 digits.
 fn parse_dwords(tokens: &[&str]) -> Result<Vec<u8>, ParseError> {
     if tokens.len() != DWORD_COUNT {
         return Err(ParseError::DwordCount);
@@ -78,7 +67,6 @@ fn parse_dwords(tokens: &[&str]) -> Result<Vec<u8>, ParseError> {
     Ok(key)
 }
 
-/// The key's bytes from hexadecimal digits, two per byte, with whitespace ignored.
 fn parse_hex(text: &str) -> Result<Vec<u8>, ParseError> {
     let digits = text
         .chars()
@@ -103,7 +91,6 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, ParseError> {
     Ok(pairs.iter().map(|[high, low]| (high << 4) | low).collect())
 }
 
-/// The key in the spelling `parse` reads.
 pub(crate) fn format(key: &[u8]) -> String {
     key.iter().fold(String::new(), |mut text, byte| {
         let _ = write!(text, "{byte:02x}");
@@ -111,7 +98,6 @@ pub(crate) fn format(key: &[u8]) -> String {
     })
 }
 
-/// The saved key, if one has been entered.
 pub(crate) fn load() -> io::Result<Option<Vec<u8>>> {
     let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(app_key(), KEY_READ) {
         Ok(key) => key,
@@ -128,7 +114,6 @@ pub(crate) fn load() -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// Saves the key, replacing the one entered before.
 pub(crate) fn save(key: &[u8]) -> io::Result<()> {
     let (app, _) = RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey_with_flags(app_key(), KEY_READ | KEY_WRITE)?;
@@ -141,7 +126,6 @@ pub(crate) fn save(key: &[u8]) -> io::Result<()> {
     )
 }
 
-/// `HKEY_CURRENT_USER\Software\hindsight`.
 fn app_key() -> String {
     format!(r"Software\{APP_NAME}")
 }

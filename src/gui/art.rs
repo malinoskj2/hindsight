@@ -1,23 +1,17 @@
-//! Theme artwork: PNG layers decoded once, then scaled to the size they are drawn at and kept
-//! as bitmaps GDI can blend. Everything here is plain arithmetic on pixels; only the bitmap
-//! itself is a Windows object.
+//! Theme artwork: PNGs decoded once and scaled into bitmaps GDI can alpha-blend.
 
 use winsafe::{self as w, guard::DeleteObjectGuard};
 
-/// Bytes in a pixel: blue, green, red and alpha, with the colour premultiplied by the alpha as
-/// `AlphaBlend` expects.
+/// Premultiplied BGRA, as `AlphaBlend` expects.
 const PIXEL: usize = 4;
 
-/// A decoded picture, top row first.
 pub(super) struct Image {
     width: usize,
     height: usize,
-    /// Premultiplied BGRA.
     pixels: Vec<u8>,
 }
 
 impl Image {
-    /// Decodes an 8-bit RGBA PNG; anything else is not artwork this app ships.
     pub(super) fn decode(png_bytes: &[u8]) -> Option<Self> {
         let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
         decoder.set_transformations(png::Transformations::EXPAND);
@@ -36,12 +30,9 @@ impl Image {
         })
     }
 
-    /// This picture shrunk (or stretched) to `height` rows, keeping its proportions. Each new
-    /// pixel averages the old ones it covers, so a thin line stays a line instead of vanishing.
     pub(super) fn scaled_to_height(&self, height: usize) -> Self {
         let height = height.max(1);
         let width = (self.width * height).div_ceil(self.height).max(1);
-        // Rows first, then columns: each pass averages a run of source pixels per target pixel.
         let across = resample(
             &self.pixels,
             (self.width, self.height),
@@ -61,14 +52,12 @@ impl Image {
         }
     }
 
-    /// The picture's width and height, in pixels.
     pub(super) fn size(&self) -> (i32, i32) {
         let clamp = |length: usize| i32::try_from(length).unwrap_or(i32::MAX);
         (clamp(self.width), clamp(self.height))
     }
 }
 
-/// A picture ready to be blended onto a window.
 pub(super) struct Layer {
     bitmap: DeleteObjectGuard<w::HBITMAP>,
     width: i32,
@@ -76,7 +65,6 @@ pub(super) struct Layer {
 }
 
 impl Layer {
-    /// `image` as a bitmap, or `None` when Windows cannot make one.
     pub(super) fn new(image: &Image) -> Option<Self> {
         let (width, height) = image.size();
         Some(Self {
@@ -86,13 +74,10 @@ impl Layer {
         })
     }
 
-    /// The picture's width and height, in pixels.
     pub(super) const fn size(&self) -> (i32, i32) {
         (self.width, self.height)
     }
 
-    /// Blends the picture onto `hdc` with its top left corner at (`x`, `y`), at `opacity` out of
-    /// 255 on top of its own transparency.
     pub(super) fn draw(&self, hdc: &w::HDC, x: i32, y: i32, opacity: u8) {
         let Ok(source) = hdc.CreateCompatibleDC() else {
             return;
@@ -104,16 +89,12 @@ impl Layer {
     }
 }
 
-/// The direction [`resample`] works along.
 #[derive(Clone, Copy)]
 enum Axis {
-    /// Along each row, changing the width.
     Horizontal,
-    /// Down each column, changing the height.
     Vertical,
 }
 
-/// Turns straight RGBA `pixels` into the premultiplied BGRA that `AlphaBlend` expects, in place.
 fn premultiply_to_bgra(pixels: &mut [u8]) {
     let (rows, _) = pixels.as_chunks_mut::<PIXEL>();
     for pixel in rows {
@@ -127,8 +108,6 @@ fn premultiply_to_bgra(pixels: &mut [u8]) {
     }
 }
 
-/// Averages `source` (`from_width` by `from_height`) down to `to_width` by `to_height` along
-/// `axis`; the other axis must not change.
 fn resample(
     source: &[u8],
     (from_width, from_height): (usize, usize),
@@ -141,7 +120,6 @@ fn resample(
     } else {
         (from_height, to_height, from_width)
     };
-    // Where pixel `position` of `line` starts in a picture `width` pixels wide.
     let offset = |width: usize, line: usize, position: usize| {
         if horizontal {
             (line * width + position) * PIXEL
@@ -164,8 +142,6 @@ fn resample(
     target
 }
 
-/// The source pixels that target pixel `index` covers along a line `from_len` pixels long, when
-/// each target pixel spans `scale` source pixels, with how much of each it covers.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn coverage(
     index: usize,
@@ -182,8 +158,6 @@ fn coverage(
     })
 }
 
-/// The average of the pixels of `source` starting at each offset in `pixels`, each weighted by
-/// its share.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -> [u8; PIXEL] {
     let mut sum = [0.0_f32; PIXEL];
@@ -197,9 +171,7 @@ fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -
     sum.map(|total| (total / weight.max(f32::EPSILON)).round() as u8)
 }
 
-/// Blends `source`, `size` pixels square-on, onto `dest` at `origin`: over what is there, by the
-/// picture's own alpha channel and then `opacity` out of 255. (`winsafe`'s `AlphaBlend` hands
-/// Windows a pointer where it wants the blend settings themselves.)
+/// Raw `AlphaBlend`: `winsafe`'s wrapper passes the blend settings by pointer.
 #[expect(unsafe_code)]
 fn alpha_blend(
     dest: &w::HDC,
@@ -220,8 +192,7 @@ fn alpha_blend(
         SourceConstantAlpha: opacity,
         AlphaFormat: SOURCE_ALPHA,
     };
-    // SAFETY: both handles are device contexts that stay alive for the call, and the source
-    // has the bitmap selected into it.
+    // SAFETY: both DCs are live for the call; the bitmap is selected into `source`.
     let _ = unsafe {
         AlphaBlend(
             HDC(dest.ptr()),
@@ -239,8 +210,7 @@ fn alpha_blend(
     };
 }
 
-/// A 32-bit top-down bitmap holding `pixels`. `AlphaBlend` only honours a picture's own alpha
-/// channel when the bitmap is a DIB section, which `winsafe` has no wrapper for.
+/// `AlphaBlend` honours per-pixel alpha only for a DIB section; `winsafe` has no wrapper.
 #[expect(unsafe_code)]
 fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGuard<w::HBITMAP>> {
     use windows::Win32::Graphics::Gdi::{
@@ -255,7 +225,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         bmiHeader: BITMAPINFOHEADER {
             biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).ok()?,
             biWidth: width,
-            // A negative height makes the rows run top to bottom, as `pixels` does.
+            // Negative height: top-down rows.
             biHeight: -height,
             biPlanes: 1,
             biBitCount: 32,
@@ -265,8 +235,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         ..Default::default()
     };
     let mut bits = std::ptr::null_mut();
-    // SAFETY: `info` describes a 32-bit bitmap, and `bits` receives the address of its pixels,
-    // which Windows owns for as long as the bitmap lives.
+    // SAFETY: `info` describes a 32-bit bitmap; `bits` receives its pixel pointer.
     let bitmap = unsafe {
         CreateDIBSection(
             None,
@@ -283,8 +252,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         let _ = unsafe { DeleteObject(bitmap.into()) };
         return None;
     }
-    // SAFETY: the bitmap's pixel memory holds `width * height * 4` bytes, which is exactly
-    // `pixels.len()`, and the two do not overlap.
+    // SAFETY: the DIB holds exactly `pixels.len()` bytes and does not overlap `pixels`.
     unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len()) };
     // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
     Some(unsafe { DeleteObjectGuard::new(w::HBITMAP::from_ptr(bitmap.0)) })
@@ -329,7 +297,6 @@ mod tests {
     #[test]
     fn scaling_averages_the_pixels_it_merges() {
         let mut image = flat(2, 2, [0, 0, 0, 255]);
-        // The right column is white.
         for row in 0..2 {
             let offset = (row * 2 + 1) * PIXEL;
             image.pixels[offset..offset + PIXEL].copy_from_slice(&[255, 255, 255, 255]);
@@ -364,7 +331,6 @@ mod tests {
             assert_eq!(image.size(), (1024, 1536), "{name}");
             let scaled = image.scaled_to_height(340);
             assert_eq!(scaled.size(), (227, 340), "{name}");
-            // Some of the picture is opaque, and some is transparent.
             let alphas: Vec<u8> = scaled
                 .pixels
                 .as_chunks::<PIXEL>()
@@ -372,7 +338,6 @@ mod tests {
                 .iter()
                 .map(|pixel| pixel[3])
                 .collect();
-            // The artwork's most opaque pixels are 254 out of 255.
             assert!(alphas.iter().any(|alpha| *alpha >= 250), "{name}");
             assert!(alphas.contains(&0), "{name}");
         }

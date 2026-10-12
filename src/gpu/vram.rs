@@ -1,13 +1,4 @@
-//! The replay buffer in the GPU's own memory. Packets are uploaded, one after another, into
-//! 64 MiB pages: Direct3D 11 buffers on a device of their own on the NVIDIA adapter, so a
-//! save's read-backs never queue behind the capture's work on the shared device. A page is
-//! reused once the buffer has dropped every packet in it, unless a save is still reading it,
-//! in which case it is destroyed when the save is done and a fresh page takes its place. A
-//! save reads a page's packets back in runs, through a staging buffer, 32 MiB at a time.
-//!
-//! What this costs: one small upload per frame on the capture thread, and the whole buffer
-//! crossing the bus back into system memory when a clip is saved. What it buys: the system's
-//! memory stays free of the buffer while the game runs.
+//! The replay buffer in GPU memory, on a Direct3D device of its own so saves never queue behind capture.
 
 use super::{
     CHUNK_BYTES, MEBIBYTE, PAGE_BYTES,
@@ -26,35 +17,27 @@ use windows::Win32::Graphics::{
     Dxgi::DXGI_ERROR_WAS_STILL_DRAWING,
 };
 
-/// How long a read-back waits between asking whether its copy has finished.
 const POLL: Duration = Duration::from_millis(1);
 
-/// Why the buffer could not be placed in GPU memory.
 #[derive(Debug, Error)]
 pub(crate) enum VramError {
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error("read the adapter's memory size: {0}")]
     Adapter(windows::core::Error),
-    /// The buffer is larger than the GPU's memory altogether.
     #[error("the buffer would take {} MiB and the GPU has {} MiB", needed / MEBIBYTE, available / MEBIBYTE)]
     TooLarge { needed: usize, available: usize },
     #[error("reserve a page of GPU memory: {0}")]
     Page(windows::core::Error),
 }
 
-/// The buffer's pages in GPU memory, and the device they are on.
 pub(crate) struct VideoMemory {
     device: Device,
     pages: Pages<VramPage>,
-    /// Pages reserved up front.
     reserved: usize,
 }
 
 impl VideoMemory {
-    /// Reserves pages for `bytes` of packets, and one more for the group of pictures the
-    /// buffer keeps beyond its span, on a device of its own on the NVIDIA adapter. More pages
-    /// are made as needed if the packets outgrow the estimate.
     pub(crate) fn create(bytes: u64) -> Result<Self, VramError> {
         let device = Device::create()?;
         let pages = reserved_pages(bytes);
@@ -75,7 +58,6 @@ impl VideoMemory {
         })
     }
 
-    /// What was reserved, for the log.
     pub(crate) fn description(&self) -> String {
         format!(
             "Replay buffer in GPU memory: {} MiB reserved in {} MiB pages on {}",
@@ -97,7 +79,6 @@ impl Store for VideoMemory {
     }
 }
 
-/// One page: a buffer in GPU memory on the store's device.
 struct VramPage {
     buffer: ID3D11Buffer,
     d3d: ID3D11Device,
@@ -122,11 +103,9 @@ impl VramPage {
         })
     }
 
-    /// Uploads `data` to the page at `offset`; the range lies within the page.
     fn write(&self, offset: usize, data: &[u8]) {
         let region = byte_range(offset, data.len());
-        // SAFETY: the destination range lies within the live buffer and the source bytes
-        // outlive the call, which copies them.
+        // SAFETY: the range lies within the live buffer; the source is copied during the call.
         unsafe {
             self.context.UpdateSubresource(
                 &self.buffer,
@@ -165,8 +144,7 @@ impl Page for VramPage {
         while done < length {
             let piece = chunk.min(length - done);
             let region = byte_range(offset + done, piece);
-            // SAFETY: both buffers are live, and the source range lies within the page and the
-            // destination within the staging buffer.
+            // SAFETY: both buffers are live and the ranges lie within them.
             unsafe {
                 self.context.CopySubresourceRegion(
                     &staging,
@@ -192,16 +170,14 @@ impl Page for VramPage {
     }
 }
 
-/// Maps `staging` for reading once the copy into it has finished, asking rather than waiting
-/// inside the call, which would hold the device's lock against the capture thread's uploads.
+/// Polls with `DO_NOT_WAIT`: a waiting `Map` would hold the device lock against the capture thread's uploads.
 fn map_when_ready(
     context: &ID3D11DeviceContext,
     staging: &ID3D11Buffer,
 ) -> Result<D3D11_MAPPED_SUBRESOURCE, StoreError> {
     loop {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: a live staging buffer with CPU read access; the out-parameter outlives the
-        // call.
+        // SAFETY: live staging buffer with CPU read access.
         let result = unsafe {
             context.Map(
                 staging,
@@ -219,19 +195,16 @@ fn map_when_ready(
     }
 }
 
-/// A buffer on `device` as `description` says, without initial data.
 fn create_buffer(
     device: &ID3D11Device,
     description: &D3D11_BUFFER_DESC,
 ) -> windows::core::Result<ID3D11Buffer> {
     let mut buffer = None;
-    // SAFETY: a plain buffer description without initial data; the out-parameter outlives the
-    // call.
+    // SAFETY: a plain buffer description without initial data.
     unsafe { device.CreateBuffer(description, None, Some(&raw mut buffer)) }?;
     buffer.ok_or_else(windows::core::Error::empty)
 }
 
-/// The box that selects `length` bytes at `offset` of a buffer.
 fn byte_range(offset: usize, length: usize) -> D3D11_BOX {
     D3D11_BOX {
         left: width(offset),
@@ -243,7 +216,6 @@ fn byte_range(offset: usize, length: usize) -> D3D11_BOX {
     }
 }
 
-/// `bytes` as Direct3D counts a buffer's bytes; a page and everything in it fit.
 fn width(bytes: usize) -> u32 {
     u32::try_from(bytes).expect("a page's bytes fit in 32 bits")
 }

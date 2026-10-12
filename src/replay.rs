@@ -1,7 +1,5 @@
-//! What a recording session shares with the rest of the application: the rolling buffers of
-//! encoded video packets and captured sound, the streams they belong to, and counters for the
-//! Status tab. Saving takes a snapshot of the buffers, encodes its sound and writes it to an MP4
-//! file while recording carries on.
+//! The rolling buffers of encoded video and captured sound a recording session shares with
+//! the rest of the application, and saving them to an MP4 file.
 
 use crate::{config::Codec, log};
 use std::{
@@ -44,41 +42,34 @@ const WRITE_BUFFER_BYTES: usize = 1 << 20;
 /// One encoded frame: an H.264 or HEVC access unit in Annex B form, or an AV1 temporal unit.
 #[derive(Debug)]
 pub(crate) struct Packet {
-    /// The frame's tick of the session's frame clock; skipped ticks leave gaps. Packets come
-    /// in rising order of index, as the frame clock and an encoder without B-frames give them;
-    /// the ring's trimming counts on it.
+    /// Tick of the session's frame clock; rising, with gaps for skipped ticks.
     pub(crate) index: u64,
     pub(crate) keyframe: bool,
     pub(crate) data: Box<[u8]>,
 }
 
-/// The encoded video's shape, fixed for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stream {
     pub(crate) codec: Codec,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) frame_rate: u32,
-    /// The matrix the picture's YUV was made from RGB with, which a clip signals so that
-    /// players turn it back into the same colours.
     pub(crate) matrix: Matrix,
 }
 
-/// The matrix coefficients a picture's YUV was derived from RGB with. The primaries and the
-/// transfer are BT.709 and the range is limited whichever it is: only the matrix depends on
-/// what converted the picture.
+/// Matrix coefficients the YUV was derived with; primaries and transfer are always BT.709,
+/// range limited.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Matrix {
-    /// BT.709, which NVENC converts BGRA input with.
+    /// What NVENC converts BGRA input with.
     #[default]
     Bt709,
-    /// BT.601, as SMPTE 170M names it, which NvFBC converts with when it grabs NV12.
+    /// SMPTE 170M; what NvFBC converts with when it grabs NV12.
     Bt601,
 }
 
 impl Matrix {
-    /// The matrix's code point in ISO/IEC 23091-2 (H.273), which the H.264 and HEVC VUI, the
-    /// AV1 sequence header and the MP4 `colr` atom all use.
+    /// The H.273 code point, as the VUI, the AV1 sequence header and the `colr` atom use.
     pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Bt709 => 1,
@@ -87,31 +78,22 @@ impl Matrix {
     }
 }
 
-/// A session's buffer and counters, shared between the capture thread and the worker.
 pub(crate) struct Live {
     ring: Mutex<Ring>,
     stream: OnceLock<Stream>,
-    /// Frames encoded, including repeats of an unchanged screen.
     encoded: AtomicU64,
     /// Frames that brought new screen content.
     fresh: AtomicU64,
-    /// Encoded bytes that went into the buffer, including those since dropped from it.
     bytes: AtomicU64,
-    /// Called once the stream is recorded, so the owner learns of it without polling.
     on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
-    /// The clock time of the frame clock's first tick, once the capture has started; see
-    /// [`audio`] for the clock both streams share.
     origin: OnceLock<i64>,
-    /// The frame index of the oldest buffered packet, or `u64::MAX` before the first; the sound
-    /// is trimmed to it.
+    /// Index of the oldest buffered packet, or `u64::MAX`; the sound is trimmed to it.
     oldest: AtomicU64,
-    /// The sound's shape, once the audio capture has started.
     audio: OnceLock<Arc<AudioFormat>>,
     sound: Mutex<AudioRing>,
 }
 
 impl Live {
-    /// An empty buffer that keeps at least `span` frames.
     pub(crate) fn new(span: u64) -> Self {
         Self {
             ring: Mutex::new(Ring::new(span)),
@@ -127,12 +109,11 @@ impl Live {
         }
     }
 
-    /// Runs `callback` when the stream is recorded; it runs on the capture thread.
+    /// Runs `callback` on the capture thread once the stream is recorded.
     pub(crate) fn on_stream(&self, callback: impl Fn() + Send + Sync + 'static) {
         let _ = self.on_stream.set(Box::new(callback));
     }
 
-    /// Records the stream's shape once the encoder is configured.
     pub(crate) fn set_stream(&self, stream: Stream) {
         if self.stream.set(stream).is_ok()
             && let Some(callback) = self.on_stream.get()
@@ -141,24 +122,19 @@ impl Live {
         }
     }
 
-    /// The stream's shape, once it is recorded.
     pub(crate) fn stream(&self) -> Option<Stream> {
         self.stream.get().copied()
     }
 
-    /// Records the clock time (QPC, in 100 ns units) of the frame clock's first tick, which
-    /// places every packet's frame index on the clock the sound is stamped with.
+    /// QPC time, in 100 ns units, of the frame clock's first tick.
     pub(crate) fn set_origin(&self, time: i64) {
         let _ = self.origin.set(time);
     }
 
-    /// Keeps the packets from now on in `store` (the GPU's memory, or a file on disk) rather than
-    /// in system memory; a store that refuses a packet is given up with a warning.
     pub(crate) fn set_store(&self, store: Box<dyn Store>) {
         self.ring().set_store(store);
     }
 
-    /// Adds an encoded frame; `fresh` when it carried new screen content.
     pub(crate) fn push(&self, packet: Packet, fresh: bool) {
         self.bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
@@ -175,8 +151,6 @@ impl Live {
         self.count_frame(oldest, fresh);
     }
 
-    /// Adds an encoded frame that the encoder put away in a store of its own, at `slot`;
-    /// `fresh` when it carried new screen content.
     #[cfg(windows)]
     pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, fresh: bool) {
         self.bytes.fetch_add(slot.length as u64, Ordering::Relaxed);
@@ -192,8 +166,6 @@ impl Live {
         self.count_frame(oldest, fresh);
     }
 
-    /// Counts a frame that went through the buffer, `fresh` when it carried new screen content,
-    /// and notes the `oldest` frame the buffer kept after it, for the sound's trimming.
     fn count_frame(&self, oldest: Option<u64>, fresh: bool) {
         self.oldest
             .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
@@ -203,14 +175,10 @@ impl Live {
         }
     }
 
-    /// Records the sound's shape once the audio capture starts.
     pub(crate) fn set_audio(&self, format: AudioFormat) {
         let _ = self.audio.set(Arc::new(format));
     }
 
-    /// Adds `data`, interleaved samples, as the sound from input sample `start` on, then drops
-    /// the samples that no clip of the buffered video can need. The sound is encoded only when
-    /// a clip is saved, so it is not counted among the encoded bytes.
     pub(crate) fn push_audio(&self, start: u64, data: Arc<[i16]>) {
         let Some(format) = self.audio.get() else {
             return;
@@ -221,20 +189,16 @@ impl Live {
         sound.trim(format, video_start);
     }
 
-    /// The clock time of video frame `index`, once the clock and the frame rate are known;
-    /// `u64::MAX` stands for no frame.
     fn video_time(&self, index: u64) -> Option<i64> {
         let origin = *self.origin.get()?;
         let frame_rate = self.stream()?.frame_rate;
         (index != u64::MAX).then(|| tick_time(origin, frame_rate, index))
     }
 
-    /// Encoded bytes that went into the buffer since the session started.
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
 
-    /// Frames encoded and frames with new content, since the session started.
     pub(crate) fn counters(&self) -> (u64, u64) {
         (
             self.encoded.load(Ordering::Relaxed),
@@ -242,16 +206,13 @@ impl Live {
         )
     }
 
-    /// Frames and bytes currently buffered.
     #[cfg(test)]
     pub(crate) fn buffered(&self) -> (u64, usize) {
         let ring = self.ring();
         (ring.frames(), ring.bytes())
     }
 
-    /// The buffer as it is now, if the stream has started, with the sound from the first
-    /// packet's frame to the end of the last one's when there is sound. Cheap: the packets put
-    /// away in a store are read back, and the sound is encoded, only as a save writes them.
+    /// Cheap: stored packets are read back, and the sound encoded, only as a save writes them.
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
         let entries = self.ring().snapshot();
@@ -264,13 +225,11 @@ impl Live {
         })
     }
 
-    /// The buffer as a clip, read back where it was put away.
     #[cfg(test)]
     pub(crate) fn clip(&self) -> Option<Clip> {
         self.snapshot().map(|snapshot| snapshot.clip().unwrap())
     }
 
-    /// The sound from the start of video frame `first` to the start of frame `end`.
     fn audio_between(&self, first: u64, end: u64) -> Option<PcmClip> {
         let format = self.audio.get()?;
         let (start, end) = (self.video_time(first)?, self.video_time(end)?);
@@ -286,8 +245,6 @@ impl Live {
     }
 }
 
-/// The buffer as it was when a save was requested: the stream, the packets, wherever they are
-/// kept, and the sound that plays alongside them.
 pub(crate) struct Snapshot {
     stream: Stream,
     entries: Vec<Entry>,
@@ -295,7 +252,6 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    /// Seconds of video, from the first packet to the end of the last.
     pub(crate) fn seconds(&self) -> f64 {
         seconds(
             self.entries.first().map(Entry::index),
@@ -304,8 +260,6 @@ impl Snapshot {
         )
     }
 
-    /// The snapshot with every packet in memory, for tests to look at: the ones put away in a
-    /// store are read back, which takes as much memory as they do. Saving does not need this.
     #[cfg(test)]
     pub(crate) fn clip(self) -> Result<Clip, StoreError> {
         Ok(Clip {
@@ -316,8 +270,7 @@ impl Snapshot {
     }
 }
 
-/// The buffered packets as the MP4 writer goes through them: the ones put away in a store read
-/// back a run at a time on each pass, never all at once.
+/// Stored packets are read back a run at a time on each pass, never all at once.
 impl mp4::Packets for [Entry] {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
         store::each(self, &mut |entry, data| {
@@ -326,7 +279,6 @@ impl mp4::Packets for [Entry] {
     }
 }
 
-/// A snapshot with every packet in memory, for tests to look at.
 #[cfg(test)]
 pub(crate) struct Clip {
     pub(crate) stream: Stream,
@@ -336,7 +288,6 @@ pub(crate) struct Clip {
 
 #[cfg(test)]
 impl Clip {
-    /// Seconds of video, from the first packet to the end of the last.
     pub(crate) fn seconds(&self) -> f64 {
         seconds(
             self.packets.first().map(|packet| packet.index),
@@ -346,7 +297,6 @@ impl Clip {
     }
 }
 
-/// Seconds of video from frame `first` to the end of frame `last` at `frame_rate`.
 fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
     match (first, last) {
         (Some(first), Some(last)) => (last - first + 1) as f64 / f64::from(frame_rate),
@@ -354,10 +304,8 @@ fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
     }
 }
 
-/// Why a clip could not be saved.
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
-    /// A file system call failed; `step` says which, in words for the log.
     #[error("{step} {}: {source}", path.display())]
     Io {
         step: &'static str,
@@ -365,14 +313,11 @@ pub(crate) enum SaveError {
         #[source]
         source: io::Error,
     },
-    /// The clip could not be muxed, its packets could not be read back from where they were
-    /// put away, or the muxed bytes could not be written.
     #[error(transparent)]
     Mux(#[from] MuxError),
 }
 
 impl SaveError {
-    /// Wraps the error of the file system call `step` made on `path`, for `map_err`.
     fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
         move |source| Self::Io {
             step,
@@ -382,7 +327,6 @@ impl SaveError {
     }
 }
 
-/// Whether `data` starts a group of pictures a decoder can begin with.
 pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
     match codec {
         Codec::H264 => h264::is_keyframe(data),
@@ -391,8 +335,7 @@ pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
     }
 }
 
-/// The decoder configuration record (`avcC`, `hvcC` or `av1C`) from the sequence header in
-/// `data`, if it carries one.
+/// The `avcC`, `hvcC` or `av1C` record from the sequence header in `data`.
 fn configuration(codec: Codec, data: &[u8]) -> Option<Vec<u8>> {
     match codec {
         Codec::H264 => h264::configuration(data),
@@ -401,7 +344,6 @@ fn configuration(codec: Codec, data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The pieces of `data` a stored sample keeps: NAL units, or whole OBUs.
 fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
     match codec {
         Codec::H264 => h264::sample_units(data),
@@ -410,10 +352,8 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
     }
 }
 
-/// Writes `snapshot` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The
-/// file appears under its final name only once it is complete. The sound is encoded to AAC here,
-/// on the calling thread, before anything is written. Packets kept in GPU memory are read back as
-/// they are written, so the save holds a few pieces of them at a time, not the clip.
+/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`; the file appears under
+/// its final name only once complete.
 pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let path = unused_path(directory, &log::file_stamp());
@@ -421,21 +361,16 @@ pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, Sav
     Ok(path)
 }
 
-/// Writes `snapshot` next to `path` under a partial name and renames it to `path` once
-/// complete, removing the partial file if either step fails.
 fn write_then_rename(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
     let partial = path.with_extension(PARTIAL_EXTENSION);
     let result = write_file(snapshot, &partial)
         .and_then(|()| fs::rename(&partial, path).map_err(SaveError::io("finish", path)));
     if result.is_err() {
-        // The save already failed; a leftover partial file is all that is lost here.
         let _ = fs::remove_file(&partial);
     }
     result
 }
 
-/// Encodes `snapshot`'s sound, muxes it into a new file at `path` and waits until it is on the
-/// disk.
 fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
     let audio = snapshot.audio.as_ref().and_then(encode_sound);
     let file = File::create(path).map_err(SaveError::io("create", path))?;
@@ -449,15 +384,12 @@ fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
     sync(output).map_err(SaveError::io("finish", path))
 }
 
-/// The clip's sound encoded to AAC, or `None`, logged, when it cannot be: the clip is still
-/// worth saving without it.
 fn encode_sound(pcm: &PcmClip) -> Option<AudioClip> {
     crate::audio::encode(pcm)
         .inspect_err(|error| log::warning(format!("The clip is saved without sound: {error}")))
         .ok()
 }
 
-/// Flushes `output`'s buffer into its file, then the file's contents to the disk.
 fn sync(output: BufWriter<File>) -> io::Result<()> {
     let file = output
         .into_inner()
@@ -465,7 +397,6 @@ fn sync(output: BufWriter<File>) -> io::Result<()> {
     file.sync_all()
 }
 
-/// `hindsight_<stamp>.mp4`, or with `-2`, `-3`, … when a clip was already saved that second.
 fn unused_path(directory: &Path, stamp: &str) -> PathBuf {
     (1..=u32::MAX)
         .map(|attempt| {
@@ -494,7 +425,6 @@ mod tests {
         matrix: Matrix::Bt709,
     };
 
-    /// Pushes `frames` H.264 frames with a keyframe every 30, every other one fresh.
     fn push_frames(live: &Live, frames: u64) {
         for index in 0..frames {
             let keyframe_packet = index % 30 == 0;
@@ -541,8 +471,6 @@ mod tests {
         let in_memory = live_with(100).clip().unwrap();
         let mut expected = Vec::new();
         mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
-        // Whole packets in each piece read back; packets straddling small pieces; and a store
-        // given up mid-session, which leaves the newer packets in memory behind stored ones.
         for (piece, fail_after) in [(1000, usize::MAX), (7, usize::MAX), (7, 50)] {
             let live = Live::new(60);
             live.set_stream(STREAM);
@@ -576,8 +504,6 @@ mod tests {
 
     #[test]
     fn a_buffer_on_disk_saves_the_same_clip() {
-        // Frames of a few hundred bytes, so that they fill several of the small store's blocks
-        // and pages, but not more than its writer may fall behind by.
         let push = |live: &Live| {
             for index in 0..100 {
                 let keyframe_packet = index % 30 == 0;
@@ -597,8 +523,6 @@ mod tests {
         let mut expected = Vec::new();
         mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
 
-        // Saved with every packet still in staging, and again once the writer has put them in
-        // the file, but for the block it is filling.
         let folder = tempfile::tempdir().unwrap();
         let store = disk::DiskStore::small(folder.path(), 4);
         let control = store.control();
@@ -627,8 +551,6 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), expected, "from the file");
     }
 
-    /// An H.264 frame of about `bytes`: a keyframe's parameter sets and picture, or a slice,
-    /// with a long run of payload after it that holds no start code.
     fn large_frame(keyframe_frame: bool, bytes: usize) -> Box<[u8]> {
         let mut data = if keyframe_frame {
             keyframe()
@@ -645,8 +567,6 @@ mod tests {
         const FRAME_BYTES: usize = 256 << 10;
         let live = Live::new(FRAMES as u64);
         live.set_stream(STREAM);
-        // Pages of 4 MiB read back in 1 MiB pieces, a scale model of the GPU stores' 32 MiB
-        // reads, so many frames straddle two pieces.
         live.set_store(Box::new(store::tests::MemoryStore::new(4 << 20, 1 << 20)));
         for (index, extra) in (0..).zip(0..FRAMES) {
             let keyframe_packet = index % 30 == 0;
@@ -665,7 +585,6 @@ mod tests {
         let saving = heap::peak_during(|| {
             save(&snapshot, directory.path()).unwrap();
         });
-        // The write buffer, a packet gathered across two pieces, and the index.
         assert!(
             saving < WRITE_BUFFER_BYTES + 2 * FRAME_BYTES + (256 << 10),
             "a save held {saving} bytes at once"
@@ -684,8 +603,6 @@ mod tests {
         assert!(!is_keyframe(Codec::Av1, &av1::tests::inter_frame()));
     }
 
-    /// Encoder output from x264, x265 and libaom (128×72, 75 frames, a keyframe every 30),
-    /// framed like NVENC's: delimiters, and parameter sets repeated on every keyframe.
     fn encoded_fixture(codec: Codec) -> Vec<Packet> {
         let units: Vec<&[u8]> = match codec {
             Codec::H264 => {
@@ -711,18 +628,12 @@ mod tests {
             .collect()
     }
 
-    /// The 64-bit FNV-1a hash of `bytes`: stable across Rust releases, unlike `DefaultHasher`.
     fn fnv1a(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
         })
     }
 
-    /// Real encoder output through the buffer and the writer, for every codec: the index is
-    /// decoded back and checked against the packets, and the media data and the decoder record
-    /// are pinned to what the hand-written writer put in the file before the atoms were handed
-    /// to `mp4-atom`. Set `HINDSIGHT_MUX_OUTPUT` to a directory to keep the files, e.g. to check
-    /// them with ffprobe.
     #[test]
     fn real_encoder_output_muxes_for_every_codec() {
         for codec in Codec::ALL {
@@ -758,7 +669,6 @@ mod tests {
             let kinds: Vec<_> = top.iter().map(|(kind, _)| kind).collect();
             assert_eq!(kinds, [b"ftyp", b"moov", b"mdat"], "{codec}");
 
-            // One track of 45 frames at 30 fps: 1.5 s, keyframes at frames 30 and 60.
             let (moov, media) = mp4::tests::index(&file);
             assert_eq!(
                 (moov.mvhd.timescale, moov.mvhd.duration),
@@ -778,8 +688,6 @@ mod tests {
             assert_eq!(table.stss.as_ref().unwrap().entries, [1, 31], "{codec}");
             assert_eq!(table.stts.entries.len(), 1, "{codec}");
 
-            // Every sample sits in the one chunk, which fills the media data, as the packet is
-            // stored.
             let samples: Vec<_> = clip
                 .packets
                 .iter()
@@ -802,7 +710,6 @@ mod tests {
             };
             assert_eq!(fnv1a(top[2].1), expected_media, "{codec}");
 
-            // The decoder record is the one the first keyframe builds, pinned byte for byte.
             let record = mp4::tests::decoder_record(track);
             assert_eq!(
                 record,
@@ -822,10 +729,6 @@ mod tests {
         }
     }
 
-    /// Real H.264 and AAC encoder output through the buffer and the writer: the video's 1 s to
-    /// 2.5 s mark, at 30 fps, with the sound cut to the same span on the shared clock and the
-    /// frames ffmpeg's encoder made of the whole run standing in for the save's encoding. Set
-    /// `HINDSIGHT_MUX_OUTPUT` to keep the file, e.g. to check both streams with ffprobe.
     #[test]
     fn real_encoder_output_muxes_with_sound() {
         let live = Live::new(40);
@@ -843,7 +746,6 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             anchor: 0,
-            // ffmpeg's encoder, like most, puts one frame in front of the sound.
             priming: FRAME_SAMPLES,
         });
         for packet in encoded_fixture(Codec::H264) {
@@ -854,8 +756,6 @@ mod tests {
         let clip = live.clip().unwrap();
         assert_eq!(clip.packets.len(), 45);
         let pcm = clip.audio.as_ref().unwrap();
-        // 1 s is output sample 49 024, in frame 47; frame 46 comes first, and 2.5 s (output
-        // sample 121 024) is in frame 118.
         assert_eq!(pcm.start, 46 * 1024);
         assert_eq!(pcm.frames, 119 - 46);
         assert_eq!(pcm.lead, 49_024 - 46 * 1024);
@@ -867,7 +767,6 @@ mod tests {
             fs::write(Path::new(&directory).join("h264-aac.mp4"), &file).unwrap();
         }
 
-        // Two tracks of 1.5 s; the sound skips its lead and lasts 73 frames.
         let (moov, media) = mp4::tests::index(&file);
         assert_eq!((moov.mvhd.duration, moov.mvhd.next_track_id), (1500, 3));
         let [video, sound] = &moov.trak[..] else {
@@ -893,8 +792,6 @@ mod tests {
             .collect();
         assert_eq!(mp4::tests::sizes(sound_table), frame_sizes);
 
-        // The chunks alternate a second of video with its sound, each holding its samples, and
-        // together they fill the media data.
         let video_samples: Vec<_> = clip
             .packets
             .iter()
@@ -941,8 +838,6 @@ mod tests {
             anchor: 0,
             priming: 0,
         });
-        // Five seconds of 30 fps video with a keyframe a second, and the sound arriving
-        // alongside it in reads of 60 ms, each once its end has been reached.
         let read: u64 = 2880;
         let mut next_sample: u64 = 0;
         for index in 0..150 {
@@ -963,15 +858,11 @@ mod tests {
             }
         }
 
-        // The video keeps its last two seconds from the keyframe at 3 s, and the cut starts
-        // at the frame before the one playing then (3 s is sample 144 000, in frame 140).
         let clip = live.clip().unwrap();
         assert_eq!(clip.packets[0].index, 90);
         let audio = clip.audio.unwrap();
         assert_eq!(audio.start, 139 * 1024);
         assert_eq!(audio.lead, 144_000 - 139 * 1024);
-        // The video ends at 5 s, sample 240 000, in frame 234; what was not yet captured when
-        // the clip was taken is silence.
         assert_eq!(audio.frames, 235 - 139);
         let mut samples = [7; 4];
         audio.read(139 * 1024, &mut samples);
@@ -979,13 +870,10 @@ mod tests {
         audio.read(239_000, &mut samples);
         assert_eq!(samples, [0; 4]);
 
-        // The next read trims the buffer to the sample the cut starts at, and no further.
         live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
         assert_eq!(live.sound().runs()[0].0, 139 * 1024);
     }
 
-    /// Pushes stereo sound from input sample `start` to `end` in reads of 60 ms, made by
-    /// `sample` from each sample's number.
     #[cfg(windows)]
     fn push_sound(live: &Live, start: u64, end: u64, sample: impl Fn(u64) -> i16) {
         let mut at = start;
@@ -1002,10 +890,6 @@ mod tests {
         }
     }
 
-    /// Three seconds of 30 fps video from clock time 0, of which the buffer keeps the last two,
-    /// and sound from a third of a second in to 3.2 s, silent but for a click at 2 s (input
-    /// sample 80 000) and with nothing captured from 2.5 s to 2.75 s. The sound starts as
-    /// Media Foundation's encoder does, with no priming.
     #[cfg(windows)]
     fn live_with_a_click() -> Live {
         let live = live_with(90);
@@ -1022,8 +906,6 @@ mod tests {
         live
     }
 
-    /// The snapshot of `live` and its sound encoded, or `None` on a machine without Media
-    /// Foundation's AAC encoder, which skips the test.
     #[cfg(windows)]
     fn snapshot_with_sound(live: &Live) -> Option<Snapshot> {
         let snapshot = live.snapshot().unwrap();
@@ -1043,9 +925,6 @@ mod tests {
         let Some(snapshot) = snapshot_with_sound(&live) else {
             return;
         };
-        // The video runs from 1 s to 3 s: output samples 32 000 to 128 000, so frames 31 to
-        // 124 with frame 30 in front, which an encoder started at input sample 30 720 makes
-        // first.
         let pcm = snapshot.audio.as_ref().unwrap();
         assert_eq!(
             (pcm.start, pcm.frames, pcm.lead),
@@ -1071,16 +950,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2000, Some(1280))]
         );
-        // At 192 kb/s the encoder spends 24 000 bytes a second, silence included.
         let sizes = mp4::tests::sizes(&sound.mdia.minf.stbl);
         assert_eq!(sizes.len(), 95);
         let bytes: u32 = sizes.iter().sum();
         assert!((40_000..=56_000).contains(&bytes), "{bytes} bytes");
     }
 
-    /// Decodes a saved clip's sound with ffmpeg, which applies the edit list, and finds the
-    /// click two seconds into the session exactly one second into the clip. Run by hand with
-    /// ffmpeg on the path: `cargo test click_plays_in_time -- --ignored --nocapture`.
     #[test]
     #[cfg(windows)]
     #[ignore = "needs ffmpeg"]
@@ -1116,8 +991,6 @@ mod tests {
         assert!(peak.abs_diff(48_000) <= 2, "the click at {peak}");
     }
 
-    /// Times the encoding of a 300 s clip's sound, which a save of the longest buffer pays:
-    /// `cargo test --release encodes_five_minutes -- --ignored --nocapture`.
     #[test]
     #[cfg(windows)]
     #[ignore = "a timing, not a check"]
@@ -1137,7 +1010,6 @@ mod tests {
             anchor: 0,
             priming: 0,
         });
-        // A chord with noise on it, so the encoder has something to spend its bits on.
         let mut seed: u32 = 1;
         let noise: Vec<i16> = (0..48_000)
             .map(|_| {
@@ -1214,9 +1086,6 @@ mod tests {
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
-    /// Counts the heap bytes each thread holds and the most it has held, so a test can see what
-    /// a save holds at its peak. Bytes one thread allocates and another frees count against the
-    /// second, which a test on one thread never does.
     #[expect(unsafe_code)]
     mod heap {
         use std::{
@@ -1229,11 +1098,9 @@ mod tests {
             static PEAK: Cell<isize> = const { Cell::new(0) };
         }
 
-        /// The system allocator, counting as it goes.
         struct Counting;
 
-        // SAFETY: every call is passed to the system allocator as it came, and the counting
-        // beside it neither allocates nor touches the memory.
+        // SAFETY: every call goes to the system allocator unchanged; counting touches no memory.
         unsafe impl GlobalAlloc for Counting {
             unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
                 // SAFETY: the caller's promises about `layout` are the system allocator's.
@@ -1254,15 +1121,13 @@ mod tests {
             }
 
             unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-                // SAFETY: the caller allocated `pointer` with `layout` here, which is to say in
-                // the system allocator.
+                // SAFETY: the caller allocated `pointer` with `layout` in the system allocator.
                 unsafe { System.dealloc(pointer, layout) };
                 count(-size(layout.size()));
             }
 
             unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-                // SAFETY: as for `dealloc`, and the caller's promises about `new_size` are the
-                // system allocator's.
+                // SAFETY: as for `dealloc`; the caller's promises about `new_size` pass through.
                 let moved = unsafe { System.realloc(pointer, layout, new_size) };
                 if !moved.is_null() {
                     count(size(new_size) - size(layout.size()));
@@ -1274,13 +1139,10 @@ mod tests {
         #[global_allocator]
         static COUNTING: Counting = Counting;
 
-        /// `bytes` as a signed count; no allocation comes near `isize::MAX`.
         fn size(bytes: usize) -> isize {
             isize::try_from(bytes).unwrap_or(isize::MAX)
         }
 
-        /// Adds `bytes` to this thread's count and raises its peak to match. A thread being
-        /// torn down may have lost its counters already; it is not measured.
         fn count(bytes: isize) {
             let _ = HELD.try_with(|held| {
                 let now = held.get() + bytes;
@@ -1289,7 +1151,6 @@ mod tests {
             });
         }
 
-        /// The most heap bytes this thread held while `work` ran, above what it held before.
         pub(super) fn peak_during(work: impl FnOnce()) -> usize {
             let before = HELD.with(Cell::get);
             PEAK.with(|peak| peak.set(before));

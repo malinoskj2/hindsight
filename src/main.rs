@@ -1,4 +1,4 @@
-//! The executable: everything lives in the library, which this only starts.
+//! The executable; everything lives in the library.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 

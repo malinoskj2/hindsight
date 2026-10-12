@@ -27,7 +27,6 @@ pub(crate) const APP_NAME: &str = "hindsight";
 const UNSUPPORTED_PLATFORM_MESSAGE: &str =
     "hindsight requires Windows 10 1903 or newer and an NVIDIA GPU";
 
-/// Starts the desktop application and its recording worker.
 #[cfg(windows)]
 pub fn run() -> Result<()> {
     let tray = match cli::dispatch()? {
@@ -42,7 +41,6 @@ pub fn run() -> Result<()> {
     ));
 
     let startup = startup();
-    // Only one copy runs at a time: a later launch brings the running one forward and leaves.
     if let Err(error) = &startup
         && already_running(error)
         && sys::instance::show_running()
@@ -52,13 +50,11 @@ pub fn run() -> Result<()> {
     gui::run(startup, tray)
 }
 
-/// Fails at once: the recording application is available on Windows only.
 #[cfg(not(windows))]
 pub fn run() -> Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
 }
 
-/// Opens the state and log file, loads the configuration and starts the recording worker.
 #[cfg(windows)]
 fn startup() -> Result<(service::Worker, config::Config)> {
     let store = storage::Store::open().context("open application state")?;
@@ -70,8 +66,6 @@ fn startup() -> Result<(service::Worker, config::Config)> {
     Ok((worker, config))
 }
 
-/// Mirrors the log to a file in the state directory; without one it is still kept in memory
-/// for the Logs tab.
 #[cfg(windows)]
 fn mirror_log() {
     let log_file = storage::state_directory().join(log::FILE_NAME);
@@ -83,7 +77,6 @@ fn mirror_log() {
     }
 }
 
-/// Whether startup failed only because another copy holds the state lock.
 #[cfg(windows)]
 fn already_running(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {

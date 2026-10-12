@@ -1,5 +1,4 @@
-//! Everything the window shows in words, its own log lines included. Kept apart from the pages
-//! so the layout reads without the wording, and the wording can change without the layout.
+//! Every string the window shows, log lines included.
 
 use crate::{
     config::Memory,
@@ -7,11 +6,8 @@ use crate::{
 };
 use std::{fmt::Display, path::Path};
 
-/// Shown in place of a value that is not known yet.
 const NO_VALUE: &str = "—";
-/// Bytes in a gigabyte here: 1024 cubed.
 const GIGABYTE: f64 = 1_073_741_824.0;
-/// Bytes in a megabyte here: 1024 squared.
 const MEGABYTE: f64 = 1_048_576.0;
 
 pub(super) const TAB_STATUS: &str = "Status";
@@ -32,10 +28,8 @@ pub(super) const SESSION_SAVED: &str = "Session Saved";
 pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
 pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
 
-/// What the Clips tab shows in place of its list while the clip folder holds no clip.
 pub(super) const NO_CLIPS: &str =
     "No clips yet — press the hotkey while a full-screen app is running";
-/// The menu a right-click on a clip shows.
 pub(super) const CLIP_MENU_OPEN: &str = "&Open";
 pub(super) const CLIP_MENU_REVEAL: &str = "Show in &Explorer";
 pub(super) const CLIP_MENU_DELETE: &str = "&Delete";
@@ -133,15 +127,11 @@ pub(super) fn clip_menu_failed(error: impl Display) -> String {
     format!("The clip menu could not be shown: {error}")
 }
 
-/// The caption under a clip's thumbnail: when it was taken, or its name, and its size in
-/// whole megabytes.
 pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
-    // A no-break space keeps the size on one line: the list view wraps the caption, and
-    // "760" alone at the end of a line reads as nothing.
+    // No-break space: the list view wraps captions and would split the size from its unit.
     format!("{title} {:.0}\u{a0}MB", bytes as f64 / MEGABYTE)
 }
 
-/// The state line: what the recorder is doing, after a dot.
 pub(super) fn status(state: DisplayStatus) -> String {
     let message = match state {
         DisplayStatus::Starting => "Starting capture…",
@@ -154,19 +144,16 @@ pub(super) fn status(state: DisplayStatus) -> String {
     format!("●  {message}")
 }
 
-/// What is being captured, or a dash while it is not known.
 pub(super) fn source(status: &Status) -> String {
     status.source.clone().unwrap_or_else(|| NO_VALUE.to_owned())
 }
 
-/// The capture backend in use, or a dash while it is not known.
 pub(super) fn backend(status: &Status) -> String {
     status
         .backend
         .map_or_else(|| NO_VALUE.to_owned(), |backend| backend.to_string())
 }
 
-/// The codec, frame size and bitrate being encoded, or a dash while they are not known.
 pub(super) fn encoder(status: &Status) -> String {
     status.stream.map_or_else(
         || NO_VALUE.to_owned(),
@@ -179,36 +166,28 @@ pub(super) fn encoder(status: &Status) -> String {
     )
 }
 
-/// The rate frames are being encoded at, or a dash while it is not known.
 pub(super) fn rates(status: &Status) -> String {
     status
         .encode_rate
         .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
 }
 
-/// Everything that has gone into the replay buffer since the app started.
 pub(super) fn session_written(status: &Status) -> String {
     gigabytes(Some(status.session_written_bytes))
 }
 
-/// Everything saved as clips since the app started.
 pub(super) fn session_saved(status: &Status) -> String {
     gigabytes(Some(status.session_saved_bytes))
 }
 
-/// Everything that has gone into the replay buffer over every run of the app.
 pub(super) fn lifetime_written(status: &Status) -> String {
     gigabytes(status.buffered_lifetime_bytes)
 }
 
-/// Everything saved as clips over every run of the app.
 pub(super) fn lifetime_saved(status: &Status) -> String {
     gigabytes(status.saved_bytes)
 }
 
-/// The memory the replay buffer takes at the entered bitrate and length, where it is kept; a
-/// buffer in GPU memory passes through system memory again when a clip is saved, and one on
-/// disk writes the whole stream to the drive, which is what it costs an SSD in wear.
 pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
     let place = memory.place();
     match memory {
@@ -223,7 +202,6 @@ pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32)
     }
 }
 
-/// Gigabytes a stream of `bitrate_mbps` amounts to in an hour, to the nearest whole one.
 fn gigabytes_an_hour(bitrate_mbps: u32) -> u64 {
     const SECONDS_AN_HOUR: u64 = 3600;
     const BITS_PER_BYTE: u64 = 8;
@@ -232,8 +210,6 @@ fn gigabytes_an_hour(bitrate_mbps: u32) -> u64 {
     (megabytes + MEGABYTES_PER_GIGABYTE / 2) / MEGABYTES_PER_GIGABYTE
 }
 
-/// A total in gigabytes, or a dash while it is not known. Shown to two decimals, far coarser
-/// than the rounding of a byte count to `f64`.
 fn gigabytes(bytes: Option<u64>) -> String {
     bytes.map_or_else(
         || NO_VALUE.to_owned(),
@@ -241,7 +217,6 @@ fn gigabytes(bytes: Option<u64>) -> String {
     )
 }
 
-/// The last part of `path`, as the journal names a file.
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),

@@ -1,5 +1,5 @@
-//! H.264 in MP4 (ISO/IEC 14496-15): length-prefixed NAL units in each sample, with the
-//! sequence and picture parameter sets in an `avcC` record.
+//! H.264 in MP4 (ISO/IEC 14496-15): length-prefixed NAL units per sample, parameter sets in
+//! `avcC`.
 
 use super::{
     annexb::nal_units,
@@ -12,19 +12,15 @@ const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 pub(super) const NAL_AUD: u8 = 9;
-/// The profiles whose `avcC` record goes on to state the chroma format and bit depths: High,
-/// High 10, High 4:2:2 and High 4:4:4 Predictive.
+/// Profiles whose `avcC` record also carries the chroma format and bit depths.
 const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
-/// 4:2:0, the `chroma_format_idc` the encoder is configured for.
 const CHROMA_420: u8 = 1;
 
-/// Whether the access unit holds an IDR picture.
 pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
     nal_units(access_unit).any(|unit| nal_type(unit) == NAL_IDR)
 }
 
-/// The `avcC` record for the parameter sets in `access_unit`, if it carries both: the profile,
-/// compatibility flags and level from the SPS, then the one SPS and the one PPS.
+/// The `avcC` record, when the access unit carries both an SPS and a PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units: Vec<&[u8]> = nal_units(access_unit).collect();
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
@@ -40,15 +36,13 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     mp4::record(&record)
 }
 
-/// The NAL units a stored sample keeps: parameter sets travel in the sample description and
-/// access unit delimiters carry nothing an MP4 reader needs.
+/// The sample's NAL units without parameter sets (those live in `avcC`) or delimiters.
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
     nal_units(access_unit)
         .filter(|unit| !matches!(nal_type(unit), NAL_SPS | NAL_PPS | NAL_AUD))
         .collect()
 }
 
-/// The `nal_unit_type` in a NAL unit's one-byte header.
 pub(super) fn nal_type(unit: &[u8]) -> u8 {
     unit[0] & NAL_TYPE_MASK
 }
@@ -62,7 +56,6 @@ pub(super) mod tests {
     pub(in crate::replay) const IDR: [u8; 5] = [0x65, 0x88, 0x84, 0x00, 0x33];
     pub(in crate::replay) const SLICE: [u8; 4] = [0x41, 0x9A, 0x02, 0x10];
 
-    /// A keyframe access unit as NVENC writes it: delimiter, parameter sets, then the picture.
     pub(in crate::replay) fn keyframe() -> Vec<u8> {
         [
             &[0, 0, 0, 1, 0x09, 0x10][..],
@@ -76,7 +69,6 @@ pub(super) mod tests {
         .concat()
     }
 
-    /// An access unit holding one slice of a picture that refers to earlier ones.
     pub(in crate::replay) fn inter_frame() -> Vec<u8> {
         [&[0, 0, 0, 1][..], &SLICE].concat()
     }

@@ -1,53 +1,5 @@
-//! NVIDIA Frame Buffer Capture (NvFBC) of a monitor, the capture Instant Replay itself uses.
-//! The driver copies the display, cursor included, straight from the frame buffer it scans
-//! out, so it costs a game nothing that Windows composes.
-//!
-//! NvFBC on Windows writes into Direct3D 9 surfaces. Three, as many as the driver takes, are
-//! created on a Direct3D 9Ex device on the monitor's GPU, and NVENC runs on that same device,
-//! reading the surfaces in place, as NVIDIA's `NvFBCDX9NvEnc` sample does: on each tick the
-//! grab the previous tick started is handed to the encoder, and the next grab goes into the next
-//! surface. The surface the next grab goes into was last encoded two ticks earlier, which NVENC
-//! has almost always finished by then, and is waited for when it has not. Every grab counts as
-//! a new frame, since the driver does not say whether the screen changed. The device is used
-//! from the capture thread only, by the grabs and by the encoder alike.
-//!
-//! Nothing on the CPU waits for a grab to land. A device carries out its work on one resource
-//! in the order it was submitted, so the grab's blit is done before NVENC's read of the same
-//! surface begins, and NVENC's own submission sends the blit to the GPU; the sample likewise
-//! encodes each surface straight after the grab. An earlier design encoded on a Direct3D 11
-//! device through shared textures, which Direct3D 9Ex shares unsynchronised, and so followed
-//! every grab with an event query it flushed and polled: about 120,000 thread cycles a frame.
-//! Encoding on this device instead brought the whole backend from 287 to about 261 Mcycles/s
-//! at AV1 1080p240 and cs2's lost frames from 22.2 to 18.3 fps, with no torn or repeated
-//! frames in a tearing test (measured live 2026-10-12, `docs/day-run.md`).
-//!
-//! The encoder reads every grab where it lies, uncropped, so the display's width and height
-//! must be even; an odd-sized display is refused, and Windows Graphics Capture records it.
-//!
-//! The driver only lets a licensed application capture with NvFBC on a GeForce GPU: it must
-//! present the key NVIDIA issued, which is entered in Settings and read from the registry. NvFBC
-//! must also be turned on in the driver, which takes administrator rights once.
-//!
-//! Like Desktop Duplication, NvFBC sees whole monitors connected to the GPU, so a window target
-//! is recorded through its monitor. When the driver ends the session (a mode change, the
-//! secure desktop) it is opened again in place, keeping the buffer, unless the size changed.
-//!
-//! Four environment variables, read once when a capture starts and meant for measuring
-//! against Instant Replay with the benchmark harness (`docs/nvfbc-source.md`), change what the
-//! driver is asked for; unset, the capture behaves exactly as described above.
-//! `HINDSIGHT_NVFBC_PROCESS=<pid>` asks for that process's presented frames instead of the
-//! display's scanned-out frame, through the private structure Instant Replay itself passes (the
-//! driver may refuse it, and the process must present at the display's size).
-//! `HINDSIGHT_NVFBC_GRAB_MODE=scale|crop` grabs through the driver's scaling or cropping path
-//! at the display's own size instead of the plain full-size path. `HINDSIGHT_NVFBC_WAIT_TIMEOUT=<ms>`
-//! has each grab wait up to that long for a new picture instead of taking the current one.
-//! While any of these three is set, the first grab's report (size, source process, wait mode) is
-//! logged.
-//!
-//! `HINDSIGHT_NVFBC_FORMAT=nv12` has the driver grab NV12, as Instant Replay does, instead of
-//! ARGB, into offscreen plain surfaces, the only kind Direct3D 9 makes in NV12. The driver
-//! converts with the BT.601 matrix, which the clip then signals (`docs/backend-overhead.md`,
-//! "NV12 from NvFBC"); ARGB is converted by NVENC, with BT.709.
+//! NVIDIA Frame Buffer Capture of a monitor into Direct3D 9 surfaces that NVENC reads in place
+//! on the same device; the `HINDSIGHT_NVFBC_*` environment variables are experimental switches.
 
 mod cuda;
 mod ffi;
@@ -80,81 +32,54 @@ use windows::{
     core::{BOOL, Interface, s, w},
 };
 
-// Re-exported because `CaptureError::Nvfbc` carries it.
-/// The same capture into CUDA memory, for an encoder on a CUDA context.
 pub(super) use cuda::Capture as CudaCapture;
 pub(in crate::gpu) use ffi::Status;
 use ffi::Zeroed;
 
-/// Surfaces grabbed into in turn: the most the driver accepts (it refuses four), one for the
-/// grab on its way and two for the frames NVENC may still be reading.
+/// The most the driver accepts; it refuses four.
 const SLOT_COUNT: u32 = 3;
 const SLOTS: usize = SLOT_COUNT as usize;
-/// The variable naming the process whose frames to grab; see [`Switches`].
 const PROCESS_VARIABLE: &str = "HINDSIGHT_NVFBC_PROCESS";
-/// The variable naming the driver's grab path; see [`Switches`].
 const GRAB_MODE_VARIABLE: &str = "HINDSIGHT_NVFBC_GRAB_MODE";
-/// The variable giving how long a grab waits for a new picture; see [`Switches`].
 const WAIT_TIMEOUT_VARIABLE: &str = "HINDSIGHT_NVFBC_WAIT_TIMEOUT";
-/// The variable naming the pixel format the driver grabs into; see [`PixelFormat`].
 const FORMAT_VARIABLE: &str = "HINDSIGHT_NVFBC_FORMAT";
-/// `MAKEFOURCC('N', 'V', '1', '2')`, which Direct3D 9 takes as a format although its headers
-/// name no constant for it.
+/// `MAKEFOURCC('N', 'V', '1', '2')`; the Direct3D 9 headers name no constant for it.
 const D3DFMT_NV12: D3DFORMAT = D3DFORMAT(u32::from_le_bytes(*b"NV12"));
 
-/// A running NvFBC capture of one monitor.
 pub(super) struct Capture {
-    /// Unloaded only after `Drop` has released the session, the one thing here that needs it.
+    /// Must outlive the session.
     _library: Library,
-    /// The library's entry point that creates a capture object.
     create: ffi::CreateEx,
-    /// The key presented to the driver whenever a session is opened.
     key: Vec<u8>,
-    /// The Direct3D 9Ex device the surfaces live on.
     device: IDirect3DDevice9Ex,
     slots: [Slot; SLOTS],
-    /// `None` while the driver has taken it away.
     session: Option<Session>,
-    /// The slot whose grab is on its way, to be handed to the encoder on the next tick.
+    /// The slot whose grab is in flight, handed over on the next tick.
     pending: Option<usize>,
-    /// The slot the next grab goes into.
     next: u32,
-    /// Whether the pipeline has agreed to have the encoder read the surfaces in place, the
-    /// only way their grabs reach it.
     handed_over: bool,
     size: (u32, u32),
-    /// The captured monitor, checked for before a lost session is opened again.
     monitor: HMONITOR,
-    /// The window whose monitor is recorded, when the target is one.
     window: Option<HWND>,
     reopen: ReopenThrottle,
-    /// Whether the driver draws the mouse cursor into each grab.
     cursor: bool,
-    /// The experimental settings this capture was started with.
     switches: Switches,
-    /// Whether the first grab's report has been logged, which only a switch asks for.
     reported: bool,
-    /// What the driver grabs into the surfaces.
     format: PixelFormat,
 }
 
-/// The pixel format the driver grabs into, which `HINDSIGHT_NVFBC_FORMAT` chooses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PixelFormat {
-    /// BGRA in render-target textures, converted by NVENC with BT.709, the default.
     Argb,
-    /// NV12 in offscreen plain surfaces, converted by the driver with BT.601.
+    /// Offscreen plain surfaces; the driver converts with BT.601.
     Nv12,
 }
 
 impl PixelFormat {
-    /// What the environment asks for.
     fn from_environment() -> Self {
         Self::parse(std::env::var(FORMAT_VARIABLE).ok().as_deref())
     }
 
-    /// The format a value of the variable asks for, without regard to case or surrounding
-    /// whitespace; anything but `nv12` leaves ARGB.
     fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some(value) if value.eq_ignore_ascii_case("nv12") => Self::Nv12,
@@ -162,7 +87,6 @@ impl PixelFormat {
         }
     }
 
-    /// The driver's `NVFBC_TODX9VID_*` mode for the format.
     const fn mode(self) -> u32 {
         match self {
             Self::Argb => ffi::TODX9VID_ARGB,
@@ -171,31 +95,23 @@ impl PixelFormat {
     }
 }
 
-/// What starting a grab came to.
 enum Grab {
-    /// A grab is on its way into the next slot.
     Started,
-    /// Protected video is on screen, and the driver withholds the picture.
+    /// Protected video is on screen.
     Withheld,
-    /// The display's size changed.
     Resized,
-    /// The driver ended the session.
     Lost,
 }
 
-/// The experimental parameters the environment variables named in the module documentation
-/// choose, read once when a capture starts. All unset, the default, is today's behaviour.
+/// Experimental switches from the `HINDSIGHT_NVFBC_*` environment variables.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Switches {
-    /// The process whose presented frames the session grabs instead of the display's.
     process: Option<u32>,
-    /// Which of the driver's grab paths a frame takes.
     grab_mode: GrabMode,
-    /// How many milliseconds a grab may wait for a new picture; `None` takes the current one.
     wait_timeout: Option<u32>,
 }
 
-/// `NVFBC_TODX9VID_SOURCEMODE_*`, each asked for at the display's own size.
+/// `NVFBC_TODX9VID_SOURCEMODE_*`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GrabMode {
     Full,
@@ -204,15 +120,12 @@ enum GrabMode {
 }
 
 impl Switches {
-    /// Today's behaviour.
     const DEFAULT: Self = Self {
         process: None,
         grab_mode: GrabMode::Full,
         wait_timeout: None,
     };
 
-    /// What the environment asks for; a variable that is unset, empty or unreadable leaves
-    /// its default.
     fn from_environment() -> Self {
         let variable = |name| std::env::var(name).ok();
         Self::parse(
@@ -222,8 +135,6 @@ impl Switches {
         )
     }
 
-    /// The switches the variables' values ask for, each read without regard to case or
-    /// surrounding whitespace; a value that is missing, empty or malformed leaves its default.
     fn parse(process: Option<&str>, grab_mode: Option<&str>, wait_timeout: Option<&str>) -> Self {
         let value = |value: Option<&str>| {
             value
@@ -242,8 +153,6 @@ impl Switches {
         }
     }
 
-    /// Writes the switches to the log when any is set, so a measurement's log says which arm
-    /// it was.
     fn report(self) {
         if self == Self::DEFAULT {
             return;
@@ -266,8 +175,6 @@ impl Switches {
 }
 
 impl Capture {
-    /// Starts capturing the monitor `target` names, or the monitor its window fills, with the
-    /// cursor drawn in if `cursor` is set.
     pub(super) fn start(
         device: &Device,
         target: &Target,
@@ -323,8 +230,6 @@ impl Capture {
         Ok(capture)
     }
 
-    /// Creates the driver's capture object on the device and hands it the surfaces. A refusal
-    /// that trying again may change comes back as [`CaptureError::Nvfbc`].
     fn open_session(&self) -> Result<Session, CaptureError> {
         let object = self
             .create_object()
@@ -340,8 +245,6 @@ impl Capture {
         Ok(session)
     }
 
-    /// Asks the driver for a capture object on the device, presenting the key, and naming the
-    /// process whose frames to grab when a switch chose one.
     fn create_object(&self) -> Result<NonNull<ffi::ToDx9Vid>, Status> {
         let mut params = ffi::CreateParams::zeroed();
         params.version = ffi::CREATE_PARAMS_VER;
@@ -358,14 +261,11 @@ impl Capture {
             params.private_data2_size =
                 u32::try_from(size_of::<ffi::ProcessSource>()).expect("a few hundred bytes");
         }
-        // SAFETY: the parameters are complete; the device, the key and the source outlive the
-        // call.
+        // SAFETY: the device, the key and the source outlive the call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
         NonNull::new(params.nvfbc).ok_or(Status::UNSUPPORTED)
     }
 
-    /// Opens the session again after the driver ended it. While the driver refuses, the last
-    /// picture is repeated; a monitor that went away ends the capture.
     fn reopen(&mut self) -> Result<Frame, CaptureError> {
         let Some(now) = self.reopen.attempt() else {
             return Ok(Frame::Unchanged);
@@ -378,15 +278,13 @@ impl Capture {
                 self.session = Some(session);
                 self.reopen.succeeded();
             }
-            // A permanent refusal already reads as unsupported; any other status may pass.
+            // Permanent refusals already read as unsupported.
             Err(CaptureError::Nvfbc(..)) => self.reopen.refused(now),
             Err(error) => return Err(error),
         }
         Ok(Frame::Unchanged)
     }
 
-    /// Starts a grab of the display into the next slot; one that started is left for the next
-    /// tick to hand over, and the following grab moves on to the slot after it.
     fn grab(&mut self) -> Result<Grab, CaptureError> {
         let Some(session) = &self.session else {
             return Ok(Grab::Lost);
@@ -403,8 +301,7 @@ impl Capture {
             Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
             Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
             Status::SUCCESS => {
-                // No wait for the grab to land: NVENC reads the surface on the same device,
-                // which carries the blit out first (see the module documentation).
+                // No wait: NVENC reads on the same device, which orders the blit first.
                 self.pending = Some(self.next as usize);
                 self.next = (self.next + 1) % SLOT_COUNT;
                 Ok(Grab::Started)
@@ -436,9 +333,7 @@ impl Source for Capture {
             return Err(CaptureError::Closed);
         }
         if !self.handed_over {
-            // A surface on the Direct3D 9 device cannot be copied into a Direct3D 11 texture,
-            // and the pipeline hands surfaces over whenever the display's size is encodable,
-            // which `start` made sure of.
+            // A Direct3D 9 surface cannot be copied into a Direct3D 11 texture.
             return Err(CaptureError::Unsupported(
                 "NVIDIA NvFBC can only encode its grabs in place".to_owned(),
             ));
@@ -448,8 +343,7 @@ impl Source for Capture {
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
             Grab::Resized => return Ok(Frame::Resized),
-            // The frame just collected is delivered first; the next tick, with nothing left
-            // to collect, opens the session again.
+            // Deliver the collected frame first; reopen on the next tick.
             Grab::Lost if collected.is_some() => self.session = None,
             Grab::Lost => {
                 self.session = None;
@@ -490,20 +384,16 @@ impl Source for Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // The driver's object goes before the library that implements it, which is unloaded
-        // when the fields are dropped after this.
+        // The session goes before the library that implements it.
         self.session = None;
     }
 }
 
-/// `NvFBC64.dll`, unloaded when dropped. Entry points looked up in it, and objects it made,
-/// must be gone by then.
+/// `NvFBC64.dll`; everything looked up in or made by it must be gone before it is dropped.
 struct Library(HMODULE);
 
 impl Library {
     fn load() -> Result<Self, CaptureError> {
-        // The driver installs the library in System32; never look anywhere a planted copy
-        // could be.
         // SAFETY: loads a system library by name.
         unsafe { LoadLibraryExW(w!("NvFBC64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
             .map(Self)
@@ -517,13 +407,11 @@ impl Library {
 
 impl Drop for Library {
     fn drop(&mut self) {
-        // SAFETY: the library was loaded by `load`, and whoever holds it drops everything that
-        // came from it first: `Capture` releases its session in its own `Drop`.
+        // SAFETY: loaded by `load`; `Capture` releases its session first.
         let _ = unsafe { FreeLibrary(self.0) };
     }
 }
 
-/// The entry points of `NvFBC64.dll` that capture calls, valid while the library is loaded.
 struct EntryPoints {
     get_status: ffi::GetStatusEx,
     create: ffi::CreateEx,
@@ -538,8 +426,7 @@ impl EntryPoints {
                 "NvFBC64.dll has no {name}; update the NVIDIA driver"
             ))
         };
-        // SAFETY: looks symbols up in the loaded NvFBC library; each has the documented
-        // signature.
+        // SAFETY: each symbol has the documented signature.
         unsafe {
             let get_status = GetProcAddress(library, s!("NvFBC_GetStatusEx"))
                 .ok_or_else(|| missing("NvFBC_GetStatusEx"))?;
@@ -563,32 +450,25 @@ impl EntryPoints {
     }
 }
 
-/// A Direct3D 9 surface NvFBC grabs into and NVENC reads.
 struct Slot {
     surface: IDirect3DSurface9,
-    /// The texture an ARGB surface is the only level of, kept alive for as long as the
-    /// surface; `None` for an NV12 plain surface, which stands alone.
+    /// Keeps an ARGB surface's parent texture alive; `None` for NV12.
     _texture: Option<IDirect3DTexture9>,
 }
 
-/// A capture object of the driver's, released when dropped.
 struct Session {
-    /// Live from `NvFBC_CreateEx` until `Drop` releases it; its method table lives in the
-    /// library, which outlives the session.
+    /// Live until `Drop`; its method table lives in the library.
     object: NonNull<ffi::ToDx9Vid>,
-    /// The surfaces handed to the driver at setup, kept for as long as it may look at them.
+    /// The driver may read these for the session's life.
     buffers: Box<[ffi::OutputBuffer; SLOTS]>,
 }
 
 impl Session {
     fn methods(&self) -> &ffi::ToDx9VidVtable {
-        // SAFETY: the object is live (see the field), and a live object's table pointer is
-        // valid for as long as the library that made it is loaded.
+        // SAFETY: the object is live and the library holding its table is loaded.
         unsafe { &*(*self.object.as_ptr()).vtable }
     }
 
-    /// Hands the driver the session's surfaces to grab into in `format`, with the cursor drawn
-    /// in if `cursor` is set.
     fn set_up(&self, cursor: bool, format: PixelFormat) -> Result<(), Status> {
         let mut setup = ffi::SetupParams::zeroed();
         setup.version = ffi::TODX9VID_SETUP_PARAMS_VER;
@@ -596,14 +476,10 @@ impl Session {
         setup.mode = format.mode();
         setup.buffer_count = SLOT_COUNT;
         setup.buffers = self.buffers.as_ptr().cast_mut();
-        // SAFETY: a live object; the surfaces belong to the device it was created on and live
-        // as long as the session.
+        // SAFETY: a live object; the surfaces are on its device and outlive the session.
         unsafe { (self.methods().set_up)(self.object.as_ptr(), &raw mut setup) }.ok()
     }
 
-    /// Starts a grab of the whole display, which is `size` large, into the surface at
-    /// `buffer_index` without waiting for the screen to change, unless the switches say
-    /// otherwise, and returns the driver's status with its report on the grab.
     fn grab_frame(
         &self,
         buffer_index: u32,
@@ -620,8 +496,7 @@ impl Session {
             }
             None => params.flags = ffi::TODX9VID_NOWAIT,
         }
-        // Scaling and cropping name their output size; at the display's own size and from its
-        // corner they deliver the same picture as the full-size path.
+        // At the display's own size, scale and crop deliver the full picture.
         params.grab_mode = match switches.grab_mode {
             GrabMode::Full => ffi::TODX9VID_SOURCEMODE_FULL,
             GrabMode::Scale => ffi::TODX9VID_SOURCEMODE_SCALE,
@@ -632,8 +507,7 @@ impl Session {
         }
         params.buffer_index = buffer_index;
         params.grab_info = &raw mut info;
-        // SAFETY: a live object, set up by `Capture::open_session` before it handed the session
-        // out; `info` outlives the call.
+        // SAFETY: a live, set-up object; `info` outlives the call.
         let status = unsafe { (self.methods().grab_frame)(self.object.as_ptr(), &raw mut params) };
         (status, info)
     }
@@ -646,7 +520,6 @@ impl Drop for Session {
     }
 }
 
-/// The key saved in Settings; without one the driver refuses NvFBC on a GeForce GPU.
 fn saved_key() -> Result<Vec<u8>, CaptureError> {
     match nvfbc_key::load() {
         Ok(Some(key)) => Ok(key),
@@ -660,14 +533,11 @@ fn saved_key() -> Result<Vec<u8>, CaptureError> {
     }
 }
 
-/// The key's length as the driver's parameter structures hold it.
 fn key_size(key: &[u8]) -> u32 {
-    // At most `nvfbc_key::MAX_BYTES`, checked when it was entered.
+    // Bounded by `nvfbc_key::MAX_BYTES` on entry.
     u32::try_from(key.len()).unwrap_or(u32::MAX)
 }
 
-/// The Direct3D 9 adapter that shows `monitor`, which must be the GPU the pipeline's device is
-/// on: the encoder reads the grabs there, and the rest of the session stays on that GPU.
 fn find_adapter(
     d3d9: &IDirect3D9Ex,
     device: &Device,
@@ -695,7 +565,6 @@ fn find_adapter(
     Ok(adapter)
 }
 
-/// The monitor's current size; a turned monitor is refused, as with Desktop Duplication.
 fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), CaptureError> {
     let mut mode = D3DDISPLAYMODEEX {
         Size: u32::try_from(size_of::<D3DDISPLAYMODEEX>()).expect("a display mode is a few bytes"),
@@ -714,8 +583,6 @@ fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), Capture
     Ok((mode.Width, mode.Height))
 }
 
-/// Checks that the driver will capture `adapter` with this key, turning NvFBC on in the driver
-/// when it is off, and returns the entry point that creates a session.
 fn prepare(library: &Library, key: &[u8], adapter: u32) -> Result<ffi::CreateEx, CaptureError> {
     let entry_points = EntryPoints::look_up(library)?;
     if !is_capture_possible(entry_points.get_status, key, adapter)? {
@@ -724,7 +591,6 @@ fn prepare(library: &Library, key: &[u8], adapter: u32) -> Result<ffi::CreateEx,
     Ok(entry_points.create)
 }
 
-/// Asks the driver whether it will capture `adapter` with this key as things stand.
 fn is_capture_possible(
     get_status: ffi::GetStatusEx,
     key: &[u8],
@@ -735,14 +601,13 @@ fn is_capture_possible(
     status.adapter_index = adapter;
     status.private_data = key.as_ptr().cast();
     status.private_data_size = key_size(key);
-    // SAFETY: the parameters are complete; the key outlives the call.
+    // SAFETY: the key outlives the call.
     unsafe { get_status(&raw mut status) }
         .ok()
         .map_err(nvfbc_failed("read the NvFBC status"))?;
     Ok(status.flags & ffi::STATUS_CAPTURE_POSSIBLE != 0)
 }
 
-/// Turns NvFBC on in the driver, which only an administrator may do.
 fn turn_on(enable: ffi::Enable) -> Result<(), CaptureError> {
     // SAFETY: a plain call into the loaded library.
     let result = unsafe { enable(ffi::STATE_ENABLE) };
@@ -761,7 +626,6 @@ fn turn_on(enable: ffi::Enable) -> Result<(), CaptureError> {
     Ok(())
 }
 
-/// A Direct3D 9Ex device on `adapter` that only holds the grab surfaces; it never presents.
 fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex, CaptureError> {
     let mut parameters = D3DPRESENT_PARAMETERS {
         BackBufferWidth: 1,
@@ -775,19 +639,14 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
         PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ..Default::default()
     };
-    // Software vertex processing, because the device never draws a vertex: it only owns the
-    // surfaces NvFBC grabs into. With hardware vertex processing the NVIDIA driver runs a
-    // worker thread for the device that costs about 170 Mcycles/s at 240 fps (a third of the
-    // backend's CPU); with software vertex processing it starts none, and the grabs, the
-    // frames reaching the encoder and the game's frame times are unchanged (measured 2026-10-11,
-    // `docs/backend-overhead.md`).
+    // Software vertex processing: with hardware, the NVIDIA driver runs a worker thread for
+    // the device, and nothing here draws.
     let flags = D3DCREATE_FPU_PRESERVE
         | D3DCREATE_MULTITHREADED
         | D3DCREATE_SOFTWARE_VERTEXPROCESSING
         | D3DCREATE_NOWINDOWCHANGES;
     let mut device = None;
-    // SAFETY: windowed parameters on the desktop window; the out-parameter is written on
-    // success.
+    // SAFETY: windowed parameters on the desktop window; out-parameter written on success.
     unsafe {
         d3d9.CreateDeviceEx(
             adapter,
@@ -803,8 +662,6 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
     .map_err(failed("create the Direct3D 9 device for NvFBC"))
 }
 
-/// A surface on `d3d9` the size of the display for grabs in `format`: for ARGB the one level
-/// of a render-target texture, for NV12 a plain surface.
 fn create_slot(
     d3d9: &IDirect3DDevice9Ex,
     size: (u32, u32),
@@ -828,15 +685,13 @@ fn create_slot(
     }
 }
 
-/// An NV12 plain surface of `width` × `height` that the driver can grab into. Direct3D 9 makes
-/// NV12 neither as a texture nor as a render target.
+/// Direct3D 9 makes NV12 neither as a texture nor as a render target.
 fn create_nv12_surface(
     d3d9: &IDirect3DDevice9Ex,
     (width, height): (u32, u32),
 ) -> Result<IDirect3DSurface9, CaptureError> {
     let mut surface = None;
-    // SAFETY: an unshared plain surface in the default pool, so the handle pointer may be
-    // null; the out-parameter is written on success.
+    // SAFETY: unshared, so the handle pointer may be null; out-parameter written on success.
     unsafe {
         d3d9.CreateOffscreenPlainSurface(
             width,
@@ -851,15 +706,12 @@ fn create_nv12_surface(
     .map_err(failed("create an NV12 surface for NvFBC"))
 }
 
-/// A render-target texture of `width` × `height` that the driver can grab into. It is not
-/// shared: NVENC reads it on the same device.
 fn create_texture(
     d3d9: &IDirect3DDevice9Ex,
     (width, height): (u32, u32),
 ) -> Result<IDirect3DTexture9, CaptureError> {
     let mut texture = None;
-    // SAFETY: an unshared texture in the default pool, so the handle pointer may be null; the
-    // out-parameter is written on success.
+    // SAFETY: unshared, so the handle pointer may be null; out-parameter written on success.
     unsafe {
         d3d9.CreateTexture(
             width,
@@ -876,7 +728,6 @@ fn create_texture(
     .map_err(failed("create a surface for NvFBC"))
 }
 
-/// The surfaces of `slots` as the driver is handed them at setup.
 fn output_buffers(slots: &[Slot; SLOTS]) -> [ffi::OutputBuffer; SLOTS] {
     std::array::from_fn(|index| {
         let mut buffer = ffi::OutputBuffer::zeroed();
@@ -885,7 +736,6 @@ fn output_buffers(slots: &[Slot; SLOTS]) -> [ffi::OutputBuffer; SLOTS] {
     })
 }
 
-/// Whether the monitor still exists.
 fn is_attached(monitor: HMONITOR) -> bool {
     let mut info = MONITORINFO {
         cbSize: u32::try_from(size_of::<MONITORINFO>())
@@ -896,8 +746,7 @@ fn is_attached(monitor: HMONITOR) -> bool {
     unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
 }
 
-/// Refuses a display with an odd width or height for `backend`, named as Settings names it:
-/// NVENC encodes even sizes, and both NvFBC backends have their grabs read in place, uncropped.
+/// NVENC encodes even sizes, and grabs are read in place, uncropped.
 fn require_even((width, height): (u32, u32), backend: &str) -> Result<(), CaptureError> {
     if width % 2 == 0 && height % 2 == 0 {
         return Ok(());
@@ -907,13 +756,10 @@ fn require_even((width, height): (u32, u32), backend: &str) -> Result<(), Captur
     )))
 }
 
-/// Wraps a driver status with the step that failed, for `map_err`; a refusal that trying again
-/// would not change reads as unsupported.
 fn nvfbc_failed(step: &'static str) -> impl Fn(Status) -> CaptureError {
     move |status| permanent(status).unwrap_or(CaptureError::Nvfbc(step, status))
 }
 
-/// The driver's refusals that trying again would not change.
 fn permanent(status: Status) -> Option<CaptureError> {
     let reason = match status {
         Status::UNSUPPORTED | Status::INVALID_TARGET => {

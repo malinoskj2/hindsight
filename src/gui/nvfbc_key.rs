@@ -1,7 +1,4 @@
-//! The modal window that asks for the NvFBC key when NvFBC is chosen as the capture backend.
-//! The key NVIDIA issued is entered as hexadecimal or as four 0x-prefixed dwords, masked like
-//! a password, and saved to the user's registry; the capture backend reads it from there each
-//! time it starts.
+//! The modal window that asks for the NvFBC key and saves it to the user's registry.
 
 use super::{
     layout::{self, BLACK, BUTTON_HEIGHT, LINE, RED, label},
@@ -18,25 +15,16 @@ use winsafe::{co, gui, prelude::*};
 
 const WIDTH: i32 = 400;
 const HEIGHT: i32 = 170;
-/// Gap between the window's edges and what it holds.
 const PADDING: i32 = 12;
-/// Width left for what the window holds.
 const INNER_WIDTH: i32 = WIDTH - 2 * PADDING;
-/// Lines the explanation above the field takes.
 const HELP_LINES: i32 = 3;
-/// Where the field starts, below the explanation.
 const FIELD_Y: i32 = PADDING + HELP_LINES * LINE + 10;
-/// How far the field sits to the right of the start of its caption.
 const FIELD_OFFSET: i32 = 76;
-/// Width of a button on the bottom row.
 const BUTTON_WIDTH: i32 = 84;
-/// Gap between the buttons on the bottom row.
 const BUTTON_GAP: i32 = 8;
-/// Where the bottom row of buttons starts.
 const BUTTON_Y: i32 = HEIGHT - PADDING - BUTTON_HEIGHT;
 
-/// Asks for the key over `parent` until it is saved or the user cancels; reports whether a
-/// key was saved.
+/// Reports whether a key was saved.
 pub(super) fn ask(parent: &impl GuiParent) -> bool {
     let dialog = KeyDialog::new(&saved_key());
     let accepted = Rc::new(Cell::new(false));
@@ -48,7 +36,6 @@ pub(super) fn ask(parent: &impl GuiParent) -> bool {
     accepted.get()
 }
 
-/// The window and the controls a handler needs.
 struct KeyDialog {
     wnd: gui::WindowModal,
     field: gui::Edit,
@@ -58,7 +45,6 @@ struct KeyDialog {
 }
 
 impl KeyDialog {
-    /// Declares the window and its controls, in tab order, with `saved` in the field.
     fn new(saved: &str) -> Self {
         let wnd = gui::WindowModal::new(gui::WindowModalOpts {
             title: text::NVFBC_KEY_TITLE,
@@ -115,7 +101,6 @@ impl KeyDialog {
         }
     }
 
-    /// Wires the buttons and the window's creation; `accepted` is set once a key is saved.
     fn events(&self, accepted: &Rc<Cell<bool>>) {
         let save_wnd = self.wnd.clone();
         let save_field = self.field.clone();
@@ -144,8 +129,6 @@ impl KeyDialog {
         });
     }
 
-    /// Installs the handlers that draw the window in the classic look, with the error line
-    /// red and every other label black.
     fn draw(&self) {
         let error = self.error.clone();
         layout::draw(
@@ -161,8 +144,6 @@ impl KeyDialog {
     }
 }
 
-/// The key saved before, spelled as it is entered, or nothing when there is none or it cannot
-/// be read.
 fn saved_key() -> String {
     match nvfbc_key::load() {
         Ok(key) => key.map(|key| nvfbc_key::format(&key)).unwrap_or_default(),
@@ -173,7 +154,6 @@ fn saved_key() -> String {
     }
 }
 
-/// A push button on the bottom row at `x`. Its dialog `id` lets Enter or Escape press it.
 fn dialog_button(
     wnd: &gui::WindowModal,
     text: &str,
@@ -195,7 +175,6 @@ fn dialog_button(
     )
 }
 
-/// Saves the key in `entered`, or gives the problem to show under the field.
 fn save_entered(entered: &str) -> Result<(), String> {
     let key = nvfbc_key::parse(entered).map_err(|problem| problem.to_string())?;
     nvfbc_key::save(&key).map_err(|problem| {

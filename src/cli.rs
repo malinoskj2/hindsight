@@ -1,5 +1,4 @@
-//! Command-line entry points: `--tray` starts hidden in the notification area (the Start with
-//! Windows entry uses it), and `icon <path>` writes the application icon for the build.
+//! Command-line entry points.
 
 use crate::{
     APP_NAME,
@@ -25,15 +24,11 @@ enum Command {
     Icon { path: PathBuf },
 }
 
-/// What the command line asked for.
 pub(crate) enum Launch {
-    /// A command ran; there is no window to show.
     Handled,
-    /// The application starts, hidden in the notification area when `tray` is set.
     Window { tray: bool },
 }
 
-/// Parses the command line and runs a command it names.
 pub(crate) fn dispatch() -> Result<Launch> {
     let arguments = Arguments::parse();
     match arguments.command {

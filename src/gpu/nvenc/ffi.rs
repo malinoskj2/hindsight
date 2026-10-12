@@ -1,10 +1,5 @@
-//! The parts of NVIDIA's Video Codec SDK interface (`nvEncodeAPI.h`, API 12.1) this program uses.
-//!
-//! Only the fields that are set or read have names; the rest of each structure is kept as
-//! opaque padding of the same size. Every size and named offset is checked at compile time
-//! against the values the C header produces for 64-bit Windows, so a slip in a layout fails the
-//! build instead of corrupting memory in the driver. API 12.1 is accepted by drivers 531 and
-//! newer, which covers every GPU with an AV1 encoder.
+//! The parts of `nvEncodeAPI.h` (Video Codec SDK API 12.1, drivers 531 and newer) this program uses;
+//! every layout is checked at compile time against the 64-bit Windows header.
 
 use std::{
     ffi::{c_char, c_void},
@@ -17,16 +12,11 @@ pub(super) const API_MAJOR: u32 = 12;
 pub(super) const API_MINOR: u32 = 1;
 pub(super) const API_VERSION: u32 = API_MAJOR | (API_MINOR << 24);
 
-// The header's own value for the version above.
 const _: () = assert!(API_VERSION == 0x0100_000C);
 
-/// How many low bits of a `NvEncodeAPIGetMaxSupportedVersion` result hold the minor version;
-/// the major version sits above them.
 const MAX_VERSION_MINOR_BITS: u32 = 4;
-/// The lowest `NvEncodeAPIGetMaxSupportedVersion` result that accepts this program's structures.
 pub(super) const REQUIRED_MAX_VERSION: u32 = (API_MAJOR << MAX_VERSION_MINOR_BITS) | API_MINOR;
 
-/// Splits a `NvEncodeAPIGetMaxSupportedVersion` result into its major and minor versions.
 pub(super) const fn split_max_version(version: u32) -> (u32, u32) {
     (
         version >> MAX_VERSION_MINOR_BITS,
@@ -37,13 +27,11 @@ pub(super) const fn split_max_version(version: u32) -> (u32, u32) {
 const _: () = assert!(REQUIRED_MAX_VERSION == 0xC1);
 const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
 
-/// `NVENCAPI_STRUCT_VERSION`. The header also sets bit 31 in some structures' versions, without
-/// naming it, and so do the constants below.
+/// `NVENCAPI_STRUCT_VERSION`; some structures also set bit 31, which the header does not name.
 pub(super) const fn struct_version(version: u32) -> u32 {
     API_VERSION | (version << 16) | (0x7 << 28)
 }
 
-// One version per structure the API checks, in the order the structures are declared below.
 pub(super) const FUNCTION_LIST_VER: u32 = struct_version(2);
 pub(super) const OPEN_ENCODE_SESSION_EX_PARAMS_VER: u32 = struct_version(1);
 pub(super) const CAPS_PARAM_VER: u32 = struct_version(1);
@@ -57,7 +45,6 @@ pub(super) const MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
 pub(super) const PIC_PARAMS_VER: u32 = struct_version(6) | (1 << 31);
 pub(super) const LOCK_BITSTREAM_VER: u32 = struct_version(1) | (1 << 31);
 
-// The header's own values for some of the versions above.
 const _: () = assert!(FUNCTION_LIST_VER == 0x7102_000C);
 const _: () = assert!(CONFIG_VER == 0xF108_000C);
 const _: () = assert!(PIC_PARAMS_VER == 0xF106_000C);
@@ -98,7 +85,6 @@ pub(super) const PROFILE_AV1_MAIN: GUID = GUID::from_values(
     0x4f95,
     [0x9a, 0x9e, 0xb7, 0x6d, 0x56, 0x8f, 0xcf, 0x97],
 );
-/// The middle of the seven speed/quality presets.
 pub(super) const PRESET_P4: GUID = GUID::from_values(
     0x90a7_b826,
     0xdf06,
@@ -106,11 +92,7 @@ pub(super) const PRESET_P4: GUID = GUID::from_values(
     [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
 );
 
-// Field values for the session and frame structures, in the order those structures are declared
-// below.
-/// `NV_ENC_DEVICE_TYPE_DIRECTX`: the device is an `ID3D11Device` or an `IDirect3DDevice9Ex`.
 pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
-/// `NV_ENC_DEVICE_TYPE_CUDA`: the device is a `CUcontext`.
 pub(super) const DEVICE_TYPE_CUDA: u32 = 1;
 pub(super) const CAPS_WIDTH_MAX: u32 = 16;
 pub(super) const CAPS_HEIGHT_MAX: u32 = 17;
@@ -118,48 +100,31 @@ pub(super) const RATE_CONTROL_VBR: u32 = 1;
 pub(super) const MULTI_PASS_DISABLED: u32 = 0;
 pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
-/// `NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`: a `CUdeviceptr` to pitch-linear rows.
 pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
-/// `NV_ENC_BUFFER_FORMAT_NV12`: a plane of 8-bit luma, then a half-height plane of interleaved
-/// 8-bit chroma, as NvFBC grabs into a Direct3D 9 surface.
 pub(super) const BUFFER_FORMAT_NV12: u32 = 0x1;
-/// 32-bit words with blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
+/// Blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
-/// `NV_ENC_BUFFER_FORMAT_U8`: plain bytes, the format of an output buffer in video memory.
 pub(super) const BUFFER_FORMAT_U8: u32 = 0x4000_0000;
 pub(super) const INPUT_IMAGE: u32 = 0;
-/// `NV_ENC_OUTPUT_BITSTREAM`: a registered buffer the encoder writes a frame's bitstream to.
 pub(super) const OUTPUT_BITSTREAM: u32 = 2;
-/// `NV_ENC_INITIALIZE_PARAMS::enableOutputInVidmem`, in the bit field after `enablePTD`:
-/// `reportSliceOffsets`, `enableSubFrameWrite`, `enableExternalMEHints`, `enableMEOnlyMode`,
-/// `enableWeightedPrediction` (bits 0 to 4), `splitEncodeMode` (4 bits), then this one, as the
-/// SDK 12.1 header in `FFmpeg/nv-codec-headers` (tag n12.1.14.0) declares them.
+/// `enableOutputInVidmem`: bit 9 of the bit field after `enablePTD` (nv-codec-headers n12.1.14.0).
 pub(super) const INITIALIZE_OUTPUT_IN_VIDMEM: u32 = 1 << 9;
-/// Bytes of `NV_ENC_ENCODE_OUT_PARAMS`, which the encoder writes at the start of an output
-/// buffer in video memory before the bitstream.
+/// `sizeof(NV_ENC_ENCODE_OUT_PARAMS)`, written ahead of the bitstream in a video-memory output buffer.
 pub(in crate::gpu) const ENCODE_OUT_PARAMS_BYTES: usize = 256;
-/// Where `bitstreamSizeInBytes` lies in `NV_ENC_ENCODE_OUT_PARAMS`, after its version.
+/// `bitstreamSizeInBytes` in `NV_ENC_ENCODE_OUT_PARAMS`.
 pub(in crate::gpu) const ENCODE_OUT_PARAMS_SIZE_OFFSET: usize = 4;
 pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 pub(super) const PIC_STRUCT_FRAME: u32 = 1;
 pub(super) const PIC_TYPE_IDR: u32 = 3;
 
-// Colour signalling, in `NV_ENC_CONFIG_H264_VUI_PARAMETERS` and `NV_ENC_CONFIG_AV1`.
 const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
 const BT709: u32 = 1;
-/// Limited (studio) range, both as the H.264/HEVC `video_full_range_flag` and as the AV1
-/// `color_range`.
 const LIMITED_RANGE: u32 = 0;
 
-/// 4:2:0 chroma, as each codec's configuration spells its chroma format.
 pub(super) const CHROMA_FORMAT_420: u32 = 1;
 
-// `NV_ENC_CONFIG_H264` flags.
-/// SPS and PPS before every IDR frame.
 pub(super) const H264_REPEAT_SPS_PPS: u32 = 1 << 12;
 
-// `NV_ENC_CONFIG_HEVC` flags and fields, and the `NV_ENC_HEVC_CUSIZE` values 16×16 and 32×32.
-/// SPS and PPS before every IDR frame.
 pub(super) const HEVC_REPEAT_SPS_PPS: u32 = 1 << 7;
 pub(super) const HEVC_CHROMA_FORMAT_SHIFT: u32 = 9;
 pub(super) const HEVC_CHROMA_FORMAT_MASK: u32 = 0b11 << HEVC_CHROMA_FORMAT_SHIFT;
@@ -167,13 +132,11 @@ pub(super) const HEVC_BIT_DEPTH_MASK: u32 = 0b111 << 11;
 pub(super) const HEVC_CU_SIZE_16: u32 = 2;
 pub(super) const HEVC_CU_SIZE_32: u32 = 3;
 
-// `NV_ENC_CONFIG_AV1` flags and fields, and the `NV_ENC_AV1_PART_SIZE` values 16×16 and 32×32.
 pub(super) const AV1_ANNEX_B: u32 = 1 << 0;
 pub(super) const AV1_TIMING_INFO: u32 = 1 << 1;
 pub(super) const AV1_DECODER_MODEL_INFO: u32 = 1 << 2;
 pub(super) const AV1_FRAME_ID_NUMBERS: u32 = 1 << 3;
 pub(super) const AV1_DISABLE_SEQUENCE_HEADER: u32 = 1 << 4;
-/// The sequence header before every key frame.
 pub(super) const AV1_REPEAT_SEQUENCE_HEADER: u32 = 1 << 5;
 pub(super) const AV1_CHROMA_FORMAT_SHIFT: u32 = 7;
 pub(super) const AV1_CHROMA_FORMAT_MASK: u32 = 0b11 << AV1_CHROMA_FORMAT_SHIFT;
@@ -181,8 +144,7 @@ pub(super) const AV1_BIT_DEPTH_MASK: u32 = 0b11_1111 << 12;
 pub(super) const AV1_PART_SIZE_16: u32 = 3;
 pub(super) const AV1_PART_SIZE_32: u32 = 4;
 
-/// `NVENCSTATUS`; kept as an integer, since a driver may return values this program does not
-/// know.
+/// `NVENCSTATUS`, kept raw: a driver may return codes this program does not know.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gpu) struct Status(pub(super) i32);
@@ -225,20 +187,15 @@ impl Status {
     }
 }
 
-/// The name with the raw code, which stays meaningful for codes newer than this program.
 impl fmt::Display for Status {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({})", self.name(), self.0)
     }
 }
 
-/// Structures for which every bit being zero is a valid value, as the API expects of the parts
-/// a caller does not set.
-///
+/// All-zero is a valid value.
 /// # Safety
-///
-/// Implementors contain only integers, GUIDs, raw pointers, optional function pointers and
-/// unions or arrays of those.
+/// Implementors contain only integers, GUIDs, raw pointers, optional function pointers and unions or arrays of those.
 pub(super) unsafe trait Zeroed: Sized {
     fn zeroed() -> Self {
         // SAFETY: guaranteed by the trait's contract.
@@ -246,24 +203,18 @@ pub(super) unsafe trait Zeroed: Sized {
     }
 }
 
-/// An encode session, from `nvEncOpenEncodeSessionEx`.
 pub(super) type Session = *mut c_void;
-/// `NV_ENC_REGISTERED_PTR`: a texture registered with a session as encoder input.
+/// `NV_ENC_REGISTERED_PTR`.
 pub(super) type Registered = *mut c_void;
-/// `NV_ENC_INPUT_PTR`: a registered texture while it is mapped for one frame.
+/// `NV_ENC_INPUT_PTR`.
 pub(super) type Mapped = *mut c_void;
-/// `NV_ENC_OUTPUT_PTR`: a bitstream buffer.
+/// `NV_ENC_OUTPUT_PTR`.
 pub(super) type Bitstream = *mut c_void;
-/// A function list entry this program never calls.
 type Entry = *const c_void;
 
-/// `NvEncodeAPIGetMaxSupportedVersion`, one of the library's two exports.
 pub(super) type GetMaxSupportedVersion = unsafe extern "system" fn(*mut u32) -> Status;
-/// `NvEncodeAPICreateInstance`, the other export.
 pub(super) type CreateInstance = unsafe extern "system" fn(*mut FunctionList) -> Status;
 
-// The function list entries this program calls, in the list's order. An entry named like the
-// structure it takes carries an `Fn` suffix.
 pub(super) type GetEncodeGuidCount = unsafe extern "system" fn(Session, *mut u32) -> Status;
 pub(super) type GetEncodeGuids =
     unsafe extern "system" fn(Session, *mut GUID, u32, *mut u32) -> Status;
@@ -273,11 +224,9 @@ pub(super) type InitializeEncoder =
     unsafe extern "system" fn(Session, *mut InitializeParams) -> Status;
 pub(super) type CreateBitstreamBufferFn =
     unsafe extern "system" fn(Session, *mut CreateBitstreamBuffer) -> Status;
-/// The shape of every entry that takes back a handle the session gave out.
 pub(super) type WithPointer = unsafe extern "system" fn(Session, *mut c_void) -> Status;
 pub(super) type EncodePicture = unsafe extern "system" fn(Session, *mut PicParams) -> Status;
 pub(super) type LockBitstreamFn = unsafe extern "system" fn(Session, *mut LockBitstream) -> Status;
-/// The shape of both registering and unregistering a completion event.
 pub(super) type EventFn = unsafe extern "system" fn(Session, *mut EventParams) -> Status;
 pub(super) type MapInputResourceFn =
     unsafe extern "system" fn(Session, *mut MapInputResource) -> Status;
@@ -385,7 +334,7 @@ pub(super) struct RcParams {
     pub(super) max_bit_rate: u32,
     pub(super) vbv_buffer_size: u32,
     _vbv_initial_delay: u32,
-    /// Bit fields, `enableMinQP` first: lookahead, adaptive quantization and the like.
+    /// Bit fields, `enableMinQP` first.
     pub(super) flags: u32,
     _qp_to_qp_map_mode: [u32; 15],
     pub(super) multi_pass: u32,
@@ -415,8 +364,6 @@ pub(super) struct Vui {
 }
 
 impl Vui {
-    /// Signals limited range with BT.709 primaries and transfer, as players assume for HD, and
-    /// `matrix` (an ISO/IEC 23091-2 code point), the one the picture was converted to YUV with.
     pub(super) fn signal_colour(&mut self, matrix: u32) {
         self.video_signal_type_present_flag = 1;
         self.video_format = VIDEO_FORMAT_UNSPECIFIED;
@@ -434,7 +381,7 @@ const _: () = assert!(size_of::<Vui>() == 112);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct H264Config {
-    /// Bit fields, `enableTemporalSVC` first; see [`H264_REPEAT_SPS_PPS`].
+    /// Bit fields, `enableTemporalSVC` first.
     pub(super) flags: u32,
     _level: u32,
     pub(super) idr_period: u32,
@@ -459,7 +406,7 @@ pub(super) struct HevcConfig {
     _tier: u32,
     pub(super) min_cu_size: u32,
     pub(super) max_cu_size: u32,
-    /// Bit fields, `useConstrainedIntraPred` first; see [`HEVC_REPEAT_SPS_PPS`].
+    /// Bit fields, `useConstrainedIntraPred` first.
     pub(super) flags: u32,
     pub(super) idr_period: u32,
     _intra_refresh_to_temporal_layers: [u32; 10],
@@ -481,7 +428,7 @@ pub(super) struct Av1Config {
     _tier: u32,
     pub(super) min_part_size: u32,
     pub(super) max_part_size: u32,
-    /// Bit fields, `outputAnnexBFormat` first; see [`AV1_REPEAT_SEQUENCE_HEADER`].
+    /// Bit fields, `outputAnnexBFormat` first.
     pub(super) flags: u32,
     pub(super) idr_period: u32,
     _intra_refresh_to_tile_rows: [u32; 5],
@@ -500,8 +447,6 @@ pub(super) struct Av1Config {
 }
 
 impl Av1Config {
-    /// Signals limited range, BT.709 primaries and transfer and `matrix`, as
-    /// [`Vui::signal_colour`] does for H.264 and HEVC.
     pub(super) fn signal_colour(&mut self, matrix: u32) {
         self.color_primaries = BT709;
         self.transfer_characteristics = BT709;
@@ -577,7 +522,7 @@ pub(super) struct InitializeParams {
     pub(super) frame_rate_den: u32,
     pub(super) enable_encode_async: u32,
     pub(super) enable_ptd: u32,
-    /// The bit field `reportSliceOffsets` starts; see [`INITIALIZE_OUTPUT_IN_VIDMEM`].
+    /// Bit fields, `reportSliceOffsets` first.
     pub(super) flags: u32,
     _private_data_size: u32,
     _private_data: *mut c_void,
@@ -586,7 +531,7 @@ pub(super) struct InitializeParams {
     pub(super) max_encode_height: u32,
     _max_me_hint_counts: [u32; 8],
     pub(super) tuning_info: u32,
-    /// The input format, which only a Direct3D 12 session reads.
+    /// Read by a Direct3D 12 session only.
     pub(super) buffer_format: u32,
     _state_buffers_to_stats_level: [u32; 2],
     _reserved: [u32; 285],
@@ -611,7 +556,7 @@ pub(super) struct RegisterResource {
     pub(super) resource_type: u32,
     pub(super) width: u32,
     pub(super) height: u32,
-    /// Bytes between rows of a CUDA buffer; 0 for a Direct3D texture, which knows its own.
+    /// Row pitch of a CUDA buffer; 0 for a Direct3D texture.
     pub(super) pitch: u32,
     _sub_resource_index: u32,
     pub(super) resource_to_register: *mut c_void,
@@ -706,15 +651,13 @@ const _: () = assert!(offset_of!(PicParams, input_buffer) == 40);
 const _: () = assert!(offset_of!(PicParams, completion_event) == 56);
 const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
 
-/// `NV_ENC_LOCK_BITSTREAM`'s `doNotWait`: the lock fails at once rather than waiting for a
-/// frame NVENC has not finished.
+/// `NV_ENC_LOCK_BITSTREAM::doNotWait`.
 pub(super) const LOCK_DO_NOT_WAIT: u32 = 1;
 
 /// `NV_ENC_LOCK_BITSTREAM`.
 #[repr(C)]
 pub(super) struct LockBitstream {
     pub(super) version: u32,
-    /// `doNotWait` in bit 0, then bits the encoder does not use.
     pub(super) flags: u32,
     pub(super) output_bitstream: Bitstream,
     _slice_offsets: *mut u32,

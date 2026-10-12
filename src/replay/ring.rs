@@ -1,7 +1,5 @@
-//! The rolling buffer: encoded packets for the last stretch of gameplay, trimmed from the front a
-//! whole group of pictures at a time so that whatever is saved starts on a keyframe. The packets
-//! are held in memory, or put away in a store (the GPU's memory, or a file on disk) when one is
-//! given.
+//! The rolling packet buffer, trimmed a whole group of pictures at a time so a save starts on
+//! a keyframe.
 
 use super::{
     Packet,
@@ -9,21 +7,16 @@ use super::{
 };
 use std::{collections::VecDeque, sync::Arc};
 
-/// The buffered packets, oldest first, with what trimming them needs.
 pub(crate) struct Ring {
     packets: VecDeque<Entry>,
-    /// Frame indices of the keyframes still in `packets`, oldest first.
     keyframes: VecDeque<u64>,
-    /// Frames of history to keep, at least.
+    /// Frames of history to keep.
     span: u64,
-    /// Bytes of packet data in `packets`.
     bytes: usize,
-    /// Where packets are put away instead of memory, until it fails.
     store: Option<Box<dyn Store>>,
 }
 
 impl Ring {
-    /// An empty buffer that keeps at least `span` frames, and never less than one.
     pub(crate) fn new(span: u64) -> Self {
         Self {
             packets: VecDeque::new(),
@@ -34,15 +27,11 @@ impl Ring {
         }
     }
 
-    /// Puts the packets from now on in `store` rather than in memory.
     pub(crate) fn set_store(&mut self, store: Box<dyn Store>) {
         self.store = Some(store);
     }
 
-    /// Appends a packet, then drops the oldest group of pictures while the remaining ones still
-    /// cover the span. A buffer never starts with a packet that depends on earlier ones. The
-    /// error is the store refusing the packet: it is kept in memory instead, as every packet
-    /// after it is, and the store is given up.
+    /// An error means the store refused the packet; it and every later one stay in memory.
     pub(crate) fn push(&mut self, packet: Packet) -> Result<(), StoreError> {
         if self.packets.is_empty() && !packet.keyframe {
             return Ok(());
@@ -52,8 +41,6 @@ impl Ring {
         refused.map_or(Ok(()), Err)
     }
 
-    /// Appends a packet already put away in a store of the caller's, as [`push`](Self::push)
-    /// appends one in memory.
     pub(crate) fn push_entry(&mut self, entry: Entry) {
         if self.packets.is_empty() && !entry.keyframe() {
             return;
@@ -67,8 +54,6 @@ impl Ring {
         self.drop_covered_groups(latest);
     }
 
-    /// Puts `packet` in the store when there is one, or keeps it in memory, which it does for
-    /// good once the store has refused a packet.
     fn place(&mut self, packet: Packet) -> (Entry, Option<StoreError>) {
         let Some(store) = self.store.as_mut() else {
             return (Entry::Memory(Arc::new(packet)), None);
@@ -89,9 +74,6 @@ impl Ring {
         }
     }
 
-    /// Drops the oldest group of pictures while the groups after it still cover the span up to
-    /// frame `latest`. A dropped packet's slot lets go of its page, which the store fills
-    /// again once no slot holds it.
     fn drop_covered_groups(&mut self, latest: u64) {
         while let Some(&next) = self.keyframes.get(1)
             && latest - next + 1 >= self.span
@@ -103,17 +85,14 @@ impl Ring {
         }
     }
 
-    /// The frame index of the oldest buffered packet.
     pub(crate) fn first_index(&self) -> Option<u64> {
         self.packets.front().map(Entry::index)
     }
 
-    /// The buffered packets, oldest first; cheap, since packets and pages are shared.
     pub(crate) fn snapshot(&self) -> Vec<Entry> {
         self.packets.iter().cloned().collect()
     }
 
-    /// Frames between the first buffered packet and the newest, inclusive.
     #[cfg(test)]
     pub(crate) fn frames(&self) -> u64 {
         match (self.packets.front(), self.packets.back()) {
@@ -122,7 +101,6 @@ impl Ring {
         }
     }
 
-    /// Bytes of packet data currently buffered.
     #[cfg(test)]
     pub(crate) const fn bytes(&self) -> usize {
         self.bytes
@@ -150,7 +128,6 @@ mod tests {
             let snapshot = ring.snapshot();
             assert!(snapshot[0].keyframe());
             assert!(ring.frames() >= (index + 1).min(10));
-            // Never more than one extra group of pictures beyond the span.
             assert!(ring.frames() < 10 + 4);
             assert_eq!(ring.bytes(), snapshot.len() * 10);
         }
@@ -176,7 +153,6 @@ mod tests {
         for index in [0, 1, 2, 3, 20, 21, 22, 23, 24] {
             ring.push(packet(index, 4)).unwrap();
         }
-        // Frame 20 starts a group that alone covers 5 frames; the earlier group is still needed.
         assert_eq!(ring.snapshot()[0].index(), 0);
 
         ring.push(packet(28, 4)).unwrap();
@@ -225,7 +201,6 @@ mod tests {
         assert!(matches!(snapshot[1], Entry::Stored { .. }));
         assert!(matches!(snapshot[2], Entry::Memory(_)));
         assert!(matches!(snapshot[3], Entry::Memory(_)));
-        // The stored packets are still read back, from pages the slots keep alive.
         assert_eq!(fetch(&snapshot).unwrap().len(), 4);
         assert!(ring.store.is_none());
     }

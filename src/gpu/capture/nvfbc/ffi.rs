@@ -1,15 +1,5 @@
-//! The parts of NVIDIA's Capture SDK interface for Windows (`NvFBC.h` and `NvFBCToDx9Vid.h`,
-//! SDK 7, `NVFBC_DLL_VERSION` 0x70) this program uses.
-//!
-//! As in the NVENC bindings, only the fields that are set or read have names, and every size
-//! and named offset is checked at compile time against what the C headers produce for 64-bit
-//! Windows. The capture object is a C++ class with only pure virtual methods and no virtual
-//! destructor; its table is spelled out in header order.
-//!
-//! One structure, [`ProcessSource`], is not in the SDK: it is what the driver's own clients
-//! pass through the header's second private-data pointer to grab one process's frames, as read
-//! out of `NvFBC64.dll` by the open-source rbuf recorder (`docs/nvfbc-source.md`). It is only
-//! used when the experimental switch in the parent module asks for it.
+//! The parts of NVIDIA Capture SDK 7 (`NvFBC.h`, `NvFBCToDx9Vid.h`, `NVFBC_DLL_VERSION` 0x70)
+//! this program uses, laid out for 64-bit Windows; [`ProcessSource`] is not in the SDK.
 
 use std::{
     ffi::c_void,
@@ -17,11 +7,9 @@ use std::{
     mem::{offset_of, size_of},
 };
 
-/// `NVFBC_DLL_VERSION`, which every structure's version carries.
 const DLL_VERSION: u32 = 0x70;
 
-/// `NVFBC_STRUCT_VERSION`: the size, the structure's own version and the library version.
-/// Every structure is a few hundred bytes, as the assertions below check.
+/// `NVFBC_STRUCT_VERSION`.
 #[expect(clippy::cast_possible_truncation)]
 pub(super) const fn struct_version(size: usize, version: u32) -> u32 {
     size as u32 | (version << 16) | (DLL_VERSION << 24)
@@ -32,46 +20,40 @@ pub(super) const CREATE_PARAMS_VER: u32 = struct_version(size_of::<CreateParams>
 pub(super) const TODX9VID_SETUP_PARAMS_VER: u32 = struct_version(size_of::<SetupParams>(), 3);
 pub(super) const TODX9VID_GRAB_FRAME_PARAMS_VER: u32 =
     struct_version(size_of::<GrabFrameParams>(), 1);
-/// The version word of [`ProcessSource`], built the same way as the SDK's.
 pub(super) const PROCESS_SOURCE_VER: u32 = struct_version(size_of::<ProcessSource>(), 1);
 
-// What the header's macros evaluate to for 64-bit Windows.
+// What the header's macros evaluate to.
 const _: () = assert!(STATUS_VER == 0x7002_0200);
 const _: () = assert!(CREATE_PARAMS_VER == 0x7002_0200);
 const _: () = assert!(TODX9VID_SETUP_PARAMS_VER == 0x7003_0100);
 const _: () = assert!(TODX9VID_GRAB_FRAME_PARAMS_VER == 0x7001_0100);
 const _: () = assert!(PROCESS_SOURCE_VER == 0x7001_00C8);
 
-/// `NVFBC_TO_DX9_VID`: capture into Direct3D 9 surfaces in video memory.
+/// `NVFBC_TO_DX9_VID`.
 pub(super) const TO_DX9_VID: u32 = 0x2003;
-/// `NVFBC_STATE_ENABLE`: turn NvFBC on in the driver.
+/// `NVFBC_STATE_ENABLE`.
 pub(super) const STATE_ENABLE: u32 = 1;
-/// `NVFBC_TODX9VID_ARGB`: 32-bit words with blue in the low byte, `D3DFMT_A8R8G8B8`.
+/// `NVFBC_TODX9VID_ARGB`: `D3DFMT_A8R8G8B8`.
 pub(super) const TODX9VID_ARGB: u32 = 0;
-/// `NVFBC_TODX9VID_NV12`: a plane of 8-bit luma, then a half-height plane of interleaved 8-bit
-/// chroma, converted with the BT.601 matrix into limited range. Not listed in the SDK 7.1 guide;
-/// the driver accepts it (`docs/backend-overhead.md`, "NV12 from NvFBC").
+/// `NVFBC_TODX9VID_NV12`: BT.601 limited range. Not in the SDK 7.1 guide; the driver accepts it.
 pub(super) const TODX9VID_NV12: u32 = 1;
-/// `NVFBC_TODX9VID_SOURCEMODE_FULL`: the whole display at its own size.
+/// `NVFBC_TODX9VID_SOURCEMODE_*`.
 pub(super) const TODX9VID_SOURCEMODE_FULL: u32 = 0;
-/// `NVFBC_TODX9VID_SOURCEMODE_SCALE`: the whole display scaled to the target size.
 pub(super) const TODX9VID_SOURCEMODE_SCALE: u32 = 1;
-/// `NVFBC_TODX9VID_SOURCEMODE_CROP`: a rectangle of the target size from the start point.
 pub(super) const TODX9VID_SOURCEMODE_CROP: u32 = 2;
-/// `NVFBC_TODX9VID_NOWAIT`: return the current picture rather than wait for a new one.
+/// `NVFBC_TODX9VID_NOWAIT`.
 pub(super) const TODX9VID_NOWAIT: u32 = 0x1;
-/// `NVFBC_TODX9VID_WAIT_WITH_TIMEOUT`: wait for a new picture, at most `wait_time` ms.
+/// `NVFBC_TODX9VID_WAIT_WITH_TIMEOUT`.
 pub(super) const TODX9VID_WAIT_WITH_TIMEOUT: u32 = 0x10;
 /// `ProcessSource::capture_mode` for one process's presented frames.
 pub(super) const CAPTURE_MODE_PROCESS: u32 = 1;
 
-/// `NvFBCStatusEx::bIsCapturePossible`, the lowest of its flag bits.
+/// `NvFBCStatusEx::bIsCapturePossible`.
 pub(super) const STATUS_CAPTURE_POSSIBLE: u32 = 1 << 0;
-/// `NVFBC_TODX9VID_SETUP_PARAMS::bWithHWCursor`: draw the mouse cursor into the picture.
+/// `NVFBC_TODX9VID_SETUP_PARAMS::bWithHWCursor`.
 pub(super) const SETUP_WITH_HW_CURSOR: u32 = 1 << 0;
 
-/// `NVFBCRESULT`; kept as an integer, since a driver may return values this program does not
-/// know.
+/// `NVFBCRESULT`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gpu) struct Status(i32);
@@ -88,7 +70,6 @@ impl Status {
     pub(super) const INVALID_TARGET: Self = Self(-18);
     pub(super) const DYNAMIC_DISABLE: Self = Self(-20);
 
-    /// `Ok` for `SUCCESS`, and any other status as the error.
     pub(super) fn ok(self) -> Result<(), Self> {
         if self == Self::SUCCESS {
             Ok(())
@@ -97,7 +78,6 @@ impl Status {
         }
     }
 
-    /// The header's name for the status.
     const fn name(self) -> &'static str {
         match self.0 {
             0 => "NVFBC_SUCCESS",
@@ -128,19 +108,14 @@ impl Status {
     }
 }
 
-/// The name with the raw code, which stays meaningful for codes newer than this program.
 impl fmt::Display for Status {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({})", self.name(), self.0)
     }
 }
 
-/// Structures for which every bit being zero is a valid value, as the API expects of the parts
-/// a caller does not set.
-///
 /// # Safety
-///
-/// Implementors contain only integers and raw pointers.
+/// Implementors contain only integers and raw pointers, so all-zero is a valid value.
 pub(super) unsafe trait Zeroed: Sized {
     fn zeroed() -> Self {
         // SAFETY: guaranteed by the trait's contract.
@@ -209,10 +184,8 @@ const _: () = assert!(offset_of!(CreateParams, private_data2) == 64);
 const _: () = assert!(offset_of!(CreateParams, private_data2_size) == 72);
 const _: () = assert!(offset_of!(CreateParams, _reserved) == 76);
 
-/// `NvFBCCreateParamsPrivateData`: which process's presented frames a session grabs instead
-/// of a display's scanned-out frame. The name, the 200-byte size and the three leading fields
-/// are the ones rbuf read out of `NvFBC64.dll`'s log strings and parameter checks; nothing of
-/// it is in the public SDK, so the driver may refuse it or change it.
+/// `NvFBCCreateParamsPrivateData`, not in the public SDK: name, 200-byte size and leading
+/// fields as rbuf read them out of `NvFBC64.dll`.
 #[repr(C)]
 pub(super) struct ProcessSource {
     pub(super) version: u32,
@@ -225,7 +198,7 @@ unsafe impl Zeroed for ProcessSource {}
 const _: () = assert!(size_of::<ProcessSource>() == 200);
 const _: () = assert!(offset_of!(ProcessSource, target_pid) == 8);
 
-/// `NVFBC_TODX9VID_OUT_BUF`: a surface the client created, which NvFBC draws into.
+/// `NVFBC_TODX9VID_OUT_BUF`.
 #[repr(C)]
 pub(super) struct OutputBuffer {
     pub(super) primary: *mut c_void,
@@ -269,16 +242,16 @@ const _: () = assert!(offset_of!(SetupParams, _reserved) == 72);
 pub(super) struct GrabFrameParams {
     pub(super) version: u32,
     pub(super) flags: u32,
-    /// The output size for `TODX9VID_SOURCEMODE_SCALE` and the rectangle's size for `_CROP`.
+    /// For `TODX9VID_SOURCEMODE_SCALE` and `_CROP`.
     pub(super) target_width: u32,
     pub(super) target_height: u32,
-    /// The rectangle's top left corner for `TODX9VID_SOURCEMODE_CROP`.
+    /// For `TODX9VID_SOURCEMODE_CROP`.
     pub(super) start_x: u32,
     pub(super) start_y: u32,
     pub(super) grab_mode: u32,
     pub(super) buffer_index: u32,
     pub(super) grab_info: *mut FrameGrabInfo,
-    /// Milliseconds to wait for a new picture with `TODX9VID_WAIT_WITH_TIMEOUT`.
+    /// Milliseconds, with `TODX9VID_WAIT_WITH_TIMEOUT`.
     pub(super) wait_time: u32,
     _reserved: [u32; 23],
     _reserved_pointers: [*mut c_void; 15],
@@ -294,22 +267,22 @@ const _: () = assert!(offset_of!(GrabFrameParams, grab_info) == 32);
 const _: () = assert!(offset_of!(GrabFrameParams, wait_time) == 40);
 const _: () = assert!(offset_of!(GrabFrameParams, _reserved) == 44);
 
-/// `NvFBCFrameGrabInfo`: what the driver reports about a grab.
+/// `NvFBCFrameGrabInfo`.
 #[repr(C)]
 pub(super) struct FrameGrabInfo {
     pub(super) width: u32,
     pub(super) height: u32,
-    /// The width the driver padded each row to, in pixels.
+    /// Row pitch in pixels.
     pub(super) buffer_width: u32,
     _reserved: u32,
     _overlay_active: i32,
     pub(super) must_recreate: i32,
     _first_buffer_to_igpu_capture: [u32; 6],
-    /// `dwSourcePID`: "which process caused the last screen update that got grabbed".
+    /// `dwSourcePID`.
     pub(super) source_pid: u32,
     _reserved3: u32,
     _hdr_bits: u32,
-    /// `dwWaitModeUsed`: how the grab waited, which can differ from the flags asked for.
+    /// `dwWaitModeUsed`; can differ from the flags asked for.
     pub(super) wait_mode_used: u32,
     _reserved2: [u32; 11],
 }
@@ -320,17 +293,14 @@ const _: () = assert!(offset_of!(FrameGrabInfo, must_recreate) == 20);
 const _: () = assert!(offset_of!(FrameGrabInfo, source_pid) == 48);
 const _: () = assert!(offset_of!(FrameGrabInfo, wait_mode_used) == 60);
 
-/// An `INvFBCToDx9Vid_v3` object: a pointer to its method table.
-///
-/// Only ever seen behind a pointer `NvFBC_CreateEx` returned. Such a pointer, and the table it
-/// leads to, stay valid until `release` is called on it, provided the library that created it
-/// stays loaded; the table itself lives in the library.
+/// `INvFBCToDx9Vid_v3`: valid from `NvFBC_CreateEx` until `release`, while the library is
+/// loaded; the method table lives in the library.
 #[repr(C)]
 pub(super) struct ToDx9Vid {
     pub(super) vtable: *const ToDx9VidVtable,
 }
 
-/// `INvFBCToDx9Vid_v3`'s methods, in declaration order.
+/// In declaration order; pure virtual, no virtual destructor.
 #[repr(C)]
 pub(super) struct ToDx9VidVtable {
     pub(super) set_up: unsafe extern "system" fn(*mut ToDx9Vid, *mut SetupParams) -> Status,

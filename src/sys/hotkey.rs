@@ -1,5 +1,4 @@
-//! The global hotkey that saves a clip. It is written as text such as `Alt+F10` in the settings
-//! and registered with Windows for the application window, so it fires while a game has focus.
+//! The global hotkey that saves a clip, written as text such as `Alt+F10`.
 
 use std::{fmt, str::FromStr};
 use thiserror::Error;
@@ -17,15 +16,12 @@ const MODIFIERS: [(u16, &str); 4] = [
 ];
 
 const VK_F1: u16 = 0x70;
-/// Function keys run from F1 to F24.
 const FUNCTION_KEY_COUNT: u16 = 24;
 const VK_NUMPAD0: u16 = 0x60;
-/// Number-pad digits run from Numpad0 to Numpad9.
 const NUMPAD_DIGIT_COUNT: u16 = 10;
 const VK_PRINT_SCREEN: u16 = 0x2C;
 const VK_PAUSE: u16 = 0x13;
 const VK_SCROLL_LOCK: u16 = 0x91;
-/// Named keys other than letters, digits, function keys and the number pad.
 const NAMED_KEYS: [(u16, &str); 11] = [
     (0x20, "Space"),
     (0x2D, "Insert"),
@@ -39,7 +35,7 @@ const NAMED_KEYS: [(u16, &str); 11] = [
     (VK_SCROLL_LOCK, "ScrollLock"),
     (0xC0, "`"),
 ];
-/// Keys that may stand alone: pressing them never types text.
+/// Pressing these never types text, so they may stand alone.
 const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
 
 #[derive(Debug, Error)]
@@ -54,7 +50,6 @@ pub(crate) enum ParseError {
     NeedsModifier(String),
 }
 
-/// Modifiers (`MOD_*` flags) and a virtual-key code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hotkey {
     modifiers: u16,
@@ -92,7 +87,6 @@ impl fmt::Display for Hotkey {
     }
 }
 
-/// The `MOD_*` flags of the modifier names, each of which may appear once.
 fn parse_modifiers<'a>(names: impl Iterator<Item = &'a str>) -> Result<u16, ParseError> {
     let mut modifiers = 0;
     for name in names {
@@ -105,7 +99,6 @@ fn parse_modifiers<'a>(names: impl Iterator<Item = &'a str>) -> Result<u16, Pars
     Ok(modifiers)
 }
 
-/// The `MOD_*` flag of a modifier name, in any case.
 fn modifier(name: &str) -> Option<u16> {
     match name.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => Some(MOD_CONTROL),
@@ -116,7 +109,6 @@ fn modifier(name: &str) -> Option<u16> {
     }
 }
 
-/// The virtual-key code of a key name, in any case.
 fn key_code(name: &str) -> Option<u16> {
     let upper = name.to_ascii_uppercase();
     letter_or_digit(&upper)
@@ -125,7 +117,6 @@ fn key_code(name: &str) -> Option<u16> {
         .or_else(|| named_key(name))
 }
 
-/// The code of a single letter or digit, which is its upper-case character.
 fn letter_or_digit(upper: &str) -> Option<u16> {
     let mut chars = upper.chars();
     match (chars.next(), chars.next()) {
@@ -136,7 +127,6 @@ fn letter_or_digit(upper: &str) -> Option<u16> {
     }
 }
 
-/// The code of `F1` to `F24`.
 fn function_key(upper: &str) -> Option<u16> {
     upper
         .strip_prefix('F')
@@ -145,7 +135,6 @@ fn function_key(upper: &str) -> Option<u16> {
         .map(|number| VK_F1 + number - 1)
 }
 
-/// The code of `Numpad0` to `Numpad9`.
 fn numpad_digit(upper: &str) -> Option<u16> {
     upper
         .strip_prefix("NUMPAD")
@@ -154,7 +143,6 @@ fn numpad_digit(upper: &str) -> Option<u16> {
         .map(|digit| VK_NUMPAD0 + digit)
 }
 
-/// The code of one of `NAMED_KEYS`.
 fn named_key(name: &str) -> Option<u16> {
     NAMED_KEYS
         .iter()
@@ -162,12 +150,10 @@ fn named_key(name: &str) -> Option<u16> {
         .map(|(code, _)| *code)
 }
 
-/// Whether a key may be the hotkey without a modifier: pressing it never types text.
 fn may_stand_alone(key: u16) -> bool {
     is_function_key(key) || STANDALONE_KEYS.contains(&key)
 }
 
-/// The name of a key as the hotkey is written, the reverse of `key_code`.
 fn key_label(key: u16) -> String {
     if is_function_key(key) {
         return format!("F{}", key - VK_F1 + 1);
@@ -181,12 +167,10 @@ fn key_label(key: u16) -> String {
     char::from_u32(u32::from(key)).map_or_else(|| format!("{key:#04x}"), String::from)
 }
 
-/// Whether a key is one of `F1` to `F24`.
 const fn is_function_key(key: u16) -> bool {
     key >= VK_F1 && key < VK_F1 + FUNCTION_KEY_COUNT
 }
 
-/// Whether a key is one of `Numpad0` to `Numpad9`.
 const fn is_numpad_digit(key: u16) -> bool {
     key >= VK_NUMPAD0 && key < VK_NUMPAD0 + NUMPAD_DIGIT_COUNT
 }
@@ -200,7 +184,6 @@ mod native {
     use thiserror::Error;
     use winsafe::{self as w, co};
 
-    /// The `WM_HOTKEY` identifier of the save hotkey.
     pub(crate) const SAVE_HOTKEY_ID: i32 = 1;
 
     #[derive(Debug, Error)]
@@ -211,11 +194,8 @@ mod native {
         System(Hotkey, co::ERROR),
     }
 
-    /// Makes `hotkey` save a clip, replacing the hotkey registered before. Held keys do not
-    /// repeat it.
     pub(crate) fn register(window: &w::HWND, hotkey: Hotkey) -> Result<(), RegisterError> {
         let (modifiers, key) = system_codes(hotkey);
-        // Nothing may be registered yet; that is not an error.
         let _ = window.UnregisterHotKey(SAVE_HOTKEY_ID);
         window
             .RegisterHotKey(SAVE_HOTKEY_ID, modifiers, key)
@@ -228,12 +208,9 @@ mod native {
             })
     }
 
-    /// The hotkey's modifiers, with `NOREPEAT` added, and key as the types `RegisterHotKey`
-    /// takes.
     #[expect(unsafe_code)]
     fn system_codes(hotkey: Hotkey) -> (co::MOD, co::VK) {
-        // SAFETY: `MOD` and `VK` are plain newtypes over the flag and key values; every value
-        // the parser produces is representable.
+        // SAFETY: `MOD` and `VK` are plain newtypes; every parsed value is representable.
         unsafe {
             (
                 co::MOD::from_raw(hotkey.modifiers) | co::MOD::NOREPEAT,

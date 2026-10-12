@@ -1,11 +1,4 @@
-//! The CUDA driver API (`nvcuda.dll`, installed with the NVIDIA driver), as far as NvFBC's
-//! CUDA interface and NVENC's CUDA input need it: the device, its primary context, and plain
-//! device memory for the frames. No CUDA toolkit is involved; the library is loaded at run time
-//! like NVENC and NvFBC, and only the handful of entry points below are looked up.
-//!
-//! The entry points are the ones `cuda.h` resolves the plain names to: `cuMemAlloc` is
-//! `cuMemAlloc_v2` (64-bit device pointers), and so on; the names were checked against the
-//! loader `FFmpeg` ships for the same library.
+//! The CUDA driver API (`nvcuda.dll`), loaded at run time: the device, its primary context and device memory.
 
 use std::{
     ffi::{c_char, c_void},
@@ -21,7 +14,6 @@ use windows::{
     core::{Owned, PCSTR, w},
 };
 
-/// Why a CUDA call could not be made, or failed.
 #[derive(Debug, Error)]
 pub(crate) enum CudaError {
     #[error("nvcuda.dll was not found; install or update the NVIDIA driver")]
@@ -32,8 +24,7 @@ pub(crate) enum CudaError {
     Call(&'static str, Status),
 }
 
-/// `CUresult`; kept as an integer, since a driver may return values this program does not
-/// know.
+/// `CUresult`, kept raw: a driver may return codes this program does not know.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Status(i32);
@@ -42,7 +33,6 @@ impl Status {
     pub(super) const SUCCESS: Self = Self(0);
     const UNKNOWN: Self = Self(999);
 
-    /// `Ok` for `SUCCESS`, and any other status as the error of `call`.
     fn ok(self, call: &'static str) -> Result<(), CudaError> {
         if self == Self::SUCCESS {
             Ok(())
@@ -51,7 +41,6 @@ impl Status {
         }
     }
 
-    /// The header's name for the status, for the codes the calls here can return.
     const fn name(self) -> &'static str {
         match self.0 {
             0 => "CUDA_SUCCESS",
@@ -75,42 +64,37 @@ impl Status {
     }
 }
 
-/// The name with the raw code, which stays meaningful for codes newer than this program.
 impl fmt::Display for Status {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({})", self.name(), self.0)
     }
 }
 
-/// `CUdevice`: a device ordinal.
+/// `CUdevice`.
 pub(super) type Device = i32;
 
-/// `CUdeviceptr`: an address in device memory, which is 64 bits wide on this platform.
+/// `CUdeviceptr`.
 pub(super) type DevicePointer = u64;
 
-/// `CUcontext`: a context the driver made, which stays valid until whoever made it destroys
-/// or releases it.
+/// `CUcontext`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Context(NonNull<c_void>);
 
-// SAFETY: a CUDA context is a handle the driver lets any thread make current and use; nothing
-// about it is tied to the thread that made it.
+// SAFETY: a context handle may be made current and used from any thread.
 unsafe impl Send for Context {}
 // SAFETY: as above; the handle is only ever read.
 unsafe impl Sync for Context {}
 
 impl Context {
-    /// The handle as other NVIDIA APIs take it.
     pub(super) fn as_ptr(self) -> *mut c_void {
         self.0.as_ptr()
     }
 }
 
-/// Fits `LUID`'s eight bytes, as `cuDeviceGetLuid` writes them.
 const LUID_BYTES: usize = 8;
 
-// The entry points, with the signatures `cuda.h` declares for them.
+// Signatures from `cuda.h`; the `_v2` names are what the plain ones resolve to.
 type Init = unsafe extern "system" fn(u32) -> Status;
 type DriverGetVersion = unsafe extern "system" fn(*mut i32) -> Status;
 type DeviceGetCount = unsafe extern "system" fn(*mut i32) -> Status;
@@ -130,8 +114,6 @@ type StreamSynchronize = unsafe extern "system" fn(*mut c_void) -> Status;
 type CtxSynchronize = unsafe extern "system" fn() -> Status;
 type CtxSetFlags = unsafe extern "system" fn(u32) -> Status;
 
-/// The loaded driver library and its entry points. Everything made through it (contexts,
-/// memory) must be released before it is dropped, which unloads the library.
 pub(super) struct Driver {
     init: Init,
     get_version: DriverGetVersion,
@@ -151,23 +133,18 @@ pub(super) struct Driver {
     stream_synchronize: StreamSynchronize,
     ctx_synchronize: CtxSynchronize,
     ctx_set_flags: CtxSetFlags,
-    /// Declared last, so it is unloaded after the entry points above are no longer reachable.
+    /// Declared last so it is unloaded last.
     _library: Owned<HMODULE>,
 }
 
-// SAFETY: the driver library stays loaded while the `Owned` module handle lives, and the CUDA
-// driver API is thread-safe: its entry points may be called from any thread, with a context
-// made current there.
+// SAFETY: the library stays loaded while this lives, and the driver API is thread-safe.
 unsafe impl Send for Driver {}
 // SAFETY: as above; the entry points are plain function pointers that are only read.
 unsafe impl Sync for Driver {}
 
-/// Looks `name` up in `library` as an entry point of type `T`, which must be the function
-/// pointer type `cuda.h` declares for that export.
 macro_rules! entry_point {
     ($library:expr, $name:literal, $type:ty) => {{
-        // SAFETY: looks a symbol up in the loaded CUDA driver library; the caller names the
-        // type `cuda.h` declares for the export.
+        // SAFETY: looks a symbol up in the loaded library.
         let address = unsafe { GetProcAddress($library, PCSTR(concat!($name, "\0").as_ptr())) }
             .ok_or(CudaError::MissingEntryPoint($name))?;
         // SAFETY: the export has the declared signature, as the macro's contract says.
@@ -176,10 +153,8 @@ macro_rules! entry_point {
 }
 
 impl Driver {
-    /// Loads the driver library and initializes the driver API.
     pub(super) fn load() -> Result<Self, CudaError> {
-        // The driver installs the library in System32; never look anywhere a planted copy
-        // could be.
+        // System32 only, never a planted copy.
         // SAFETY: loads a system library by name.
         let library =
             unsafe { LoadLibraryExW(w!("nvcuda.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
@@ -221,7 +196,6 @@ impl Driver {
         Ok(driver)
     }
 
-    /// The driver's version as it reports it: 1000 × major + 10 × minor.
     pub(super) fn version(&self) -> Result<i32, CudaError> {
         let mut version = 0;
         // SAFETY: writes one integer.
@@ -229,7 +203,6 @@ impl Driver {
         Ok(version)
     }
 
-    /// The device whose adapter has `luid`, if the driver knows one.
     pub(super) fn device_with_luid(&self, luid: LUID) -> Result<Option<Device>, CudaError> {
         let wanted = luid_bytes(luid);
         let mut count = 0;
@@ -241,8 +214,7 @@ impl Driver {
             unsafe { (self.device_get)(&raw mut device, ordinal) }.ok("cuDeviceGet")?;
             let mut bytes = [0 as c_char; LUID_BYTES];
             let mut node_mask = 0;
-            // SAFETY: the buffer holds the eight bytes the call writes; both out-parameters
-            // outlive the call.
+            // SAFETY: the buffer holds the eight bytes written.
             unsafe { (self.device_get_luid)(bytes.as_mut_ptr(), &raw mut node_mask, device) }
                 .ok("cuDeviceGetLuid")?;
             if bytes.map(i8::cast_unsigned) == wanted {
@@ -252,7 +224,6 @@ impl Driver {
         Ok(None)
     }
 
-    /// The device with ordinal 0, the one CUDA considers first.
     pub(super) fn first_device(&self) -> Result<Device, CudaError> {
         let mut device = 0;
         // SAFETY: the out-parameter is written on success.
@@ -260,28 +231,21 @@ impl Driver {
         Ok(device)
     }
 
-    /// Takes a reference on the primary context of `device`, creating it the first time, and
-    /// returns it; every retain is undone with [`release_primary_context`](Self::release_primary_context).
     pub(super) fn retain_primary_context(&self, device: Device) -> Result<Context, CudaError> {
         let mut context = ptr::null_mut();
         // SAFETY: the out-parameter is written on success.
         unsafe { (self.device_primary_ctx_retain)(&raw mut context, device) }
             .ok("cuDevicePrimaryCtxRetain")?;
-        // A driver that reports success without a context is treated as having failed in an
-        // unknown way.
         NonNull::new(context)
             .map(Context)
             .ok_or(CudaError::Call("cuDevicePrimaryCtxRetain", Status::UNKNOWN))
     }
 
-    /// Gives back one reference on the primary context of `device`; the context is destroyed
-    /// with the last one.
     pub(super) fn release_primary_context(&self, device: Device) -> Result<(), CudaError> {
         // SAFETY: undoes a `retain_primary_context` on the same device.
         unsafe { (self.device_primary_ctx_release)(device) }.ok("cuDevicePrimaryCtxRelease")
     }
 
-    /// The context current on this thread, if any.
     pub(super) fn current_context(&self) -> Result<Option<Context>, CudaError> {
         let mut context = ptr::null_mut();
         // SAFETY: the out-parameter is written on success, null when none is current.
@@ -289,14 +253,11 @@ impl Driver {
         Ok(NonNull::new(context).map(Context))
     }
 
-    /// Makes `context` current on this thread, on top of whatever was.
     pub(super) fn push_context(&self, context: Context) -> Result<(), CudaError> {
         // SAFETY: a live context.
         unsafe { (self.ctx_push_current)(context.as_ptr()) }.ok("cuCtxPushCurrent")
     }
 
-    /// Takes the current context off this thread, making the one below it current again, and
-    /// returns it.
     pub(super) fn pop_context(&self) -> Result<Option<Context>, CudaError> {
         let mut context = ptr::null_mut();
         // SAFETY: the out-parameter is written on success.
@@ -304,7 +265,6 @@ impl Driver {
         Ok(NonNull::new(context).map(Context))
     }
 
-    /// Allocates `bytes` of device memory in the current context, aligned for any use.
     pub(super) fn allocate(&self, bytes: usize) -> Result<DevicePointer, CudaError> {
         let mut pointer = 0;
         // SAFETY: a context is current; the out-parameter is written on success.
@@ -312,13 +272,11 @@ impl Driver {
         Ok(pointer)
     }
 
-    /// Frees memory from [`allocate`](Self::allocate), which nothing may still read.
     pub(super) fn free(&self, pointer: DevicePointer) -> Result<(), CudaError> {
         // SAFETY: the pointer came from `allocate` and is freed once.
         unsafe { (self.mem_free)(pointer) }.ok("cuMemFree")
     }
 
-    /// Bytes of device memory free and in all, for the current context's device.
     pub(super) fn memory_info(&self) -> Result<(usize, usize), CudaError> {
         let (mut free, mut total) = (0, 0);
         // SAFETY: a context is current; both out-parameters are written on success.
@@ -326,41 +284,31 @@ impl Driver {
         Ok((free, total))
     }
 
-    /// Copies `into.len()` bytes of device memory at `from` into `into`, waiting for the copy
-    /// and for every copy queued before it.
     pub(super) fn copy_to_host(
         &self,
         into: &mut [u8],
         from: DevicePointer,
     ) -> Result<(), CudaError> {
-        // SAFETY: the host slice is writable for exactly the length passed; a device range
-        // that is not allocated is reported by the driver, not written from.
+        // SAFETY: the host slice is writable for the length passed.
         unsafe { (self.memcpy_dtoh)(into.as_mut_ptr().cast(), from, into.len()) }.ok("cuMemcpyDtoH")
     }
 
-    /// Queues a copy of `bytes` of device memory from `from` to `to`, both allocated in the
-    /// current context, which may still be under way when the call returns.
     pub(super) fn copy_on_device(
         &self,
         to: DevicePointer,
         from: DevicePointer,
         bytes: usize,
     ) -> Result<(), CudaError> {
-        // SAFETY: the copy touches device memory only, through the driver, which reports a
-        // range that is not allocated instead of touching host memory.
+        // SAFETY: device memory only; the driver rejects an unallocated range.
         unsafe { (self.memcpy_dtod)(to, from, bytes) }.ok("cuMemcpyDtoD")
     }
 
-    /// Waits for every copy queued so far in the current context.
     pub(super) fn synchronize(&self) -> Result<(), CudaError> {
         // SAFETY: the null stream is the context's default queue.
         unsafe { (self.stream_synchronize)(ptr::null_mut()) }.ok("cuStreamSynchronize")
     }
 
-    /// Waits for all the work queued in the current context, on every stream, the driver's
-    /// own included.
-    /// Makes the current context's synchronising calls block the thread rather than spin
-    /// (`CU_CTX_SCHED_BLOCKING_SYNC`).
+    /// `CU_CTX_SCHED_BLOCKING_SYNC`: synchronising calls block instead of spinning.
     pub(super) fn block_on_synchronize(&self) -> Result<(), CudaError> {
         // SAFETY: a context is current; the flag is a documented scheduling flag.
         unsafe { (self.ctx_set_flags)(0x04) }.ok("cuCtxSetFlags")
@@ -372,7 +320,6 @@ impl Driver {
     }
 }
 
-/// A LUID's eight bytes in memory order, which is how `cuDeviceGetLuid` reports them.
 fn luid_bytes(luid: LUID) -> [u8; LUID_BYTES] {
     let mut bytes = [0; LUID_BYTES];
     bytes[..4].copy_from_slice(&luid.LowPart.to_le_bytes());

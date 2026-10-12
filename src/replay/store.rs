@@ -1,26 +1,16 @@
-//! Where the buffer's packets may be kept instead of system memory. A store hands out slots in
-//! pages of its own (the GPU's memory, say) as packets arrive, and a save reads whole runs of
-//! slots back from a page at a time, since reading each packet on its own would cost a round
-//! trip per frame. A slot keeps its page alive, so a page is free to fill again once the
-//! buffer has dropped every packet in it and no save is still reading it.
+//! Stores that keep the buffer's packets outside system memory, in pages that their slots keep
+//! alive.
 
 use super::Packet;
 use std::{collections::VecDeque, error::Error, fmt, ptr, sync::Arc};
 use thiserror::Error;
 
-// What the stores share: those in GPU memory (`gpu::vram`, `gpu::cuda_output`) and the one on
-// disk (`disk`).
-
-/// Bytes in a page of a store. A packet never straddles two pages, so a page's last bytes may go
-/// unused.
 pub(crate) const PAGE_BYTES: usize = 64 << 20;
-/// Bytes a save reads back at a time: the size of the buffer in system memory it reads through.
+/// Bytes a save reads back at a time.
 pub(crate) const CHUNK_BYTES: usize = 32 << 20;
-/// Bytes in a mebibyte, for the log.
 pub(crate) const MEBIBYTE: usize = 1 << 20;
 
-/// Pages to reserve up front for `bytes` of packets: enough to hold them, and one more for the
-/// group of pictures the buffer keeps beyond its span.
+/// Pages for `bytes` of packets, plus one for the group of pictures kept beyond the span.
 pub(crate) fn reserved_pages(bytes: u64) -> usize {
     usize::try_from(bytes)
         .unwrap_or(usize::MAX)
@@ -28,13 +18,10 @@ pub(crate) fn reserved_pages(bytes: u64) -> usize {
         .saturating_add(1)
 }
 
-/// Why a store could not take a packet or give it back.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
-    /// The packet is larger than a page of the store.
     #[error("a {0} byte packet is larger than a page of the store")]
     TooLarge(usize),
-    /// A call into the store's memory failed; `step` says which, in words for the log.
     #[error("{step}: {source}")]
     Call {
         step: &'static str,
@@ -44,7 +31,6 @@ pub(crate) enum StoreError {
 }
 
 impl StoreError {
-    /// Wraps the error of `step`, for `map_err`.
     pub(crate) fn call<E: Error + Send + Sync + 'static>(
         step: &'static str,
     ) -> impl FnOnce(E) -> Self {
@@ -55,11 +41,8 @@ impl StoreError {
     }
 }
 
-/// A page of a store: a block of its memory that slots are carved from in order, and read
-/// back in bulk.
 pub(crate) trait Page: Send + Sync {
-    /// Reads the `length` bytes at `offset`, handing `sink` each piece as it arrives with the
-    /// piece's offset from `offset`; the pieces come in order and cover the range exactly.
+    /// Hands `sink` the range in pieces, in order, each with its offset from `offset`.
     fn read(
         &self,
         offset: usize,
@@ -68,8 +51,7 @@ pub(crate) trait Page: Send + Sync {
     ) -> Result<(), StoreError>;
 }
 
-/// Where a packet was put: a range of a page. Cloning a slot keeps its page alive, so a save
-/// can read it after the store has dropped the packet.
+/// A range of a page; a clone keeps the page alive.
 #[derive(Clone)]
 pub(crate) struct Slot {
     pub(crate) page: Arc<dyn Page>,
@@ -94,27 +76,19 @@ impl Slot {
     }
 }
 
-/// A store of packets outside system memory.
 pub(crate) trait Store: Send {
-    /// Puts `data` away and says where.
     fn put(&mut self, data: &[u8]) -> Result<Slot, StoreError>;
 }
 
-/// The pages of a store, filled one after another: which is being filled and how far, which
-/// are free to fill again, and the reclaiming of pages that nothing holds any more.
 pub(crate) struct Pages<P> {
-    /// Pages with packets in them, oldest first; the newest is the one being filled.
     used: VecDeque<Arc<P>>,
-    /// Pages with no packets in them, ready to be filled again.
     free: Vec<Arc<P>>,
-    /// Bytes of the newest page in use.
+    /// Bytes written to the newest page in use.
     fill: usize,
-    /// Bytes in a page.
     page_bytes: usize,
 }
 
 impl<P: Page + 'static> Pages<P> {
-    /// Pages of `page_bytes` each, starting with `reserved` free ones.
     pub(crate) fn new(page_bytes: usize, reserved: Vec<P>) -> Self {
         Self {
             used: VecDeque::new(),
@@ -124,9 +98,7 @@ impl<P: Page + 'static> Pages<P> {
         }
     }
 
-    /// Room for `length` bytes: the page to write them to and the offset in it. A packet never
-    /// straddles two pages; when the one being filled lacks the room, a free page is taken, or
-    /// `make` makes one.
+    /// A page and offset for `length` bytes; a packet never straddles two pages.
     pub(crate) fn place(
         &mut self,
         length: usize,
@@ -153,7 +125,6 @@ impl<P: Page + 'static> Pages<P> {
         Ok((page, offset))
     }
 
-    /// The slot for `length` bytes at `offset` of `page`, as [`place`](Self::place) gave them.
     pub(crate) fn slot(page: Arc<P>, offset: usize, length: usize) -> Slot {
         Slot {
             page: page as Arc<dyn Page>,
@@ -162,8 +133,7 @@ impl<P: Page + 'static> Pages<P> {
         }
     }
 
-    /// Frees the oldest pages that no slot holds any more: packets drop oldest first, so the
-    /// pages free up from the front. The page being filled stays in use even when empty.
+    /// Frees unheld pages from the front; the page being filled stays in use even when empty.
     fn reclaim(&mut self) {
         while self.used.len() > 1
             && let Some(page) = self.used.pop_front_if(|page| Arc::strong_count(page) == 1)
@@ -172,14 +142,12 @@ impl<P: Page + 'static> Pages<P> {
         }
     }
 
-    /// Pages made so far, in use or free.
     #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.used.len() + self.free.len()
     }
 }
 
-/// A buffered packet: held in memory, or put away in a store with only its header kept here.
 #[derive(Clone, Debug)]
 pub(crate) enum Entry {
     Memory(Arc<Packet>),
@@ -191,7 +159,6 @@ pub(crate) enum Entry {
 }
 
 impl Entry {
-    /// The packet's frame index.
     pub(crate) fn index(&self) -> u64 {
         match self {
             Self::Memory(packet) => packet.index,
@@ -206,7 +173,6 @@ impl Entry {
         }
     }
 
-    /// The packet's size in bytes.
     pub(crate) fn length(&self) -> usize {
         match self {
             Self::Memory(packet) => packet.data.len(),
@@ -215,13 +181,10 @@ impl Entry {
     }
 }
 
-/// What [`each`] calls with each entry and its packet's bytes.
 pub(crate) type Visit<'a, E> = dyn FnMut(&Entry, &[u8]) -> Result<(), E> + 'a;
 
-/// Calls `visit` with each of `entries` and its packet's bytes, in order, those put away read
-/// back from their pages: each run of neighbours in one page in a single read. Only one packet
-/// is ever held here, and only when it straddles two of the pieces a page reads back in; the
-/// others are handed over straight from the piece. Stops at the first error.
+/// Visits each entry with its bytes, reading each run of neighbours in one page in a single
+/// read.
 pub(crate) fn each<E: From<StoreError>>(
     entries: &[Entry],
     visit: &mut Visit<'_, E>,
@@ -244,7 +207,6 @@ pub(crate) fn each<E: From<StoreError>>(
     Ok(())
 }
 
-/// The packets of `entries`, those put away read back from their pages.
 #[cfg(test)]
 pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
     let mut packets = Vec::with_capacity(entries.len());
@@ -264,8 +226,7 @@ pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
     Ok(packets)
 }
 
-/// How many entries from the start of `rest`, the first of them at `first`, lie in one page
-/// one after another without overlapping: what one read can bring back.
+/// Leading entries of `rest` in the page of `first` at rising, non-overlapping offsets.
 fn run_length(rest: &[Entry], first: &Slot) -> usize {
     let mut end = first.offset;
     rest.iter()
@@ -279,7 +240,6 @@ fn run_length(rest: &[Entry], first: &Slot) -> usize {
         .count()
 }
 
-/// The slot of a stored entry.
 fn slot_of(entry: &Entry) -> &Slot {
     match entry {
         Entry::Stored { slot, .. } => slot,
@@ -287,9 +247,6 @@ fn slot_of(entry: &Entry) -> &Slot {
     }
 }
 
-/// Reads back `run`, stored packets in one page at rising offsets, in one pass over the range
-/// they span, and calls `visit` with each as it completes. A packet that straddles two pieces
-/// is gathered in `straddling`, whose room is kept for the next one.
 fn visit_run<E: From<StoreError>>(
     run: &[Entry],
     straddling: &mut Vec<u8>,
@@ -301,8 +258,7 @@ fn visit_run<E: From<StoreError>>(
     let start = first.offset;
     let span = last.offset + last.length - start;
 
-    // The page's sink cannot fail, so an error from `visit` is kept, and the rest of the read
-    // passes over.
+    // The sink cannot fail, so a `visit` error is parked and the rest of the read skipped.
     let mut failed = None;
     let mut next = 0;
     first.page.read(start, span, &mut |at, piece| {
@@ -323,9 +279,6 @@ fn visit_run<E: From<StoreError>>(
     Ok(())
 }
 
-/// Hands each packet of `run` that `piece`, the bytes at `at` of the range from `start`,
-/// completes to `visit`, from `next` on, and moves `next` past them. A packet wholly in the
-/// piece goes straight from it; one that begins or ends outside it is gathered in `straddling`.
 fn spread<E>(
     run: &[Entry],
     start: usize,
@@ -366,7 +319,6 @@ pub(crate) mod tests {
     use super::*;
     use std::{assert_matches, sync::Mutex};
 
-    /// A page in memory, read back in pieces of a few bytes to exercise the spreading.
     pub(crate) struct MemoryPage {
         bytes: Mutex<Vec<u8>>,
         piece: usize,
@@ -391,7 +343,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A store of small pages in memory. `fail_after` packets, it refuses.
     pub(crate) struct MemoryStore {
         pages: Pages<MemoryPage>,
         page_bytes: usize,
@@ -411,7 +362,6 @@ pub(crate) mod tests {
             }
         }
 
-        /// Pages the store has made.
         pub(crate) fn pages(&self) -> usize {
             self.pages.count()
         }
@@ -457,7 +407,6 @@ pub(crate) mod tests {
             stored(&mut store, 0, &[1, 2, 3, 4]),
             stored(&mut store, 1, &[5, 6, 7, 8, 9]),
             Entry::Memory(Arc::clone(&in_memory)),
-            // Does not fit the first page's last byte: a new page.
             stored(&mut store, 3, &[10, 11]),
             stored(&mut store, 4, &[12]),
         ];
@@ -488,8 +437,6 @@ pub(crate) mod tests {
 
     #[test]
     fn a_run_ends_where_the_offsets_stop_rising() {
-        // One page read back whole at once; slots that go backwards or overlap in it, as a
-        // store other than `Pages` might hand out, are read in separate passes.
         let page: Arc<MemoryPage> = Arc::new(MemoryPage {
             bytes: Mutex::new((0..10).collect()),
             piece: 10,
@@ -522,12 +469,10 @@ pub(crate) mod tests {
         let first = store.put(&[1; 6]).unwrap();
         let second = store.put(&[2; 6]).unwrap();
         assert_eq!(store.pages(), 2);
-        // The first page is empty of live slots, but the second is still being filled.
         drop(first);
         let third = store.put(&[3; 6]).unwrap();
         assert_eq!(store.pages(), 2, "the first page was filled again");
         assert_eq!(third.offset, 0);
-        // A page a slot still holds is not reused.
         drop(second);
         let held = third.clone();
         let fourth = store.put(&[4; 6]).unwrap();
