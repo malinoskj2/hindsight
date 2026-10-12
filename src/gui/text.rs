@@ -11,14 +11,16 @@ use std::{fmt::Display, path::Path};
 const NO_VALUE: &str = "—";
 /// Bytes in a gigabyte here: 1024 cubed.
 const GIGABYTE: f64 = 1_073_741_824.0;
+/// Bytes in a megabyte here: 1024 squared.
+const MEGABYTE: f64 = 1_048_576.0;
 
 pub(super) const TAB_STATUS: &str = "Status";
+pub(super) const TAB_CLIPS: &str = "Clips";
 pub(super) const TAB_SETTINGS: &str = "Settings";
 pub(super) const TAB_LOGS: &str = "Logs";
 
 pub(super) const GROUP_RECORDING: &str = "Recording";
 pub(super) const GROUP_STATS: &str = "Stats";
-pub(super) const GROUP_CLIPS: &str = "Clips";
 pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_GENERAL: &str = "General";
 
@@ -29,12 +31,10 @@ pub(super) const SESSION_WRITTEN: &str = "Session Written";
 pub(super) const SESSION_SAVED: &str = "Session Saved";
 pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
 pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
-pub(super) const LAST_CLIP: &str = "Last clip";
-pub(super) const CLIP_FOLDER: &str = "Folder";
-pub(super) const SAVE_REPLAY: &str = "Save replay";
-pub(super) const SAVING: &str = "Saving…";
-pub(super) const STOP_RECORDING: &str = "Stop recording";
-pub(super) const START_RECORDING: &str = "Start recording";
+
+/// What the Clips tab shows in place of its list while the clip folder holds no clip.
+pub(super) const NO_CLIPS: &str =
+    "No clips yet — press the hotkey while a full-screen app is running";
 
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
@@ -92,6 +92,30 @@ pub(super) fn nvfbc_key_not_saved(error: impl Display) -> String {
 
 pub(super) fn nvfbc_key_window_failed(error: impl Display) -> String {
     format!("The NvFBC key window could not be shown: {error}")
+}
+
+pub(super) fn thumbnails_unavailable(error: impl Display) -> String {
+    format!("Clips are listed without thumbnails: {error}")
+}
+
+pub(super) fn thumbnail_failed(path: &Path, error: impl Display) -> String {
+    format!("No thumbnail for {}: {error}", file_name(path))
+}
+
+pub(super) fn clip_not_listed(path: &Path, error: impl Display) -> String {
+    format!("{} could not be listed: {error}", file_name(path))
+}
+
+pub(super) fn clip_open_failed(path: &Path, error: impl Display) -> String {
+    format!("Could not open {}: {error}", path.display())
+}
+
+/// The caption under a clip's thumbnail: when it was taken, or its name, and its size in
+/// whole megabytes.
+pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
+    // A no-break space keeps the size on one line: the list view wraps the caption, and
+    // "760" alone at the end of a line reads as nothing.
+    format!("{title} {:.0}\u{a0}MB", bytes as f64 / MEGABYTE)
 }
 
 /// The state line: what the recorder is doing, after a dot.
@@ -159,11 +183,6 @@ pub(super) fn lifetime_saved(status: &Status) -> String {
     gigabytes(status.saved_bytes)
 }
 
-/// The last saved clip, or a dash while there is none.
-pub(super) fn last_clip(path: Option<&Path>) -> String {
-    path.map_or_else(|| NO_VALUE.to_owned(), |path| path.display().to_string())
-}
-
 /// The memory the replay buffer takes at the entered bitrate and length, where it is kept; a
 /// buffer in GPU memory passes through system memory again when a clip is saved.
 pub(super) fn buffer_estimate(megabytes: u64, memory: Memory) -> String {
@@ -182,6 +201,14 @@ fn gigabytes(bytes: Option<u64>) -> String {
     bytes.map_or_else(
         || NO_VALUE.to_owned(),
         |bytes| format!("{:.2} GB", bytes as f64 / GIGABYTE),
+    )
+}
+
+/// The last part of `path`, as the journal names a file.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.display().to_string(),
     )
 }
 
@@ -207,6 +234,19 @@ mod tests {
         assert_eq!(rates(&status), "—");
         status.encode_rate = Some(59.6);
         assert_eq!(rates(&status), "60 fps");
+    }
+
+    #[test]
+    fn a_clip_caption_rounds_the_size_to_whole_megabytes() {
+        assert_eq!(
+            clip_caption("2026-10-12 21:14:05", 0),
+            "2026-10-12 21:14:05 0\u{a0}MB"
+        );
+        assert_eq!(
+            clip_caption("boss.mp4", 155_189_248),
+            "boss.mp4 148\u{a0}MB"
+        );
+        assert_eq!(clip_caption("boss.mp4", 1_572_864), "boss.mp4 2\u{a0}MB");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use super::{
         INNER_X, LINE, RED, button, label, skin_button,
     },
     text,
-    theme::{ButtonRole, Skin, Surface},
+    theme::{Skin, Surface},
 };
 use crate::{
     config::{
@@ -341,7 +341,7 @@ impl RecordingControls {
         let cursor = check_box(page, text::CURSOR, rows::CURSOR, config.cursor);
         let estimate = label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1);
         let apply = button(page, text::APPLY, INNER_X, rows::APPLY, BUTTON_WIDTH);
-        skin_button(&apply, skin, ButtonRole::Primary);
+        skin_button(&apply, skin);
         // The error line starts just right of the button, a little higher so its two lines
         // sit level with it.
         let error_x = BUTTON_WIDTH + 8;

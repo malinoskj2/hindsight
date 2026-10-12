@@ -57,12 +57,13 @@ The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 
 
 ## While you play
 
-- The **Status** tab shows which app or monitor is being recorded, the frame rate (frames encoded, and how many of them brought new pictures), how much is buffered, and the last saved clip.
+- The **Status** tab shows which app or monitor is being recorded, the frame rate (frames encoded, and how many of them brought new pictures), and how much is buffered.
+- The **Clips** tab shows a thumbnail of every clip in the clip folder, newest first; click one to play it in your default video player.
 - The **Logs** tab lists what the app did and any errors. The same lines are written to `%LOCALAPPDATA%\Hindsight\hindsight.log`, replaced on each launch; attach it to a bug report.
 - **Close the window** to keep recording from the tray. Click the tray icon to reopen it; right-click it for **Save replay** and **Quit**.
 - **Only one copy runs.** Starting hindsight again, from the Start menu, a shortcut or a terminal, just brings the running window forward, even if it is in the tray or minimized.
 - **Start with Windows** (Settings tab) starts the app hidden in the tray at sign-in, ready for the first full-screen app.
-- **Stop recording** pauses everything, including noticing full-screen apps, until **Start recording** or **Apply**.
+- There is nothing to start or stop: recording runs by itself as the **Record** setting says, and the hotkey saves. **Apply** restarts it with new settings.
 - Saving never pauses recording: the clip is written from a snapshot of the buffer while capture carries on.
 
 ## How it stays light

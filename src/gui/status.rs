@@ -1,19 +1,15 @@
-//! The Status tab: what is being recorded, how much of it is buffered, and the last saved clip,
-//! with buttons to save a replay and to stop or start recording.
+//! The Status tab: what is being recorded and how much of it is buffered. Recording starts by
+//! itself and a clip is saved with the hotkey, so the tab has nothing to press.
 
 use super::{
     layout::{
-        self, AMBER, BLACK, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH,
-        INNER_X, LINE, RED, TintedLabel, VALUE_WIDTH, VALUE_X, button, label, path_label,
-        skin_button,
+        self, AMBER, BLACK, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, RED,
+        TintedLabel, VALUE_WIDTH, VALUE_X, label, path_label,
     },
     text,
-    theme::{ButtonRole, Skin, Surface},
+    theme::{Skin, Surface},
 };
-use crate::{
-    config::Config,
-    service::{DisplayStatus, Status},
-};
+use crate::service::Status;
 use winsafe::{self as w, gui, prelude::*};
 
 /// Height the Recording group gains while it shows notices or errors (two lines).
@@ -35,10 +31,6 @@ pub(super) struct StatusPage {
     session_saved: gui::Label,
     lifetime_written: gui::Label,
     lifetime_saved: gui::Label,
-    last_clip: gui::Label,
-    folder: gui::Label,
-    pub(super) save: gui::Button,
-    pub(super) recording: gui::Button,
 }
 
 impl StatusPage {
@@ -46,9 +38,8 @@ impl StatusPage {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
         let recording = RecordingLabels::new(&page);
         let stats = StatsLabels::new(&page);
-        let clips = ClipsControls::new(&page, skin);
-        let recording_group = expanding_recording_group(&recording, &stats, &clips);
-        let frames = vec![recording.frame, stats.frame, clips.frame];
+        let recording_group = expanding_recording_group(&recording, &stats);
+        let frames = vec![recording.frame, stats.frame];
         layout::draw(
             &page,
             page.on(),
@@ -72,10 +63,6 @@ impl StatusPage {
             session_saved: stats.session_saved.value,
             lifetime_written: stats.lifetime_written.value,
             lifetime_saved: stats.lifetime_saved.value,
-            last_clip: clips.last_clip.value,
-            folder: clips.folder.value,
-            save: clips.save,
-            recording: clips.recording,
         }
     }
 
@@ -100,20 +87,12 @@ impl StatusPage {
         self.recording_group.extra()
     }
 
-    /// Shows `status`, with the clip settings of `config` and `hotkey_error` if the hotkey
-    /// could not be registered, and reports whether the Recording group changed height.
-    pub(super) fn update(
-        &self,
-        status: &Status,
-        config: &Config,
-        hotkey_error: Option<&str>,
-    ) -> bool {
+    /// Shows `status`, with `hotkey_error` if the hotkey could not be registered, and reports
+    /// whether the Recording group changed height.
+    pub(super) fn update(&self, status: &Status, hotkey_error: Option<&str>) -> bool {
         self.show_state(status);
         self.show_figures(status);
-        let grown = self.show_notices(status, hotkey_error);
-        self.show_clips(status, config);
-        self.show_buttons(status);
-        grown
+        self.show_notices(status, hotkey_error)
     }
 
     /// The state line, green while frames are being encoded and gray otherwise.
@@ -143,36 +122,6 @@ impl StatusPage {
         let notice = notice_text(status, hotkey_error);
         self.recording_group
             .set_message((!notice.is_empty()).then_some(notice.as_str()))
-    }
-
-    /// The last saved clip and the folder clips go to.
-    fn show_clips(&self, status: &Status, config: &Config) {
-        layout::set_text(
-            &self.last_clip,
-            &text::last_clip(status.last_clip.as_deref()),
-        );
-        layout::set_text(&self.folder, &config.clip_directory().display().to_string());
-    }
-
-    /// The save button, disabled while a clip is being saved, and the recording switch.
-    fn show_buttons(&self, status: &Status) {
-        layout::set_text(
-            &self.save,
-            if status.saving {
-                text::SAVING
-            } else {
-                text::SAVE_REPLAY
-            },
-        );
-        self.save.hwnd().EnableWindow(!status.saving);
-        layout::set_text(
-            &self.recording,
-            if is_on(status) {
-                text::STOP_RECORDING
-            } else {
-                text::START_RECORDING
-            },
-        );
     }
 }
 
@@ -244,42 +193,6 @@ impl StatsLabels {
     }
 }
 
-/// The Clips group: the last clip, the clip folder, and the buttons to save a replay and to
-/// stop or start recording.
-struct ClipsControls {
-    frame: Frame,
-    last_clip: Row,
-    folder: Row,
-    save: gui::Button,
-    recording: gui::Button,
-}
-
-impl ClipsControls {
-    /// Lays out the Clips group on `page`, its buttons in the look of `skin`.
-    fn new(page: &gui::TabPage, skin: &Skin) -> Self {
-        let frame = Frame::new(page, text::GROUP_CLIPS, 244, 100);
-        let last_clip = Row::path(page, text::LAST_CLIP, 264);
-        let folder = Row::path(page, text::CLIP_FOLDER, 284);
-        let save = button(page, text::SAVE_REPLAY, INNER_X, 310, BUTTON_WIDTH);
-        let recording = button(
-            page,
-            text::STOP_RECORDING,
-            INNER_X + INNER_WIDTH - BUTTON_WIDTH,
-            310,
-            BUTTON_WIDTH,
-        );
-        skin_button(&save, skin, ButtonRole::Primary);
-        skin_button(&recording, skin, ButtonRole::Secondary);
-        Self {
-            frame,
-            last_clip,
-            folder,
-            save,
-            recording,
-        }
-    }
-}
-
 /// A caption with the value it names to its right.
 struct Row {
     caption: gui::Label,
@@ -309,18 +222,9 @@ impl Row {
     }
 }
 
-/// Whether recording is switched on: capturing, or waiting for a full-screen app to capture.
-pub(super) fn is_on(status: &Status) -> bool {
-    status.recording || status.state == DisplayStatus::Waiting
-}
-
-/// The Recording group, which grows to show its notice line and moves the Stats and Clips
-/// groups down to make room.
-fn expanding_recording_group(
-    recording: &RecordingLabels,
-    stats: &StatsLabels,
-    clips: &ClipsControls,
-) -> ExpandableGroup {
+/// The Recording group, which grows to show its notice line and moves the Stats group down to
+/// make room.
+fn expanding_recording_group(recording: &RecordingLabels, stats: &StatsLabels) -> ExpandableGroup {
     ExpandableGroup::new(
         recording.frame.clone(),
         recording.notice.label().clone(),
@@ -328,13 +232,6 @@ fn expanding_recording_group(
     )
     .moving_frame(stats.frame.clone())
     .moving(stats.labels())
-    .moving_frame(clips.frame.clone())
-    .moving(
-        [&clips.last_clip, &clips.folder]
-            .into_iter()
-            .flat_map(Row::labels),
-    )
-    .moving([clips.save.clone(), clips.recording.clone()])
 }
 
 /// The colour of each label on the page: the `tints` lines read theirs from beside them; every
@@ -382,18 +279,5 @@ mod tests {
             notice_text(&status, Some("hotkey taken")),
             "hotkey taken\r\nsound is off\r\ncapture failed"
         );
-    }
-
-    #[test]
-    fn recording_counts_as_on_while_waiting_for_a_full_screen_app() {
-        let mut status = Status {
-            state: DisplayStatus::Waiting,
-            ..Status::default()
-        };
-        assert!(is_on(&status));
-        status.state = DisplayStatus::Stopped;
-        assert!(!is_on(&status));
-        status.recording = true;
-        assert!(is_on(&status));
     }
 }

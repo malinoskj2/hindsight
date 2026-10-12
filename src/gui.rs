@@ -2,6 +2,7 @@
 //! fonts, tabs, group boxes and buttons are drawn by Windows exactly like any control panel.
 
 use self::{
+    clips::ClipsPage,
     footer::Footer,
     layout::{BLACK, GRAY, MARGIN, WINDOW_WIDTH, resize_height_by, resize_width_by, shift_by},
     logs::LogsPage,
@@ -26,6 +27,7 @@ use std::{cell::RefCell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
 mod art;
+mod clips;
 mod footer;
 mod layout;
 mod logs;
@@ -38,10 +40,12 @@ mod theme;
 
 /// Resource id of the icon embedded by `build.rs`.
 const ICON_RESOURCE: u16 = 1;
-/// Id of the timer that refreshes the Status tab while the window can be seen.
+/// Id of the timer that refreshes the pages while the window can be seen.
 const STATUS_TIMER: usize = 1;
-/// How often the Status tab refreshes, in milliseconds.
+/// How often the pages refresh, in milliseconds.
 const STATUS_INTERVAL_MS: u32 = 1000;
+/// Where the Clips tab stands in the strip.
+const CLIPS_TAB: u32 = 1;
 
 /// Height of the tab control, in logical pixels.
 const TAB_HEIGHT: i32 = 406;
@@ -63,6 +67,7 @@ struct Main {
     wnd: gui::WindowMain,
     tab: gui::Tab,
     status: StatusPage,
+    clips: ClipsPage,
     settings: SettingsPage,
     logs: LogsPage,
     footer: Footer,
@@ -76,7 +81,6 @@ impl Main {
         let main = Self::create(worker, config, start_hidden);
         main.draw();
         main.window_events();
-        main.status_events();
         main.settings_events();
         main.run(start_hidden)
     }
@@ -90,6 +94,7 @@ impl Main {
         let wnd = main_window(width, start_hidden);
         let (start_with_windows, startup_error) = startup_setting();
         let status = StatusPage::new(&wnd, &skin);
+        let clips = ClipsPage::new(&wnd, &skin);
         let settings = SettingsPage::new(&wnd, &config, start_with_windows, &skin);
         let logs = LogsPage::new(&wnd, &skin);
         let tab = gui::Tab::new(
@@ -99,6 +104,7 @@ impl Main {
                 size: gui::dpi(width - 2 * MARGIN, TAB_HEIGHT),
                 pages: &[
                     (text::TAB_STATUS, status.page().clone()),
+                    (text::TAB_CLIPS, clips.page().clone()),
                     (text::TAB_SETTINGS, settings.page().clone()),
                     (text::TAB_LOGS, logs.page().clone()),
                 ],
@@ -110,6 +116,7 @@ impl Main {
             wnd,
             tab,
             status,
+            clips,
             settings,
             logs,
             footer,
@@ -149,13 +156,20 @@ impl Main {
         );
     }
 
-    /// Wires the window's own messages: creation, visibility, the status timer, the hotkey,
-    /// another launch, closing and destruction.
+    /// Wires the window's own messages: creation, visibility, the status timer, a change of
+    /// tab, the hotkey, another launch, closing and destruction.
     fn window_events(&self) {
         let me = self.clone();
         self.wnd.on().wm_create(move |_| {
             me.on_create();
             Ok(0)
+        });
+
+        // The Clips tab reads its folder when it comes into view, not before.
+        let me = self.clone();
+        self.tab.on().tcn_sel_change(move || {
+            me.refresh();
+            Ok(())
         });
 
         let me = self.clone();
@@ -192,21 +206,6 @@ impl Main {
         let me = self.clone();
         self.wnd.on().wm_destroy(move || {
             me.on_destroy();
-            Ok(())
-        });
-    }
-
-    /// Wires the Status tab's buttons to what they do.
-    fn status_events(&self) {
-        let me = self.clone();
-        self.status.save.on().bn_clicked(move || {
-            me.save();
-            Ok(())
-        });
-
-        let me = self.clone();
-        self.status.recording.on().bn_clicked(move || {
-            me.toggle_recording();
             Ok(())
         });
     }
@@ -261,6 +260,7 @@ impl Main {
     fn on_create(&self) {
         self.apply_look();
         self.status.on_create();
+        self.clips.on_create();
         self.settings.on_create();
         self.logs.on_create();
         self.footer.on_create();
@@ -407,18 +407,6 @@ impl Main {
         }
     }
 
-    /// Stops recording, or starts it again with the applied settings.
-    fn toggle_recording(&self) {
-        let shared = self.shared.borrow();
-        if status::is_on(&shared.worker.status()) {
-            shared.worker.stop();
-        } else {
-            shared.worker.start(shared.config.clone());
-            drop(shared);
-            self.watch_foreground();
-        }
-    }
-
     /// Applies the settings as entered, or shows the problem with them: the hotkey changes,
     /// and recording restarts with the new configuration.
     fn apply_settings(&self) {
@@ -482,6 +470,7 @@ impl Main {
         for frame in self.status.frames().iter().chain(self.settings.frames()) {
             frame.show_title_label(classic);
         }
+        self.clips.apply_look(&self.skin);
         self.redraw();
     }
 
@@ -520,8 +509,9 @@ impl Main {
         result
     }
 
-    /// Shows the worker's latest status on the Status tab and new journal entries on the Logs
-    /// tab, refitting the window when the Status tab changed height.
+    /// Shows the worker's latest status on the Status tab, the clip folder on the Clips tab
+    /// while it is in view, and new journal entries on the Logs tab, refitting the window when
+    /// the Status tab changed height.
     fn refresh(&self) {
         let (status, config, hotkey_error) = {
             let shared = self.shared.borrow();
@@ -531,13 +521,22 @@ impl Main {
                 shared.hotkey_error.clone(),
             )
         };
-        if self
-            .status
-            .update(&status, &config, hotkey_error.as_deref())
-        {
+        if self.status.update(&status, hotkey_error.as_deref()) {
             self.fit_window();
         }
+        self.clips
+            .update(&status, &config.clip_directory(), self.clips_in_view());
         self.logs.update();
+    }
+
+    /// Whether the Clips tab is the one showing in a window that can be seen.
+    fn clips_in_view(&self) -> bool {
+        self.wnd.hwnd().IsWindowVisible()
+            && self
+                .tab
+                .items()
+                .selected()
+                .is_some_and(|item| item.index() == CLIPS_TAB)
     }
 
     /// Gives the tab and the pages the larger of the pages' extra heights, moving the footer
@@ -550,6 +549,7 @@ impl Main {
             for window in self.tab_and_pages() {
                 resize_height_by(window, page_delta);
             }
+            resize_height_by(self.clips.list().hwnd(), page_delta);
             resize_height_by(self.logs.view().hwnd(), page_delta);
             shift_by(self.footer.control().hwnd(), page_delta);
         }
@@ -561,10 +561,11 @@ impl Main {
     }
 
     /// The tab control and its pages, which share one size.
-    fn tab_and_pages(&self) -> [&w::HWND; 4] {
+    fn tab_and_pages(&self) -> [&w::HWND; 5] {
         [
             self.tab.hwnd(),
             self.status.page().hwnd(),
+            self.clips.page().hwnd(),
             self.settings.page().hwnd(),
             self.logs.page().hwnd(),
         ]

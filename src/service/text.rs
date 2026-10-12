@@ -27,7 +27,6 @@ pub(super) fn save_settings_failed(error: impl Display) -> String {
 
 // The session.
 
-pub(super) const RECORDING_STOPPED: &str = "Recording stopped";
 pub(super) const RESTARTING: &str = "Starting capture again";
 pub(super) const RESIZED: &str =
     "The display or window changed size; capture restarted and the replay buffer starts over.";

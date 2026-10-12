@@ -1,7 +1,7 @@
 //! Geometry shared by the pages and the helpers that create, draw and move controls. Positions
 //! are hand-laid in logical pixels; `winsafe::gui::dpi` scales them when a control is created.
 
-use super::theme::{ButtonRole, Skin, Surface};
+use super::theme::{Skin, Surface};
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
@@ -294,14 +294,14 @@ pub(super) fn button(
     )
 }
 
-/// Makes a push button take the chosen theme's look in its `role`. With no theme chosen
-/// Windows draws the button as it always did.
-pub(super) fn skin_button(button: &gui::Button, skin: &Skin, role: ButtonRole) {
+/// Makes a push button take the chosen theme's look. With no theme chosen Windows draws the
+/// button as it always did.
+pub(super) fn skin_button(button: &gui::Button, skin: &Skin) {
     let skin = skin.clone();
     let owner = button.clone();
     button.on().nm_custom_draw(move |draw| {
         let text = owner.hwnd().GetWindowText().unwrap_or_default();
-        Ok(skin.paint_button(draw, &text, role))
+        Ok(skin.paint_button(draw, &text))
     });
 }
 

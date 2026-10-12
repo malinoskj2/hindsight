@@ -176,7 +176,6 @@ enum Command {
     Start(Config),
     /// A full-screen app is in front; recorded in that mode, unless it already is.
     Target(Target),
-    Stop,
     Save,
     /// The window changed its look; remembered without touching the session.
     Theme(Theme),
@@ -251,11 +250,6 @@ impl Worker {
     /// Tells the worker which full-screen app is in front.
     pub(crate) fn target(&self, target: Target) {
         self.request(Command::Target(target));
-    }
-
-    /// Stops recording until the settings are applied again.
-    pub(crate) fn stop(&self) {
-        self.request(Command::Stop);
     }
 
     /// Saves the replay buffer as a clip.
@@ -367,8 +361,6 @@ struct Machine {
     /// When a failed session is tried again (whole-desktop mode), or when targets are accepted
     /// again (full-screen mode).
     retry_at: Option<Instant>,
-    /// Stopped by the user; targets are ignored until the settings are applied again.
-    paused: bool,
     saving: Option<Saving>,
     sample: Option<Sample>,
     /// Lets the capture and save threads wake the worker when they finish or start streaming.
@@ -401,7 +393,6 @@ impl Machine {
             target: None,
             live: None,
             retry_at: None,
-            paused: false,
             saving: None,
             sample: None,
             wake,
@@ -416,7 +407,6 @@ impl Machine {
             match self.receive(commands) {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
-                Ok(Command::Stop) => self.pause(),
                 Ok(Command::Save) => self.save(),
                 Ok(Command::Theme(theme)) => self.remember_theme(theme),
                 Ok(Command::Wake | Command::Publish) | Err(RecvTimeoutError::Timeout) => {}
@@ -460,7 +450,6 @@ impl Machine {
         log::info(text::settings_applied(&config));
         self.config = config;
         self.stop_session();
-        self.paused = false;
         self.begin();
     }
 
@@ -469,7 +458,6 @@ impl Machine {
     /// cannot work on this machine.
     fn offer(&mut self, target: Target) {
         if self.config.mode != Mode::Fullscreen
-            || self.paused
             || self.retry_at.is_some()
             || self.status.state == DisplayStatus::Unsupported
         {
@@ -482,15 +470,6 @@ impl Machine {
         self.stop_session();
         log::info(text::target_found(target.name()));
         self.start_session(target);
-    }
-
-    /// Stops recording at the user's request, until the settings are applied again.
-    fn pause(&mut self) {
-        self.stop_session();
-        self.retry_at = None;
-        self.paused = true;
-        self.status.state = DisplayStatus::Stopped;
-        log::info(text::RECORDING_STOPPED);
     }
 
     /// Starts writing the buffer to a clip, unless a clip is already being written or there is
@@ -1156,21 +1135,6 @@ mod tests {
     }
 
     #[test]
-    fn stopping_ends_the_session_and_its_buffer_stays_saveable() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-        wait_for(&worker, |status| status.session_written_bytes > 0);
-
-        worker.stop();
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Stopped);
-        assert!(!status.recording);
-
-        // The stopped session's buffer can still be saved.
-        worker.save();
-        wait_for(&worker, |status| status.last_clip.is_some());
-    }
-
-    #[test]
     fn a_failed_session_is_retried() {
         let worker = spawn(failing, Duration::from_millis(50), None, desktop());
 
@@ -1245,12 +1209,6 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         assert_eq!(worker.status().state, DisplayStatus::Retrying);
         wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-
-        worker.stop();
-        wait_for(&worker, |status| status.state == DisplayStatus::Stopped);
-        worker.target(window(1));
-        thread::sleep(Duration::from_millis(50));
-        assert_eq!(worker.status().state, DisplayStatus::Stopped);
     }
 
     #[test]

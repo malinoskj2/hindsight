@@ -30,8 +30,6 @@ const CORNER: i32 = 4;
 const PRESSED_PRIMARY: u32 = 40;
 /// How far a hovered primary button lightens its accent towards its text, out of 255.
 const HOT_PRIMARY: u32 = 28;
-/// How far a pressed secondary button moves its fill towards the border colour, out of 255.
-const PRESSED_SECONDARY: u32 = 150;
 /// Gap between a button's edge and its keyboard-focus rectangle, in logical pixels.
 const FOCUS_INSET: i32 = 3;
 /// How far a painted group title sits from its panel's left edge, in logical pixels.
@@ -53,6 +51,7 @@ struct Palette {
     muted: u32,
     status: u32,
     on_accent: u32,
+    /// The quiet fill of a tab not selected and of a disabled button.
     secondary_button: u32,
 }
 
@@ -147,15 +146,6 @@ impl Surface {
     }
 }
 
-/// How much a push button stands out.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ButtonRole {
-    /// The page's main action, which takes the accent colour.
-    Primary,
-    /// Any other action, on a quiet fill.
-    Secondary,
-}
-
 /// The look currently chosen, shared by every handler that paints.
 #[derive(Clone)]
 pub(super) struct Skin(Rc<Inner>);
@@ -218,6 +208,13 @@ impl Skin {
     pub(super) fn title_bar_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
         self.palette()
             .map(|palette| (colour(palette.background), colour(palette.text)))
+    }
+
+    /// A list's background and text in the theme's colours, those of a group panel so that it
+    /// sits on the page like one, or `None` for Windows' own.
+    pub(super) fn list_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
+        self.palette()
+            .map(|palette| (colour(palette.panel), colour(palette.text)))
     }
 
     /// The brush labels erase themselves with, so that they blend into what is behind them.
@@ -313,12 +310,7 @@ impl Skin {
     }
 
     /// Draws a push button in the theme during `NM_CUSTOMDRAW`, or lets Windows draw it.
-    pub(super) fn paint_button(
-        &self,
-        draw: &w::NMCUSTOMDRAW,
-        text: &str,
-        role: ButtonRole,
-    ) -> co::CDRF {
+    pub(super) fn paint_button(&self, draw: &w::NMCUSTOMDRAW, text: &str) -> co::CDRF {
         let Some(palette) = self.palette() else {
             return co::CDRF::DODEFAULT;
         };
@@ -326,7 +318,7 @@ impl Skin {
             return co::CDRF::DODEFAULT;
         }
         let state = draw.uItemState;
-        let (fill, edge, ink) = button_colours(palette, role, state);
+        let (fill, edge, ink) = button_colours(palette, state);
 
         let hdc = &draw.hdc;
         let (Ok(brush), Ok(pen)) = (solid_brush(fill), solid_pen(edge)) else {
@@ -671,34 +663,20 @@ fn paint_tab(hdc: &w::HDC, palette: &Palette, face: &TabFace) {
     draw_centred(hdc, text, *rect);
 }
 
-/// A push button's fill, border and text colours, as `0xRRGGBB`, for its `role` in `state`.
-/// A disabled button looks the same whatever its role.
-fn button_colours(palette: &Palette, role: ButtonRole, state: co::CDIS) -> (u32, u32, u32) {
-    let disabled = state.has(co::CDIS::DISABLED);
-    let pressed = state.has(co::CDIS::SELECTED);
-    let hot = state.has(co::CDIS::HOT);
-    if disabled {
+/// A push button's fill, border and text colours, as `0xRRGGBB`, in `state`. Every button is
+/// a page's main action and takes the accent colour; a disabled one goes quiet.
+fn button_colours(palette: &Palette, state: co::CDIS) -> (u32, u32, u32) {
+    if state.has(co::CDIS::DISABLED) {
         return (palette.secondary_button, palette.border, palette.muted);
     }
-    if role == ButtonRole::Primary {
-        let fill = if pressed {
-            mix(palette.accent, BLACK_RGB, PRESSED_PRIMARY)
-        } else if hot {
-            mix(palette.accent, palette.on_accent, HOT_PRIMARY)
-        } else {
-            palette.accent
-        };
-        return (fill, palette.accent, palette.on_accent);
-    }
-    let fill = if pressed {
-        mix(palette.secondary_button, palette.border, PRESSED_SECONDARY)
-    } else if hot {
-        palette.panel
+    let fill = if state.has(co::CDIS::SELECTED) {
+        mix(palette.accent, BLACK_RGB, PRESSED_PRIMARY)
+    } else if state.has(co::CDIS::HOT) {
+        mix(palette.accent, palette.on_accent, HOT_PRIMARY)
     } else {
-        palette.secondary_button
+        palette.accent
     };
-    let edge = if hot { palette.accent } else { palette.border };
-    (fill, edge, palette.text)
+    (fill, palette.accent, palette.on_accent)
 }
 
 /// A colour from `0xRRGGBB`.
@@ -867,18 +845,22 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_button_looks_the_same_in_either_role() {
+    fn a_disabled_button_goes_quiet_whatever_else_its_state_says() {
         let state = co::CDIS::DISABLED | co::CDIS::HOT | co::CDIS::SELECTED;
-        let quiet = (EMBER.secondary_button, EMBER.border, EMBER.muted);
-        assert_eq!(button_colours(&EMBER, ButtonRole::Primary, state), quiet);
-        assert_eq!(button_colours(&EMBER, ButtonRole::Secondary, state), quiet);
+        assert_eq!(
+            button_colours(&EMBER, state),
+            (EMBER.secondary_button, EMBER.border, EMBER.muted)
+        );
     }
 
     #[test]
-    fn a_primary_button_keeps_its_accent_edge_and_darkens_when_pressed() {
-        let pressed = co::CDIS::SELECTED | co::CDIS::HOT;
+    fn a_button_keeps_its_accent_edge_and_darkens_when_pressed() {
         assert_eq!(
-            button_colours(&EMBER, ButtonRole::Primary, pressed),
+            button_colours(&EMBER, co::CDIS::default()),
+            (EMBER.accent, EMBER.accent, EMBER.on_accent)
+        );
+        assert_eq!(
+            button_colours(&EMBER, co::CDIS::SELECTED | co::CDIS::HOT),
             (
                 mix(EMBER.accent, BLACK_RGB, PRESSED_PRIMARY),
                 EMBER.accent,
@@ -886,7 +868,7 @@ mod tests {
             )
         );
         assert_eq!(
-            button_colours(&EMBER, ButtonRole::Primary, co::CDIS::HOT),
+            button_colours(&EMBER, co::CDIS::HOT),
             (
                 mix(EMBER.accent, EMBER.on_accent, HOT_PRIMARY),
                 EMBER.accent,
@@ -896,18 +878,14 @@ mod tests {
     }
 
     #[test]
-    fn a_secondary_button_takes_the_accent_edge_only_while_hovered() {
+    fn a_list_takes_the_panel_colours_in_a_theme_and_none_in_classic() {
+        let raw = |colours: Option<(w::COLORREF, w::COLORREF)>| {
+            colours.map(|(background, text)| (background.raw(), text.raw()))
+        };
+        assert_eq!(raw(Skin::new(Theme::Classic).list_colours()), None);
         assert_eq!(
-            button_colours(&EMBER, ButtonRole::Secondary, co::CDIS::HOT),
-            (EMBER.panel, EMBER.accent, EMBER.text)
-        );
-        assert_eq!(
-            button_colours(&EMBER, ButtonRole::Secondary, co::CDIS::SELECTED),
-            (
-                mix(EMBER.secondary_button, EMBER.border, PRESSED_SECONDARY),
-                EMBER.border,
-                EMBER.text
-            )
+            raw(Skin::new(Theme::Ember).list_colours()),
+            Some((colour(EMBER.panel).raw(), colour(EMBER.text).raw()))
         );
     }
 }
