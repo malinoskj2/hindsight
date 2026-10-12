@@ -129,10 +129,10 @@ impl<'a> Sound<'a> {
     /// The bitrate over the whole clip and the highest over any second of it, in bits per
     /// second, for the decoder configuration.
     fn bitrates(&self) -> (u32, u32) {
-        let frames_per_second = (self.clip.format.sample_rate / FRAME_SAMPLES).max(1) as usize;
+        let frames_per_second = (self.clip.sample_rate / FRAME_SAMPLES).max(1) as usize;
         let bits = |sizes: &[u32]| sizes.iter().map(|&size| u64::from(size) * 8).sum::<u64>();
         let seconds = (self.sizes.len() as u64 * u64::from(FRAME_SAMPLES))
-            .div_ceil(u64::from(self.clip.format.sample_rate.max(1)))
+            .div_ceil(u64::from(self.clip.sample_rate.max(1)))
             .max(1);
         let average = bits(&self.sizes) / seconds;
         let peak = self
@@ -195,7 +195,7 @@ impl Layout {
                 (window, u64::from(sample.size))
             }),
         );
-        let rate = u64::from(sound.clip.format.sample_rate.max(1));
+        let rate = u64::from(sound.clip.sample_rate.max(1));
         let lead = u64::from(sound.clip.lead);
         let audio = runs(
             Kind::Audio,
@@ -808,7 +808,7 @@ fn sample_sizes(sizes: Vec<u32>) -> Stsz {
 /// Every frame lasts [`FRAME_SAMPLES`], and every AAC frame decodes on its own, so there is no
 /// `stss`.
 fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result<Trak, MuxError> {
-    let format = &sound.clip.format;
+    let clip = sound.clip;
     Ok(Trak {
         tkhd: Tkhd {
             track_id: AUDIO_TRACK_ID,
@@ -828,7 +828,7 @@ fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result
             }),
         }),
         mdia: Mdia {
-            mdhd: media_header(format.sample_rate, sound.media_duration()?),
+            mdhd: media_header(clip.sample_rate, sound.media_duration()?),
             hdlr: handler(*b"soun", "SoundHandler"),
             minf: Minf {
                 smhd: Some(Smhd::default()),
@@ -861,16 +861,16 @@ fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result
 /// whose elementary stream descriptor says the stream is AAC, gives its buffer size and
 /// bitrates, and carries the `AudioSpecificConfig`.
 fn audio_entry(sound: &Sound<'_>) -> Result<SampleEntry, MuxError> {
-    let format = &sound.clip.format;
+    let clip = sound.clip;
     let (average, peak) = sound.bitrates();
     let largest = sound.sizes.iter().copied().max().unwrap_or(0);
     Ok(Mp4a {
         audio: Audio {
             data_reference_index: DATA_REFERENCE,
-            channel_count: format.channels,
+            channel_count: clip.channels,
             sample_size: AUDIO_SAMPLE_BITS,
             // The rate is 16.16 fixed point, so it must fit 16 bits.
-            sample_rate: fit::<u16, _>(format.sample_rate)?.into(),
+            sample_rate: fit::<u16, _>(clip.sample_rate)?.into(),
         },
         esds: Esds {
             es_desc: EsDescriptor {
@@ -884,7 +884,7 @@ fn audio_entry(sound: &Sound<'_>) -> Result<SampleEntry, MuxError> {
                     max_bitrate: peak,
                     avg_bitrate: average,
                     dec_specific: Some(DecoderSpecific {
-                        raw: format.config.to_vec(),
+                        raw: clip.config.to_vec(),
                         ..DecoderSpecific::default()
                     }),
                 },
@@ -1251,11 +1251,7 @@ pub(super) mod tests {
         let frames: Vec<Arc<[u8]>> = (0..100_u8)
             .map(|number| Arc::from(vec![number; 10 + usize::from(number % 7)]))
             .collect();
-        let clip = AudioClip {
-            format: crate::replay::audio::tests::format(1024),
-            frames: frames.clone(),
-            lead: 1500,
-        };
+        let clip = crate::replay::audio::tests::aac_clip(frames.clone(), 1500);
         let mut file = Vec::new();
         write_with_audio(&mut file, &stream(Codec::H264), &packets, &clip).unwrap();
 
@@ -1362,11 +1358,7 @@ pub(super) mod tests {
         let frames: Vec<Arc<[u8]>> = (0..300 * 48_000 / 1024)
             .map(|number: usize| Arc::from(vec![0_u8; 200 + number % 50]))
             .collect();
-        let clip = AudioClip {
-            format: crate::replay::audio::tests::format(1024),
-            frames,
-            lead: 0,
-        };
+        let clip = crate::replay::audio::tests::aac_clip(frames, 0);
         let mut file = Vec::new();
         let start = std::time::Instant::now();
         for _ in 0..10 {

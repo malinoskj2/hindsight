@@ -1,20 +1,21 @@
-//! The audio thread of a session: it opens the default output device's loopback capture and
-//! the AAC encoder, then every few packets reads, places and encodes what has arrived, until
-//! the session stops it. It keeps the sound unbroken on the shared clock through everything a
-//! device does: silence fills a gap, a quiet device (Windows sends a loopback capture nothing
-//! while nothing plays), a lost device and the time a reopen takes; a packet marked as a
-//! discontinuity is simply stamped later than the run expects, which reads as a gap.
+//! The audio thread of a session: it opens the default output device's loopback capture, then
+//! every few packets reads what has arrived, places it on the run and hands it to the buffer
+//! as 16-bit PCM, until the session stops it. It does not encode: a save encodes the clip's
+//! span. It keeps the sound on the shared clock through everything a device does: a gap is
+//! left wherever nothing arrived, for a save to fill with silence, whether nothing played (a
+//! quiet device: Windows sends a loopback capture nothing then), the device was lost or a
+//! reopen took its time; a packet marked as a discontinuity is simply stamped later than the
+//! run expects, which reads as a gap.
 
 use super::{
-    CHANNELS, SAMPLE_RATE,
-    aac::{self, Encoder, MediaFoundation},
+    CHANNELS, SAMPLE_RATE, aac,
     loopback::{self, Com, Devices, Loopback, OpenError, Packet, Signal, Wake, Watch},
     pcm::{self, Layout},
     timeline::Timeline,
 };
 use crate::{
     log,
-    replay::{AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES, Live},
+    replay::{AudioFormat, CLOCK_RATE, Live},
     sys::{self, clock},
 };
 use std::{
@@ -41,11 +42,6 @@ const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the thread asks which output device is the default, when Windows could not be
 /// asked to say so itself.
 const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-/// Silence encoded in a row before more is skipped rather than encoded: enough to push out
-/// everything the encoder holds back and its priming, with a frame to spare, so every frame it
-/// still holds is silent too and the skipped ones can be left out of the buffer, where a save
-/// stands in a silent frame.
-const FLUSH_SAMPLES: u64 = (aac::HELD_BACK + aac::PRIMING + FRAME_SAMPLES) as u64;
 
 /// The sound capture of a running session; dropping it stops the capture and waits for its
 /// thread, which takes no longer than closing the device.
@@ -91,20 +87,6 @@ pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
     }
 }
 
-/// Why the thread stopped reading.
-enum Failure {
-    /// The device failed; it is opened again.
-    Device(windows::core::Error),
-    /// The encoder failed; the session's sound ends there.
-    Encoder(windows::core::Error),
-}
-
-impl From<windows::core::Error> for Failure {
-    fn from(error: windows::core::Error) -> Self {
-        Self::Device(error)
-    }
-}
-
 /// Records sound into `live` until `stop` is set.
 fn record(live: &Live, stop: &Signal) {
     let Some(mut pipeline) = Pipeline::open(live) else {
@@ -120,44 +102,32 @@ fn record(live: &Live, stop: &Signal) {
         if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
             break;
         }
-        let result = device
-            .read(&mut pipeline.track)
-            .and_then(|()| pipeline.track.catch_up(clock::now() - SILENCE_LAG));
-        match result {
-            Ok(()) => {}
-            Err(Failure::Device(error)) => device.lost(&error),
-            Err(Failure::Encoder(error)) => {
-                log::error(format!(
-                    "Sound recording stopped: the AAC encoder failed ({error})"
-                ));
-                return;
-            }
+        if let Err(error) = device.read(&mut pipeline.track) {
+            device.lost(&error);
         }
+        pipeline.track.catch_up(clock::now() - SILENCE_LAG);
+        pipeline.track.flush();
     }
     log::info("Sound recording stopped");
 }
 
-/// What the audio thread records with. The fields drop in this order: the encoder and the
-/// device list release their COM objects before Media Foundation and COM are shut down.
+/// What the audio thread records with. The fields drop in this order: the device list releases
+/// its COM objects before COM is shut down.
 struct Pipeline<'a> {
     track: Track<'a>,
     devices: Devices,
-    _media: MediaFoundation,
     _com: Com,
 }
 
 impl<'a> Pipeline<'a> {
-    /// Starts COM and Media Foundation on this thread and opens the device list and the
-    /// encoder, or logs which of them keeps the session's sound from being recorded.
+    /// Starts COM on this thread and opens the device list, or logs which of them keeps the
+    /// session's sound from being recorded.
     fn open(live: &'a Live) -> Option<Self> {
         let com = started(Com::start(), "COM is unavailable")?;
-        let media = started(MediaFoundation::start(), "Media Foundation is unavailable")?;
         let devices = started(Devices::new(), "the audio devices could not be listed")?;
-        let track = started(Track::open(live), "the AAC encoder could not be opened")?;
         Some(Self {
-            track,
+            track: Track::open(live),
             devices,
-            _media: media,
             _com: com,
         })
     }
@@ -299,127 +269,96 @@ impl Device {
     }
 
     /// Hands every packet waiting in the open capture to `track`.
-    fn read(&mut self, track: &mut Track<'_>) -> Result<(), Failure> {
+    fn read(&mut self, track: &mut Track<'_>) -> windows::core::Result<()> {
         let Some(loopback) = self.loopback.as_mut() else {
             return Ok(());
         };
         let layout = loopback.layout();
-        loopback.read(|packet| track.packet(packet, layout))
+        loopback.read(|packet| {
+            track.packet(packet, layout);
+            Ok(())
+        })
     }
 }
 
-/// The session's run of sound: the encoder, where the run stands on the clock, and the number
-/// of the next frame.
+/// The session's run of sound: where it stands on the clock, the number of the next sample,
+/// and the samples converted since they were last handed to the buffer.
 struct Track<'a> {
     live: &'a Live,
-    encoder: Encoder,
     timeline: Timeline,
-    /// The number the encoder's next frame gets.
-    next_frame: u64,
-    /// Samples of silence encoded since the last captured sound.
-    quiet: u64,
-    /// A packet converted for the encoder, kept to reuse its allocation.
-    pcm: Vec<i16>,
-    /// A frame of silence for the encoder.
-    zeros: Vec<i16>,
+    /// The number the run's next sample gets, silence included.
+    next: u64,
+    /// Interleaved samples converted since the last hand-over, all following each other.
+    pending: Vec<i16>,
+    /// The number of the first sample in `pending`.
+    pending_start: u64,
 }
 
 impl<'a> Track<'a> {
-    /// Opens the encoder and records the stream's format in `live`, with the run starting now.
-    fn open(live: &'a Live) -> windows::core::Result<Self> {
-        let encoder = Encoder::open(SAMPLE_RATE, CHANNELS)?;
-        let silence = aac::silent_frame(SAMPLE_RATE, CHANNELS)?;
+    /// Records the stream's format in `live`, with the run starting now.
+    fn open(live: &'a Live) -> Self {
         let anchor = clock::now();
         live.set_audio(AudioFormat {
             sample_rate: SAMPLE_RATE,
             channels: CHANNELS,
-            config: encoder.config(),
             anchor,
             priming: aac::PRIMING,
-            silence,
         });
-        Ok(Self {
+        Self {
             live,
-            encoder,
             timeline: Timeline::new(SAMPLE_RATE, anchor),
-            next_frame: 0,
-            quiet: 0,
-            pcm: Vec::new(),
-            zeros: vec![0; FRAME_SAMPLES as usize * usize::from(CHANNELS)],
-        })
+            next: 0,
+            pending: Vec::new(),
+            pending_start: 0,
+        }
     }
 
-    /// Places `packet`, whose samples are laid out as `layout` says, on the run and encodes it.
-    fn packet(&mut self, packet: &Packet<'_>, layout: Layout) -> Result<(), Failure> {
+    /// Places `packet`, whose samples are laid out as `layout` says, on the run and converts
+    /// it. A silent packet is a gap, which a save encodes as silence.
+    fn packet(&mut self, packet: &Packet<'_>, layout: Layout) {
         let placement = self.timeline.place(packet.time, packet.frames);
-        self.silence(placement.silence)?;
+        self.skip(placement.silence);
         let kept = packet.frames - placement.skip;
         let Some(data) = packet.data else {
-            return self.silence(u64::from(kept));
+            return self.skip(u64::from(kept));
         };
-        self.pcm.clear();
+        if self.pending.is_empty() {
+            self.pending_start = self.next;
+        }
+        let length = self.pending.len() + kept as usize * usize::from(CHANNELS);
         let skipped_bytes = placement.skip as usize * layout.frame_bytes();
         pcm::append_stereo(
-            &mut self.pcm,
+            &mut self.pending,
             &data[skipped_bytes.min(data.len())..],
             layout,
         );
-        self.quiet = 0;
-        encode(
-            &mut self.encoder,
-            self.live,
-            &mut self.next_frame,
-            &self.pcm,
-        )
+        // The run counts the frames the packet claims, whatever its data holds.
+        self.pending.resize(length, 0);
+        self.next += u64::from(kept);
     }
 
-    /// Fills the run with silence up to clock time `time`, if nothing has arrived to fill it.
-    fn catch_up(&mut self, time: i64) -> Result<(), Failure> {
+    /// Leaves the run empty up to clock time `time`, if nothing has arrived to fill it.
+    fn catch_up(&mut self, time: i64) {
         let silence = self.timeline.catch_up(time);
-        self.silence(silence)
+        self.skip(silence);
     }
 
-    /// Adds `samples` of silence to the run. Once the encoder has been given enough silence to
-    /// hold nothing else, whole frames of more are skipped: their numbers are passed over and
-    /// a save fills them with the silent frame.
-    fn silence(&mut self, samples: u64) -> Result<(), Failure> {
-        let frame = u64::from(FRAME_SAMPLES);
-        let flushing = samples.min(FLUSH_SAMPLES.saturating_sub(self.quiet));
-        let rest = samples - flushing;
-        let mut encoded = flushing + rest % frame;
-        self.quiet = self.quiet.saturating_add(encoded);
-        while encoded > 0 {
-            let now = encoded.min(frame);
-            let length = usize::try_from(now).unwrap_or(0) * usize::from(CHANNELS);
-            encode(
-                &mut self.encoder,
-                self.live,
-                &mut self.next_frame,
-                &self.zeros[..length],
-            )?;
-            encoded -= now;
+    /// Passes over `samples` of silence: they are not kept, and a save encodes silence there.
+    fn skip(&mut self, samples: u64) {
+        if samples > 0 {
+            self.flush();
+            self.next += samples;
         }
-        self.next_frame += rest / frame;
-        Ok(())
     }
-}
 
-/// Encodes `pcm` and adds each finished frame to `live` under the next number.
-fn encode(
-    encoder: &mut Encoder,
-    live: &Live,
-    next_frame: &mut u64,
-    pcm: &[i16],
-) -> Result<(), Failure> {
-    encoder
-        .encode(pcm, |data| {
-            live.push_audio(AudioFrame {
-                number: *next_frame,
-                data,
-            });
-            *next_frame += 1;
-        })
-        .map_err(Failure::Encoder)
+    /// Hands the samples converted since the last time to the session's buffer.
+    fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            self.live
+                .push_audio(self.pending_start, Arc::from(&self.pending[..]));
+            self.pending.clear();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,14 +399,9 @@ mod tests {
         for entry in log::since(0) {
             println!("{}", entry.line());
         }
-        let audio = live.clip().unwrap().audio.unwrap();
-        let silent = audio
-            .frames
-            .iter()
-            .filter(|frame| Arc::ptr_eq(frame, &audio.format.silence))
-            .count();
+        let audio = crate::audio::encode(&live.clip().unwrap().audio.unwrap()).unwrap();
         println!(
-            "{} frames for 10 s of video, {silent} of them stand-ins for silence, lead {}",
+            "{} frames for 10 s of video, lead {}",
             audio.frames.len(),
             audio.lead
         );

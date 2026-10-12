@@ -1,7 +1,7 @@
 //! What a recording session shares with the rest of the application: the rolling buffers of
-//! encoded video packets and sound frames, the streams they belong to, and counters for the
-//! Status tab. Saving takes a snapshot of the buffers and writes it to an MP4 file while
-//! recording carries on.
+//! encoded video packets and captured sound, the streams they belong to, and counters for the
+//! Status tab. Saving takes a snapshot of the buffers, encodes its sound and writes it to an MP4
+//! file while recording carries on.
 
 use crate::{config::Codec, log};
 use std::{
@@ -24,7 +24,7 @@ mod mp4;
 mod ring;
 mod store;
 
-pub(crate) use audio::{AudioClip, AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES};
+pub(crate) use audio::{AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip};
 use audio::{AudioRing, tick_time};
 use mp4::{MuxError, Visit};
 use ring::Ring;
@@ -102,7 +102,7 @@ pub(crate) struct Live {
     /// The frame index of the oldest buffered packet, or `u64::MAX` before the first; the sound
     /// is trimmed to it.
     oldest: AtomicU64,
-    /// The encoded sound's shape, once the audio capture has started.
+    /// The sound's shape, once the audio capture has started.
     audio: OnceLock<Arc<AudioFormat>>,
     sound: Mutex<AudioRing>,
 }
@@ -200,23 +200,22 @@ impl Live {
         }
     }
 
-    /// Records the encoded sound's shape once the audio encoder is configured.
+    /// Records the sound's shape once the audio capture starts.
     pub(crate) fn set_audio(&self, format: AudioFormat) {
         let _ = self.audio.set(Arc::new(format));
     }
 
-    /// Adds an encoded sound frame, then drops the frames that no clip of the buffered video can
-    /// need.
-    pub(crate) fn push_audio(&self, frame: AudioFrame) {
+    /// Adds `data`, interleaved samples, as the sound from input sample `start` on, then drops
+    /// the samples that no clip of the buffered video can need. The sound is encoded only when
+    /// a clip is saved, so it is not counted among the encoded bytes.
+    pub(crate) fn push_audio(&self, start: u64, data: Arc<[i16]>) {
         let Some(format) = self.audio.get() else {
             return;
         };
-        self.bytes
-            .fetch_add(frame.data.len() as u64, Ordering::Relaxed);
-        let start = self.video_time(self.oldest.load(Ordering::Relaxed));
+        let video_start = self.video_time(self.oldest.load(Ordering::Relaxed));
         let mut sound = self.sound();
-        sound.push(frame);
-        sound.trim(format, start);
+        sound.push(format, start, data);
+        sound.trim(format, video_start);
     }
 
     /// The clock time of video frame `index`, once the clock and the frame rate are known;
@@ -249,7 +248,7 @@ impl Live {
 
     /// The buffer as it is now, if the stream has started, with the sound from the first
     /// packet's frame to the end of the last one's when there is sound. Cheap: the packets put
-    /// away in a store are read back only as a save writes them.
+    /// away in a store are read back, and the sound is encoded, only as a save writes them.
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
         let entries = self.ring().snapshot();
@@ -269,7 +268,7 @@ impl Live {
     }
 
     /// The sound from the start of video frame `first` to the start of frame `end`.
-    fn audio_between(&self, first: u64, end: u64) -> Option<AudioClip> {
+    fn audio_between(&self, first: u64, end: u64) -> Option<PcmClip> {
         let format = self.audio.get()?;
         let (start, end) = (self.video_time(first)?, self.video_time(end)?);
         Some(audio::cut(&self.sound(), format, start, end))
@@ -289,7 +288,7 @@ impl Live {
 pub(crate) struct Snapshot {
     stream: Stream,
     entries: Vec<Entry>,
-    audio: Option<AudioClip>,
+    audio: Option<PcmClip>,
 }
 
 impl Snapshot {
@@ -329,7 +328,7 @@ impl mp4::Packets for [Entry] {
 pub(crate) struct Clip {
     pub(crate) stream: Stream,
     pub(crate) packets: Vec<Arc<Packet>>,
-    pub(crate) audio: Option<AudioClip>,
+    pub(crate) audio: Option<PcmClip>,
 }
 
 #[cfg(test)]
@@ -409,8 +408,9 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Writes `snapshot` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The
-/// file appears under its final name only once it is complete. Packets kept in GPU memory are
-/// read back as they are written, so the save holds a few pieces of them at a time, not the clip.
+/// file appears under its final name only once it is complete. The sound is encoded to AAC here,
+/// on the calling thread, before anything is written. Packets kept in GPU memory are read back as
+/// they are written, so the save holds a few pieces of them at a time, not the clip.
 pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let path = unused_path(directory, &log::file_stamp());
@@ -431,17 +431,27 @@ fn write_then_rename(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> 
     result
 }
 
-/// Muxes `snapshot` into a new file at `path` and waits until it is on the disk.
+/// Encodes `snapshot`'s sound, muxes it into a new file at `path` and waits until it is on the
+/// disk.
 fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
+    let audio = snapshot.audio.as_ref().and_then(encode_sound);
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     mp4::write_from(
         &mut output,
         &snapshot.stream,
         &snapshot.entries[..],
-        snapshot.audio.as_ref(),
+        audio.as_ref(),
     )?;
     sync(output).map_err(SaveError::io("finish", path))
+}
+
+/// The clip's sound encoded to AAC, or `None`, logged, when it cannot be: the clip is still
+/// worth saving without it.
+fn encode_sound(pcm: &PcmClip) -> Option<AudioClip> {
+    crate::audio::encode(pcm)
+        .inspect_err(|error| log::warning(format!("The clip is saved without sound: {error}")))
+        .ok()
 }
 
 /// Flushes `output`'s buffer into its file, then the file's contents to the disk.
@@ -757,7 +767,8 @@ mod tests {
     }
 
     /// Real H.264 and AAC encoder output through the buffer and the writer: the video's 1 s to
-    /// 2.5 s mark, at 30 fps, with the sound cut to the same span on the shared clock. Set
+    /// 2.5 s mark, at 30 fps, with the sound cut to the same span on the shared clock and the
+    /// frames ffmpeg's encoder made of the whole run standing in for the save's encoding. Set
     /// `HINDSIGHT_MUX_OUTPUT` to keep the file, e.g. to check both streams with ffprobe.
     #[test]
     fn real_encoder_output_muxes_with_sound() {
@@ -775,26 +786,24 @@ mod tests {
         live.set_audio(AudioFormat {
             sample_rate: 48_000,
             channels: 2,
-            config: Box::new([0x11, 0x90]),
             anchor: 0,
             // ffmpeg's encoder, like most, puts one frame in front of the sound.
             priming: FRAME_SAMPLES,
-            silence: Arc::clone(&frames[0]),
         });
         for packet in encoded_fixture(Codec::H264) {
             live.push(packet, true);
         }
-        for (number, data) in (0..).zip(frames) {
-            live.push_audio(AudioFrame { number, data });
-        }
+        live.push_audio(0, audio::tests::numbered(0, 120_000));
 
         let clip = live.clip().unwrap();
         assert_eq!(clip.packets.len(), 45);
-        let audio = clip.audio.as_ref().unwrap();
+        let pcm = clip.audio.as_ref().unwrap();
         // 1 s is output sample 49 024, in frame 47; frame 46 comes first, and 2.5 s (output
         // sample 121 024) is in frame 118.
-        assert_eq!(audio.frames.len(), 119 - 46);
-        assert_eq!(audio.lead, 49_024 - 46 * 1024);
+        assert_eq!(pcm.start, 46 * 1024);
+        assert_eq!(pcm.frames, 119 - 46);
+        assert_eq!(pcm.lead, 49_024 - 46 * 1024);
+        let audio = &audio::tests::aac_clip(frames[46..].to_vec(), pcm.lead);
 
         let mut file = Vec::new();
         mp4::write_with_audio(&mut file, &clip.stream, &clip.packets, audio).unwrap();
@@ -873,14 +882,13 @@ mod tests {
         live.set_audio(AudioFormat {
             sample_rate: 48_000,
             channels: 2,
-            config: Box::new([0x11, 0x90]),
             anchor: 0,
             priming: 0,
-            silence: Arc::from(&b"silence"[..]),
         });
         // Five seconds of 30 fps video with a keyframe a second, and the sound arriving
-        // alongside it, each frame once its start has been reached.
-        let mut next_frame: u64 = 0;
+        // alongside it in reads of 60 ms, each once its end has been reached.
+        let read: u64 = 2880;
+        let mut next_sample: u64 = 0;
         for index in 0..150 {
             let key = index % 30 == 0;
             let data = if key { keyframe() } else { inter_frame() };
@@ -893,27 +901,209 @@ mod tests {
                 true,
             );
             let now = tick_time(0, 30, index);
-            while i64::try_from(next_frame * 1024 * 10_000_000 / 48_000).unwrap() < now {
-                live.push_audio(AudioFrame {
-                    number: next_frame,
-                    data: Arc::from(&[1, 2, 3][..]),
-                });
-                next_frame += 1;
+            while i64::try_from((next_sample + read) * 10_000_000 / 48_000).unwrap() <= now {
+                live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
+                next_sample += read;
             }
         }
 
-        // The video keeps its last two seconds from the keyframe at 3 s; the sound keeps the
-        // frame before the one playing then (3 s is sample 144 000, in frame 140), and no more.
+        // The video keeps its last two seconds from the keyframe at 3 s, and the cut starts
+        // at the frame before the one playing then (3 s is sample 144 000, in frame 140).
         let clip = live.clip().unwrap();
         assert_eq!(clip.packets[0].index, 90);
-        assert_eq!(live.sound().numbers()[0], 139);
         let audio = clip.audio.unwrap();
+        assert_eq!(audio.start, 139 * 1024);
         assert_eq!(audio.lead, 144_000 - 139 * 1024);
-        // The video ends at 5 s, sample 240 000, in frame 234; the frames not yet captured
-        // when the clip was taken are silence.
-        assert_eq!(audio.frames.len(), 235 - 139);
-        assert_eq!(&*audio.frames[0], &[1, 2, 3]);
-        assert_eq!(&*audio.frames[233 - 139], b"silence");
+        // The video ends at 5 s, sample 240 000, in frame 234; what was not yet captured when
+        // the clip was taken is silence.
+        assert_eq!(audio.frames, 235 - 139);
+        let mut samples = [7; 4];
+        audio.read(139 * 1024, &mut samples);
+        assert_eq!(samples, [22_336, -22_336, 22_337, -22_337]);
+        audio.read(239_000, &mut samples);
+        assert_eq!(samples, [0; 4]);
+
+        // The next read trims the buffer to the sample the cut starts at, and no further.
+        live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
+        assert_eq!(live.sound().runs()[0].0, 139 * 1024);
+    }
+
+    /// Pushes stereo sound from input sample `start` to `end` in reads of 60 ms, made by
+    /// `sample` from each sample's number.
+    #[cfg(windows)]
+    fn push_sound(live: &Live, start: u64, end: u64, sample: impl Fn(u64) -> i16) {
+        let mut at = start;
+        while at < end {
+            let next = (at + 2880).min(end);
+            let data: Arc<[i16]> = (at..next)
+                .flat_map(|number| {
+                    let value = sample(number);
+                    [value, value]
+                })
+                .collect();
+            live.push_audio(at, data);
+            at = next;
+        }
+    }
+
+    /// Three seconds of 30 fps video from clock time 0, of which the buffer keeps the last two,
+    /// and sound from a third of a second in to 3.2 s, silent but for a click at 2 s (input
+    /// sample 80 000) and with nothing captured from 2.5 s to 2.75 s. The sound starts as
+    /// Media Foundation's encoder does, with no priming.
+    #[cfg(windows)]
+    fn live_with_a_click() -> Live {
+        let live = live_with(90);
+        live.set_origin(0);
+        live.set_audio(AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            anchor: CLOCK_RATE / 3,
+            priming: 0,
+        });
+        let click = |number| if number == 80_000 { 30_000 } else { 0 };
+        push_sound(&live, 0, 104_000, click);
+        push_sound(&live, 116_000, 137_600, click);
+        live
+    }
+
+    /// The snapshot of `live` and its sound encoded, or `None` on a machine without Media
+    /// Foundation's AAC encoder, which skips the test.
+    #[cfg(windows)]
+    fn snapshot_with_sound(live: &Live) -> Option<Snapshot> {
+        let snapshot = live.snapshot().unwrap();
+        match crate::audio::encode(snapshot.audio.as_ref().unwrap()) {
+            Ok(_) => Some(snapshot),
+            Err(error) => {
+                eprintln!("skipped: {error}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_saved_clip_encodes_its_sound_in_line_with_the_video() {
+        let live = live_with_a_click();
+        let Some(snapshot) = snapshot_with_sound(&live) else {
+            return;
+        };
+        // The video runs from 1 s to 3 s: output samples 32 000 to 128 000, so frames 31 to
+        // 124 with frame 30 in front, which an encoder started at input sample 30 720 makes
+        // first.
+        let pcm = snapshot.audio.as_ref().unwrap();
+        assert_eq!(
+            (pcm.start, pcm.frames, pcm.lead),
+            (30 * 1024, 125 - 30, 32_000 - 30 * 1024)
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = fs::read(save(&snapshot, directory.path()).unwrap()).unwrap();
+        let (moov, _) = mp4::tests::index(&file);
+        let [_, sound] = &moov.trak[..] else {
+            panic!("expected two tracks");
+        };
+        assert_eq!(moov.mvhd.duration, 2000);
+        assert_eq!(
+            (sound.mdia.mdhd.timescale, sound.mdia.mdhd.duration),
+            (48_000, 95 * 1024)
+        );
+        let edits = &sound.edts.as_ref().unwrap().elst.as_ref().unwrap().entries;
+        assert_eq!(
+            edits
+                .iter()
+                .map(|edit| (edit.segment_duration, edit.media_time))
+                .collect::<Vec<_>>(),
+            [(2000, Some(1280))]
+        );
+        // At 192 kb/s the encoder spends 24 000 bytes a second, silence included.
+        let sizes = mp4::tests::sizes(&sound.mdia.minf.stbl);
+        assert_eq!(sizes.len(), 95);
+        let bytes: u32 = sizes.iter().sum();
+        assert!((40_000..=56_000).contains(&bytes), "{bytes} bytes");
+    }
+
+    /// Decodes a saved clip's sound with ffmpeg, which applies the edit list, and finds the
+    /// click two seconds into the session exactly one second into the clip. Run by hand with
+    /// ffmpeg on the path: `cargo test click_plays_in_time -- --ignored --nocapture`.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "needs ffmpeg"]
+    fn the_click_plays_in_time_with_the_video() {
+        let live = live_with_a_click();
+        let snapshot = snapshot_with_sound(&live).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let clip = save(&snapshot, directory.path()).unwrap();
+        let raw = directory.path().join("sound.raw");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&clip)
+            .args(["-map", "0:a", "-f", "s16le", "-ac", "1"])
+            .arg(&raw)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let decoded: Vec<i16> = fs::read(&raw)
+            .unwrap()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect();
+        let peak = (0..decoded.len())
+            .max_by_key(|&index| decoded[index].unsigned_abs())
+            .unwrap();
+        println!(
+            "{} samples decoded for 2 s of video, the click at {peak}",
+            decoded.len()
+        );
+        assert_eq!(decoded.len(), 96_000);
+        assert!(peak.abs_diff(48_000) <= 2, "the click at {peak}");
+    }
+
+    /// Times the encoding of a 300 s clip's sound, which a save of the longest buffer pays:
+    /// `cargo test --release encodes_five_minutes -- --ignored --nocapture`.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "a timing, not a check"]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "the signal stays within ±12 000, and sample numbers are far below 2^52"
+    )]
+    fn encodes_five_minutes_of_sound() {
+        let live = Live::new(9000);
+        live.set_stream(STREAM);
+        push_frames(&live, 9000);
+        live.set_origin(0);
+        live.set_audio(AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            anchor: 0,
+            priming: 0,
+        });
+        // A chord with noise on it, so the encoder has something to spend its bits on.
+        let mut seed: u32 = 1;
+        let noise: Vec<i16> = (0..48_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                i16::try_from(seed >> 20).unwrap() - 2048
+            })
+            .collect();
+        push_sound(&live, 0, 300 * 48_000, |number| {
+            let time = number as f64 / 48_000.0;
+            let chord = (time * 2764.6).sin() * 5000.0 + (time * 3487.2).sin() * 4000.0;
+            chord as i16 + noise[usize::try_from(number % 48_000).unwrap()]
+        });
+        let snapshot = live.snapshot().unwrap();
+        let pcm = snapshot.audio.as_ref().unwrap();
+        let start = std::time::Instant::now();
+        let audio = crate::audio::encode(pcm).unwrap();
+        println!(
+            "{} frames ({} bytes) of AAC from 300 s of sound in {:?}",
+            audio.frames.len(),
+            audio.frames.iter().map(|frame| frame.len()).sum::<usize>(),
+            start.elapsed()
+        );
     }
 
     #[test]

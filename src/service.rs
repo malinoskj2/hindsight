@@ -743,8 +743,8 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                // Packets kept in GPU memory are read back here, off the worker, as they are
-                // written.
+                // The sound is encoded and packets kept in GPU memory are read back here, off
+                // the worker, in background mode like the writing.
                 write(&snapshot, &directory)
             })
     }

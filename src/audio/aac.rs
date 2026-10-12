@@ -1,9 +1,11 @@
 //! The AAC-LC encoder: Media Foundation's AAC encoder transform, which ships with Windows (it is
 //! what NVIDIA Instant Replay's clips carry too). It takes 16-bit PCM and returns one raw AAC
-//! frame of 1024 samples per output, about 47 a second at 48 kHz. Encoding a frame takes tens
-//! of microseconds, so it runs on the audio capture thread, straight after each packet.
+//! frame of 1024 samples per output, about 47 a second at 48 kHz. It runs only when a clip is
+//! saved, on the save thread, over the clip's span of the buffered PCM: running it as the sound
+//! arrives cost the audio thread more CPU than everything else it does.
 
-use crate::replay::{CLOCK_RATE, FRAME_SAMPLES};
+use super::{EncodeError, loopback::Com};
+use crate::replay::{AudioClip, CLOCK_RATE, FRAME_SAMPLES, PcmClip};
 use std::{mem::ManuallyDrop, sync::Arc};
 use windows::{
     Win32::{
@@ -44,9 +46,7 @@ const WAVE_INFO_BYTES: usize = 12;
 pub(crate) const PRIMING: u32 = 0;
 /// The input the encoder can hold back before it finishes a frame, in samples per channel: its
 /// lookahead and a partly filled frame, rounded up.
-pub(crate) const HELD_BACK: u32 = 4 * FRAME_SAMPLES;
-/// Samples of silence encoded to find the frame the encoder makes of silence.
-const SILENCE_PROBE_FRAMES: usize = 8;
+const HELD_BACK: u32 = 4 * FRAME_SAMPLES;
 
 /// Media Foundation, started for the calling thread's use; stopped again on drop.
 pub(crate) struct MediaFoundation(());
@@ -262,20 +262,52 @@ fn contents(sample: &IMFSample) -> Result<Arc<[u8]>> {
     }
 }
 
-/// The frame the encoder makes of digital silence once it has settled, from a throwaway
-/// encoder so the session's stays untouched.
-pub(crate) fn silent_frame(rate: u32, channels: u16) -> Result<Arc<[u8]>> {
-    let mut encoder = Encoder::open(rate, channels)?;
-    let zeros = vec![0; SILENCE_PROBE_FRAMES * FRAME_SAMPLES as usize * usize::from(channels)];
-    let mut last = None;
-    encoder.encode(&zeros, |frame| last = Some(frame))?;
-    last.ok_or_else(|| windows::core::Error::from(MF_E_TRANSFORM_NEED_MORE_INPUT))
+/// Samples per channel handed to the encoder at a time when a save encodes a clip: eight
+/// frames, few enough calls that their overhead does not count and a small buffer.
+const CLIP_BLOCK: u32 = 8 * FRAME_SAMPLES;
+
+/// Encodes `clip` to AAC on the calling thread, which starts COM and Media Foundation for the
+/// while. A fresh encoder started at the clip's first sample makes the clip's first frame
+/// first (see the replay module's `audio`), so the frames line up with the video as numbered;
+/// the input runs on past the clip's end by what the encoder holds back, so it finishes the
+/// last frame from the sound that followed, or from silence.
+pub(crate) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
+    let _com = Com::start()?;
+    let _media = MediaFoundation::start()?;
+    let format = &clip.format;
+    let mut encoder = Encoder::open(format.sample_rate, format.channels)?;
+    let mut frames = Vec::with_capacity(clip.frames);
+    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels.max(1))];
+    let input = i64::try_from(clip.frames)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(i64::from(FRAME_SAMPLES))
+        .saturating_add(i64::from(HELD_BACK));
+    let end = clip.start.saturating_add(input);
+    let mut next = clip.start;
+    while frames.len() < clip.frames && next < end {
+        clip.read(next, &mut pcm);
+        encoder.encode(&pcm, |frame| frames.push(frame))?;
+        next += i64::from(CLIP_BLOCK);
+    }
+    if frames.len() < clip.frames {
+        return Err(EncodeError::Short {
+            made: frames.len(),
+            needed: clip.frames,
+        });
+    }
+    frames.truncate(clip.frames);
+    Ok(AudioClip {
+        sample_rate: format.sample_rate,
+        channels: format.channels,
+        config: encoder.config(),
+        frames,
+        lead: clip.lead,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::loopback::Com;
 
     /// Opens an encoder, or says why a machine without Media Foundation (a Windows N edition
     /// without the Media Feature Pack, a server without the feature) skips the test.
@@ -319,10 +351,6 @@ mod tests {
             (19_000..=29_000).contains(&bytes),
             "{bytes} bytes for a second"
         );
-
-        let silence = silent_frame(48_000, 2).unwrap();
-        // The encoder keeps a constant bitrate, so silence takes a full frame's worth of bytes.
-        assert!((300..=FRAME_BYTES_MAX as usize).contains(&silence.len()));
     }
 
     /// Finds the encoder's delay: encodes a click at sample 10 000, writes the frames as ADTS
