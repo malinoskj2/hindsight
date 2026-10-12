@@ -108,8 +108,10 @@ impl ClipsPage {
     }
 
     /// Shows the clips of `folder` while the tab is in view (`shown`), reading the folder again
-    /// when it is not the one listed or `status` says a clip was saved since. Thumbnails made
-    /// meanwhile are taken in whether the tab is in view or not, so they are there when it is.
+    /// when the tab comes back into view, when it is not the one listed or when `status` says a
+    /// clip was saved since. Clips put in the folder by hand are so picked up on the next visit
+    /// to the tab, not while it is being looked at. Thumbnails made meanwhile are taken in
+    /// whether the tab is in view or not, so they are there when it is.
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
         self.receive_thumbnails();
         let rebuild = {
@@ -119,6 +121,10 @@ impl ClipsPage {
                 state.last_clip = status.last_clip.clone();
                 state.stale = true;
             }
+            if shown && !state.in_view {
+                state.stale = true;
+            }
+            state.in_view = shown;
             let rebuild = shown && state.stale;
             if rebuild {
                 state.stale = false;
@@ -443,6 +449,8 @@ struct State {
     last_clip: Option<PathBuf>,
     /// The folder must be read again before the list is next in view.
     stale: bool,
+    /// Whether the tab was in view at the last update; coming into view reads the folder again.
+    in_view: bool,
     /// The clips as listed, in the order of the items.
     clips: Vec<Clip>,
     /// Where the placeholder sits in the image list, once added.
