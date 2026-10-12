@@ -31,6 +31,13 @@ pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
 /// How far a classic group title sits from the frame's left edge.
 const TITLE_INDENT: i32 = 8;
 
+/// Where a control that fills its page, the Clips list or the Logs view, starts on it.
+pub(super) const FILL_Y: i32 = 6;
+/// Height of a control that fills its page: down to where the Settings tab's last group ends
+/// while compact, so the page never asks for more height. While a group on another page shows
+/// its extra line, the window grows every page, and these controls with them.
+pub(super) const FILL_HEIGHT: i32 = 364;
+
 /// Pitch of a row of text.
 pub(super) const LINE: i32 = 18;
 pub(super) const BUTTON_WIDTH: i32 = 120;

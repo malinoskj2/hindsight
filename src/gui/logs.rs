@@ -1,15 +1,13 @@
 //! The Logs tab: a read-only text box that receives journal entries as they are recorded.
 
 use super::{
-    layout::{self, BLACK, GROUP_WIDTH, GROUP_X},
+    layout::{self, BLACK, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X},
     theme::{Skin, Surface},
 };
 use crate::log;
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
-/// Height of the log view, filling the page.
-const VIEW_HEIGHT: i32 = 290;
 /// Characters after which the view is cleared before the next batch of entries is appended;
 /// older lines remain in the session log file.
 const VIEW_LIMIT: i32 = 200_000;
@@ -29,9 +27,9 @@ impl LogsPage {
             &page,
             gui::EditOpts {
                 text: "",
-                position: gui::dpi(GROUP_X, 6),
+                position: gui::dpi(GROUP_X, FILL_Y),
                 width: gui::dpi_x(GROUP_WIDTH),
-                height: gui::dpi_y(VIEW_HEIGHT),
+                height: gui::dpi_y(FILL_HEIGHT),
                 control_style: co::ES::MULTILINE
                     | co::ES::READONLY
                     | co::ES::AUTOVSCROLL

@@ -35,6 +35,10 @@ pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
 /// What the Clips tab shows in place of its list while the clip folder holds no clip.
 pub(super) const NO_CLIPS: &str =
     "No clips yet — press the hotkey while a full-screen app is running";
+/// The menu a right-click on a clip shows.
+pub(super) const CLIP_MENU_OPEN: &str = "&Open";
+pub(super) const CLIP_MENU_REVEAL: &str = "Show in &Explorer";
+pub(super) const CLIP_MENU_DELETE: &str = "&Delete";
 
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
@@ -108,6 +112,25 @@ pub(super) fn clip_not_listed(path: &Path, error: impl Display) -> String {
 
 pub(super) fn clip_open_failed(path: &Path, error: impl Display) -> String {
     format!("Could not open {}: {error}", path.display())
+}
+
+pub(super) fn clip_reveal_failed(path: &Path, error: impl Display) -> String {
+    format!("Could not show {} in Explorer: {error}", path.display())
+}
+
+pub(super) fn clip_deleted(path: &Path) -> String {
+    format!("Moved {} to the Recycle Bin", path.display())
+}
+
+pub(super) fn clip_delete_failed(path: &Path, error: impl Display) -> String {
+    format!(
+        "Could not move {} to the Recycle Bin: {error}",
+        path.display()
+    )
+}
+
+pub(super) fn clip_menu_failed(error: impl Display) -> String {
+    format!("The clip menu could not be shown: {error}")
 }
 
 /// The caption under a clip's thumbnail: when it was taken, or its name, and its size in

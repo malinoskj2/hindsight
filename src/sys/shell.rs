@@ -1,15 +1,18 @@
-//! The Windows shell's view of a file: the thumbnail Explorer shows for it, and opening it with
-//! whatever the user made the default for files of its kind.
+//! The Windows shell's view of a file: the thumbnail Explorer shows for it, opening it with
+//! whatever the user made the default for files of its kind, showing it selected in an Explorer
+//! window, and sending it to the Recycle Bin.
 
 use crate::sys::thread;
 use std::{
+    ffi::OsString,
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::SIZE,
+        Foundation::{HWND, SIZE},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
         },
@@ -18,8 +21,10 @@ use windows::{
         },
         UI::{
             Shell::{
-                IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT,
-                SIIGBF_THUMBNAILONLY, ShellExecuteW,
+                FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+                FOF_WANTNUKEWARNING, IShellItemImageFactory, SHCreateItemFromParsingName,
+                SHFILEOPSTRUCTW, SHFileOperationW, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
+                ShellExecuteW,
             },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
@@ -34,6 +39,18 @@ const PIXEL: usize = 4;
 const ALPHA: usize = 3;
 /// What `ShellExecute` returns above when it succeeded; at or below, the value is an error code.
 const SHELL_EXECUTE_OK: usize = 32;
+/// How a clip goes to the Recycle Bin: undoably, without the "are you sure" question, the
+/// progress window or the shell's own error boxes, since the caller logs a failure. The one
+/// question kept is the warning that a file too large for the bin would be destroyed outright.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the flags all sit in the low 16 bits, which is all the structure has room for"
+)]
+const RECYCLE_FLAGS: u16 = (FOF_ALLOWUNDO.0
+    | FOF_NOCONFIRMATION.0
+    | FOF_SILENT.0
+    | FOF_NOERRORUI.0
+    | FOF_WANTNUKEWARNING.0) as u16;
 /// Share of a placeholder's height its play mark takes.
 const MARK_SHARE: i32 = 3;
 
@@ -73,6 +90,22 @@ pub(crate) enum ThumbnailError {
 #[derive(Debug, Error)]
 #[error("the shell refused to open the file (code {0})")]
 pub(crate) struct OpenError(usize);
+
+/// Why Explorer could not be shown a file.
+#[derive(Debug, Error)]
+#[error("the shell could not start Explorer (code {0})")]
+pub(crate) struct RevealError(usize);
+
+/// Why a file could not be sent to the Recycle Bin.
+#[derive(Debug, Error)]
+pub(crate) enum RecycleError {
+    #[error("the path is not a full one, so the file could not be restored")]
+    NotAbsolute,
+    #[error("the shell could not move the file to the Recycle Bin (code {0:#x})")]
+    Refused(i32),
+    #[error("the deletion was cancelled")]
+    Cancelled,
+}
 
 /// A thumbnail for every path sent on `requests`, in the order asked, each answered on
 /// `results`; returns once the requests' sender is dropped. Meant for a thread of its own: the
@@ -129,8 +162,47 @@ pub(crate) fn placeholder(
 /// Opens `path` with whatever the user made the default for files of its kind, as a double
 /// click in Explorer does.
 pub(crate) fn open(path: &Path) -> Result<(), OpenError> {
+    execute(&HSTRING::from(path.as_os_str()), None).map_err(OpenError)
+}
+
+/// Opens an Explorer window on the folder of `path` with the file selected in it.
+pub(crate) fn reveal(path: &Path) -> Result<(), RevealError> {
+    let parameters = HSTRING::from(select_argument(path));
+    execute(&HSTRING::from("explorer.exe"), Some(&parameters)).map_err(RevealError)
+}
+
+/// Sends the file at `path` to the Recycle Bin, from where the user can restore it. A file too
+/// large for the bin is destroyed only after the shell's warning, as a dialog owned by `owner`.
+pub(crate) fn recycle(path: &Path, owner: &w::HWND) -> Result<(), RecycleError> {
+    // Without a full path the shell deletes for good, as it cannot tell where to restore to.
+    if !path.is_absolute() {
+        return Err(RecycleError::NotAbsolute);
+    }
+    let from = path_list(path);
+    let mut operation = SHFILEOPSTRUCTW {
+        hwnd: HWND(owner.ptr()),
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: RECYCLE_FLAGS,
+        ..Default::default()
+    };
+    // SAFETY: the structure and the path list it points to outlive the call, the list ends in
+    // the two nulls the call looks for, and the owner is a window of this thread or null.
+    let code = unsafe { SHFileOperationW(&raw mut operation) };
+    if code != 0 {
+        return Err(RecycleError::Refused(code));
+    }
+    if operation.fAnyOperationsAborted.as_bool() {
+        return Err(RecycleError::Cancelled);
+    }
+    Ok(())
+}
+
+/// Has the shell do the default thing with `file`, given `parameters` if any, as a double click
+/// in Explorer would; the shell's code when it fails.
+fn execute(file: &HSTRING, parameters: Option<&HSTRING>) -> Result<(), usize> {
     let verb = HSTRING::from("open");
-    let file = HSTRING::from(path.as_os_str());
+    let parameters = parameters.map_or(PCWSTR::null(), |parameters| PCWSTR(parameters.as_ptr()));
     // SAFETY: the strings outlive the call, the absent ones are null, and no window owns the
     // launch.
     let result = unsafe {
@@ -138,7 +210,7 @@ pub(crate) fn open(path: &Path) -> Result<(), OpenError> {
             None,
             PCWSTR(verb.as_ptr()),
             PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
+            parameters,
             PCWSTR::null(),
             SW_SHOWNORMAL,
         )
@@ -148,8 +220,23 @@ pub(crate) fn open(path: &Path) -> Result<(), OpenError> {
     if code > SHELL_EXECUTE_OK {
         Ok(())
     } else {
-        Err(OpenError(code))
+        Err(code)
     }
+}
+
+/// What Explorer is told to open a window on the folder of `path` with it selected. The quotes
+/// keep a comma or a space in the path from ending it early.
+fn select_argument(path: &Path) -> OsString {
+    let mut argument = OsString::from("/select,\"");
+    argument.push(path);
+    argument.push("\"");
+    argument
+}
+
+/// `path` as the list of files a shell file operation takes: wide characters, each name ended
+/// by a null and the list by a second one.
+fn path_list(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain([0, 0]).collect()
 }
 
 /// COM, started for the calling thread in a single-threaded apartment, which the shell's
@@ -417,6 +504,36 @@ mod tests {
         );
         // An empty picture counts as a dot, which is square, so nothing divides by zero.
         assert_eq!(Fit::of((0, 0), (128, 72)), Fit::of((1, 1), (128, 72)));
+    }
+
+    #[test]
+    fn explorer_is_asked_to_select_the_whole_path_however_it_is_spelled() {
+        assert_eq!(
+            select_argument(Path::new(r"D:\My Clips, 2026\boss fight.mp4")),
+            r#"/select,"D:\My Clips, 2026\boss fight.mp4""#
+        );
+    }
+
+    #[test]
+    fn a_file_operation_gets_its_path_ended_by_two_nulls() {
+        let list = path_list(Path::new(r"D:\a.mp4"));
+        assert_eq!(
+            String::from_utf16_lossy(&list[..list.len() - 2]),
+            r"D:\a.mp4"
+        );
+        assert_eq!(list[list.len() - 2..], [0, 0]);
+    }
+
+    #[test]
+    fn only_a_full_path_goes_to_the_recycle_bin() {
+        // Refused before the shell is called, so nothing on disk is touched.
+        assert!(matches!(
+            recycle(
+                Path::new("hindsight_2026-10-12_21-14-05.mp4"),
+                &w::HWND::NULL
+            ),
+            Err(RecycleError::NotAbsolute)
+        ));
     }
 
     #[test]

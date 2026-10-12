@@ -1,10 +1,11 @@
 //! The Clips tab: every clip in the clip folder as a thumbnail, newest first, which a click
-//! opens in whatever plays videos on this machine. The thumbnails are the ones Explorer shows,
-//! made by the shell on a thread of its own since a video's first one takes it a while; a
-//! placeholder stands in until each arrives.
+//! opens in whatever plays videos on this machine, and a right-click offers to open, show in
+//! Explorer or send to the Recycle Bin. The thumbnails are the ones Explorer shows, made by the
+//! shell on a thread of its own since a video's first one takes it a while; a placeholder stands
+//! in until each arrives.
 
 use super::{
-    layout::{self, BLACK, GROUP_WIDTH, GROUP_X, LINE},
+    layout::{self, BLACK, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE},
     text,
     theme::{Skin, Surface},
 };
@@ -24,10 +25,6 @@ use std::{
 };
 use winsafe::{self as w, co, gui, prelude::*};
 
-/// Where the list starts on the page.
-const LIST_Y: i32 = 6;
-/// Down to where the Settings tab's last group ends, so the page never asks for more height.
-const LIST_HEIGHT: i32 = 364;
 /// A thumbnail's size, in logical pixels: 16:9, as the clips are.
 const THUMB_WIDTH: i32 = 128;
 const THUMB_HEIGHT: i32 = 72;
@@ -59,8 +56,8 @@ impl ClipsPage {
         let list = gui::ListView::new(
             &page,
             gui::ListViewOpts {
-                position: gui::dpi(GROUP_X, LIST_Y),
-                size: gui::dpi(GROUP_WIDTH, LIST_HEIGHT),
+                position: gui::dpi(GROUP_X, FILL_Y),
+                size: gui::dpi(GROUP_WIDTH, FILL_HEIGHT),
                 // Rows of large icons from the top, arranged afresh as items come and go.
                 control_style: co::LVS::ICON
                     | co::LVS::ALIGNTOP
@@ -133,12 +130,21 @@ impl ClipsPage {
         }
     }
 
-    /// Wires a click to opening the clip, and the line the empty list shows.
+    /// Wires a click to opening the clip, a right-click to the clip's menu, and the line the
+    /// empty list shows.
     fn events(&self) {
         let me = self.clone();
         self.list.on().nm_click(move |click| {
-            me.open(click.iItem);
+            if let Some(path) = me.clip_path(click.iItem) {
+                open(&path);
+            }
             Ok(())
+        });
+        let me = self.clone();
+        self.list.on().nm_r_click(move |click| {
+            me.on_right_click(click.iItem);
+            // Handled: the list need not go on to send a context-menu message of its own.
+            Ok(1)
         });
         self.list.on().lvn_get_empty_markup(|markup| {
             markup.dwFlags = co::EMF::CENTERED;
@@ -147,20 +153,81 @@ impl ClipsPage {
         });
     }
 
-    /// Opens the clip of item `index` with the user's video player; a click beside the items
-    /// does nothing.
-    fn open(&self, index: i32) {
-        let path = usize::try_from(index).ok().and_then(|index| {
-            self.state
-                .borrow()
-                .clips
-                .get(index)
-                .map(|clip| clip.path.clone())
-        });
-        if let Some(path) = path
-            && let Err(error) = shell::open(&path)
-        {
-            log::warning(text::clip_open_failed(&path, error));
+    /// The file of item `index`; none for a click beside the items, which reports -1.
+    fn clip_path(&self, index: i32) -> Option<PathBuf> {
+        let index = usize::try_from(index).ok()?;
+        let state = self.state.borrow();
+        state.clips.get(index).map(|clip| clip.path.clone())
+    }
+
+    /// Selects item `index` and shows its menu at the mouse, then does what was chosen; a
+    /// right-click beside the items shows nothing.
+    fn on_right_click(&self, index: i32) {
+        let Some(path) = self.clip_path(index) else {
+            return;
+        };
+        if let Ok(item) = u32::try_from(index) {
+            let _ = self.list.items().get(item).select(true);
+        }
+        // The menu runs a message loop of its own, in which the refresh timer may rebuild the
+        // list; the path was taken beforehand, so the choice still applies to this clip.
+        match self.choose_command() {
+            Ok(Some(ClipCommand::Open)) => open(&path),
+            Ok(Some(ClipCommand::Reveal)) => {
+                if let Err(error) = shell::reveal(&path) {
+                    log::warning(text::clip_reveal_failed(&path, error));
+                }
+            }
+            Ok(Some(ClipCommand::Delete)) => self.delete(&path),
+            Ok(None) => {}
+            Err(error) => log::warning(text::clip_menu_failed(error)),
+        }
+    }
+
+    /// Shows the clip menu at the mouse until the user picks from it or dismisses it.
+    fn choose_command(&self) -> w::SysResult<Option<ClipCommand>> {
+        let mut menu = w::HMENU::CreatePopupMenu()?;
+        let items: Vec<w::MenuItem> = ClipCommand::ALL
+            .iter()
+            .map(|command| w::MenuItem::Entry {
+                cmd_id: command.id(),
+                text: command.text(),
+            })
+            .collect();
+        let chosen = menu
+            .append_item(&items)
+            .and_then(|()| {
+                // Bold, as Explorer marks what a click on the item does.
+                menu.SetMenuDefaultItem(w::IdPos::Id(ClipCommand::Open.id()))
+            })
+            .and_then(|()| w::GetCursorPos())
+            .and_then(|at| {
+                // The choice comes back from the call rather than as a command message.
+                menu.TrackPopupMenu(
+                    co::TPM::RETURNCMD | co::TPM::NONOTIFY | co::TPM::RIGHTBUTTON,
+                    at,
+                    self.list.hwnd(),
+                )
+            });
+        let _ = menu.DestroyMenu();
+        Ok(chosen?.and_then(ClipCommand::from_id))
+    }
+
+    /// Sends the clip at `path` to the Recycle Bin and lists the folder afresh, or logs why it
+    /// stays.
+    fn delete(&self, path: &Path) {
+        if let Err(error) = shell::recycle(path, self.list.hwnd()) {
+            log::warning(text::clip_delete_failed(path, error));
+            return;
+        }
+        log::info(text::clip_deleted(path));
+        let folder = {
+            let mut state = self.state.borrow_mut();
+            state.forget(path);
+            state.folder.clone()
+        };
+        if let Some(folder) = folder {
+            self.rebuild(list_clips(&folder));
         }
     }
 
@@ -261,6 +328,11 @@ impl ClipsPage {
             None => return,
         };
         for (path, result) in made {
+            // A clip deleted while its thumbnail was being made needs neither the picture nor
+            // the failure its absence caused.
+            if !state.requested.contains(&path) {
+                continue;
+            }
             match result.and_then(|thumbnail| self.add_image(&thumbnail)) {
                 Ok(image) => {
                     state.thumbnails.insert(path.clone(), image);
@@ -408,6 +480,54 @@ impl State {
             }
         }
     }
+
+    /// Lets go of what is kept for the clip at `path`, which is gone: should a file come back
+    /// at that path, restored or new, its thumbnail is made afresh. Its picture stays in the
+    /// image list unused, since removing one there renumbers every picture after it.
+    fn forget(&mut self, path: &Path) {
+        self.thumbnails.remove(path);
+        self.requested.remove(path);
+    }
+}
+
+/// What the menu on a clip offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipCommand {
+    /// Play it, as a click does.
+    Open,
+    /// Show it selected in an Explorer window.
+    Reveal,
+    /// Send it to the Recycle Bin.
+    Delete,
+}
+
+impl ClipCommand {
+    /// In the menu's order.
+    const ALL: [Self; 3] = [Self::Open, Self::Reveal, Self::Delete];
+
+    /// The menu item's id. A menu reports no choice as 0, so the ids start at 1.
+    fn id(self) -> u16 {
+        match self {
+            Self::Open => 1,
+            Self::Reveal => 2,
+            Self::Delete => 3,
+        }
+    }
+
+    /// The command whose menu item has `id`, as the menu reports a choice.
+    fn from_id(id: i32) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|command| i32::from(command.id()) == id)
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::Open => text::CLIP_MENU_OPEN,
+            Self::Reveal => text::CLIP_MENU_REVEAL,
+            Self::Delete => text::CLIP_MENU_DELETE,
+        }
+    }
 }
 
 /// The thread that makes thumbnails, and the channels to and from it. The thread ends when
@@ -548,6 +668,13 @@ fn list_clips(folder: &Path) -> Vec<Clip> {
     clips
 }
 
+/// Opens the clip at `path` with the user's video player, or logs why it could not.
+fn open(path: &Path) {
+    if let Err(error) = shell::open(path) {
+        log::warning(text::clip_open_failed(path, error));
+    }
+}
+
 /// Sorts `clips` newest first.
 fn newest_first(clips: &mut [Clip]) {
     clips.sort_by(|a, b| b.order().cmp(&a.order()));
@@ -676,6 +803,34 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_offers_open_reveal_and_delete_each_under_an_id_of_its_own() {
+        for command in ClipCommand::ALL {
+            assert_ne!(command.id(), 0, "{command:?} would read as no choice");
+            assert_eq!(ClipCommand::from_id(command.id().into()), Some(command));
+        }
+        assert_eq!(ClipCommand::from_id(0), None);
+        assert_eq!(ClipCommand::from_id(4), None);
+        assert_eq!(ClipCommand::ALL[0], ClipCommand::Open);
+    }
+
+    #[test]
+    fn a_deleted_clip_is_forgotten_and_the_others_keep_their_pictures() {
+        let gone = PathBuf::from(r"D:\Clips\hindsight_2026-10-12_21-14-05.mp4");
+        let kept = PathBuf::from(r"D:\Clips\hindsight_2026-10-12_21-15-00.mp4");
+        let mut state = State::default();
+        for (path, image) in [(&gone, 1), (&kept, 2)] {
+            state.thumbnails.insert(path.clone(), image);
+            state.requested.insert(path.clone());
+        }
+        state.forget(&gone);
+        assert!(!state.thumbnails.contains_key(&gone));
+        assert!(!state.requested.contains(&gone));
+        // The picture after it keeps its place in the image list.
+        assert_eq!(state.thumbnails.get(&kept), Some(&2));
+        assert!(state.requested.contains(&kept));
+    }
+
+    #[test]
     fn items_go_across_then_down_from_the_areas_corner() {
         let area = work_area((426, 360), (134, 116), 6, 17, 4);
         // The list draws a thumbnail one pixel in from the item's position.
@@ -720,8 +875,6 @@ mod tests {
             (CELL_WIDTH - THUMB_WIDTH, CELL_HEIGHT - THUMB_HEIGHT),
             (6, 2 * LINE + 8)
         );
-        assert_eq!((LIST_HEIGHT - 2 * EDGE) / CELL_HEIGHT, 3);
-        // Level with the bottom of the Settings tab's last group, so the page needs no more.
-        assert_eq!(LIST_Y + LIST_HEIGHT, 370);
+        assert_eq!((FILL_HEIGHT - 2 * EDGE) / CELL_HEIGHT, 3);
     }
 }

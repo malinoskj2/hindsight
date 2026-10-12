@@ -714,6 +714,12 @@ mod tests {
         );
         assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 292));
         assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (298, 72));
+        // The Clips list and the Logs view reach as far down as the compact General group, so
+        // no page asks for more height than this one.
+        assert_eq!(
+            rows::GENERAL_FRAME + rows::GENERAL_HEIGHT,
+            layout::FILL_Y + layout::FILL_HEIGHT
+        );
         assert_eq!(
             [rows::THEME, rows::START_WITH_WINDOWS, rows::STARTUP_ERROR],
             [318, 346, 368]
