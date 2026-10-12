@@ -114,6 +114,14 @@ impl Device {
         Ok(description.AdapterLuid)
     }
 
+    /// Bytes of memory on the adapter itself, as DXGI reports them.
+    pub(super) fn dedicated_video_memory(&self) -> windows::core::Result<usize> {
+        let device = self.dxgi()?;
+        // SAFETY: reads the adapter of a live device and then its description.
+        let description = unsafe { device.GetAdapter()?.GetDesc() }?;
+        Ok(description.DedicatedVideoMemory)
+    }
+
     /// Lets the device's copies run ahead of a game that keeps the GPU busy.
     pub(super) fn raise_priority(&self) -> windows::core::Result<()> {
         let device = self.dxgi()?;

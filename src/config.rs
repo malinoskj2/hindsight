@@ -118,6 +118,42 @@ impl fmt::Display for Codec {
     }
 }
 
+/// Where the replay buffer is kept: in system memory, or in the GPU's own, which leaves the
+/// system's free for the game and costs the GPU's instead. A save reads a buffer in GPU memory
+/// back through system memory, so for a moment it takes as much of both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Memory {
+    #[default]
+    Ram,
+    Vram,
+}
+
+impl Memory {
+    pub(crate) const ALL: [Self; 2] = [Self::Ram, Self::Vram];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Ram => "System memory (RAM)",
+            Self::Vram => "GPU memory (VRAM)",
+        }
+    }
+
+    /// The short name, for log lines and estimates.
+    pub(crate) const fn short_name(self) -> &'static str {
+        match self {
+            Self::Ram => "RAM",
+            Self::Vram => "VRAM",
+        }
+    }
+}
+
+impl fmt::Display for Memory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
 /// How the window looks. Classic is the plain Windows dialog; the others dress it in a
 /// character's colours and artwork.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +207,8 @@ pub(crate) struct Config {
     /// Whether the mouse cursor is drawn into the picture, where the backend can (NvFBC and
     /// Windows Graphics Capture; Desktop Duplication never draws it).
     pub(crate) cursor: bool,
+    /// Where the replay buffer is kept.
+    pub(crate) buffer_memory: Memory,
 }
 
 impl Default for Config {
@@ -187,6 +225,7 @@ impl Default for Config {
             theme: Theme::Classic,
             audio: true,
             cursor: false,
+            buffer_memory: Memory::Ram,
         }
     }
 }
@@ -312,6 +351,13 @@ mod tests {
         // The cursor stays out of the picture unless asked for.
         assert!(!config.cursor);
         assert!(parse(r#"{"cursor":true}"#).unwrap().cursor);
+        // The buffer stays in system memory unless asked to go to the GPU's.
+        assert_eq!(config.buffer_memory, Memory::Ram);
+        assert_eq!(
+            parse(r#"{"buffer_memory":"vram"}"#).unwrap().buffer_memory,
+            Memory::Vram
+        );
+        assert!(parse(r#"{"buffer_memory":"gpu"}"#).is_err());
 
         assert_eq!(parse(r#"{"mode":"desktop"}"#).unwrap().mode, Mode::Desktop);
         assert_eq!(

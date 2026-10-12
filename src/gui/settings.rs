@@ -12,7 +12,7 @@ use super::{
 use crate::{
     config::{
         self, Backend, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
-        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Mode, Theme,
+        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
     },
     log,
     sys::startup,
@@ -46,6 +46,7 @@ pub(super) struct SettingsPage {
     mode: gui::ComboBox,
     pub(super) backend: gui::ComboBox,
     folder: gui::Edit,
+    pub(super) memory: gui::ComboBox,
     audio: gui::CheckBox,
     cursor: gui::CheckBox,
     estimate: gui::Label,
@@ -93,6 +94,7 @@ impl SettingsPage {
             mode: recording.mode,
             backend: recording.backend,
             folder: recording.folder,
+            memory: recording.memory,
             audio: recording.audio,
             cursor: recording.cursor,
             estimate: recording.estimate,
@@ -162,7 +164,7 @@ impl SettingsPage {
         layout::set_text(&self.hotkey, hotkey);
     }
 
-    /// Shows how much memory the buffer takes at the entered bitrate and length.
+    /// Shows how much memory the buffer takes at the entered bitrate and length, and where.
     pub(super) fn update_estimate(&self) {
         let estimate = number(&self.buffer_seconds).zip(number(&self.bitrate)).map(
             |(buffer_seconds, bitrate_mbps)| {
@@ -175,9 +177,12 @@ impl SettingsPage {
                     / BYTES_PER_MEGABYTE
             },
         );
+        let memory = chosen(&self.memory, &Memory::ALL);
         layout::set_text(
             &self.estimate,
-            &estimate.map_or_else(String::new, text::buffer_estimate),
+            &estimate.map_or_else(String::new, |megabytes| {
+                text::buffer_estimate(megabytes, memory)
+            }),
         );
     }
 
@@ -232,6 +237,7 @@ impl SettingsPage {
             clip_directory: stored_folder(folder.trim()),
             audio: self.audio.is_checked(),
             cursor: self.cursor.is_checked(),
+            buffer_memory: chosen(&self.memory, &Memory::ALL),
             theme: chosen(&self.theme, &Theme::ALL),
         })
     }
@@ -250,6 +256,7 @@ struct RecordingControls {
     mode: gui::ComboBox,
     backend: gui::ComboBox,
     folder: gui::Edit,
+    memory: gui::ComboBox,
     audio: gui::CheckBox,
     cursor: gui::CheckBox,
     estimate: gui::Label,
@@ -261,7 +268,7 @@ impl RecordingControls {
     /// Lays out the Recording group on `page`, filled in from `config`, its button in the look
     /// of `skin`.
     fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
-        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 264);
+        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 292);
         let codec = choice_field(
             page,
             text::CODEC,
@@ -304,14 +311,23 @@ impl RecordingControls {
             INNER_WIDTH - FIELD_OFFSET,
             &config.clip_directory().display().to_string(),
         );
-        let audio = check_box(page, text::AUDIO, 166, config.audio);
-        let cursor = check_box(page, text::CURSOR, 188, config.cursor);
-        let estimate = label(page, "", INNER_X, 214, INNER_WIDTH, 1);
-        let apply = button(page, text::APPLY, INNER_X, 232, BUTTON_WIDTH);
+        let memory = choice_field(
+            page,
+            text::MEMORY,
+            INNER_X,
+            166,
+            190,
+            &Memory::ALL.map(Memory::name),
+            index_of(&Memory::ALL, config.buffer_memory),
+        );
+        let audio = check_box(page, text::AUDIO, 194, config.audio);
+        let cursor = check_box(page, text::CURSOR, 216, config.cursor);
+        let estimate = label(page, "", INNER_X, 242, INNER_WIDTH, 1);
+        let apply = button(page, text::APPLY, INNER_X, 260, BUTTON_WIDTH);
         skin_button(&apply, skin, ButtonRole::Primary);
         // The error line starts just right of the button.
         let error_x = BUTTON_WIDTH + 8;
-        let error = label(page, "", INNER_X + error_x, 230, INNER_WIDTH - error_x, 2);
+        let error = label(page, "", INNER_X + error_x, 258, INNER_WIDTH - error_x, 2);
         Self {
             frame,
             codec,
@@ -323,6 +339,7 @@ impl RecordingControls {
             mode,
             backend,
             folder,
+            memory,
             audio,
             cursor,
             estimate,
@@ -346,18 +363,18 @@ impl GeneralControls {
     /// Lays out the General group on `page`, filled in from `config` and the Run key's state.
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
         // Compact; the group adds a line for the error label when one occurs.
-        let frame = Frame::new(page, text::GROUP_GENERAL, 270, 72);
+        let frame = Frame::new(page, text::GROUP_GENERAL, 298, 72);
         let theme = choice_field(
             page,
             text::THEME,
             INNER_X,
-            290,
+            318,
             190,
             &Theme::ALL.map(Theme::name),
             index_of(&Theme::ALL, config.theme),
         );
-        let check_box = check_box(page, text::START_WITH_WINDOWS, 318, start_with_windows);
-        let error = label(page, "", INNER_X, 340, INNER_WIDTH, 1);
+        let check_box = check_box(page, text::START_WITH_WINDOWS, 346, start_with_windows);
+        let error = label(page, "", INNER_X, 368, INNER_WIDTH, 1);
         let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
         Self {
             frame,

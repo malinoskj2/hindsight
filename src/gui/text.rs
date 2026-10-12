@@ -1,7 +1,10 @@
 //! Everything the window shows in words, its own log lines included. Kept apart from the pages
 //! so the layout reads without the wording, and the wording can change without the layout.
 
-use crate::service::{DisplayStatus, Status};
+use crate::{
+    config::Memory,
+    service::{DisplayStatus, Status},
+};
 use std::{fmt::Display, path::Path};
 
 /// Shown in place of a value that is not known yet.
@@ -43,6 +46,7 @@ pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
 pub(super) const AUDIO: &str = "Record system sound (what the default output device plays)";
 pub(super) const CURSOR: &str = "Record the mouse cursor (not with DXGI Desktop Duplication)";
+pub(super) const MEMORY: &str = "Buffer in";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";
@@ -156,9 +160,16 @@ pub(super) fn last_clip(path: Option<&Path>) -> String {
     path.map_or_else(|| NO_VALUE.to_owned(), |path| path.display().to_string())
 }
 
-/// The memory the replay buffer takes at the entered bitrate and length.
-pub(super) fn buffer_estimate(megabytes: u64) -> String {
-    format!("Buffer memory at this bitrate: about {megabytes} MB")
+/// The memory the replay buffer takes at the entered bitrate and length, where it is kept; a
+/// buffer in GPU memory passes through system memory again when a clip is saved.
+pub(super) fn buffer_estimate(megabytes: u64, memory: Memory) -> String {
+    let name = memory.short_name();
+    match memory {
+        Memory::Ram => format!("Buffer in {name} at this bitrate: about {megabytes} MB"),
+        Memory::Vram => format!(
+            "Buffer in {name} at this bitrate: about {megabytes} MB, plus as much RAM while a clip is saved"
+        ),
+    }
 }
 
 /// A total in gigabytes, or a dash while it is not known. Shown to two decimals, far coarser

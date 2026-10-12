@@ -47,10 +47,13 @@ The **Capture** setting chooses how frames are taken. All of them keep every fra
 | Theme | Classic Windows | Classic Windows, Ember, Selene or Nova |
 | Record system sound | On | On or off |
 | Record the mouse cursor | Off | On or off; NvFBC and Windows Graphics Capture draw it, DXGI Desktop Duplication never does |
+| Buffer in | System memory (RAM) | System memory, or GPU memory (VRAM) |
 
 **Theme** (in the General group) dresses the window in one of three characters: their colours, rounded group panels, tab strip and buttons, and an illustration beside the controls. It applies the moment you choose it, without restarting recording, and is remembered. Classic Windows, the default, is the plain dialog of Windows' own controls, unchanged. The artwork is in `assets/themes`.
 
 The buffer is kept in RAM: about 190 MB for 30 seconds at 50 Mbps, 1.9 GB for 5 minutes. The Settings tab shows the estimate for what you enter. **Apply** starts a new buffer, so save anything you want first.
+
+**Buffer in** can move it to the GPU's own memory instead, which leaves your RAM free for the game and takes the same amount of VRAM: the packets are uploaded as they are encoded, in 64 MiB pages, and read back when you save. It costs about 17 million CPU cycles a second more at 240 fps (0.4% of one core, one upload per frame plus the driver's thread for the second device; measured with NvFBC, and the path is the same for every backend) and nothing the game can see, but a few things to know: the VRAM is taken for as long as the buffer exists, so a card that is short of it will start swapping the game's textures out; a save copies the whole buffer back across the bus, so for the few seconds a clip takes to write, hindsight holds the clip's size in RAM as well; and if the GPU cannot reserve the pages, the buffer stays in RAM and the log says so.
 
 ## While you play
 

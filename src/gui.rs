@@ -237,6 +237,12 @@ impl Main {
         }
 
         let me = self.clone();
+        self.settings.memory.on().cbn_sel_change(move || {
+            me.settings.update_estimate();
+            Ok(())
+        });
+
+        let me = self.clone();
         self.settings.start_with_windows.on().bn_clicked(move || {
             if me.settings.toggle_startup() {
                 me.fit_window();

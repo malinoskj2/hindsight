@@ -17,5 +17,7 @@ mod pacer;
 mod pipeline;
 #[expect(unsafe_code)]
 mod priority;
+#[expect(unsafe_code)]
+mod vram;
 
 pub(crate) use pipeline::record;

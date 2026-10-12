@@ -9,11 +9,12 @@ use std::{fmt::Display, path::Path};
 
 pub(super) fn settings_applied(config: &Config) -> String {
     format!(
-        "Settings applied: {}, {}, {}, {} s buffer, {} fps, {} Mbps, hotkey {}",
+        "Settings applied: {}, {}, {}, {} s buffer in {}, {} fps, {} Mbps, hotkey {}",
         config.mode,
         config.backend,
         config.codec,
         config.buffer_seconds,
+        config.buffer_memory.short_name(),
         config.frame_rate,
         config.bitrate_mbps,
         config.hotkey

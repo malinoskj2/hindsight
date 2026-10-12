@@ -22,11 +22,16 @@ mod h264;
 mod hevc;
 mod mp4;
 mod ring;
+mod store;
 
 pub(crate) use audio::{AudioClip, AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES};
 use audio::{AudioRing, tick_time};
 use mp4::MuxError;
 use ring::Ring;
+use store::Entry;
+#[cfg(windows)]
+pub(crate) use store::{Page, Slot};
+pub(crate) use store::{Store, StoreError};
 
 const CLIP_PREFIX: &str = "hindsight";
 const CLIP_EXTENSION: &str = "mp4";
@@ -116,15 +121,26 @@ impl Live {
         let _ = self.origin.set(time);
     }
 
+    /// Keeps the packets from now on in `store` (the GPU's memory) rather than in system
+    /// memory; a store that refuses a packet is given up with a warning.
+    pub(crate) fn set_store(&self, store: Box<dyn Store>) {
+        self.ring().set_store(store);
+    }
+
     /// Adds an encoded frame; `fresh` when it carried new screen content.
     pub(crate) fn push(&self, packet: Packet, fresh: bool) {
         self.bytes
             .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
-        let oldest = {
+        let (oldest, refused) = {
             let mut ring = self.ring();
-            ring.push(packet);
-            ring.first_index()
+            let refused = ring.push(packet).err();
+            (ring.first_index(), refused)
         };
+        if let Some(error) = refused {
+            log::warning(format!(
+                "The replay buffer could not be kept in GPU memory ({error}); it continues in RAM"
+            ));
+        }
         self.oldest
             .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
         self.encoded.fetch_add(1, Ordering::Relaxed);
@@ -181,17 +197,24 @@ impl Live {
     }
 
     /// The buffer as it is now, if the stream has started, with the sound from the first
-    /// packet's frame to the end of the last one's when there is sound.
-    pub(crate) fn clip(&self) -> Option<Clip> {
+    /// packet's frame to the end of the last one's when there is sound. Cheap: the packets put
+    /// away in a store are read back only when the snapshot becomes a clip.
+    pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
-        let packets = self.ring().snapshot();
-        let (first, last) = (packets.first()?.index, packets.last()?.index);
+        let entries = self.ring().snapshot();
+        let (first, last) = (entries.first()?.index(), entries.last()?.index());
         let audio = self.audio_between(first, last + 1);
-        Some(Clip {
+        Some(Snapshot {
             stream,
-            packets,
+            entries,
             audio,
         })
+    }
+
+    /// The buffer as a clip, read back where it was put away.
+    #[cfg(test)]
+    pub(crate) fn clip(&self) -> Option<Clip> {
+        self.snapshot().map(|snapshot| snapshot.clip().unwrap())
     }
 
     /// The sound from the start of video frame `first` to the start of frame `end`.
@@ -210,6 +233,35 @@ impl Live {
     }
 }
 
+/// The buffer as it was when a save was requested: the stream, the packets, wherever they are
+/// kept, and the sound that plays alongside them.
+pub(crate) struct Snapshot {
+    stream: Stream,
+    entries: Vec<Entry>,
+    audio: Option<AudioClip>,
+}
+
+impl Snapshot {
+    /// Seconds of video, from the first packet to the end of the last.
+    pub(crate) fn seconds(&self) -> f64 {
+        seconds(
+            self.entries.first().map(Entry::index),
+            self.entries.last().map(Entry::index),
+            self.stream.frame_rate,
+        )
+    }
+
+    /// The clip to write, with every packet in memory: the ones put away in a store are read
+    /// back, which takes as much memory as they do.
+    pub(crate) fn clip(self) -> Result<Clip, StoreError> {
+        Ok(Clip {
+            stream: self.stream,
+            packets: store::fetch(&self.entries)?,
+            audio: self.audio,
+        })
+    }
+}
+
 /// What a save writes: the stream and the packets buffered when it was requested, and the sound
 /// that plays alongside them.
 pub(crate) struct Clip {
@@ -220,13 +272,21 @@ pub(crate) struct Clip {
 
 impl Clip {
     /// Seconds of video, from the first packet to the end of the last.
+    #[cfg(test)]
     pub(crate) fn seconds(&self) -> f64 {
-        match (self.packets.first(), self.packets.last()) {
-            (Some(first), Some(last)) => {
-                (last.index - first.index + 1) as f64 / f64::from(self.stream.frame_rate)
-            }
-            _ => 0.0,
-        }
+        seconds(
+            self.packets.first().map(|packet| packet.index),
+            self.packets.last().map(|packet| packet.index),
+            self.stream.frame_rate,
+        )
+    }
+}
+
+/// Seconds of video from frame `first` to the end of frame `last` at `frame_rate`.
+fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
+    match (first, last) {
+        (Some(first), Some(last)) => (last - first + 1) as f64 / f64::from(frame_rate),
+        _ => 0.0,
     }
 }
 
@@ -244,6 +304,9 @@ pub(crate) enum SaveError {
     /// The clip could not be muxed, or the muxed bytes could not be written.
     #[error(transparent)]
     Mux(#[from] MuxError),
+    /// The packets could not be read back from where they were put away.
+    #[error("read the buffer back from GPU memory: {0}")]
+    Store(#[from] StoreError),
 }
 
 impl SaveError {
@@ -392,6 +455,45 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_in_a_store_saves_the_same_clip() {
+        let in_memory = live_with(100).clip().unwrap();
+        let live = Live::new(60);
+        live.set_stream(STREAM);
+        live.set_store(Box::new(store::tests::MemoryStore::new(1 << 16, 1000)));
+        for index in 0..100 {
+            let keyframe_packet = index % 30 == 0;
+            let data = if keyframe_packet {
+                keyframe()
+            } else {
+                inter_frame()
+            };
+            live.push(
+                Packet {
+                    index,
+                    keyframe: keyframe_packet,
+                    data: data.into(),
+                },
+                true,
+            );
+        }
+        let snapshot = live.snapshot().unwrap();
+        assert!((snapshot.seconds() - in_memory.seconds()).abs() < 1e-9);
+        let from_store = snapshot.clip().unwrap();
+        assert_eq!(from_store.packets.len(), in_memory.packets.len());
+        for (stored, kept) in from_store.packets.iter().zip(&in_memory.packets) {
+            assert_eq!(stored.index, kept.index);
+            assert_eq!(stored.keyframe, kept.keyframe);
+            assert_eq!(stored.data, kept.data);
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = save(&from_store, directory.path()).unwrap();
+        let mut expected = Vec::new();
+        mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
+        assert_eq!(fs::read(path).unwrap(), expected);
+    }
+
+    #[test]
     fn keyframes_are_recognised_for_every_codec() {
         assert!(is_keyframe(Codec::H264, &h264::tests::keyframe()));
         assert!(!is_keyframe(Codec::H264, &h264::tests::inter_frame()));
@@ -454,7 +556,7 @@ mod tests {
 
             let mut ring = Ring::new(40);
             for packet in packets {
-                ring.push(packet);
+                ring.push(packet).unwrap();
             }
             let clip = Clip {
                 stream: Stream {
@@ -463,7 +565,7 @@ mod tests {
                     height: 72,
                     frame_rate: 30,
                 },
-                packets: ring.snapshot(),
+                packets: store::fetch(&ring.snapshot()).unwrap(),
                 audio: None,
             };
             assert_eq!(clip.packets.len(), 45, "{codec}");

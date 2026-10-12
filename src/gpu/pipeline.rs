@@ -7,10 +7,10 @@ use super::{
     device::{Device, DeviceError},
     nvenc::{Encoded, Encoder, NvencError, Settings},
     pacer::Pacer,
-    priority,
+    priority, vram,
 };
 use crate::{
-    config::{Codec, Config},
+    config::{Codec, Config, Memory},
     log,
     replay::{self, Live, Packet, Stream},
     service::{Ended, Target},
@@ -78,6 +78,9 @@ fn raise_thread_instead(error: &windows::core::Error) {
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     sys::thread::note_capture_thread();
     let device = open_device(config)?;
+    if config.buffer_memory == Memory::Vram {
+        place_buffer_in_vram(config, live);
+    }
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
     // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
     // which is how the sound is lined up with the video.
@@ -220,6 +223,20 @@ fn repeat_latest(
             encoder.submit(index, false)
         }
         _ => encoder.repeat_once_free(index, output),
+    }
+}
+
+/// Reserves GPU memory for the buffer of `live` at the size `config` estimates and puts the
+/// packets there; when that fails the buffer stays in RAM, with a warning.
+fn place_buffer_in_vram(config: &Config, live: &Live) {
+    match vram::VideoMemory::create(config.estimated_buffer_bytes()) {
+        Ok(store) => {
+            log::info(store.description());
+            live.set_store(Box::new(store));
+        }
+        Err(error) => log::warning(format!(
+            "The replay buffer could not be placed in GPU memory ({error}); keeping it in RAM"
+        )),
     }
 }
 

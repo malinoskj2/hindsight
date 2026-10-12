@@ -6,7 +6,7 @@ use crate::{
     audio,
     config::{Backend, Config, Mode, Theme},
     log,
-    replay::{self, Clip, Live, SaveError, Stream},
+    replay::{self, Clip, Live, SaveError, Snapshot, Stream},
     storage::{Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -480,15 +480,15 @@ impl Machine {
             log::info(text::ALREADY_SAVING);
             return;
         }
-        let Some(clip) = self.live.as_ref().and_then(|live| live.clip()) else {
+        let Some(snapshot) = self.live.as_ref().and_then(|live| live.snapshot()) else {
             log::warning(text::NOTHING_TO_SAVE);
             self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
             (self.saver.chime)(Tone::Failed);
             return;
         };
 
-        let seconds = clip.seconds();
-        match self.spawn_save(clip) {
+        let seconds = snapshot.seconds();
+        match self.spawn_save(snapshot) {
             Ok(join) => {
                 (self.saver.chime)(Tone::Progress);
                 self.saving = Some(Saving {
@@ -709,7 +709,7 @@ impl Machine {
 
     /// Starts a thread that writes `clip` to the clip directory, and wakes the worker when it is
     /// done.
-    fn spawn_save(&self, clip: Clip) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
+    fn spawn_save(&self, snapshot: Snapshot) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
         let directory = self.config.clip_directory();
         let write = self.saver.write;
         let wake = self.waker();
@@ -719,7 +719,11 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                let saved = write(&clip, &directory);
+                // Packets kept in GPU memory are read back here, off the worker.
+                let saved = snapshot
+                    .clip()
+                    .map_err(SaveError::from)
+                    .and_then(|clip| write(&clip, &directory));
                 wake();
                 saved
             })
