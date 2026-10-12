@@ -1,6 +1,8 @@
 //! A by-hand measurement, not part of the program: what each NVENC call costs the calling
 //! thread per frame when the session runs on a Direct3D 11 device, as hindsight's does, and when
-//! it runs on a Direct3D 12 device instead.
+//! it runs on a Direct3D 12 device, or on a Direct3D 9Ex device reading a BGRA render-target
+//! surface as NvFBC's (`HINDSIGHT_NVFBC_ENCODER=d3d9`), instead; and what locking the bitstream
+//! without waiting (`doNotWait`, the completion event having fired) changes.
 //!
 //! Run it on a machine with an NVIDIA GPU, with nothing else measuring:
 //!
@@ -44,9 +46,16 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HMODULE, WAIT_OBJECT_0},
+        Foundation::{HANDLE, HMODULE, HWND, LUID, WAIT_OBJECT_0},
         Graphics::{
             Direct3D::D3D_FEATURE_LEVEL_11_0,
+            Direct3D9::{
+                D3D_SDK_VERSION, D3DCREATE_FPU_PRESERVE, D3DCREATE_MULTITHREADED,
+                D3DCREATE_NOWINDOWCHANGES, D3DCREATE_SOFTWARE_VERTEXPROCESSING, D3DDEVTYPE_HAL,
+                D3DFMT_A8R8G8B8, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT, D3DPRESENT_INTERVAL_IMMEDIATE,
+                D3DPRESENT_PARAMETERS, D3DSWAPEFFECT_DISCARD, D3DUSAGE_RENDERTARGET,
+                Direct3DCreate9Ex, IDirect3DDevice9Ex, IDirect3DSurface9, IDirect3DTexture9,
+            },
             Direct3D11::ID3D11Texture2D,
             Direct3D12::{
                 D3D12_FENCE_FLAG_NONE, D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES,
@@ -63,6 +72,7 @@ use windows::{
             Threading::{CreateEventW, GetCurrentProcess, GetCurrentThread, WaitForSingleObject},
             WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime},
         },
+        UI::WindowsAndMessaging::GetDesktopWindow,
     },
     core::{Interface, Owned},
 };
@@ -139,6 +149,11 @@ const D3D12_STRUCT_VER: u32 = ffi::struct_version(1);
 struct Case {
     name: &'static str,
     d3d12: bool,
+    /// A Direct3D 9Ex session reading a surface of a BGRA render-target texture, as NvFBC's
+    /// grabs are, on a device made as NvFBC's is (software vertex processing).
+    d3d9: bool,
+    /// Lock each bitstream with `doNotWait` set.
+    lock_no_wait: bool,
     /// Completion events, as hindsight runs; otherwise the lock waits for the frame.
     asynchronous: bool,
     /// Map the input (and on Direct3D 12 the output buffers) once, not once per frame.
@@ -148,10 +163,39 @@ struct Case {
     input_fence: bool,
 }
 
-const CASES: [Case; 7] = [
+const CASES: [Case; 10] = [
+    Case {
+        name: "d3d11 async, map per frame, lock without waiting",
+        d3d12: false,
+        d3d9: false,
+        lock_no_wait: true,
+        asynchronous: true,
+        persistent_map: false,
+        input_fence: true,
+    },
+    Case {
+        name: "d3d9 async, map per frame (nvfbc encoder d3d9)",
+        d3d12: false,
+        d3d9: true,
+        lock_no_wait: false,
+        asynchronous: true,
+        persistent_map: false,
+        input_fence: true,
+    },
+    Case {
+        name: "d3d9 async, map per frame, lock without waiting",
+        d3d12: false,
+        d3d9: true,
+        lock_no_wait: true,
+        asynchronous: true,
+        persistent_map: false,
+        input_fence: true,
+    },
     Case {
         name: "d3d11 async, map per frame (hindsight today)",
         d3d12: false,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: true,
         persistent_map: false,
         input_fence: true,
@@ -159,6 +203,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d11 async, mapped once",
         d3d12: false,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: true,
         persistent_map: true,
         input_fence: true,
@@ -166,6 +212,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d11 sync, mapped once",
         d3d12: false,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: false,
         persistent_map: true,
         input_fence: true,
@@ -173,6 +221,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d12 sync, map per frame (as NvEncoderD3D12)",
         d3d12: true,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: false,
         persistent_map: false,
         input_fence: true,
@@ -180,6 +230,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d12 sync, mapped once",
         d3d12: true,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: false,
         persistent_map: true,
         input_fence: true,
@@ -187,6 +239,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d12 async, mapped once",
         d3d12: true,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: true,
         persistent_map: true,
         input_fence: true,
@@ -194,6 +248,8 @@ const CASES: [Case; 7] = [
     Case {
         name: "d3d12 async, mapped once, no input fence",
         d3d12: true,
+        d3d9: false,
+        lock_no_wait: false,
         asynchronous: true,
         persistent_map: true,
         input_fence: false,
@@ -436,6 +492,12 @@ enum Backend {
         _device: Device,
         texture: ID3D11Texture2D,
     },
+    D3d9 {
+        // The surface is the texture's only level; both go before the device.
+        surface: IDirect3DSurface9,
+        _texture: IDirect3DTexture9,
+        _device: IDirect3DDevice9Ex,
+    },
     D3d12 {
         device: ID3D12Device,
         texture: ID3D12Resource,
@@ -569,7 +631,16 @@ impl Bench {
             matrix: Matrix::Bt709,
         };
         let device = Device::create().map_err(|error| error.to_string())?;
-        let (session, backend) = if case.d3d12 {
+        let (session, backend) = if case.d3d9 {
+            let backend = open_d3d9(&device).map_err(|error| error.to_string())?;
+            let Backend::D3d9 { _device: d3d9, .. } = &backend else {
+                unreachable!("open_d3d9 opens Direct3D 9")
+            };
+            (
+                Session::open(ffi::DEVICE_TYPE_DIRECTX, d3d9.as_raw())?,
+                backend,
+            )
+        } else if case.d3d12 {
             let backend = open_d3d12(&device).map_err(|error| error.to_string())?;
             let Backend::D3d12 { device: d3d12, .. } = &backend else {
                 unreachable!("open_d3d12 opens Direct3D 12")
@@ -606,6 +677,7 @@ impl Bench {
     fn prepare(&mut self) {
         let texture = match &self.backend {
             Backend::D3d11 { texture, .. } => texture.as_raw(),
+            Backend::D3d9 { surface, .. } => surface.as_raw(),
             Backend::D3d12 { texture, .. } => texture.as_raw(),
         };
         self.registered_input = self.session.register(
@@ -642,7 +714,7 @@ impl Bench {
             self.session.check("nvEncRegisterAsyncEvent", status);
         }
         let output = match &self.backend {
-            Backend::D3d11 { .. } => {
+            Backend::D3d11 { .. } | Backend::D3d9 { .. } => {
                 let mut buffer = ffi::CreateBitstreamBuffer::zeroed();
                 buffer.version = ffi::CREATE_BITSTREAM_BUFFER_VER;
                 let create = self
@@ -759,7 +831,7 @@ impl Bench {
         let mut own_output = None;
         let mut input_resource = None;
         match &self.backend {
-            Backend::D3d11 { .. } => {
+            Backend::D3d11 { .. } | Backend::D3d9 { .. } => {
                 picture.input_buffer = input;
                 let Output::Bitstream(bitstream) = self.slots[slot].output else {
                     unreachable!("a Direct3D 11 session has bitstream buffers")
@@ -850,6 +922,7 @@ impl Bench {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = output;
+        lock.flags = u32::from(self.case.lock_no_wait);
         let lock_bitstream = self.session.api.lock_bitstream.expect("nvEncLockBitstream");
         let copy = &mut self.copy;
         let session = &self.session;
@@ -912,6 +985,74 @@ impl Bench {
             }
         }
     }
+}
+
+/// A Direct3D 9Ex device on the adapter of hindsight's device, made as NvFBC's is, with a BGRA
+/// render-target texture of the picture's size whose surface NVENC reads.
+fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
+    // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
+    let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION)? };
+    let luid = device.luid()?;
+    // SAFETY: counts the adapters of a live object.
+    let adapter = (0..unsafe { d3d9.GetAdapterCount() })
+        .find(|&adapter| {
+            let mut found = LUID::default();
+            // SAFETY: every index below the count names an adapter; written on success.
+            unsafe { d3d9.GetAdapterLUID(adapter, &raw mut found) }.is_ok() && found == luid
+        })
+        .ok_or_else(windows::core::Error::empty)?;
+    let mut parameters = D3DPRESENT_PARAMETERS {
+        BackBufferWidth: 1,
+        BackBufferHeight: 1,
+        BackBufferFormat: D3DFMT_UNKNOWN,
+        BackBufferCount: 1,
+        SwapEffect: D3DSWAPEFFECT_DISCARD,
+        // SAFETY: returns the desktop's handle; no preconditions.
+        hDeviceWindow: unsafe { GetDesktopWindow() },
+        Windowed: true.into(),
+        PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
+        ..Default::default()
+    };
+    let flags = D3DCREATE_FPU_PRESERVE
+        | D3DCREATE_MULTITHREADED
+        | D3DCREATE_SOFTWARE_VERTEXPROCESSING
+        | D3DCREATE_NOWINDOWCHANGES;
+    let mut created = None;
+    // SAFETY: windowed parameters on the desktop window; written on success.
+    unsafe {
+        d3d9.CreateDeviceEx(
+            adapter,
+            D3DDEVTYPE_HAL,
+            HWND::default(),
+            flags.cast_unsigned(),
+            &raw mut parameters,
+            ptr::null_mut(),
+            &raw mut created,
+        )?;
+    }
+    let d3d9_device = created.ok_or_else(windows::core::Error::empty)?;
+    let mut texture = None;
+    // SAFETY: a default-pool render target; written on success; no shared handle asked for.
+    unsafe {
+        d3d9_device.CreateTexture(
+            WIDTH,
+            HEIGHT,
+            1,
+            D3DUSAGE_RENDERTARGET.cast_unsigned(),
+            D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT,
+            &raw mut texture,
+            ptr::null_mut(),
+        )?;
+    }
+    let texture: IDirect3DTexture9 = texture.ok_or_else(windows::core::Error::empty)?;
+    // SAFETY: the texture has one level.
+    let surface = unsafe { texture.GetSurfaceLevel(0)? };
+    Ok(Backend::D3d9 {
+        surface,
+        _texture: texture,
+        _device: d3d9_device,
+    })
 }
 
 /// A fence point on `fence` with `flags`, waiting for `wait_value` or signalling `signal_value`.

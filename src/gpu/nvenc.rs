@@ -18,7 +18,8 @@
 //! from which it is moved into the replay buffer there without ever crossing to system memory.
 //! Likewise, for NvFBC grabbing NV12, which Direct3D 9 holds only in plain surfaces that
 //! Direct3D 11 cannot open, the session runs on NvFBC's Direct3D 9Ex device and reads the NV12
-//! surfaces in place, signalling the BT.601 matrix NvFBC converted them with.
+//! surfaces in place, signalling the BT.601 matrix NvFBC converted them with; NvFBC's ARGB
+//! surfaces can be read the same way, on its device, when the capture asks for that.
 
 use super::{
     capture::{EncoderDevice, Surface},
@@ -27,6 +28,7 @@ use super::{
 };
 use crate::{
     config::Codec,
+    log,
     replay::{Matrix, Slot as StoreSlot},
 };
 use std::{collections::VecDeque, ffi::CStr, ptr};
@@ -176,6 +178,25 @@ impl Encoded {
     }
 }
 
+/// The variable that has each finished frame's bitstream locked without waiting; see
+/// [`lock_flags_from_environment`].
+const LOCK_NO_WAIT_VARIABLE: &str = "HINDSIGHT_NVENC_LOCK_NOWAIT";
+
+/// The flags each bitstream is locked with: `doNotWait` when `HINDSIGHT_NVENC_LOCK_NOWAIT=1`,
+/// otherwise none, the default. A frame is only read once its completion event has fired, so
+/// there is nothing left to wait for; measured on a static picture
+/// (`d3d12_cost`), the lock and unlock cost about 30,000 cycles instead of 105,000, though the
+/// unmap that follows rises by 15,000. Meant for measuring live before it becomes the default.
+fn lock_flags_from_environment() -> u32 {
+    let asked = std::env::var(LOCK_NO_WAIT_VARIABLE).is_ok_and(|value| value.trim() == "1");
+    if asked {
+        log::info(
+            "NVENC locks each finished bitstream without waiting (HINDSIGHT_NVENC_LOCK_NOWAIT=1)",
+        );
+    }
+    u32::from(asked)
+}
+
 /// A frame's output buffer in video memory, registered and mapped for the session.
 struct VideoOutput {
     staging: DevicePointer,
@@ -203,6 +224,8 @@ pub(super) struct Encoder {
     device_lock: ID3D11Multithread,
     /// NVENC stopped answering; teardown does not wait for it again.
     stalled: bool,
+    /// The flags each finished frame's bitstream is locked with.
+    lock_flags: u32,
     /// The ring in video memory the frames go to, when they do; dropped after the slots have
     /// let go of its staging buffers.
     ring: Option<CudaRing>,
@@ -311,6 +334,7 @@ impl Encoder {
             latest: None,
             device_lock,
             stalled: false,
+            lock_flags: lock_flags_from_environment(),
             ring,
             library,
         };
@@ -604,17 +628,23 @@ impl Encoder {
         )
     }
 
-    /// Registers the NV12 `surface`, on the session's Direct3D 9Ex device, as an input NVENC
-    /// can map.
-    fn register_nv12_surface(
+    /// Registers `surface`, NV12 if `nv12` and 32-bit BGRA otherwise, on the session's
+    /// Direct3D 9Ex device, as an input NVENC can map.
+    fn register_d3d9_surface(
         &self,
         surface: &IDirect3DSurface9,
+        nv12: bool,
     ) -> Result<ffi::Registered, NvencError> {
+        let format = if nv12 {
+            ffi::BUFFER_FORMAT_NV12
+        } else {
+            ffi::BUFFER_FORMAT_ARGB
+        };
         self.register_resource(
             ffi::INPUT_RESOURCE_TYPE_DIRECTX,
             surface.as_raw(),
             0,
-            ffi::BUFFER_FORMAT_NV12,
+            format,
         )
     }
 
@@ -720,7 +750,7 @@ impl Encoder {
             Input::Slot(slot) => self.slots[slot].texture.as_ref(),
             Input::Surface(surface) => match &self.registered_surface(surface).handle {
                 Surface::Texture(texture) => Some(texture),
-                Surface::CudaBuffer { .. } | Surface::Direct3D9(_) => None,
+                Surface::CudaBuffer { .. } | Surface::Direct3D9 { .. } => None,
             },
         }
     }
@@ -754,7 +784,7 @@ impl Encoder {
             Surface::CudaBuffer { pointer, pitch } => {
                 self.register_cuda_buffer(*pointer, *pitch)?
             }
-            Surface::Direct3D9(nv12) => self.register_nv12_surface(nv12)?,
+            Surface::Direct3D9 { surface, nv12 } => self.register_d3d9_surface(surface, *nv12)?,
         };
         if self.surfaces.len() <= surface {
             self.surfaces.resize_with(surface + 1, || None);
@@ -989,6 +1019,7 @@ impl Encoder {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = self.slots[slot].bitstream;
+        lock.flags = self.lock_flags;
         let lock_bitstream = entry_point(self.api.lock_bitstream, "nvEncLockBitstream")?;
         let unlock_bitstream = entry_point(self.api.unlock_bitstream, "nvEncUnlockBitstream")?;
         // SAFETY: the buffer's frame has completed; it stays locked only while it is copied.

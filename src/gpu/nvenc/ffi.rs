@@ -132,9 +132,8 @@ pub(super) const INPUT_IMAGE: u32 = 0;
 pub(super) const OUTPUT_BITSTREAM: u32 = 2;
 /// `NV_ENC_INITIALIZE_PARAMS::enableOutputInVidmem`, in the bit field after `enablePTD`:
 /// `reportSliceOffsets`, `enableSubFrameWrite`, `enableExternalMEHints`, `enableMEOnlyMode`,
-/// `enableWeightedPrediction` (bits 0 to 4), `splitEncodeMode` (4 bits), then this one. To be
-/// confirmed against the SDK 12.1 header, which is not on this machine; see
-/// `docs/nvfbc-cuda.md`.
+/// `enableWeightedPrediction` (bits 0 to 4), `splitEncodeMode` (4 bits), then this one, as the
+/// SDK 12.1 header in `FFmpeg/nv-codec-headers` (tag n12.1.14.0) declares them.
 pub(super) const INITIALIZE_OUTPUT_IN_VIDMEM: u32 = 1 << 9;
 /// Bytes of `NV_ENC_ENCODE_OUT_PARAMS`, which the encoder writes at the start of an output
 /// buffer in video memory before the bitstream.
@@ -711,7 +710,8 @@ const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
 #[repr(C)]
 pub(super) struct LockBitstream {
     pub(super) version: u32,
-    _flags: u32,
+    /// `doNotWait` in bit 0, then bits the encoder does not use.
+    pub(super) flags: u32,
     pub(super) output_bitstream: Bitstream,
     _slice_offsets: *mut u32,
     _frame_index_to_num_slices: [u32; 3],

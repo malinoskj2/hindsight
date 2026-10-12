@@ -78,9 +78,13 @@ pub(super) enum Surface {
     /// Rows of 32-bit BGRA in CUDA device memory, `pitch` bytes apart, which only an encoder
     /// on the source's CUDA context can read.
     CudaBuffer { pointer: u64, pitch: u32 },
-    /// An NV12 plain surface on the source's Direct3D 9Ex device, which Direct3D 11 cannot
-    /// open, so only an encoder on that device can read it.
-    Direct3D9(IDirect3DSurface9),
+    /// A surface on the source's Direct3D 9Ex device, read by an encoder on that device: NV12
+    /// (`nv12`), which Direct3D 11 cannot open, or 32-bit BGRA, which an encoder on the source's
+    /// device reads without synchronising two devices.
+    Direct3D9 {
+        surface: IDirect3DSurface9,
+        nv12: bool,
+    },
 }
 
 /// The device the encoder must open its session on to read a source's surfaces.
@@ -96,7 +100,7 @@ pub(super) enum EncoderDevice {
         context: Context,
         primary: Option<super::cuda::Device>,
     },
-    /// The source's own Direct3D 9Ex device, on which its NV12 surfaces live; the encoder then
+    /// The source's own Direct3D 9Ex device, on which its surfaces live; the encoder then
     /// has no input textures of its own either. Used from the capture thread only, like the
     /// source that owns it.
     Direct3D9(IDirect3DDevice9Ex),
