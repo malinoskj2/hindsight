@@ -1,8 +1,9 @@
 //! AV1 in MP4 (the AV1 Codec ISO Media File Format Binding): each sample is a temporal unit of
 //! OBUs without its temporal delimiter, and an `av1C` record repeats the sequence header.
 
-use super::mp4::atom;
+use super::mp4;
 use bitstream_io::{BigEndian, BitRead, BitReader};
+use mp4_atom::Av1c;
 use std::io;
 
 const OBU_SEQUENCE_HEADER: u8 = 1;
@@ -28,8 +29,6 @@ const MAX_LEVEL_WITHOUT_TIER: u32 = 7;
 const SRGB: (u32, u32, u32) = (1, 13, 0);
 /// The same three when the sequence header leaves them out: unspecified.
 const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
-/// The `av1C` record's first byte: its marker bit and version 1.
-const AV1C_MARKER_AND_VERSION: u8 = 0x81;
 
 /// Reads bits most significant first; running out of bits is an error.
 type Bits<'a> = BitReader<&'a [u8], BigEndian>;
@@ -54,9 +53,9 @@ pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
         .into_iter()
         .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload).ok()?;
-    let mut body = sequence.record_fields()?.to_vec();
-    write_sized_obu(&mut body, &obu);
-    Some(atom(*b"av1C", &body))
+    let mut record = sequence.record()?;
+    write_sized_obu(&mut record.config_obus, &obu);
+    mp4::record(&record)
 }
 
 /// Appends `obu` to `output` with a size field, whether or not it came with one.
@@ -199,22 +198,23 @@ impl SequenceHeader {
         })
     }
 
-    /// The `av1C` record's fields before the sequence header OBU: its marker and version, the
-    /// profile, level, tier and colour format, and no initial presentation delay.
-    fn record_fields(&self) -> Option<[u8; 4]> {
+    /// The `av1C` record without its sequence header OBU: the profile, level, tier and colour
+    /// format, and no initial presentation delay.
+    fn record(&self) -> Option<Av1c> {
         let colour = &self.colour;
-        Some([
-            AV1C_MARKER_AND_VERSION,
-            (u8::try_from(self.profile).ok()? << 5) | u8::try_from(self.level).ok()?,
-            (u8::from(self.tier) << 7)
-                | (u8::from(colour.high_bitdepth) << 6)
-                | (u8::from(colour.twelve_bit) << 5)
-                | (u8::from(colour.monochrome) << 4)
-                | (u8::from(colour.subsampling_x) << 3)
-                | (u8::from(colour.subsampling_y) << 2)
-                | u8::try_from(colour.chroma_sample_position).ok()?,
-            0,
-        ])
+        Some(Av1c {
+            seq_profile: u8::try_from(self.profile).ok()?,
+            seq_level_idx_0: u8::try_from(self.level).ok()?,
+            seq_tier_0: self.tier,
+            high_bitdepth: colour.high_bitdepth,
+            twelve_bit: colour.twelve_bit,
+            monochrome: colour.monochrome,
+            chroma_subsampling_x: colour.subsampling_x,
+            chroma_subsampling_y: colour.subsampling_y,
+            chroma_sample_position: u8::try_from(colour.chroma_sample_position).ok()?,
+            initial_presentation_delay: None,
+            config_obus: Vec::new(),
+        })
     }
 
     /// Reads the optional timing and decoder model information, then every operating point,

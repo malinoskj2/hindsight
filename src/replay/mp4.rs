@@ -7,9 +7,20 @@
 //! the second of sound that plays alongside it, so a player reads both from one place in the
 //! file; the sound's edit list skips the samples of its first frames that play before the video
 //! starts, so the two start together.
+//!
+//! The atoms are encoded by the `mp4-atom` crate. The layout is this module's: which samples
+//! make a chunk and where the chunks sit, the edit list, and the index before the media data.
 
 use super::{AudioClip, FRAME_SAMPLES, Packet, Stream, configuration, sample_parts};
 use crate::config::Codec;
+use mp4_atom::{
+    Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Decode, Dinf, Dref, Edts,
+    Elst, ElstEntry, Encode, Esds, FourCC, Ftyp, Hdlr, Hvc1, Hvcc, Mdhd, Mdia, Minf, Moov, Mp4a,
+    Mvhd, Smhd, Stbl, Stsc, StscEntry, Stsd, Stss, Stsz, StszSamples, Stts, SttsEntry, Tkhd, Trak,
+    Url, Visual, Vmhd,
+    esds::{DecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
+    u24,
+};
 use std::{io, sync::Arc};
 use thiserror::Error;
 
@@ -21,18 +32,10 @@ const TRACK_ID: u32 = 1;
 const AUDIO_TRACK_ID: u32 = 2;
 /// How much of each track's media one interleaved chunk holds, in seconds.
 const CHUNK_SECONDS: u64 = 1;
-/// The `esds` descriptor tags (ISO/IEC 14496-1): the elementary stream, its decoder
-/// configuration, the decoder-specific information and the sync layer configuration.
-const ES_DESCRIPTOR: u8 = 0x03;
-const DECODER_CONFIG_DESCRIPTOR: u8 = 0x04;
-const DECODER_SPECIFIC_INFO: u8 = 0x05;
-const SL_CONFIG_DESCRIPTOR: u8 = 0x06;
-/// The object type of MPEG-4 audio (AAC), and the stream type of audio shifted past the
-/// upstream flag, with the reserved bit set.
+/// The object type of MPEG-4 audio (AAC) and the stream type of audio, as the `esds` decoder
+/// configuration states them (ISO/IEC 14496-1).
 const OBJECT_TYPE_MPEG4_AUDIO: u8 = 0x40;
-const STREAM_TYPE_AUDIO: u8 = (0x05 << 2) | 1;
-/// The sync layer configuration MP4 files use.
-const SL_PREDEFINED_MP4: u8 = 0x02;
+const STREAM_TYPE_AUDIO: u8 = 0x05;
 /// The bits of a sample that an `mp4a` entry declares; AAC decodes to 16-bit samples.
 const AUDIO_SAMPLE_BITS: u16 = 16;
 /// The bytes of the length in front of each H.264 or HEVC NAL unit in a sample, which the
@@ -42,26 +45,12 @@ pub(super) const NAL_LENGTH_BYTES: u8 = 4;
 const LARGE_SIZE: u32 = 1;
 /// A 16-byte `mdat` header with a 64-bit size, so clips larger than 4 GB need no special case.
 const MDAT_HEADER_BYTES: u64 = 16;
-/// 1.0 in 16.16 fixed point: the playback rate, and the matrix's scale factors.
-const FIXED_ONE: u32 = 0x0001_0000;
-/// The identity transform, with its last column in 2.30 fixed point.
-const UNITY_MATRIX: [u32; 9] = [FIXED_ONE, 0, 0, 0, FIXED_ONE, 0, 0, 0, 0x4000_0000];
-/// 1.0 in 8.8 fixed point: full volume.
-const FULL_VOLUME: u16 = 0x0100;
 /// `ftyp` minor version, as other muxers write it next to the `isom` brand.
 const FILE_TYPE_MINOR_VERSION: u32 = 0x200;
-/// `tkhd` flags: the track is enabled and part of the presentation.
-const TRACK_ENABLED_IN_MOVIE: u32 = 0x3;
-/// The `vmhd` flags the specification requires.
-const VIDEO_MEDIA_HEADER_FLAGS: u32 = 1;
-/// The `url ` flag saying the media is in this file.
-const SELF_CONTAINED: u32 = 1;
-/// `und`, packed as three 5-bit letters.
-const UNDETERMINED_LANGUAGE: u16 = 0x55C4;
-/// 72 dpi in 16.16 fixed point, the resolution every visual sample entry declares.
-const RESOLUTION_72_DPI: u32 = 0x0048_0000;
-/// 24-bit colour without alpha.
-const DEPTH_24_BIT: u16 = 0x0018;
+/// The language every media header declares.
+const UNDETERMINED_LANGUAGE: &str = "und";
+/// The index of the one data reference, which says the media is in this file.
+const DATA_REFERENCE: u16 = 1;
 /// BT.709 primaries, transfer and matrix, limited range: what the encoder signals.
 const BT709: u16 = 1;
 
@@ -296,6 +285,8 @@ pub(crate) enum MuxError {
     NoSequenceHeader,
     #[error("the clip is too large for an MP4 index")]
     TooLarge,
+    #[error("build the clip's index: {0}")]
+    Index(#[from] mp4_atom::Error),
     #[error("write the clip: {0}")]
     Io(#[from] io::Error),
 }
@@ -403,12 +394,14 @@ fn header(
     sound: Option<&Sound<'_>>,
     layout: &Layout,
 ) -> Result<Vec<u8>, MuxError> {
-    let file_type = file_type(track.stream.codec);
+    let mut file = Vec::new();
+    file_type(track.stream.codec).encode(&mut file)?;
     // Offsets are 64-bit whatever their value, so the index has the same length either way.
-    let index_length = movie(track, sound, layout, 0)?.len();
-    let media_offset = (file_type.len() + index_length) as u64 + MDAT_HEADER_BYTES;
-    let index = movie(track, sound, layout, media_offset)?;
-    Ok([file_type, index].concat())
+    let mut probe = Vec::new();
+    movie(track, sound, layout, 0)?.encode(&mut probe)?;
+    let media_offset = (file.len() + probe.len()) as u64 + MDAT_HEADER_BYTES;
+    movie(track, sound, layout, media_offset)?.encode(&mut file)?;
+    Ok(file)
 }
 
 /// Writes the `mdat` atom: its 64-bit size, then the chunks in order: every video sample's
@@ -459,23 +452,23 @@ fn fit<T: TryFrom<U>, U>(value: U) -> Result<T, MuxError> {
 }
 
 /// The `ftyp` atom: the brands a player checks before reading on.
-fn file_type(codec: Codec) -> Vec<u8> {
-    let codec_brand: &[u8] = match codec {
-        Codec::H264 => b"avc1",
+fn file_type(codec: Codec) -> Ftyp {
+    let codec_brand = match codec {
+        Codec::H264 => Some(b"avc1"),
         // There is no widely used HEVC-specific brand; `isom`, `iso2` and `mp41` are what
         // players check.
-        Codec::Hevc => b"",
-        Codec::Av1 => b"av01",
+        Codec::Hevc => None,
+        Codec::Av1 => Some(b"av01"),
     };
-    let mut body = Vec::new();
-    // The major brand and its version, then the compatible brands.
-    body.put(b"isom")
-        .put_u32(FILE_TYPE_MINOR_VERSION)
-        .put(b"isom")
-        .put(b"iso2")
-        .put(codec_brand)
-        .put(b"mp41");
-    atom(*b"ftyp", &body)
+    Ftyp {
+        major_brand: FourCC::new(b"isom"),
+        minor_version: FILE_TYPE_MINOR_VERSION,
+        compatible_brands: [Some(b"isom"), Some(b"iso2"), codec_brand, Some(b"mp41")]
+            .into_iter()
+            .flatten()
+            .map(FourCC::new)
+            .collect(),
+    }
 }
 
 /// The `moov` atom: the movie header, the video track and the sound track if there is one, with
@@ -485,462 +478,302 @@ fn movie(
     sound: Option<&Sound<'_>>,
     layout: &Layout,
     media_offset: u64,
-) -> Result<Vec<u8>, MuxError> {
+) -> Result<Moov, MuxError> {
     let durations = Durations::of(track)?;
-    let video = layout.placement(Kind::Video, media_offset)?;
-    let track_atoms = [
-        track_header(track.stream, durations.movie),
-        media(track, &durations, &video)?,
-    ]
-    .concat();
-    let mut body = [
-        movie_header(durations.movie, sound.is_some()),
-        atom(*b"trak", &track_atoms),
-    ]
-    .concat();
+    let mut tracks = vec![video_track(
+        track,
+        &durations,
+        layout.placement(Kind::Video, media_offset)?,
+    )?];
     if let Some(sound) = sound {
-        let audio = layout.placement(Kind::Audio, media_offset)?;
-        body.extend(sound_track(sound, durations.movie, &audio)?);
+        tracks.push(sound_track(
+            sound,
+            durations.movie,
+            layout.placement(Kind::Audio, media_offset)?,
+        )?);
     }
-    Ok(atom(*b"moov", &body))
+    // The next free track id follows the sound track's when there is one.
+    let next_track_id = if sound.is_some() {
+        AUDIO_TRACK_ID
+    } else {
+        TRACK_ID
+    } + 1;
+    Ok(Moov {
+        mvhd: Mvhd {
+            timescale: MOVIE_TIMESCALE,
+            duration: durations.movie.into(),
+            rate: 1.into(),
+            volume: 1.into(),
+            next_track_id,
+            ..Mvhd::default()
+        },
+        trak: tracks,
+        ..Moov::default()
+    })
 }
 
-/// The `mvhd` atom: the movie's time scale and duration, and the next free track id, which
-/// follows the sound track's when `with_sound`.
-fn movie_header(duration: u32, with_sound: bool) -> Vec<u8> {
-    let next_track = if with_sound { AUDIO_TRACK_ID } else { TRACK_ID } + 1;
-    let mut body = Vec::new();
-    body
-        // Creation and modification times.
-        .put_zeros(8)
-        .put_u32(MOVIE_TIMESCALE)
-        .put_u32(duration)
-        .put_u32(FIXED_ONE)
-        .put_u16(FULL_VOLUME)
-        .put_zeros(10)
-        .put_u32s(&UNITY_MATRIX)
-        // Pre-defined fields.
-        .put_zeros(24)
-        .put_u32(next_track);
-    full_atom(*b"mvhd", 0, 0, &body)
-}
-
-/// The `tkhd` atom: the track's id, its duration in the movie's time scale and its size.
-fn track_header(stream: &Stream, duration: u32) -> Vec<u8> {
-    let mut body = Vec::new();
-    body
-        // Creation and modification times.
-        .put_zeros(8)
-        .put_u32(TRACK_ID)
-        .put_zeros(4)
-        .put_u32(duration)
-        // Reserved, layer, alternate group, volume (none for video), reserved.
-        .put_zeros(16)
-        .put_u32s(&UNITY_MATRIX)
-        // Width and height in 16.16 fixed point.
-        .put_u32(stream.width << 16)
-        .put_u32(stream.height << 16);
-    full_atom(*b"tkhd", 0, TRACK_ENABLED_IN_MOVIE, &body)
-}
-
-/// The `mdia` atom: the media's timing, its handler and the media information.
-fn media(
+/// The video's `trak` atom: its header with the picture's size, and its media: the timing, the
+/// handler, the sample description, then where each sample sits in time and in the file.
+fn video_track(
     track: &Track<'_>,
     durations: &Durations,
-    placement: &Placement,
-) -> Result<Vec<u8>, MuxError> {
-    Ok(atom(
-        *b"mdia",
-        &[
-            media_header(durations.timescale, durations.media),
-            handler(*b"vide", b"VideoHandler\0"),
-            media_information(track, placement)?,
-        ]
-        .concat(),
-    ))
-}
-
-/// The `mdhd` atom: the media's time scale and its duration in it.
-fn media_header(timescale: u32, duration: u32) -> Vec<u8> {
-    let mut body = Vec::new();
-    body
-        // Creation and modification times.
-        .put_zeros(8)
-        .put_u32(timescale)
-        .put_u32(duration)
-        .put_u16(UNDETERMINED_LANGUAGE)
-        .put_zeros(2);
-    full_atom(*b"mdhd", 0, 0, &body)
-}
-
-/// The `hdlr` atom: what kind of media the track holds (`vide` or `soun`), and its name.
-fn handler(kind: [u8; 4], name: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.put_zeros(4).put(&kind).put_zeros(12).put(name);
-    full_atom(*b"hdlr", 0, 0, &body)
-}
-
-/// The `minf` atom: the video media header, where the data is, and the sample table.
-fn media_information(track: &Track<'_>, placement: &Placement) -> Result<Vec<u8>, MuxError> {
-    Ok(atom(
-        *b"minf",
-        &[
-            full_atom(*b"vmhd", 0, VIDEO_MEDIA_HEADER_FLAGS, &[0; 8]),
-            data_information(),
-            sample_table(track, placement)?,
-        ]
-        .concat(),
-    ))
-}
-
-/// The `dinf` atom: one data reference, saying the media is in this file.
-fn data_information() -> Vec<u8> {
-    let mut table = Vec::new();
-    table
-        .put_u32(1)
-        .put(&full_atom(*b"url ", 0, SELF_CONTAINED, &[]));
-    atom(*b"dinf", &full_atom(*b"dref", 0, 0, &table))
-}
-
-/// The `stbl` atom: the sample description, then where each sample sits in time and in the file.
-fn sample_table(track: &Track<'_>, placement: &Placement) -> Result<Vec<u8>, MuxError> {
-    let count: u32 = fit(track.samples.len())?;
-    let sizes: Vec<u32> = track.samples.iter().map(|sample| sample.size).collect();
-    Ok(atom(
-        *b"stbl",
-        &[
-            sample_description(track)?,
-            time_to_sample(track.samples.iter().map(|sample| sample.duration))?,
-            sync_samples(track.samples, count)?,
-            sample_to_chunk(&placement.counts)?,
-            sample_sizes(&sizes, count),
-            chunk_offsets(&placement.offsets)?,
-        ]
-        .concat(),
-    ))
-}
-
-/// The `stsd` atom: the one sample description.
-fn sample_description(track: &Track<'_>) -> Result<Vec<u8>, MuxError> {
-    let mut body = Vec::new();
-    body.put_u32(1)
-        .put(&visual_entry(track.stream, track.decoder)?);
-    Ok(full_atom(*b"stsd", 0, 0, &body))
-}
-
-/// The visual sample entry (`avc1`, `hvc1` or `av01`): the picture's size, then the decoder
-/// configuration record and the colour.
-fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<Vec<u8>, MuxError> {
-    let width: u16 = fit(stream.width)?;
-    let height: u16 = fit(stream.height)?;
-    // Parameter sets live only in the configuration record (`hvc1`, not `hev1`).
-    let kind = match stream.codec {
-        Codec::H264 => b"avc1",
-        Codec::Hevc => b"hvc1",
-        Codec::Av1 => b"av01",
-    };
-
-    let mut body = Vec::new();
-    body.put_zeros(6)
-        // Data reference index.
-        .put_u16(1)
-        .put_zeros(16)
-        .put_u16(width)
-        .put_u16(height)
-        .put_u32(RESOLUTION_72_DPI)
-        .put_u32(RESOLUTION_72_DPI)
-        .put_zeros(4)
-        // Frames per sample.
-        .put_u16(1)
-        // Compressor name.
-        .put_zeros(32)
-        .put_u16(DEPTH_24_BIT)
-        // Pre-defined.
-        .put_u16(u16::MAX)
-        .put(decoder)
-        .put(&colour());
-    Ok(atom(*kind, &body))
-}
-
-/// The `colr` atom: the colour the encoder signals.
-fn colour() -> Vec<u8> {
-    let mut body = Vec::new();
-    // Primaries, transfer and matrix, then the full-range flag cleared.
-    body.put(b"nclx").put_u16s(&[BT709; 3]).put(&[0]);
-    atom(*b"colr", &body)
-}
-
-/// The `stts` atom: the sample durations, as runs of equal ones.
-fn time_to_sample(durations: impl IntoIterator<Item = u32>) -> Result<Vec<u8>, MuxError> {
-    let mut runs: Vec<(u32, u32)> = Vec::new();
-    for next in durations {
-        match runs.last_mut() {
-            Some((run, duration)) if *duration == next => *run += 1,
-            _ => runs.push((1, next)),
-        }
-    }
-    let mut body = Vec::new();
-    body.put_u32(fit(runs.len())?);
-    for (run, duration) in runs {
-        body.put_u32(run).put_u32(duration);
-    }
-    Ok(full_atom(*b"stts", 0, 0, &body))
-}
-
-/// The `stss` atom: the keyframes among the `count` samples, by sample number from 1.
-fn sync_samples(samples: &[Sample<'_>], count: u32) -> Result<Vec<u8>, MuxError> {
-    let keyframes: Vec<u32> = (1..=count)
+    placement: Placement,
+) -> Result<Trak, MuxError> {
+    let samples = track.samples;
+    let keyframes = (1..)
         .zip(samples)
         .filter(|(_, sample)| sample.keyframe)
         .map(|(number, _)| number)
         .collect();
-    let mut body = Vec::new();
-    body.put_u32(fit(keyframes.len())?).put_u32s(&keyframes);
-    Ok(full_atom(*b"stss", 0, 0, &body))
+    Ok(Trak {
+        tkhd: Tkhd {
+            track_id: TRACK_ID,
+            duration: durations.movie.into(),
+            enabled: true,
+            in_movie: true,
+            width: fit::<u16, _>(track.stream.width)?.into(),
+            height: fit::<u16, _>(track.stream.height)?.into(),
+            ..Tkhd::default()
+        },
+        mdia: Mdia {
+            mdhd: media_header(durations.timescale, durations.media),
+            hdlr: handler(*b"vide", "VideoHandler"),
+            minf: Minf {
+                vmhd: Some(Vmhd::default()),
+                dinf: data_information(),
+                stbl: Stbl {
+                    stsd: Stsd {
+                        codecs: vec![visual_entry(track.stream, track.decoder)?],
+                    },
+                    stts: time_to_sample(samples.iter().map(|sample| sample.duration)),
+                    stss: Some(Stss { entries: keyframes }),
+                    stsc: sample_to_chunk(&placement.counts),
+                    stsz: sample_sizes(samples.iter().map(|sample| sample.size).collect()),
+                    co64: Some(Co64 {
+                        entries: placement.offsets,
+                    }),
+                    ..Stbl::default()
+                },
+                ..Minf::default()
+            },
+        },
+        ..Trak::default()
+    })
+}
+
+/// The `mdhd` atom: the media's time scale and its duration in it.
+fn media_header(timescale: u32, duration: u32) -> Mdhd {
+    Mdhd {
+        timescale,
+        duration: duration.into(),
+        language: UNDETERMINED_LANGUAGE.to_owned(),
+        ..Mdhd::default()
+    }
+}
+
+/// The `hdlr` atom: what kind of media the track holds (`vide` or `soun`), and its name.
+fn handler(kind: [u8; 4], name: &str) -> Hdlr {
+    Hdlr {
+        handler: FourCC::from(kind),
+        name: name.to_owned(),
+    }
+}
+
+/// The `dinf` atom: one data reference, saying the media is in this file.
+fn data_information() -> Dinf {
+    Dinf {
+        dref: Dref {
+            urls: vec![Url::default()],
+        },
+    }
+}
+
+/// The visual sample entry (`avc1`, `hvc1` or `av01`): the picture's size, then the decoder
+/// configuration record and the colour.
+fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<SampleEntry, MuxError> {
+    let visual = Visual {
+        data_reference_index: DATA_REFERENCE,
+        width: fit(stream.width)?,
+        height: fit(stream.height)?,
+        ..Visual::default()
+    };
+    let colr = Some(Colr::Nclx {
+        colour_primaries: BT709,
+        transfer_characteristics: BT709,
+        matrix_coefficients: BT709,
+        full_range_flag: false,
+    });
+    // The record arrives as the atom bytes `configuration` built, and the entry takes it as
+    // the crate's own type, so it is decoded back here.
+    let mut record = decoder;
+    Ok(match stream.codec {
+        Codec::H264 => Avc1 {
+            visual,
+            avcc: Avcc::decode(&mut record)?,
+            colr,
+            ..Avc1::default()
+        }
+        .into(),
+        // Parameter sets live only in the configuration record (`hvc1`, not `hev1`).
+        Codec::Hevc => Hvc1 {
+            visual,
+            hvcc: Hvcc::decode(&mut record)?,
+            colr,
+            ..Hvc1::default()
+        }
+        .into(),
+        Codec::Av1 => Av01 {
+            visual,
+            av1c: Av1c::decode(&mut record)?,
+            colr,
+            ..Av01::default()
+        }
+        .into(),
+    })
+}
+
+/// The `stts` atom: the sample durations, as runs of equal ones.
+fn time_to_sample(durations: impl IntoIterator<Item = u32>) -> Stts {
+    let mut entries: Vec<SttsEntry> = Vec::new();
+    for sample_delta in durations {
+        match entries.last_mut() {
+            Some(run) if run.sample_delta == sample_delta => run.sample_count += 1,
+            _ => entries.push(SttsEntry {
+                sample_count: 1,
+                sample_delta,
+            }),
+        }
+    }
+    Stts { entries }
 }
 
 /// The `stsc` atom: how many samples each chunk holds, as one entry per run of chunks that
-/// hold the same number (the first chunk of the run, its count, description 1). Video alone is
-/// one entry for its one chunk.
-fn sample_to_chunk(counts: &[u32]) -> Result<Vec<u8>, MuxError> {
-    let mut runs: Vec<(u32, u32)> = Vec::new();
-    for (number, &count) in (1..).zip(counts) {
-        if runs.last().is_none_or(|&(_, previous)| previous != count) {
-            runs.push((number, count));
+/// hold the same number (the first chunk of the run, its count, the one description). Video
+/// alone is one entry for its one chunk.
+fn sample_to_chunk(counts: &[u32]) -> Stsc {
+    let mut entries: Vec<StscEntry> = Vec::new();
+    for (first_chunk, &samples_per_chunk) in (1..).zip(counts) {
+        if entries
+            .last()
+            .is_none_or(|previous| previous.samples_per_chunk != samples_per_chunk)
+        {
+            entries.push(StscEntry {
+                first_chunk,
+                samples_per_chunk,
+                sample_description_index: u32::from(DATA_REFERENCE),
+            });
         }
     }
-    let mut body = Vec::new();
-    body.put_u32(fit(runs.len())?);
-    for (first, count) in runs {
-        body.put_u32s(&[first, count, 1]);
-    }
-    Ok(full_atom(*b"stsc", 0, 0, &body))
+    Stsc { entries }
 }
 
-/// The `stsz` atom: a default size of 0, so each of the `count` samples' sizes is listed.
-fn sample_sizes(sizes: &[u32], count: u32) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.put_u32(0).put_u32(count).put_u32s(sizes);
-    full_atom(*b"stsz", 0, 0, &body)
-}
-
-/// The `co64` atom: each chunk's offset in the file.
-fn chunk_offsets(offsets: &[u64]) -> Result<Vec<u8>, MuxError> {
-    let mut body = Vec::new();
-    body.put_u32(fit(offsets.len())?);
-    for &offset in offsets {
-        body.put_u64(offset);
+/// The `stsz` atom: every sample's size, listed.
+fn sample_sizes(sizes: Vec<u32>) -> Stsz {
+    Stsz {
+        samples: StszSamples::Different { sizes },
     }
-    Ok(full_atom(*b"co64", 0, 0, &body))
 }
 
 /// The sound's `trak` atom: its header, the edit that starts it with the video and lasts
 /// `duration` in the movie's time scale, and its media, whose chunks sit as `placement` says.
-fn sound_track(
-    sound: &Sound<'_>,
-    duration: u32,
-    placement: &Placement,
-) -> Result<Vec<u8>, MuxError> {
+/// Every frame lasts [`FRAME_SAMPLES`], and every AAC frame decodes on its own, so there is no
+/// `stss`.
+fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result<Trak, MuxError> {
     let format = &sound.clip.format;
-    let media = atom(
-        *b"mdia",
-        &[
-            media_header(format.sample_rate, sound.media_duration()?),
-            handler(*b"soun", b"SoundHandler\0"),
-            atom(
-                *b"minf",
-                &[
-                    // Balance (centred) and reserved.
-                    full_atom(*b"smhd", 0, 0, &[0; 4]),
-                    data_information(),
-                    sound_sample_table(sound, placement)?,
-                ]
-                .concat(),
-            ),
-        ]
-        .concat(),
-    );
-    Ok(atom(
-        *b"trak",
-        &[
-            sound_track_header(duration),
-            edit(duration, sound.clip.lead),
-            media,
-        ]
-        .concat(),
-    ))
+    Ok(Trak {
+        tkhd: Tkhd {
+            track_id: AUDIO_TRACK_ID,
+            duration: duration.into(),
+            enabled: true,
+            in_movie: true,
+            volume: 1.into(),
+            ..Tkhd::default()
+        },
+        edts: Some(Edts {
+            elst: Some(Elst {
+                entries: vec![ElstEntry {
+                    segment_duration: duration.into(),
+                    media_time: Some(sound.clip.lead.into()),
+                    media_rate: 1.into(),
+                }],
+            }),
+        }),
+        mdia: Mdia {
+            mdhd: media_header(format.sample_rate, sound.media_duration()?),
+            hdlr: handler(*b"soun", "SoundHandler"),
+            minf: Minf {
+                smhd: Some(Smhd::default()),
+                dinf: data_information(),
+                stbl: Stbl {
+                    stsd: Stsd {
+                        codecs: vec![audio_entry(sound)?],
+                    },
+                    stts: Stts {
+                        entries: vec![SttsEntry {
+                            sample_count: fit(sound.sizes.len())?,
+                            sample_delta: FRAME_SAMPLES,
+                        }],
+                    },
+                    stsc: sample_to_chunk(&placement.counts),
+                    stsz: sample_sizes(sound.sizes.clone()),
+                    co64: Some(Co64 {
+                        entries: placement.offsets,
+                    }),
+                    ..Stbl::default()
+                },
+                ..Minf::default()
+            },
+        },
+        ..Trak::default()
+    })
 }
 
-/// The sound's `tkhd` atom: its id, its duration in the movie's time scale and full volume.
-fn sound_track_header(duration: u32) -> Vec<u8> {
-    let mut body = Vec::new();
-    body
-        // Creation and modification times.
-        .put_zeros(8)
-        .put_u32(AUDIO_TRACK_ID)
-        .put_zeros(4)
-        .put_u32(duration)
-        // Reserved, layer and alternate group.
-        .put_zeros(12)
-        .put_u16(FULL_VOLUME)
-        .put_zeros(2)
-        .put_u32s(&UNITY_MATRIX)
-        // No width or height.
-        .put_zeros(8);
-    full_atom(*b"tkhd", 0, TRACK_ENABLED_IN_MOVIE, &body)
-}
-
-/// The `edts` atom with one edit: the track plays for `duration` in the movie's time scale,
-/// from `skip` samples into its media at normal speed.
-fn edit(duration: u32, skip: u32) -> Vec<u8> {
-    let mut list = Vec::new();
-    list.put_u32(1)
-        .put_u32(duration)
-        .put_u32(skip)
-        // Media rate 1.0, in 16.16 fixed point.
-        .put_u32(FIXED_ONE);
-    atom(*b"edts", &full_atom(*b"elst", 0, 0, &list))
-}
-
-/// The sound's `stbl` atom: its sample description, then every frame lasting
-/// [`FRAME_SAMPLES`], and where each sits in the file. Every AAC frame decodes on its own, so
-/// there is no `stss`.
-fn sound_sample_table(sound: &Sound<'_>, placement: &Placement) -> Result<Vec<u8>, MuxError> {
-    let count: u32 = fit(sound.sizes.len())?;
-    let mut description = Vec::new();
-    description.put_u32(1).put(&audio_entry(sound)?);
-    Ok(atom(
-        *b"stbl",
-        &[
-            full_atom(*b"stsd", 0, 0, &description),
-            time_to_sample(sound.sizes.iter().map(|_| FRAME_SAMPLES))?,
-            sample_to_chunk(&placement.counts)?,
-            sample_sizes(&sound.sizes, count),
-            chunk_offsets(&placement.offsets)?,
-        ]
-        .concat(),
-    ))
-}
-
-/// The `mp4a` sample entry: the channels, the sample size and rate, then the `esds` atom.
-fn audio_entry(sound: &Sound<'_>) -> Result<Vec<u8>, MuxError> {
+/// The `mp4a` sample entry: the channels, the sample size and rate, then the `esds` atom,
+/// whose elementary stream descriptor says the stream is AAC, gives its buffer size and
+/// bitrates, and carries the `AudioSpecificConfig`.
+fn audio_entry(sound: &Sound<'_>) -> Result<SampleEntry, MuxError> {
     let format = &sound.clip.format;
-    // The rate is 16.16 fixed point, so it must fit 16 bits.
-    let rate: u16 = fit(format.sample_rate)?;
-    let mut body = Vec::new();
-    body.put_zeros(6)
-        // Data reference index.
-        .put_u16(1)
-        // Version, revision and vendor.
-        .put_zeros(8)
-        .put_u16(format.channels)
-        .put_u16(AUDIO_SAMPLE_BITS)
-        // Pre-defined and reserved.
-        .put_zeros(4)
-        .put_u32(u32::from(rate) << 16)
-        .put(&elementary_stream(sound)?);
-    Ok(atom(*b"mp4a", &body))
-}
-
-/// The `esds` atom: the elementary stream descriptor, which says the stream is AAC, gives its
-/// buffer size and bitrates, and carries the `AudioSpecificConfig`.
-fn elementary_stream(sound: &Sound<'_>) -> Result<Vec<u8>, MuxError> {
     let (average, peak) = sound.bitrates();
     let largest = sound.sizes.iter().copied().max().unwrap_or(0);
-    let mut decoder = Vec::new();
-    decoder
-        .put(&[OBJECT_TYPE_MPEG4_AUDIO, STREAM_TYPE_AUDIO])
-        // The buffer size in 24 bits.
-        .put(&largest.min(0x00FF_FFFF).to_be_bytes()[1..])
-        .put_u32(peak)
-        .put_u32(average)
-        .put(&descriptor(
-            DECODER_SPECIFIC_INFO,
-            &sound.clip.format.config,
-        )?);
-    let mut stream = Vec::new();
-    stream
-        // Elementary stream id (0 in MP4 files) and flags.
-        .put_u16(0)
-        .put(&[0])
-        .put(&descriptor(DECODER_CONFIG_DESCRIPTOR, &decoder)?)
-        .put(&descriptor(SL_CONFIG_DESCRIPTOR, &[SL_PREDEFINED_MP4])?);
-    Ok(full_atom(
-        *b"esds",
-        0,
-        0,
-        &descriptor(ES_DESCRIPTOR, &stream)?,
-    ))
+    Ok(Mp4a {
+        audio: Audio {
+            data_reference_index: DATA_REFERENCE,
+            channel_count: format.channels,
+            sample_size: AUDIO_SAMPLE_BITS,
+            // The rate is 16.16 fixed point, so it must fit 16 bits.
+            sample_rate: fit::<u16, _>(format.sample_rate)?.into(),
+        },
+        esds: Esds {
+            es_desc: EsDescriptor {
+                // Elementary streams in MP4 files have id 0.
+                es_id: 0,
+                dec_config: DecoderConfig {
+                    object_type_indication: OBJECT_TYPE_MPEG4_AUDIO,
+                    stream_type: STREAM_TYPE_AUDIO,
+                    up_stream: 0,
+                    buffer_size_db: fit(largest.min(u24::MAX))?,
+                    max_bitrate: peak,
+                    avg_bitrate: average,
+                    dec_specific: Some(DecoderSpecific {
+                        raw: format.config.to_vec(),
+                        ..DecoderSpecific::default()
+                    }),
+                },
+                sl_config: SLConfig {},
+            },
+        },
+        btrt: None,
+        taic: None,
+    }
+    .into())
 }
 
-/// An MPEG-4 descriptor: its tag, its length in one byte (all of these are short), then `body`.
-fn descriptor(tag: u8, body: &[u8]) -> Result<Vec<u8>, MuxError> {
-    let length = u8::try_from(body.len())
-        .ok()
-        .filter(|&length| length < 0x80)
-        .ok_or(MuxError::TooLarge)?;
-    Ok([&[tag, length][..], body].concat())
-}
-
-/// An atom: its 32-bit size, its type, then `body`.
-pub(super) fn atom(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
-    // Index atoms stay far below 4 GB; only `mdat` can grow past it, and it is written apart.
-    let size = u32::try_from(body.len() + 8).expect("an index atom fits a 32-bit size");
-    [&size.to_be_bytes()[..], &kind, body].concat()
-}
-
-/// A full atom: an atom whose body starts with a version byte and 24 bits of flags.
-fn full_atom(kind: [u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
-    let header = (u32::from(version) << 24) | (flags & 0x00FF_FFFF);
-    atom(kind, &[&header.to_be_bytes()[..], body].concat())
-}
-
-/// Appends a parameter set to an `avcC` or `hvcC` record behind its 16-bit length, unless it is
-/// too long for one.
-pub(super) fn write_parameter_set(record: &mut Vec<u8>, unit: &[u8]) -> Option<()> {
-    record.put_u16(u16::try_from(unit.len()).ok()?).put(unit);
-    Some(())
-}
-
-/// Big-endian field writers for building atom bodies.
-trait Fields {
-    fn put(&mut self, bytes: &[u8]) -> &mut Self;
-    fn put_zeros(&mut self, count: usize) -> &mut Self;
-    fn put_u16(&mut self, value: u16) -> &mut Self;
-    fn put_u32(&mut self, value: u32) -> &mut Self;
-    fn put_u64(&mut self, value: u64) -> &mut Self;
-
-    fn put_u16s(&mut self, values: &[u16]) -> &mut Self {
-        values.iter().fold(self, |body, &value| body.put_u16(value))
-    }
-
-    fn put_u32s(&mut self, values: &[u32]) -> &mut Self {
-        values.iter().fold(self, |body, &value| body.put_u32(value))
-    }
-}
-
-impl Fields for Vec<u8> {
-    fn put(&mut self, bytes: &[u8]) -> &mut Self {
-        self.extend_from_slice(bytes);
-        self
-    }
-
-    fn put_zeros(&mut self, count: usize) -> &mut Self {
-        self.resize(self.len() + count, 0);
-        self
-    }
-
-    fn put_u16(&mut self, value: u16) -> &mut Self {
-        self.put(&value.to_be_bytes())
-    }
-
-    fn put_u32(&mut self, value: u32) -> &mut Self {
-        self.put(&value.to_be_bytes())
-    }
-
-    fn put_u64(&mut self, value: u64) -> &mut Self {
-        self.put(&value.to_be_bytes())
-    }
+/// `atom`, a decoder configuration record (`avcC`, `hvcC` or `av1C`), as the bytes a sample
+/// entry carries, unless it cannot be encoded.
+pub(super) fn record(atom: &impl Encode) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    atom.encode(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -969,35 +802,94 @@ pub(super) mod tests {
         found
     }
 
-    fn child(body: &[u8], kind: [u8; 4]) -> &[u8] {
-        atoms(body)
+    /// The file's index, decoded, and the offset of its media data.
+    pub(in crate::replay) fn index(file: &[u8]) -> (Moov, usize) {
+        let mut rest = file;
+        Ftyp::decode(&mut rest).unwrap();
+        let moov = Moov::decode(&mut rest).unwrap();
+        let media = file.len() - rest.len() + usize::try_from(MDAT_HEADER_BYTES).unwrap();
+        (moov, media)
+    }
+
+    /// The sizes a sample table lists.
+    pub(in crate::replay) fn sizes(table: &Stbl) -> Vec<u32> {
+        match &table.stsz.samples {
+            StszSamples::Different { sizes } => sizes.clone(),
+            StszSamples::Identical { count, size } => vec![*size; *count as usize],
+        }
+    }
+
+    /// Each chunk of a sample table as (offset, bytes), the bytes being those of its run of
+    /// `samples`, which must be the track's samples as the media data stores them.
+    pub(in crate::replay) fn chunks(table: &Stbl, samples: &[Vec<u8>]) -> Vec<(usize, Vec<u8>)> {
+        let mut next = 0;
+        let found: Vec<_> = (1..)
+            .zip(&table.co64.as_ref().unwrap().entries)
+            .map(|(number, &offset)| {
+                let run = table
+                    .stsc
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.first_chunk <= number)
+                    .unwrap();
+                let count = run.samples_per_chunk as usize;
+                let bytes = samples[next..next + count].concat();
+                next += count;
+                (usize::try_from(offset).unwrap(), bytes)
+            })
+            .collect();
+        assert_eq!(next, samples.len(), "every sample is in a chunk");
+        found
+    }
+
+    /// A packet's bytes as the media data stores them.
+    pub(in crate::replay) fn stored(codec: Codec, packet: &Packet) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for part in sample_parts(codec, &packet.data) {
+            if length_prefixed(codec) {
+                bytes.extend_from_slice(&u32::try_from(part.len()).unwrap().to_be_bytes());
+            }
+            bytes.extend_from_slice(part);
+        }
+        bytes
+    }
+
+    /// The decoder configuration record of a track's one sample entry, as atom bytes again.
+    pub(in crate::replay) fn decoder_record(track: &Trak) -> Vec<u8> {
+        let record = match &track.mdia.minf.stbl.stsd.codecs[..] {
+            [SampleEntry::Avc1(entry)] => record(&entry.avcc),
+            [SampleEntry::Hvc1(entry)] => record(&entry.hvcc),
+            [SampleEntry::Av01(entry)] => record(&entry.av1c),
+            other => panic!("expected one video sample entry, found {other:?}"),
+        };
+        record.unwrap()
+    }
+
+    /// Checks that every chunk of `table` sits in `file` holding its `samples`, and returns the
+    /// chunk offsets.
+    fn check_chunks(file: &[u8], table: &Stbl, samples: &[Vec<u8>]) -> Vec<usize> {
+        chunks(table, samples)
             .into_iter()
-            .find(|(found, _)| *found == kind)
-            .map_or_else(
-                || panic!("no {} atom", String::from_utf8_lossy(&kind)),
-                |(_, body)| body,
-            )
+            .map(|(offset, bytes)| {
+                assert_eq!(&file[offset..offset + bytes.len()], bytes);
+                offset
+            })
+            .collect()
     }
 
-    fn sample_table(file: &[u8]) -> &[u8] {
-        let movie = atoms(file)[1].1;
-        child(
-            child(child(child(movie, *b"trak"), *b"mdia"), *b"minf"),
-            *b"stbl",
-        )
-    }
-
-    /// The single chunk's offset, from the `co64` atom in `table`.
-    fn chunk_offset(table: &[u8]) -> usize {
-        let offsets = child(table, *b"co64");
-        usize::try_from(u64::from_be_bytes(offsets[8..16].try_into().unwrap())).unwrap()
-    }
-
-    fn words(body: &[u8]) -> Vec<u32> {
-        body.as_chunks::<4>()
-            .0
+    fn total_duration(stts: &Stts) -> u64 {
+        stts.entries
             .iter()
-            .map(|word| u32::from_be_bytes(*word))
+            .map(|entry| u64::from(entry.sample_count) * u64::from(entry.sample_delta))
+            .sum()
+    }
+
+    /// The sample-to-chunk entries as (first chunk, samples per chunk) pairs.
+    fn chunk_runs(stsc: &Stsc) -> Vec<(u32, u32)> {
+        stsc.entries
+            .iter()
+            .map(|entry| (entry.first_chunk, entry.samples_per_chunk))
             .collect()
     }
 
@@ -1043,39 +935,84 @@ pub(super) mod tests {
         let kinds: Vec<_> = top.iter().map(|(kind, _)| kind).collect();
         assert_eq!(kinds, [b"ftyp", b"moov", b"mdat"]);
 
-        let table = sample_table(&file);
-        assert_eq!(words(child(table, *b"stsz")), [0, 0, 6, 9, 8, 8, 9, 8, 8]);
-        assert_eq!(words(child(table, *b"stss")), [0, 2, 1, 4]);
-        assert_eq!(words(child(table, *b"stts")), [0, 1, 6, 1000]);
-        assert_eq!(words(child(table, *b"stsc")), [0, 1, 1, 6, 1]);
+        let (moov, media) = index(&file);
+        let table = &moov.trak[0].mdia.minf.stbl;
+        assert_eq!(sizes(table), [9, 8, 8, 9, 8, 8]);
+        assert_eq!(table.stss.as_ref().unwrap().entries, [1, 4]);
+        assert_eq!(
+            table.stts.entries,
+            [SttsEntry {
+                sample_count: 6,
+                sample_delta: 1000
+            }]
+        );
+        assert_eq!(chunk_runs(&table.stsc), [(1, 6)]);
 
-        let offset = chunk_offset(table);
-        assert_eq!(&file[offset..offset + 4], &5_u32.to_be_bytes());
-        assert_eq!(&file[offset + 4..offset + 9], &h264::tests::IDR);
-        assert_eq!(&file[offset + 13..offset + 17], &h264::tests::SLICE);
+        let samples: Vec<_> = packets
+            .iter()
+            .map(|packet| stored(Codec::H264, packet))
+            .collect();
+        assert_eq!(check_chunks(&file, table, &samples), [media]);
+        assert_eq!(&file[media..media + 4], &5_u32.to_be_bytes());
+        assert_eq!(&file[media + 4..media + 9], &h264::tests::IDR);
+        assert_eq!(&file[media + 13..media + 17], &h264::tests::SLICE);
         assert_eq!(top[2].1.len(), 9 * 2 + 8 * 4);
+        assert_eq!(media + top[2].1.len(), file.len());
     }
 
     #[test]
     fn describes_the_stream_and_its_decoder_configuration() {
         let file = mux(Codec::H264, &[packet(Codec::H264, 0, true)]);
-        let movie = atoms(&file)[1].1;
+        let (moov, _) = index(&file);
 
-        let header = child(movie, *b"mvhd");
-        assert_eq!(words(&header[12..20]), [1000, 16]);
-        let track = child(movie, *b"trak");
-        let track_header = child(track, *b"tkhd");
-        assert_eq!(words(&track_header[76..84]), [1920 << 16, 1080 << 16]);
-        let media = child(track, *b"mdia");
-        assert_eq!(words(&child(media, *b"mdhd")[12..20]), [60_000, 1000]);
+        assert_eq!(
+            (
+                moov.mvhd.timescale,
+                moov.mvhd.duration,
+                moov.mvhd.next_track_id
+            ),
+            (1000, 16, 2)
+        );
+        let [track] = &moov.trak[..] else {
+            panic!("expected one track");
+        };
+        assert_eq!(track.tkhd.track_id, 1);
+        assert_eq!(
+            (track.tkhd.width, track.tkhd.height),
+            (1920.into(), 1080.into())
+        );
+        assert_eq!(track.mdia.hdlr.handler, FourCC::new(b"vide"));
+        assert_eq!(
+            (track.mdia.mdhd.timescale, track.mdia.mdhd.duration),
+            (60_000, 1000)
+        );
 
-        let description = child(sample_table(&file), *b"stsd");
-        let visual = child(&description[8..], *b"avc1");
-        assert_eq!(&visual[24..28], &[0x07, 0x80, 0x04, 0x38]);
-        let configuration = child(&visual[78..], *b"avcC");
-        assert_eq!(&configuration[8..14], &h264::tests::SPS);
-        assert_eq!(&configuration[17..21], &h264::tests::PPS);
-        assert_eq!(child(&visual[78..], *b"colr"), b"nclx\0\x01\0\x01\0\x01\0");
+        let [SampleEntry::Avc1(entry)] = &track.mdia.minf.stbl.stsd.codecs[..] else {
+            panic!("expected one avc1 entry");
+        };
+        assert_eq!((entry.visual.width, entry.visual.height), (1920, 1080));
+        assert_eq!(
+            entry.avcc.sequence_parameter_sets,
+            [h264::tests::SPS.to_vec()]
+        );
+        assert_eq!(
+            entry.avcc.picture_parameter_sets,
+            [h264::tests::PPS.to_vec()]
+        );
+        assert_eq!(
+            entry.colr,
+            Some(Colr::Nclx {
+                colour_primaries: 1,
+                transfer_characteristics: 1,
+                matrix_coefficients: 1,
+                full_range_flag: false,
+            })
+        );
+        // The record in the file is the one the parameter sets built, byte for byte.
+        assert_eq!(
+            decoder_record(track),
+            h264::configuration(&h264::tests::keyframe()).unwrap()
+        );
     }
 
     #[test]
@@ -1083,11 +1020,17 @@ pub(super) mod tests {
         let packets = [packet(Codec::Hevc, 0, true), packet(Codec::Hevc, 1, false)];
         let file = mux(Codec::Hevc, &packets);
 
-        let table = sample_table(&file);
-        let visual = child(&child(table, *b"stsd")[8..], *b"hvc1");
-        child(&visual[78..], *b"hvcC");
-        let sizes = words(child(table, *b"stsz"));
-        assert_eq!(sizes[3] as usize, hevc::tests::IDR.len() + 4);
+        let (moov, _) = index(&file);
+        let table = &moov.trak[0].mdia.minf.stbl;
+        let [SampleEntry::Hvc1(entry)] = &table.stsd.codecs[..] else {
+            panic!("expected one hvc1 entry");
+        };
+        assert_eq!(entry.hvcc.arrays.len(), 3);
+        assert_eq!(
+            decoder_record(&moov.trak[0]),
+            hevc::configuration(&hevc::tests::keyframe()).unwrap()
+        );
+        assert_eq!(sizes(table)[0] as usize, hevc::tests::IDR.len() + 4);
     }
 
     #[test]
@@ -1095,22 +1038,31 @@ pub(super) mod tests {
         let packets = [packet(Codec::Av1, 0, true), packet(Codec::Av1, 1, false)];
         let file = mux(Codec::Av1, &packets);
 
-        let file_type = atoms(&file)[0].1;
-        assert!(file_type.as_chunks::<4>().0.contains(b"av01"));
-        let table = sample_table(&file);
-        let visual = child(&child(table, *b"stsd")[8..], *b"av01");
-        child(&visual[78..], *b"av1C");
+        let file_type = Ftyp::decode(&mut &file[..]).unwrap();
+        assert!(file_type.compatible_brands.contains(&FourCC::new(b"av01")));
+        let (moov, media) = index(&file);
+        let table = &moov.trak[0].mdia.minf.stbl;
+        let [SampleEntry::Av01(entry)] = &table.stsd.codecs[..] else {
+            panic!("expected one av01 entry");
+        };
+        assert_eq!(
+            entry.av1c.config_obus[0] >> 3,
+            1,
+            "the record repeats the sequence header"
+        );
+        assert_eq!(
+            decoder_record(&moov.trak[0]),
+            av1::configuration(&av1::tests::keyframe()).unwrap()
+        );
 
         // AV1 samples are the OBUs as they are, minus the temporal delimiter.
         let kept: usize = av1::sample_obus(&packets[0].data)
             .iter()
             .map(|obu| obu.len())
             .sum();
-        let sizes = words(child(table, *b"stsz"));
-        assert_eq!(sizes[3] as usize, kept);
-        let offset = chunk_offset(table);
+        assert_eq!(sizes(table)[0] as usize, kept);
         assert_eq!(
-            file[offset] >> 3,
+            file[media] >> 3,
             1,
             "the sample starts with the sequence header"
         );
@@ -1125,47 +1077,18 @@ pub(super) mod tests {
         ];
         let file = mux(Codec::H264, &packets);
 
-        assert_eq!(
-            words(child(sample_table(&file), *b"stts")),
-            [0, 3, 1, 1000, 1, 3000, 1, 1000]
-        );
-        assert_eq!(
-            words(&child(atoms(&file)[1].1, *b"mvhd")[12..20]),
-            [1000, 83]
-        );
-    }
-
-    /// The `trak` atoms of `file`'s movie.
-    fn tracks(file: &[u8]) -> Vec<&[u8]> {
-        atoms(atoms(file)[1].1)
-            .into_iter()
-            .filter(|(kind, _)| kind == b"trak")
-            .map(|(_, body)| body)
-            .collect()
-    }
-
-    fn table_of(track: &[u8]) -> &[u8] {
-        child(child(child(track, *b"mdia"), *b"minf"), *b"stbl")
-    }
-
-    /// The offsets in a `co64` atom's body.
-    fn offsets(body: &[u8]) -> Vec<usize> {
-        body[8..]
-            .as_chunks::<8>()
-            .0
+        let (moov, _) = index(&file);
+        let durations: Vec<_> = moov.trak[0]
+            .mdia
+            .minf
+            .stbl
+            .stts
+            .entries
             .iter()
-            .map(|offset| usize::try_from(u64::from_be_bytes(*offset)).unwrap())
-            .collect()
-    }
-
-    /// The sum of the sample durations in an `stts` atom's body.
-    fn total_duration(body: &[u8]) -> u32 {
-        words(&body[8..])
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|[count, duration]| count * duration)
-            .sum()
+            .map(|entry| (entry.sample_count, entry.sample_delta))
+            .collect();
+        assert_eq!(durations, [(1, 1000), (1, 3000), (1, 1000)]);
+        assert_eq!((moov.mvhd.timescale, moov.mvhd.duration), (1000, 83));
     }
 
     #[test]
@@ -1186,67 +1109,124 @@ pub(super) mod tests {
         write_with_audio(&mut file, &stream(Codec::H264), &packets, &clip).unwrap();
 
         // The movie lasts as long as the video, and the next track id follows the sound's.
-        let header = child(atoms(&file)[1].1, *b"mvhd");
-        assert_eq!(words(&header[12..20]), [1000, 2000]);
-        assert_eq!(words(&header[96..100]), [3]);
-        let [video, sound] = tracks(&file)[..] else {
+        let (moov, media) = index(&file);
+        assert_eq!(
+            (
+                moov.mvhd.timescale,
+                moov.mvhd.duration,
+                moov.mvhd.next_track_id
+            ),
+            (1000, 2000, 3)
+        );
+        let [video, sound] = &moov.trak[..] else {
             panic!("expected two tracks");
         };
 
         // The video is described as before, split into a chunk per second.
-        let video_table = table_of(video);
-        assert_eq!(words(&child(video_table, *b"stsz")[8..12]), [120]);
-        assert_eq!(total_duration(child(video_table, *b"stts")), 120 * 1000);
-        assert_eq!(words(child(video_table, *b"stsc")), [0, 1, 1, 60, 1]);
+        let video_table = &video.mdia.minf.stbl;
+        assert_eq!(sizes(video_table).len(), 120);
+        assert_eq!(total_duration(&video_table.stts), 120 * 1000);
+        assert_eq!(chunk_runs(&video_table.stsc), [(1, 60)]);
 
         // The sound: its handler, time scale, length, edit, frames and description.
-        let media = child(sound, *b"mdia");
-        assert_eq!(&child(media, *b"hdlr")[8..12], b"soun");
-        assert_eq!(words(&child(media, *b"mdhd")[12..20]), [48_000, 100 * 1024]);
-        assert_eq!(words(&child(sound, *b"tkhd")[20..24]), [2000]);
-        let edits = child(child(sound, *b"edts"), *b"elst");
-        assert_eq!(words(edits), [0, 1, 2000, 1500, 0x0001_0000]);
-        let sound_table = table_of(sound);
-        assert_eq!(words(child(sound_table, *b"stts")), [0, 1, 100, 1024]);
-        let sizes = words(child(sound_table, *b"stsz"));
-        assert_eq!(sizes[..3], [0, 0, 100]);
-        assert!(
-            sizes[3..]
-                .iter()
-                .zip(&frames)
-                .all(|(&size, frame)| size as usize == frame.len())
-        );
-        // Frames start each second of playback from the end of the lead: 49, 47 and 4 of them.
+        assert_eq!(sound.mdia.hdlr.handler, FourCC::new(b"soun"));
         assert_eq!(
-            words(child(sound_table, *b"stsc")),
-            [0, 3, 1, 49, 1, 2, 47, 1, 3, 4, 1]
+            (sound.mdia.mdhd.timescale, sound.mdia.mdhd.duration),
+            (48_000, 100 * 1024)
         );
-        let entry = child(&child(sound_table, *b"stsd")[8..], *b"mp4a");
-        assert_eq!(&entry[16..18], &2_u16.to_be_bytes());
-        assert_eq!(words(&entry[24..28]), [48_000 << 16]);
-        let descriptor = child(&entry[28..], *b"esds");
-        assert!(descriptor.ends_with(&[0x05, 2, 0x11, 0x90, 0x06, 1, 0x02]));
+        assert_eq!(
+            (sound.tkhd.track_id, sound.tkhd.duration, sound.tkhd.volume),
+            (2, 2000, 1.into())
+        );
+        let edits = &sound.edts.as_ref().unwrap().elst.as_ref().unwrap().entries;
+        assert_eq!(
+            edits,
+            &[ElstEntry {
+                segment_duration: 2000,
+                media_time: Some(1500),
+                media_rate: 1.into(),
+            }]
+        );
+        let sound_table = &sound.mdia.minf.stbl;
+        assert_eq!(
+            sound_table.stts.entries,
+            [SttsEntry {
+                sample_count: 100,
+                sample_delta: 1024
+            }]
+        );
+        assert!(sound_table.stss.is_none());
+        let frame_sizes: Vec<u32> = frames
+            .iter()
+            .map(|frame| u32::try_from(frame.len()).unwrap())
+            .collect();
+        assert_eq!(sizes(sound_table), frame_sizes);
+        // Frames start each second of playback from the end of the lead: 49, 47 and 4 of them.
+        assert_eq!(chunk_runs(&sound_table.stsc), [(1, 49), (2, 47), (3, 4)]);
+        let [SampleEntry::Mp4a(entry)] = &sound_table.stsd.codecs[..] else {
+            panic!("expected one mp4a entry");
+        };
+        assert_eq!(
+            (
+                entry.audio.channel_count,
+                entry.audio.sample_size,
+                entry.audio.sample_rate
+            ),
+            (2, 16, 48_000.into())
+        );
+        let config = &entry.esds.es_desc.dec_config;
+        assert_eq!(
+            (config.object_type_indication, config.stream_type),
+            (0x40, 0x05)
+        );
+        assert_eq!(config.dec_specific.as_ref().unwrap().raw, [0x11, 0x90]);
 
         // The chunks alternate, a second of video then the sound that plays with it, and each
-        // offset points at its first sample's bytes.
-        let video_offsets = offsets(child(video_table, *b"co64"));
-        let sound_offsets = offsets(child(sound_table, *b"co64"));
+        // holds its samples' bytes.
+        let video_samples: Vec<_> = packets
+            .iter()
+            .map(|packet| stored(Codec::H264, packet))
+            .collect();
+        let sound_samples: Vec<_> = frames.iter().map(|frame| frame.to_vec()).collect();
+        let video_offsets = check_chunks(&file, video_table, &video_samples);
+        let sound_offsets = check_chunks(&file, sound_table, &sound_samples);
+        assert_eq!(video_offsets[0], media);
         assert!(video_offsets[0] < sound_offsets[0]);
         assert!(sound_offsets[0] < video_offsets[1]);
         assert!(video_offsets[1] < sound_offsets[1]);
         assert!(sound_offsets[1] < sound_offsets[2]);
-        for (offset, first) in sound_offsets.iter().zip([0, 49, 96]) {
-            assert_eq!(
-                &file[*offset..*offset + frames[first].len()],
-                &*frames[first]
-            );
-        }
-        for offset in video_offsets {
-            assert_eq!(&file[offset + 4..offset + 9], &h264::tests::IDR);
-        }
         let media_end =
             sound_offsets[2] + frames[96..].iter().map(|frame| frame.len()).sum::<usize>();
         assert_eq!(media_end, file.len());
+    }
+
+    /// Times ten writes of a 300 s clip's worth of synthetic packets with sound, into memory:
+    /// `cargo test --release -- --ignored --nocapture times_a_five_minute_clip`.
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn times_a_five_minute_clip() {
+        let packets: Vec<_> = (0..300 * 60)
+            .map(|index| packet(Codec::H264, index, index % 60 == 0))
+            .collect();
+        let frames: Vec<Arc<[u8]>> = (0..300 * 48_000 / 1024)
+            .map(|number: usize| Arc::from(vec![0_u8; 200 + number % 50]))
+            .collect();
+        let clip = AudioClip {
+            format: crate::replay::audio::tests::format(1024),
+            frames,
+            lead: 0,
+        };
+        let mut file = Vec::new();
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            file.clear();
+            write_with_audio(&mut file, &stream(Codec::H264), &packets, &clip).unwrap();
+        }
+        println!(
+            "ten writes of a 300 s clip with sound: {:?} for {} bytes each",
+            start.elapsed(),
+            file.len()
+        );
     }
 
     #[test]

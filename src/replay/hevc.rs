@@ -3,8 +3,9 @@
 
 use super::{
     annexb::{nal_units, unescape},
-    mp4::{NAL_LENGTH_BYTES, atom, write_parameter_set},
+    mp4::{self, NAL_LENGTH_BYTES},
 };
+use mp4_atom::{HvcCArray, Hvcc};
 use std::ops::{Range, RangeInclusive};
 
 const NAL_TYPE_MASK: u8 = 0x3F;
@@ -17,14 +18,16 @@ pub(super) const NAL_AUD: u8 = 35;
 const IRAP: RangeInclusive<u8> = 16..=21;
 /// Bytes of an SPS up to and including `general_level_idc`, after emulation prevention.
 const SPS_PROFILE_BYTES: usize = 15;
-/// Where `profile_tier_level` sits in those bytes: general profile space, tier and profile,
-/// compatibility flags, constraint flags and level, which the `hvcC` record copies as they are.
-const SPS_PROFILE_TIER_LEVEL: Range<usize> = 3..SPS_PROFILE_BYTES;
-/// `configurationVersion` of the `hvcC` record.
-const HVCC_VERSION: u8 = 1;
-/// The `array_completeness` flag: every parameter set of the type is in the record, none only in
-/// the samples.
-const ARRAY_COMPLETE: u8 = 0x80;
+/// Where `profile_tier_level` sits in those bytes, after the two-byte NAL header and the byte
+/// holding the VPS id, the sub-layer count and the temporal id nesting flag: the general
+/// profile space, tier and profile in one byte, then the compatibility flags, the constraint
+/// flags and the level, which the `hvcC` record copies as they are.
+const SPS_PROFILE: usize = 3;
+const SPS_COMPATIBILITY_FLAGS: Range<usize> = 4..8;
+const SPS_CONSTRAINT_FLAGS: Range<usize> = 8..14;
+const SPS_LEVEL: usize = 14;
+/// 4:2:0, the `chroma_format_idc` the encoder is configured for.
+const CHROMA_420: u8 = 1;
 
 /// Whether the access unit holds an intra random access point picture.
 pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
@@ -33,55 +36,48 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
         .any(|unit| IRAP.contains(&nal_type(unit)))
 }
 
-/// The `hvcC` record for the parameter sets in `access_unit`, if it carries all three.
+/// The `hvcC` record for the parameter sets in `access_unit`, if it carries all three: the
+/// fields copied from the SPS, then one array per parameter set type, each holding its one
+/// parameter set and marked complete, since none stay in the samples.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
     let (vps, sps, pps) = (of_type(NAL_VPS)?, of_type(NAL_SPS)?, of_type(NAL_PPS)?);
-    let mut body = record_fields(sps)?;
-    // One array per parameter set type, each holding one parameter set behind its count.
-    for unit in [vps, sps, pps] {
-        body.push(ARRAY_COMPLETE | nal_type(unit));
-        body.extend_from_slice(&1_u16.to_be_bytes());
-        write_parameter_set(&mut body, unit)?;
-    }
-    Some(atom(*b"hvcC", &body))
+    let mut record = record_fields(sps)?;
+    record.arrays = [vps, sps, pps]
+        .into_iter()
+        .map(|unit| HvcCArray {
+            completeness: true,
+            nal_unit_type: nal_type(unit),
+            nalus: vec![unit.to_vec()],
+        })
+        .collect();
+    mp4::record(&record)
 }
 
 /// The `hvcC` record's fields before its parameter set arrays: the profile, tier and level and
-/// the sub-layers, copied from `sps`, and the stream format the encoder is configured for.
-fn record_fields(sps: &[u8]) -> Option<Vec<u8>> {
-    // After the two-byte NAL header: VPS id (4 bits), max sub-layers minus one (3) and temporal
-    // id nesting (1), then `profile_tier_level`.
+/// the sub-layers, copied from `sps`, and the stream format the encoder is configured for. The
+/// rest stay unknown or zero: no minimum spatial segmentation, unknown parallelism, unknown and
+/// not constant frame rate.
+fn record_fields(sps: &[u8]) -> Option<Hvcc> {
     let header = unescape(sps, SPS_PROFILE_BYTES);
     if header.len() < SPS_PROFILE_BYTES {
         return None;
     }
-    let sub_layers = ((header[2] >> 1) & 0b111) + 1;
-    let temporal_id_nested = header[2] & 1;
-
-    // The reserved bits are set throughout.
-    let mut body = vec![HVCC_VERSION];
-    body.extend_from_slice(&header[SPS_PROFILE_TIER_LEVEL]);
-    body.extend_from_slice(&[
-        // No minimum spatial segmentation.
-        0xF0,
-        0x00,
-        // Unknown parallelism.
-        0xFC,
-        // 4:2:0, 8-bit luma and chroma: what the encoder is configured for.
-        0xFC | 1,
-        0xF8,
-        0xF8,
-        // Unknown average frame rate.
-        0x00,
-        0x00,
-        // Frame rate not constant, the sub-layers, temporal id nesting, then the length size.
-        (sub_layers << 3) | (temporal_id_nested << 2) | (NAL_LENGTH_BYTES - 1),
-        // One array per parameter set type.
-        3,
-    ]);
-    Some(body)
+    Some(Hvcc {
+        general_profile_space: header[SPS_PROFILE] >> 6,
+        general_tier_flag: header[SPS_PROFILE] & 0x20 != 0,
+        general_profile_idc: header[SPS_PROFILE] & 0x1F,
+        general_profile_compatibility_flags: header[SPS_COMPATIBILITY_FLAGS].try_into().ok()?,
+        general_constraint_indicator_flags: header[SPS_CONSTRAINT_FLAGS].try_into().ok()?,
+        general_level_idc: header[SPS_LEVEL],
+        // 8-bit luma and chroma: the bit depths minus 8 stay 0.
+        chroma_format_idc: CHROMA_420,
+        num_temporal_layers: ((header[2] >> 1) & 0b111) + 1,
+        temporal_id_nested: header[2] & 1 != 0,
+        length_size_minus_one: NAL_LENGTH_BYTES - 1,
+        ..Hvcc::new()
+    })
 }
 
 /// The NAL units a stored sample keeps: parameter sets travel in the sample description and

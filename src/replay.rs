@@ -435,7 +435,11 @@ mod tests {
         })
     }
 
-    /// Set `HINDSIGHT_MUX_OUTPUT` to a directory to keep the files, e.g. to check them with ffprobe.
+    /// Real encoder output through the buffer and the writer, for every codec: the index is
+    /// decoded back and checked against the packets, and the media data and the decoder record
+    /// are pinned to what the hand-written writer put in the file before the atoms were handed
+    /// to `mp4-atom`. Set `HINDSIGHT_MUX_OUTPUT` to a directory to keep the files, e.g. to check
+    /// them with ffprobe.
     #[test]
     fn real_encoder_output_muxes_for_every_codec() {
         for codec in Codec::ALL {
@@ -467,14 +471,66 @@ mod tests {
             let mut file = Vec::new();
             mp4::write(&mut file, &clip.stream, &clip.packets).unwrap();
             let top = mp4::tests::atoms(&file);
-            assert_eq!(top.len(), 3, "{codec}");
-            // Pins the written bytes, so a refactor of the writer shows up as a changed file.
-            let expected = match codec {
-                Codec::H264 => 0xDD34_1F2C_9F9F_EB0C,
-                Codec::Hevc => 0x8B6A_2560_120A_255F,
-                Codec::Av1 => 0x3BED_D0D1_7FCC_6739,
+            let kinds: Vec<_> = top.iter().map(|(kind, _)| kind).collect();
+            assert_eq!(kinds, [b"ftyp", b"moov", b"mdat"], "{codec}");
+
+            // One track of 45 frames at 30 fps: 1.5 s, keyframes at frames 30 and 60.
+            let (moov, media) = mp4::tests::index(&file);
+            assert_eq!(
+                (moov.mvhd.timescale, moov.mvhd.duration),
+                (1000, 1500),
+                "{codec}"
+            );
+            let [track] = &moov.trak[..] else {
+                panic!("{codec}: expected one track");
             };
-            assert_eq!(fnv1a(&file), expected, "{codec}");
+            assert_eq!(track.tkhd.track_id, 1, "{codec}");
+            assert_eq!(
+                (track.mdia.mdhd.timescale, track.mdia.mdhd.duration),
+                (30_000, 45_000),
+                "{codec}"
+            );
+            let table = &track.mdia.minf.stbl;
+            assert_eq!(table.stss.as_ref().unwrap().entries, [1, 31], "{codec}");
+            assert_eq!(table.stts.entries.len(), 1, "{codec}");
+
+            // Every sample sits in the one chunk, which fills the media data, as the packet is
+            // stored.
+            let samples: Vec<_> = clip
+                .packets
+                .iter()
+                .map(|packet| mp4::tests::stored(codec, packet))
+                .collect();
+            let sample_sizes: Vec<_> = samples
+                .iter()
+                .map(|sample| u32::try_from(sample.len()).unwrap())
+                .collect();
+            assert_eq!(mp4::tests::sizes(table), sample_sizes, "{codec}");
+            let [(offset, bytes)] = &mp4::tests::chunks(table, &samples)[..] else {
+                panic!("{codec}: expected one chunk");
+            };
+            assert_eq!(*offset, media, "{codec}");
+            assert_eq!(&file[*offset..], &bytes[..], "{codec}");
+            let expected_media = match codec {
+                Codec::H264 => 0x4CC2_8686_4D7A_C7C8,
+                Codec::Hevc => 0x1944_D923_E869_BE8C,
+                Codec::Av1 => 0x6028_8448_497C_A88C,
+            };
+            assert_eq!(fnv1a(top[2].1), expected_media, "{codec}");
+
+            // The decoder record is the one the first keyframe builds, pinned byte for byte.
+            let record = mp4::tests::decoder_record(track);
+            assert_eq!(
+                record,
+                configuration(codec, &clip.packets[0].data).unwrap(),
+                "{codec}"
+            );
+            let expected_record = match codec {
+                Codec::H264 => 0x5B56_C447_D3ED_352B,
+                Codec::Hevc => 0x716B_345E_8965_10BA,
+                Codec::Av1 => 0xDAD6_9D69_8A69_A58C,
+            };
+            assert_eq!(fnv1a(&record), expected_record, "{codec}");
             if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
                 let name = format!("{}.mp4", codec.name().replace('.', "").to_lowercase());
                 fs::write(Path::new(&directory).join(name), &file).unwrap();
@@ -526,7 +582,68 @@ mod tests {
         if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
             fs::write(Path::new(&directory).join("h264-aac.mp4"), &file).unwrap();
         }
-        assert_eq!(fnv1a(&file), 0x5043_654E_42DB_C181);
+
+        // Two tracks of 1.5 s; the sound skips its lead and lasts 73 frames.
+        let (moov, media) = mp4::tests::index(&file);
+        assert_eq!((moov.mvhd.duration, moov.mvhd.next_track_id), (1500, 3));
+        let [video, sound] = &moov.trak[..] else {
+            panic!("expected two tracks");
+        };
+        assert_eq!((video.tkhd.track_id, sound.tkhd.track_id), (1, 2));
+        assert_eq!(
+            (sound.mdia.mdhd.timescale, sound.mdia.mdhd.duration),
+            (48_000, 73 * 1024)
+        );
+        let edits = &sound.edts.as_ref().unwrap().elst.as_ref().unwrap().entries;
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            (edits[0].segment_duration, edits[0].media_time),
+            (1500, Some(1920))
+        );
+        let sound_table = &sound.mdia.minf.stbl;
+        assert!(sound_table.stss.is_none());
+        let frame_sizes: Vec<_> = audio
+            .frames
+            .iter()
+            .map(|frame| u32::try_from(frame.len()).unwrap())
+            .collect();
+        assert_eq!(mp4::tests::sizes(sound_table), frame_sizes);
+
+        // The chunks alternate a second of video with its sound, each holding its samples, and
+        // together they fill the media data.
+        let video_samples: Vec<_> = clip
+            .packets
+            .iter()
+            .map(|packet| mp4::tests::stored(Codec::H264, packet))
+            .collect();
+        let sound_samples: Vec<_> = audio.frames.iter().map(|frame| frame.to_vec()).collect();
+        let tagged = |table, samples, is_video| {
+            mp4::tests::chunks(table, samples)
+                .into_iter()
+                .map(move |(offset, bytes)| (offset, bytes, is_video))
+        };
+        let mut all: Vec<_> = tagged(&video.mdia.minf.stbl, &video_samples, true)
+            .chain(tagged(sound_table, &sound_samples, false))
+            .collect();
+        all.sort_by_key(|(offset, _, _)| *offset);
+        let order: Vec<_> = all.iter().map(|(_, _, is_video)| *is_video).collect();
+        assert_eq!(
+            order,
+            [true, false, true, false],
+            "video, sound, video, sound"
+        );
+        let mut next = media;
+        for (offset, bytes, _) in all {
+            assert_eq!(offset, next);
+            assert_eq!(&file[offset..offset + bytes.len()], &bytes[..]);
+            next += bytes.len();
+        }
+        assert_eq!(next, file.len());
+        assert_eq!(fnv1a(mp4::tests::atoms(&file)[2].1), 0x56DC_4C5D_809C_3A4E);
+        assert_eq!(
+            fnv1a(&mp4::tests::decoder_record(video)),
+            0x5B56_C447_D3ED_352B
+        );
     }
 
     #[test]

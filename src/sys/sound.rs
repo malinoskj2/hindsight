@@ -3,7 +3,7 @@
 //! taking over from the game, and they play on their own thread so a save never waits on the
 //! sound card.
 
-use std::f64::consts::TAU;
+use std::{f64::consts::TAU, io::Cursor};
 #[cfg(windows)]
 use std::{
     sync::{
@@ -89,35 +89,25 @@ pub(crate) fn play(_tone: Tone) {}
 /// A mono 16-bit WAV of the `(frequency Hz, milliseconds)` tones, where a frequency of 0 is
 /// silence. Each tone fades in and out so it does not click.
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
-    let data = pcm(tones);
-    let data_length = u32::try_from(data.len()).expect("a tone is a few hundred milliseconds");
-    let mut wav = Vec::with_capacity(44 + data.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_length).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16_u32.to_le_bytes());
-    wav.extend_from_slice(&1_u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&1_u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // bytes per second
-    wav.extend_from_slice(&2_u16.to_le_bytes()); // bytes per frame
-    wav.extend_from_slice(&16_u16.to_le_bytes()); // bits per sample
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_length.to_le_bytes());
-    wav.extend_from_slice(&data);
-    wav
-}
-
-/// The tones' samples one after another, as little-endian 16-bit PCM.
-fn pcm(tones: &[(u32, u32)]) -> Vec<u8> {
-    let mut data = Vec::new();
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut wav = Cursor::new(Vec::new());
+    // Writing into memory cannot fail.
+    let mut writer = hound::WavWriter::new(&mut wav, spec).expect("a WAV header fits in memory");
     for &(frequency, milliseconds) in tones {
         let count = SAMPLE_RATE * milliseconds / 1000;
         for index in 0..count {
-            data.extend_from_slice(&sample(frequency, index, count).to_le_bytes());
+            writer
+                .write_sample(sample(frequency, index, count))
+                .expect("a sample fits in memory");
         }
     }
-    data
+    writer.finalize().expect("the WAV lengths fit in memory");
+    wav.into_inner()
 }
 
 /// Sample `index` of a tone `count` samples long, faded in and out over `FADE_MILLISECONDS`; a

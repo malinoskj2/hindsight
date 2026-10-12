@@ -3,18 +3,15 @@
 
 use super::{
     annexb::nal_units,
-    mp4::{NAL_LENGTH_BYTES, atom, write_parameter_set},
+    mp4::{self, NAL_LENGTH_BYTES},
 };
+use mp4_atom::{Avcc, AvccExt};
 
 const NAL_TYPE_MASK: u8 = 0x1F;
 const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 pub(super) const NAL_AUD: u8 = 9;
-/// The NAL header byte, then `profile_idc`, the constraint flags and `level_idc`.
-const SPS_PROFILE_BYTES: usize = 4;
-/// `configurationVersion` of the `avcC` record.
-const AVCC_VERSION: u8 = 1;
 /// The profiles whose `avcC` record goes on to state the chroma format and bit depths: High,
 /// High 10, High 4:2:2 and High 4:4:4 Predictive.
 const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
@@ -28,34 +25,21 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
         .any(|unit| nal_type(unit) == NAL_IDR)
 }
 
-/// The `avcC` record for the parameter sets in `access_unit`, if it carries both.
+/// The `avcC` record for the parameter sets in `access_unit`, if it carries both: the profile,
+/// compatibility flags and level from the SPS, then the one SPS and the one PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     let units = nal_units(access_unit);
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
-    let (sps, pps) = (of_type(NAL_SPS)?, of_type(NAL_PPS)?);
-    if sps.len() < SPS_PROFILE_BYTES {
-        return None;
+    let mut record = Avcc::new(of_type(NAL_SPS)?, of_type(NAL_PPS)?).ok()?;
+    record.length_size = NAL_LENGTH_BYTES;
+    // 8-bit luma and chroma, with no SPS extensions.
+    if HIGH_PROFILES.contains(&record.avc_profile_indication) {
+        record.ext = Some(AvccExt {
+            chroma_format: CHROMA_420,
+            ..AvccExt::default()
+        });
     }
-    let (profile, compatibility, level) = (sps[1], sps[2], sps[3]);
-
-    // The reserved bits are set throughout.
-    let mut body = vec![
-        AVCC_VERSION,
-        profile,
-        compatibility,
-        level,
-        0xFC | (NAL_LENGTH_BYTES - 1),
-    ];
-    // One SPS, then one PPS, each behind its count.
-    body.push(0xE0 | 1);
-    write_parameter_set(&mut body, sps)?;
-    body.push(1);
-    write_parameter_set(&mut body, pps)?;
-    // 8-bit luma and chroma (bit depths minus 8 of 0), no SPS extensions.
-    if HIGH_PROFILES.contains(&profile) {
-        body.extend_from_slice(&[0xFC | CHROMA_420, 0xF8, 0xF8, 0]);
-    }
-    Some(atom(*b"avcC", &body))
+    mp4::record(&record)
 }
 
 /// The NAL units a stored sample keeps: parameter sets travel in the sample description and
