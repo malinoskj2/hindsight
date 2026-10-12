@@ -3,9 +3,10 @@
 //! encoder slot and submitted, and whatever NVENC has finished goes into the replay buffer.
 
 use super::{
-    capture::{self, CaptureError, Frame, Surface},
+    capture::{self, CaptureError, EncoderDevice, Frame, Surface},
+    cuda_output::CudaRing,
     device::{Device, DeviceError},
-    nvenc::{Encoded, Encoder, NvencError, Settings},
+    nvenc::{Encoded, Encoder, NvencError, Output, Payload, Settings},
     pacer::Pacer,
     priority, vram,
 };
@@ -78,9 +79,6 @@ fn raise_thread_instead(error: &windows::core::Error) {
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     sys::thread::note_capture_thread();
     let device = open_device(config)?;
-    if config.buffer_memory == Memory::Vram {
-        place_buffer_in_vram(config, live);
-    }
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
     // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
     // which is how the sound is lined up with the video.
@@ -93,9 +91,11 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         config.cursor,
     )?;
     let (width, height) = encodable(capture.size());
+    let on = capture.encoder_device();
+    let output = choose_output(config, on, live);
     let mut encoder = Encoder::open(
         &device.d3d,
-        capture.encoder_device(),
+        on,
         Settings {
             codec: config.codec,
             width,
@@ -103,6 +103,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
             frame_rate: config.frame_rate,
             bitrate: config.bitrate(),
         },
+        output,
     )?;
     // NVENC reads a capture's own surfaces in place where it can, which saves copying every
     // frame into the encoder's input.
@@ -121,14 +122,19 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     let mut keyframes = Keyframes::new(settings.codec);
     let mut output = |encoded: Encoded| {
         let keyframe = keyframes.classify(&encoded);
-        live.push(
-            Packet {
-                index: encoded.index,
-                keyframe,
-                data: encoded.data,
-            },
-            encoded.fresh,
-        );
+        match encoded.data {
+            Payload::Memory(data) => live.push(
+                Packet {
+                    index: encoded.index,
+                    keyframe,
+                    data,
+                },
+                encoded.fresh,
+            ),
+            Payload::Stored { slot, .. } => {
+                live.push_stored(encoded.index, keyframe, slot, encoded.fresh);
+            }
+        }
     };
 
     let first_frame_deadline = capture
@@ -226,10 +232,31 @@ fn repeat_latest(
     }
 }
 
-/// Reserves GPU memory for the buffer of `live` at the size `config` estimates and puts the
-/// packets there; when that fails the buffer stays in RAM, with a warning.
-fn place_buffer_in_vram(config: &Config, live: &Live) {
-    match vram::VideoMemory::create(config.estimated_buffer_bytes()) {
+/// Where the encoder's frames go, as `config` asks: into RAM; into GPU memory written by the
+/// encoder itself, when the session is on a device's primary CUDA context; or, with any other
+/// session, into GPU memory through a Direct3D device of the buffer's own, which `live` is
+/// given as its store. When GPU memory cannot be had the buffer stays in RAM, with a warning.
+fn choose_output(config: &Config, on: EncoderDevice, live: &Live) -> Output {
+    if config.buffer_memory != Memory::Vram {
+        return Output::Memory;
+    }
+    let bytes = config.estimated_buffer_bytes();
+    if let EncoderDevice::Cuda {
+        primary: Some(device),
+        ..
+    } = on
+    {
+        match CudaRing::create(device, bytes) {
+            Ok(ring) => {
+                log::info(ring.description());
+                return Output::VideoMemory(ring);
+            }
+            Err(error) => log::warning(format!(
+                "The replay buffer could not be placed in CUDA memory ({error}); trying a Direct3D buffer"
+            )),
+        }
+    }
+    match vram::VideoMemory::create(bytes) {
         Ok(store) => {
             log::info(store.description());
             live.set_store(Box::new(store));
@@ -238,6 +265,7 @@ fn place_buffer_in_vram(config: &Config, live: &Live) {
             "The replay buffer could not be placed in GPU memory ({error}); keeping it in RAM"
         )),
     }
+    Output::Memory
 }
 
 /// Creates the device to capture and encode on, logs it, and raises its GPU thread priority
@@ -279,11 +307,12 @@ impl Keyframes {
         }
     }
 
-    /// Whether `encoded` is a keyframe, which a clip can start with.
+    /// Whether `encoded` is a keyframe, which a clip can start with. A frame left in video
+    /// memory carries no picture type, so its first bytes are parsed for every frame.
     fn classify(&mut self, encoded: &Encoded) -> bool {
         let idr = encoded.is_idr();
         self.driver_flags_keyframes |= idr;
-        idr || (!self.driver_flags_keyframes && replay::is_keyframe(self.codec, &encoded.data))
+        idr || (!self.driver_flags_keyframes && replay::is_keyframe(self.codec, encoded.head()))
     }
 }
 

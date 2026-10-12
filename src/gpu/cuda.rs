@@ -94,6 +94,12 @@ pub(super) type DevicePointer = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Context(NonNull<c_void>);
 
+// SAFETY: a CUDA context is a handle the driver lets any thread make current and use; nothing
+// about it is tied to the thread that made it.
+unsafe impl Send for Context {}
+// SAFETY: as above; the handle is only ever read.
+unsafe impl Sync for Context {}
+
 impl Context {
     /// The handle as other NVIDIA APIs take it.
     pub(super) fn as_ptr(self) -> *mut c_void {
@@ -117,6 +123,10 @@ type CtxPushCurrent = unsafe extern "system" fn(*mut c_void) -> Status;
 type CtxPopCurrent = unsafe extern "system" fn(*mut *mut c_void) -> Status;
 type MemAlloc = unsafe extern "system" fn(*mut DevicePointer, usize) -> Status;
 type MemFree = unsafe extern "system" fn(DevicePointer) -> Status;
+type MemGetInfo = unsafe extern "system" fn(*mut usize, *mut usize) -> Status;
+type MemcpyDtoH = unsafe extern "system" fn(*mut c_void, DevicePointer, usize) -> Status;
+type MemcpyDtoD = unsafe extern "system" fn(DevicePointer, DevicePointer, usize) -> Status;
+type StreamSynchronize = unsafe extern "system" fn(*mut c_void) -> Status;
 
 /// The loaded driver library and its entry points. Everything made through it (contexts,
 /// memory) must be released before it is dropped, which unloads the library.
@@ -133,9 +143,20 @@ pub(super) struct Driver {
     ctx_pop_current: CtxPopCurrent,
     mem_alloc: MemAlloc,
     mem_free: MemFree,
+    mem_get_info: MemGetInfo,
+    memcpy_dtoh: MemcpyDtoH,
+    memcpy_dtod: MemcpyDtoD,
+    stream_synchronize: StreamSynchronize,
     /// Declared last, so it is unloaded after the entry points above are no longer reachable.
     _library: Owned<HMODULE>,
 }
+
+// SAFETY: the driver library stays loaded while the `Owned` module handle lives, and the CUDA
+// driver API is thread-safe: its entry points may be called from any thread, with a context
+// made current there.
+unsafe impl Send for Driver {}
+// SAFETY: as above; the entry points are plain function pointers that are only read.
+unsafe impl Sync for Driver {}
 
 /// Looks `name` up in `library` as an entry point of type `T`, which must be the function
 /// pointer type `cuda.h` declares for that export.
@@ -183,6 +204,10 @@ impl Driver {
             ctx_pop_current: entry_point!(module, "cuCtxPopCurrent_v2", CtxPopCurrent),
             mem_alloc: entry_point!(module, "cuMemAlloc_v2", MemAlloc),
             mem_free: entry_point!(module, "cuMemFree_v2", MemFree),
+            mem_get_info: entry_point!(module, "cuMemGetInfo_v2", MemGetInfo),
+            memcpy_dtoh: entry_point!(module, "cuMemcpyDtoH_v2", MemcpyDtoH),
+            memcpy_dtod: entry_point!(module, "cuMemcpyDtoD_v2", MemcpyDtoD),
+            stream_synchronize: entry_point!(module, "cuStreamSynchronize", StreamSynchronize),
             _library: library,
         };
         // SAFETY: the flags must be 0.
@@ -285,6 +310,44 @@ impl Driver {
     pub(super) fn free(&self, pointer: DevicePointer) -> Result<(), CudaError> {
         // SAFETY: the pointer came from `allocate` and is freed once.
         unsafe { (self.mem_free)(pointer) }.ok("cuMemFree")
+    }
+
+    /// Bytes of device memory free and in all, for the current context's device.
+    pub(super) fn memory_info(&self) -> Result<(usize, usize), CudaError> {
+        let (mut free, mut total) = (0, 0);
+        // SAFETY: a context is current; both out-parameters are written on success.
+        unsafe { (self.mem_get_info)(&raw mut free, &raw mut total) }.ok("cuMemGetInfo")?;
+        Ok((free, total))
+    }
+
+    /// Copies `into.len()` bytes of device memory at `from` into `into`, waiting for the copy
+    /// and for every copy queued before it.
+    pub(super) fn copy_to_host(
+        &self,
+        into: &mut [u8],
+        from: DevicePointer,
+    ) -> Result<(), CudaError> {
+        // SAFETY: a context is current, the device range is allocated and the host slice is
+        // writable for its length.
+        unsafe { (self.memcpy_dtoh)(into.as_mut_ptr().cast(), from, into.len()) }.ok("cuMemcpyDtoH")
+    }
+
+    /// Queues a copy of `bytes` of device memory from `from` to `to`, both allocated in the
+    /// current context, which may still be under way when the call returns.
+    pub(super) fn copy_on_device(
+        &self,
+        to: DevicePointer,
+        from: DevicePointer,
+        bytes: usize,
+    ) -> Result<(), CudaError> {
+        // SAFETY: both ranges are allocated and do not overlap.
+        unsafe { (self.memcpy_dtod)(to, from, bytes) }.ok("cuMemcpyDtoD")
+    }
+
+    /// Waits for every copy queued so far in the current context.
+    pub(super) fn synchronize(&self) -> Result<(), CudaError> {
+        // SAFETY: the null stream is the context's default queue.
+        unsafe { (self.stream_synchronize)(ptr::null_mut()) }.ok("cuStreamSynchronize")
     }
 }
 

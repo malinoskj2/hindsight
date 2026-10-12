@@ -46,15 +46,24 @@ impl Ring {
         if self.packets.is_empty() && !packet.keyframe {
             return Ok(());
         }
-        if packet.keyframe {
-            self.keyframes.push_back(packet.index);
-        }
-        self.bytes += packet.data.len();
-        let latest = packet.index;
         let (entry, refused) = self.place(packet);
+        self.push_entry(entry);
+        refused.map_or(Ok(()), Err)
+    }
+
+    /// Appends a packet already put away in a store of the caller's, as [`push`](Self::push)
+    /// appends one in memory.
+    pub(crate) fn push_entry(&mut self, entry: Entry) {
+        if self.packets.is_empty() && !entry.keyframe() {
+            return;
+        }
+        if entry.keyframe() {
+            self.keyframes.push_back(entry.index());
+        }
+        self.bytes += entry.length();
+        let latest = entry.index();
         self.packets.push_back(entry);
         self.drop_covered_groups(latest);
-        refused.map_or(Ok(()), Err)
     }
 
     /// Puts `packet` in the store when there is one, or keeps it in memory, which it does for
@@ -80,18 +89,14 @@ impl Ring {
     }
 
     /// Drops the oldest group of pictures while the groups after it still cover the span up to
-    /// frame `latest`.
+    /// frame `latest`. A dropped packet's slot lets go of its page, which the store fills
+    /// again once no slot holds it.
     fn drop_covered_groups(&mut self, latest: u64) {
         while let Some(&next) = self.keyframes.get(1)
             && latest - next + 1 >= self.span
         {
             while let Some(dropped) = self.packets.pop_front_if(|entry| entry.index() < next) {
                 self.bytes -= dropped.length();
-                if let Entry::Stored { slot, .. } = dropped
-                    && let Some(store) = self.store.as_mut()
-                {
-                    store.release(slot);
-                }
             }
             self.keyframes.pop_front();
         }

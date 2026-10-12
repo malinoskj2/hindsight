@@ -10,17 +10,8 @@
 //! memory stays free of the buffer while the game runs.
 
 use super::device::{Device, DeviceError};
-use crate::replay::{Page, Slot, Store, StoreError};
-use std::{
-    collections::VecDeque,
-    ptr,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
-    time::Duration,
-};
+use crate::replay::{Page, Pages, Slot, Store, StoreError};
+use std::{thread, time::Duration};
 use thiserror::Error;
 use windows::Win32::Graphics::{
     Direct3D11::{
@@ -58,12 +49,7 @@ pub(crate) enum VramError {
 /// The buffer's pages in GPU memory, and the device they are on.
 pub(crate) struct VideoMemory {
     device: Device,
-    /// Pages with packets in them, oldest first; the newest is the one being filled.
-    used: VecDeque<Arc<VramPage>>,
-    /// Pages with no packets in them, ready to be filled again.
-    free: Vec<Arc<VramPage>>,
-    /// Bytes of the newest page in use.
-    fill: usize,
+    pages: Pages<VramPage>,
     /// Pages reserved up front.
     reserved: usize,
 }
@@ -85,15 +71,13 @@ impl VideoMemory {
         if needed > available {
             return Err(VramError::TooLarge { needed, available });
         }
-        let free = (0..needed / PAGE_BYTES)
-            .map(|_| VramPage::create(&device).map(Arc::new))
+        let reserved = (0..needed / PAGE_BYTES)
+            .map(|_| VramPage::create(&device))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             device,
-            used: VecDeque::new(),
-            reserved: free.len(),
-            free,
-            fill: 0,
+            reserved: reserved.len(),
+            pages: Pages::new(PAGE_BYTES, reserved),
         })
     }
 
@@ -106,65 +90,16 @@ impl VideoMemory {
             self.device.adapter
         )
     }
-
-    /// Makes a free page the one being filled, reusing one when there is one.
-    fn open_page(&mut self) -> Result<(), StoreError> {
-        let page = match self.free.pop() {
-            Some(page) => page,
-            None => Arc::new(
-                VramPage::create(&self.device).map_err(StoreError::call("reserve a page"))?,
-            ),
-        };
-        self.used.push_back(page);
-        self.fill = 0;
-        Ok(())
-    }
 }
 
 impl Store for VideoMemory {
     fn put(&mut self, data: &[u8]) -> Result<Slot, StoreError> {
-        if data.len() > PAGE_BYTES {
-            return Err(StoreError::TooLarge(data.len()));
-        }
-        if self.used.is_empty() || self.fill + data.len() > PAGE_BYTES {
-            self.open_page()?;
-        }
-        let page = self.used.back().expect("a page was just opened");
-        page.write(self.fill, data);
-        page.live.fetch_add(1, Ordering::Relaxed);
-        let slot = Slot {
-            page: Arc::clone(page) as Arc<dyn Page>,
-            offset: self.fill,
-            length: data.len(),
-        };
-        self.fill += data.len();
-        Ok(slot)
-    }
-
-    fn release(&mut self, slot: Slot) {
-        // Packets drop oldest first, so the page is at or near the front.
-        let Some(position) = self
-            .used
-            .iter()
-            .position(|page| ptr::addr_eq(Arc::as_ptr(page), Arc::as_ptr(&slot.page)))
-        else {
-            return;
-        };
-        drop(slot);
-        let page = &self.used[position];
-        // The page being filled stays in use even when empty; its earlier bytes are spent.
-        if page.live.fetch_sub(1, Ordering::Relaxed) != 1 || position + 1 == self.used.len() {
-            return;
-        }
-        let page = self
-            .used
-            .remove(position)
-            .expect("the position was just found");
-        // A save still reading the page keeps it alive through its slots; it then goes away
-        // with the save, and a fresh page is made when one is needed.
-        if Arc::strong_count(&page) == 1 {
-            self.free.push(page);
-        }
+        let device = &self.device;
+        let (page, offset) = self.pages.place(data.len(), || {
+            VramPage::create(device).map_err(StoreError::call("reserve a page"))
+        })?;
+        page.write(offset, data);
+        Ok(Pages::slot(page, offset, data.len()))
     }
 }
 
@@ -173,8 +108,6 @@ struct VramPage {
     buffer: ID3D11Buffer,
     d3d: ID3D11Device,
     context: ID3D11DeviceContext,
-    /// Packets in the page that the buffer has not dropped.
-    live: AtomicUsize,
 }
 
 impl VramPage {
@@ -193,7 +126,6 @@ impl VramPage {
             buffer,
             d3d: device.d3d.clone(),
             context: device.context.clone(),
-            live: AtomicUsize::new(0),
         })
     }
 

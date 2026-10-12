@@ -121,7 +121,22 @@ pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
 pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
 /// 32-bit words with blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
+/// `NV_ENC_BUFFER_FORMAT_U8`: plain bytes, the format of an output buffer in video memory.
+pub(super) const BUFFER_FORMAT_U8: u32 = 0x4000_0000;
 pub(super) const INPUT_IMAGE: u32 = 0;
+/// `NV_ENC_OUTPUT_BITSTREAM`: a registered buffer the encoder writes a frame's bitstream to.
+pub(super) const OUTPUT_BITSTREAM: u32 = 2;
+/// `NV_ENC_INITIALIZE_PARAMS::enableOutputInVidmem`, in the bit field after `enablePTD`:
+/// `reportSliceOffsets`, `enableSubFrameWrite`, `enableExternalMEHints`, `enableMEOnlyMode`,
+/// `enableWeightedPrediction` (bits 0 to 4), `splitEncodeMode` (4 bits), then this one. To be
+/// confirmed against the SDK 12.1 header, which is not on this machine; see
+/// `docs/nvfbc-cuda.md`.
+pub(super) const INITIALIZE_OUTPUT_IN_VIDMEM: u32 = 1 << 9;
+/// Bytes of `NV_ENC_ENCODE_OUT_PARAMS`, which the encoder writes at the start of an output
+/// buffer in video memory before the bitstream.
+pub(in crate::gpu) const ENCODE_OUT_PARAMS_BYTES: usize = 256;
+/// Where `bitstreamSizeInBytes` lies in `NV_ENC_ENCODE_OUT_PARAMS`, after its version.
+pub(in crate::gpu) const ENCODE_OUT_PARAMS_SIZE_OFFSET: usize = 4;
 pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 pub(super) const PIC_STRUCT_FRAME: u32 = 1;
 pub(super) const PIC_TYPE_IDR: u32 = 3;
@@ -558,7 +573,8 @@ pub(super) struct InitializeParams {
     pub(super) frame_rate_den: u32,
     pub(super) enable_encode_async: u32,
     pub(super) enable_ptd: u32,
-    _flags: u32,
+    /// The bit field `reportSliceOffsets` starts; see [`INITIALIZE_OUTPUT_IN_VIDMEM`].
+    pub(super) flags: u32,
     _private_data_size: u32,
     _private_data: *mut c_void,
     pub(super) encode_config: *mut Config,

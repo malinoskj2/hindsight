@@ -8,6 +8,7 @@
 mod capture;
 #[expect(unsafe_code)]
 mod cuda;
+mod cuda_output;
 #[expect(unsafe_code)]
 mod device;
 #[expect(unsafe_code)]

@@ -77,8 +77,13 @@ pub(super) enum EncoderDevice {
     /// The shared Direct3D 11 device, which also holds the encoder's own input textures.
     Direct3D,
     /// The CUDA context the source's buffers live in; the encoder then has no input textures
-    /// of its own and reads the source's surfaces only.
-    Cuda(Context),
+    /// of its own and reads the source's surfaces only. `primary` names the device whose
+    /// primary context it is, when it is one: memory that must outlive the source (the replay
+    /// buffer) can then be kept in it by retaining the context again.
+    Cuda {
+        context: Context,
+        primary: Option<super::cuda::Device>,
+    },
 }
 
 /// What a tick found.

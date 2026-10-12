@@ -1,10 +1,11 @@
 //! Where the buffer's packets may be kept instead of system memory. A store hands out slots in
 //! pages of its own (the GPU's memory, say) as packets arrive, and a save reads whole runs of
 //! slots back from a page at a time, since reading each packet on its own would cost a round
-//! trip per frame.
+//! trip per frame. A slot keeps its page alive, so a page is free to fill again once the
+//! buffer has dropped every packet in it and no save is still reading it.
 
 use super::Packet;
-use std::{error::Error, fmt, ptr, sync::Arc};
+use std::{collections::VecDeque, error::Error, fmt, ptr, sync::Arc};
 use thiserror::Error;
 
 /// Why a store could not take a packet or give it back.
@@ -78,9 +79,86 @@ impl Slot {
 pub(crate) trait Store: Send {
     /// Puts `data` away and says where.
     fn put(&mut self, data: &[u8]) -> Result<Slot, StoreError>;
+}
 
-    /// Gives `slot` back; its space is reused once nothing reads it any more.
-    fn release(&mut self, slot: Slot);
+/// The pages of a store, filled one after another: which is being filled and how far, which
+/// are free to fill again, and the reclaiming of pages that nothing holds any more.
+pub(crate) struct Pages<P> {
+    /// Pages with packets in them, oldest first; the newest is the one being filled.
+    used: VecDeque<Arc<P>>,
+    /// Pages with no packets in them, ready to be filled again.
+    free: Vec<Arc<P>>,
+    /// Bytes of the newest page in use.
+    fill: usize,
+    /// Bytes in a page.
+    page_bytes: usize,
+}
+
+impl<P: Page + 'static> Pages<P> {
+    /// Pages of `page_bytes` each, starting with `reserved` free ones.
+    pub(crate) fn new(page_bytes: usize, reserved: Vec<P>) -> Self {
+        Self {
+            used: VecDeque::new(),
+            free: reserved.into_iter().map(Arc::new).collect(),
+            fill: 0,
+            page_bytes,
+        }
+    }
+
+    /// Room for `length` bytes: the page to write them to and the offset in it. A packet never
+    /// straddles two pages; when the one being filled lacks the room, a free page is taken, or
+    /// `make` makes one.
+    pub(crate) fn place(
+        &mut self,
+        length: usize,
+        make: impl FnOnce() -> Result<P, StoreError>,
+    ) -> Result<(Arc<P>, usize), StoreError> {
+        if length > self.page_bytes {
+            return Err(StoreError::TooLarge(length));
+        }
+        if self.used.is_empty() || self.fill + length > self.page_bytes {
+            self.reclaim();
+            let page = match self.free.pop() {
+                Some(page) => page,
+                None => Arc::new(make()?),
+            };
+            self.used.push_back(page);
+            self.fill = 0;
+        }
+        let page = Arc::clone(self.used.back().expect("a page is in use"));
+        let offset = self.fill;
+        self.fill += length;
+        Ok((page, offset))
+    }
+
+    /// The slot for `length` bytes at `offset` of `page`, as [`place`](Self::place) gave them.
+    pub(crate) fn slot(page: Arc<P>, offset: usize, length: usize) -> Slot {
+        Slot {
+            page: page as Arc<dyn Page>,
+            offset,
+            length,
+        }
+    }
+
+    /// Frees the oldest pages that no slot holds any more: packets drop oldest first, so the
+    /// pages free up from the front. The page being filled stays in use even when empty.
+    fn reclaim(&mut self) {
+        while self.used.len() > 1
+            && self
+                .used
+                .front()
+                .is_some_and(|page| Arc::strong_count(page) == 1)
+        {
+            let page = self.used.pop_front().expect("a page is at the front");
+            self.free.push(page);
+        }
+    }
+
+    /// Pages made so far, in use or free.
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.used.len() + self.free.len()
+    }
 }
 
 /// A buffered packet: held in memory, or put away in a store with only its header kept here.
@@ -228,34 +306,29 @@ pub(crate) mod tests {
         }
     }
 
-    /// A store of small pages in memory: packets go in one after another, a page at a time,
-    /// and the pages are reused once released. `fail_after` packets, it refuses.
+    /// A store of small pages in memory. `fail_after` packets, it refuses.
     pub(crate) struct MemoryStore {
-        pub(crate) page_bytes: usize,
-        pub(crate) piece: usize,
+        pages: Pages<MemoryPage>,
+        page_bytes: usize,
+        piece: usize,
         pub(crate) fail_after: usize,
-        pages: Vec<Arc<MemoryPage>>,
-        fill: usize,
         put: usize,
-        pub(crate) released: usize,
     }
 
     impl MemoryStore {
         pub(crate) fn new(page_bytes: usize, piece: usize) -> Self {
             Self {
+                pages: Pages::new(page_bytes, Vec::new()),
                 page_bytes,
                 piece,
                 fail_after: usize::MAX,
-                pages: Vec::new(),
-                fill: 0,
                 put: 0,
-                released: 0,
             }
         }
 
-        /// Pages the store has created.
+        /// Pages the store has made.
         pub(crate) fn pages(&self) -> usize {
-            self.pages.len()
+            self.pages.count()
         }
     }
 
@@ -266,30 +339,16 @@ pub(crate) mod tests {
                     "the store is full",
                 )));
             }
-            if data.len() > self.page_bytes {
-                return Err(StoreError::TooLarge(data.len()));
-            }
-            if self.pages.is_empty() || self.fill + data.len() > self.page_bytes {
-                self.pages.push(Arc::new(MemoryPage {
-                    bytes: Mutex::new(vec![0; self.page_bytes]),
-                    piece: self.piece,
-                }));
-                self.fill = 0;
-            }
-            let page = self.pages.last().unwrap();
-            page.bytes.lock().unwrap()[self.fill..self.fill + data.len()].copy_from_slice(data);
-            let slot = Slot {
-                page: Arc::clone(page) as Arc<dyn Page>,
-                offset: self.fill,
-                length: data.len(),
-            };
-            self.fill += data.len();
+            let (page_bytes, piece) = (self.page_bytes, self.piece);
+            let (page, offset) = self.pages.place(data.len(), || {
+                Ok(MemoryPage {
+                    bytes: Mutex::new(vec![0; page_bytes]),
+                    piece,
+                })
+            })?;
+            page.bytes.lock().unwrap()[offset..offset + data.len()].copy_from_slice(data);
             self.put += 1;
-            Ok(slot)
-        }
-
-        fn release(&mut self, _slot: Slot) {
-            self.released += 1;
+            Ok(Pages::slot(page, offset, data.len()))
         }
     }
 
@@ -340,6 +399,28 @@ pub(crate) mod tests {
             [0, 1, 2, 3, 4]
         );
         assert!(packets[0].keyframe && !packets[1].keyframe);
+    }
+
+    #[test]
+    fn pages_are_filled_again_once_nothing_holds_their_slots() {
+        let mut store = MemoryStore::new(10, 10);
+        let first = store.put(&[1; 6]).unwrap();
+        let second = store.put(&[2; 6]).unwrap();
+        assert_eq!(store.pages(), 2);
+        // The first page is empty of live slots, but the second is still being filled.
+        drop(first);
+        let third = store.put(&[3; 6]).unwrap();
+        assert_eq!(store.pages(), 2, "the first page was filled again");
+        assert_eq!(third.offset, 0);
+        // A page a slot still holds is not reused.
+        drop(second);
+        let held = third.clone();
+        let fourth = store.put(&[4; 6]).unwrap();
+        assert_eq!(store.pages(), 2);
+        assert!(!fourth.shares_page(&held));
+        let fifth = store.put(&[5; 6]).unwrap();
+        assert_eq!(store.pages(), 3, "both pages are held, so a third is made");
+        drop((held, third, fourth, fifth));
     }
 
     #[test]

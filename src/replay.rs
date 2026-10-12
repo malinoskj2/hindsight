@@ -30,7 +30,7 @@ use mp4::MuxError;
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
-pub(crate) use store::{Page, Slot};
+pub(crate) use store::{Page, Pages, Slot};
 pub(crate) use store::{Store, StoreError};
 
 const CLIP_PREFIX: &str = "hindsight";
@@ -141,6 +141,28 @@ impl Live {
                 "The replay buffer could not be kept in GPU memory ({error}); it continues in RAM"
             ));
         }
+        self.oldest
+            .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.encoded.fetch_add(1, Ordering::Relaxed);
+        if fresh {
+            self.fresh.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Adds an encoded frame that the encoder put away in a store of its own, at `slot`;
+    /// `fresh` when it carried new screen content.
+    #[cfg(windows)]
+    pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, fresh: bool) {
+        self.bytes.fetch_add(slot.length as u64, Ordering::Relaxed);
+        let oldest = {
+            let mut ring = self.ring();
+            ring.push_entry(Entry::Stored {
+                index,
+                keyframe,
+                slot,
+            });
+            ring.first_index()
+        };
         self.oldest
             .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
         self.encoded.fetch_add(1, Ordering::Relaxed);

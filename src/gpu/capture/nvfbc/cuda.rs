@@ -404,7 +404,13 @@ impl Source for Capture {
     }
 
     fn encoder_device(&self) -> EncoderDevice {
-        EncoderDevice::Cuda(self.context.handle())
+        EncoderDevice::Cuda {
+            context: self.context.handle(),
+            primary: match self.context {
+                SessionContext::Primary { device, .. } => Some(device),
+                SessionContext::Adopted(_) => None,
+            },
+        }
     }
 }
 
