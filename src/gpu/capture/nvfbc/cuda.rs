@@ -298,6 +298,10 @@ impl Capture {
                 if !self.note_pitch(&info) {
                     return Ok(Grab::Resized);
                 }
+                // The grab only queues the copy; NVENC must not read the buffer before it lands.
+                self.cuda
+                    .synchronize_context()
+                    .map_err(cuda_failed("wait for an NvFBC grab to land"))?;
                 self.next = (self.next + 1) % SLOT_COUNT;
                 Ok(Grab::Done(slot))
             }
@@ -457,8 +461,8 @@ impl Session {
     }
 
     /// Grabs the whole display into `buffer` without waiting for the screen to change, with
-    /// the cursor drawn in if `cursor` is set, returning once the picture has landed, and
-    /// returns the driver's status with its report on the grab.
+    /// the cursor drawn in if `cursor` is set, and returns the driver's status with its report
+    /// on the grab. The copy may still be under way when it returns.
     fn grab_frame(
         &self,
         buffer: DevicePointer,
@@ -467,8 +471,9 @@ impl Session {
         let mut info = nvfbc_ffi::FrameGrabInfo::zeroed();
         let mut params = ffi::GrabFrameParams::zeroed();
         params.version = ffi::GRAB_FRAME_PARAMS_VER;
+        // Not `CPU_SYNC`: this driver (CUDA 13.4, RTX 5090) fails every grab that asks for it with
+        // `NVFBC_ERROR_NVAPI_FAILURE`. `Capture::grab` waits for the copy instead.
         params.flags = ffi::TOCUDA_NOWAIT
-            | ffi::TOCUDA_CPU_SYNC
             | if cursor {
                 ffi::TOCUDA_WITH_HW_CURSOR
             } else {

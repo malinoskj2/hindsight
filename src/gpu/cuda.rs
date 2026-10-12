@@ -127,6 +127,7 @@ type MemGetInfo = unsafe extern "system" fn(*mut usize, *mut usize) -> Status;
 type MemcpyDtoH = unsafe extern "system" fn(*mut c_void, DevicePointer, usize) -> Status;
 type MemcpyDtoD = unsafe extern "system" fn(DevicePointer, DevicePointer, usize) -> Status;
 type StreamSynchronize = unsafe extern "system" fn(*mut c_void) -> Status;
+type CtxSynchronize = unsafe extern "system" fn() -> Status;
 
 /// The loaded driver library and its entry points. Everything made through it (contexts,
 /// memory) must be released before it is dropped, which unloads the library.
@@ -147,6 +148,7 @@ pub(super) struct Driver {
     memcpy_dtoh: MemcpyDtoH,
     memcpy_dtod: MemcpyDtoD,
     stream_synchronize: StreamSynchronize,
+    ctx_synchronize: CtxSynchronize,
     /// Declared last, so it is unloaded after the entry points above are no longer reachable.
     _library: Owned<HMODULE>,
 }
@@ -208,6 +210,7 @@ impl Driver {
             memcpy_dtoh: entry_point!(module, "cuMemcpyDtoH_v2", MemcpyDtoH),
             memcpy_dtod: entry_point!(module, "cuMemcpyDtoD_v2", MemcpyDtoD),
             stream_synchronize: entry_point!(module, "cuStreamSynchronize", StreamSynchronize),
+            ctx_synchronize: entry_point!(module, "cuCtxSynchronize", CtxSynchronize),
             _library: library,
         };
         // SAFETY: the flags must be 0.
@@ -349,6 +352,13 @@ impl Driver {
     pub(super) fn synchronize(&self) -> Result<(), CudaError> {
         // SAFETY: the null stream is the context's default queue.
         unsafe { (self.stream_synchronize)(ptr::null_mut()) }.ok("cuStreamSynchronize")
+    }
+
+    /// Waits for all the work queued in the current context, on every stream, the driver's
+    /// own included.
+    pub(super) fn synchronize_context(&self) -> Result<(), CudaError> {
+        // SAFETY: a context is current; the call takes no arguments.
+        unsafe { (self.ctx_synchronize)() }.ok("cuCtxSynchronize")
     }
 }
 

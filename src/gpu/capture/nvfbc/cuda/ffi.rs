@@ -26,8 +26,6 @@ const _: () = assert!(GRAB_FRAME_PARAMS_VER == 0x7001_0200);
 pub(super) const SHARED_CUDA: u32 = 0x1007;
 /// `NVFBC_TOCUDA_NOWAIT`: return the current picture rather than wait for a new one.
 pub(super) const TOCUDA_NOWAIT: u32 = 0x1;
-/// `NVFBC_TOCUDA_CPU_SYNC`: return only once the grab has landed in the buffer.
-pub(super) const TOCUDA_CPU_SYNC: u32 = 0x2;
 /// `NVFBC_TOCUDA_WITH_HWCURSOR`: draw the mouse cursor into the picture.
 pub(super) const TOCUDA_WITH_HW_CURSOR: u32 = 0x4;
 /// `NVFBC_TOCUDA_ARGB`: 32-bit words with blue in the low byte, as `D3DFMT_A8R8G8B8`.
