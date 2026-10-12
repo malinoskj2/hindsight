@@ -8,18 +8,25 @@
 //!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues. It
 //!   grabs into Direct3D 9 surfaces, or, as [`nvfbc::CudaCapture`], into CUDA memory that an
 //!   encoder on a CUDA context reads in place.
+//!
+//! A monitor in HDR is described by [`display`]; Windows Graphics Capture and Desktop
+//! Duplication then take its FP16 scRGB picture and [`tonemap`] turns it into 8-bit SDR for
+//! the encoder (`docs/hdr.md`). NvFBC records it as 8-bit, clipped.
 
+mod display;
 mod dxgi_dd;
 mod nvfbc;
+mod tonemap;
 mod wgc;
 
 use super::{
     cuda::{Context, CudaError},
     device::Device,
 };
-use crate::{config::Backend, service::Target};
+use crate::{config::Backend, log, service::Target};
 use std::{
     ffi::c_void,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -183,12 +190,81 @@ pub(super) fn start(
     target: &Target,
     cursor: bool,
 ) -> Result<Box<dyn Source>, CaptureError> {
+    let display = display::describe(monitor_of(target).0);
+    if let Some(display) = &display {
+        log::info(format!("Display {display}"));
+    }
+    let hdr = display.as_ref().is_some_and(display::Display::is_hdr);
+    let tone_map = match (colour(backend, hdr), &display) {
+        (Colour::ToneMapped, Some(display)) => tone_mapper(device, display),
+        (Colour::Clipped, _) => {
+            warn_hdr_clipped();
+            None
+        }
+        _ => None,
+    };
     Ok(match backend {
-        Backend::Wgc => Box::new(wgc::Capture::start(device, period, target, cursor)?),
-        Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target)?),
+        Backend::Wgc => Box::new(wgc::Capture::start(
+            device, period, target, cursor, tone_map,
+        )?),
+        Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target, tone_map)?),
         Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target, cursor)?),
         Backend::NvfbcCuda => Box::new(nvfbc::CudaCapture::start(device, target, cursor)?),
     })
+}
+
+/// How a backend captures the colour of a display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Colour {
+    /// 8-bit BGRA, which an SDR display shows as it is.
+    Sdr,
+    /// FP16 scRGB from a display in HDR, tone-mapped to 8-bit SDR for the encoder.
+    ToneMapped,
+    /// 8-bit BGRA from a display in HDR: the backend has no way to deliver more, and the
+    /// highlights are clipped.
+    Clipped,
+}
+
+/// How `backend` captures a display that is in HDR when `hdr` is set: Windows Graphics
+/// Capture and Desktop Duplication can hand over scRGB; NvFBC cannot.
+const fn colour(backend: Backend, hdr: bool) -> Colour {
+    match (backend, hdr) {
+        (_, false) => Colour::Sdr,
+        (Backend::Wgc | Backend::Dxgi, true) => Colour::ToneMapped,
+        (Backend::Nvfbc | Backend::NvfbcCuda, true) => Colour::Clipped,
+    }
+}
+
+/// The tone-map pass for a display in HDR, or `None`, with a warning, when it cannot be
+/// prepared; the capture then takes 8-bit BGRA as for an SDR display.
+fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::ToneMapper> {
+    let curve = tonemap::Curve::new(display.sdr_white_nits, display.max_nits);
+    match tonemap::ToneMapper::new(device, curve) {
+        Ok(mapper) => {
+            log::info(format!(
+                "The display is in HDR: capturing scRGB and tone-mapping it to SDR, white at {:.0} nits, highlights rolled off up to {:.0} nits",
+                curve.white_nits(),
+                curve.peak_nits()
+            ));
+            Some(mapper)
+        }
+        Err(error) => {
+            log::warning(format!(
+                "The display is in HDR but the tone-map pass could not be prepared ({error}); highlights are clipped"
+            ));
+            None
+        }
+    }
+}
+
+/// Warns, once per run, that NvFBC records a display in HDR as 8-bit SDR.
+fn warn_hdr_clipped() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        log::warning(
+            "The display is in HDR, which NvFBC captures as 8-bit SDR: highlights are clipped and colours may look washed out. Windows Graphics Capture records HDR displays properly",
+        );
+    }
 }
 
 /// Wraps a Windows error with the step that failed, for `map_err`.
@@ -235,6 +311,17 @@ fn is_window_closed(window: Option<HWND>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_hdr_display_changes_how_colour_is_captured() {
+        for backend in Backend::ALL {
+            assert_eq!(colour(backend, false), Colour::Sdr);
+        }
+        assert_eq!(colour(Backend::Wgc, true), Colour::ToneMapped);
+        assert_eq!(colour(Backend::Dxgi, true), Colour::ToneMapped);
+        assert_eq!(colour(Backend::Nvfbc, true), Colour::Clipped);
+        assert_eq!(colour(Backend::NvfbcCuda, true), Colour::Clipped);
+    }
 
     #[test]
     fn reopen_is_attempted_at_once_until_refused() {

@@ -71,7 +71,7 @@ impl Device {
     }
 
     /// Copies the top-left `width` × `height` of `source` into `target` on the GPU; both are
-    /// BGRA and at least that large.
+    /// of one format and at least that large.
     pub(super) fn copy_region(
         &self,
         target: &ID3D11Texture2D,
@@ -87,7 +87,7 @@ impl Device {
             bottom: height,
             back: 1,
         };
-        // SAFETY: both textures are BGRA on this device and the region lies within each.
+        // SAFETY: both textures are of one format on this device and the region lies within each.
         unsafe {
             self.context.CopySubresourceRegion(
                 target,

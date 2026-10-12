@@ -4,10 +4,17 @@
 //! are handed over, the frame is not copied: NVENC reads the pool's buffer in place, and the
 //! frame is held, keeping Windows from drawing into that buffer, until the encoder is done with
 //! it; the pool then has buffers enough for the frames held besides the two it needs itself.
+//!
+//! A display in HDR is captured as FP16 scRGB instead, which Windows would otherwise clip to
+//! 8 bits; each frame then goes through the tone-map pass into the encoder's input, never in
+//! place, and the capture restarts if HDR is turned off.
 
-use super::{CaptureError, Frame, Source, Surface, failed, monitor};
+use super::{
+    CaptureError, Frame, Source, Surface, display, failed, monitor, monitor_of, tonemap::ToneMapper,
+};
 use crate::{
     gpu::{device::Device, pacer::HUNDRED_NANOSECONDS},
+    log,
     service::Target,
 };
 use std::{
@@ -16,7 +23,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows::{
     Foundation::{TimeSpan, TypedEventHandler},
@@ -30,7 +37,7 @@ use windows::{
     },
     Win32::{
         Foundation::HWND,
-        Graphics::Direct3D11::ID3D11Texture2D,
+        Graphics::{Direct3D11::ID3D11Texture2D, Gdi::HMONITOR},
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -48,6 +55,9 @@ const HELD_BUFFERS: i32 = 3;
 /// Distinct pool buffers this capture keeps track of; a pool that hands out more than it was
 /// created with has replaced its buffers, which are then copied rather than read in place.
 const MAX_SURFACES: usize = 8;
+/// How often a capture of a display in HDR checks that it still is, so that turning HDR off
+/// restarts the session with 8-bit capture rather than tone-mapping an SDR picture.
+const HDR_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A running Windows Graphics Capture of one monitor or window.
 pub(super) struct Capture {
@@ -69,17 +79,26 @@ pub(super) struct Capture {
     surfaces: Vec<ID3D11Texture2D>,
     /// The frame holding each of `surfaces`, while the encoder still needs it.
     held: Vec<Option<Direct3D11CaptureFrame>>,
+    /// The pass that turns the scRGB frames of a display in HDR into the encoder's 8-bit
+    /// input; `None` for a display in SDR, whose frames come as 8-bit BGRA.
+    tone_map: Option<ToneMapper>,
+    /// The monitor whose HDR state a tone-mapped capture keeps checking, and when it next does.
+    monitor: HMONITOR,
+    next_hdr_check: Instant,
 }
 
 impl Capture {
     /// Starts capturing `target`, with the cursor if `cursor` is set, at most twice per
     /// `period`: the display delivers frames only on its own refresh, so a limit of exactly one
     /// period would skip to every other refresh whenever the two rates do not divide evenly.
+    /// With `tone_map`, given for a display in HDR, frames are taken as FP16 scRGB and passed
+    /// through it into the encoder's input.
     pub(super) fn start(
         device: &Device,
         period: Duration,
         target: &Target,
         cursor: bool,
+        tone_map: Option<ToneMapper>,
     ) -> Result<Self, CaptureError> {
         prepare_thread()?;
         let item = capture_item(target)?;
@@ -88,7 +107,7 @@ impl Capture {
         let direct3d = winrt_device(device)?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &direct3d,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            pixel_format(tone_map.as_ref()),
             POOL_BUFFERS,
             size,
         )
@@ -107,6 +126,9 @@ impl Capture {
             handed_over: false,
             surfaces: Vec::new(),
             held: Vec::new(),
+            tone_map,
+            monitor: monitor_of(target).0,
+            next_hdr_check: Instant::now() + HDR_CHECK_INTERVAL,
         })
     }
 }
@@ -132,6 +154,10 @@ impl Source for Capture {
             return Err(CaptureError::Closed);
         }
         let target = super::target_of(target);
+        if self.hdr_turned_off() {
+            log::info("HDR was turned off on the captured display");
+            return Ok(Frame::Resized);
+        }
 
         let Some(frame) = newest_frame(&self.pool) else {
             return Ok(Frame::Unchanged);
@@ -153,14 +179,26 @@ impl Source for Capture {
             }
             return Ok(Frame::InSurface(index));
         }
-        // Not handed over, or the pool replaced its buffers more often than any pool should.
-        device.copy_region(target, &texture, width, height);
+        // Not handed over (always so in HDR), or the pool replaced its buffers more often than
+        // any pool should.
+        let copied = if let Some(mapper) = &mut self.tone_map {
+            mapper
+                .convert(device, &texture, target, width, height)
+                .map_err(failed("tone-map the HDR frame"))
+        } else {
+            device.copy_region(target, &texture, width, height);
+            Ok(())
+        };
         // Returns the buffer to the pool; the copy above is already queued on the GPU.
         let _ = frame.Close();
-        Ok(Frame::Fresh)
+        copied.map(|()| Frame::Fresh)
     }
 
     fn hand_over_surfaces(&mut self) -> bool {
+        // NVENC cannot read FP16 frames; they go through the tone-map pass instead.
+        if self.tone_map.is_some() {
+            return false;
+        }
         // Nothing has been taken from the pool yet, so no frame is lost.
         let recreated = self.pool.Recreate(
             &self.direct3d,
@@ -189,6 +227,21 @@ impl Source for Capture {
 }
 
 impl Capture {
+    /// Whether a capture tone-mapping a display in HDR finds, on one of its checks every
+    /// [`HDR_CHECK_INTERVAL`], that the display has left HDR. A capture of a display in SDR
+    /// never checks: one that enters HDR is recorded clipped until the session restarts.
+    fn hdr_turned_off(&mut self) -> bool {
+        if self.tone_map.is_none() {
+            return false;
+        }
+        let now = Instant::now();
+        if now < self.next_hdr_check {
+            return false;
+        }
+        self.next_hdr_check = now + HDR_CHECK_INTERVAL;
+        display::is_in_hdr(self.monitor) == Some(false)
+    }
+
     /// The index `texture`, one of the pool's buffers, is reported under, given a new one the
     /// first time it comes; `None` once more buffers than any pool keeps have come.
     fn surface_index(&mut self, texture: &ID3D11Texture2D) -> Option<usize> {
@@ -321,4 +374,15 @@ fn frame_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D, Capt
         // SAFETY: the surface of a live frame wraps a Direct3D 11 texture.
         .and_then(|access| unsafe { access.GetInterface() })
         .map_err(failed("read the captured frame"))
+}
+
+/// The format the frame pool delivers: FP16 scRGB, the display's own picture, when a tone-map
+/// pass will take it to SDR; otherwise 8-bit BGRA, which Windows converts an HDR display's
+/// picture to by clipping it.
+fn pixel_format(tone_map: Option<&ToneMapper>) -> DirectXPixelFormat {
+    if tone_map.is_some() {
+        DirectXPixelFormat::R16G16B16A16Float
+    } else {
+        DirectXPixelFormat::B8G8R8A8UIntNormalized
+    }
 }

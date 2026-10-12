@@ -10,9 +10,16 @@
 //! Windows takes the duplication away whenever the desktop changes under it: a display mode
 //! change, or the secure desktop of a UAC prompt or the lock screen. It is opened again in
 //! place, keeping the buffer, unless the monitor's size changed.
+//!
+//! A monitor in HDR is duplicated as FP16 scRGB, which a tone-map pass turns into the 8-bit
+//! input instead of the copy; Windows would otherwise convert it to 8 bits by clipping. HDR
+//! turned on or off changes the duplication's format, which restarts the session.
 
-use super::{CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of};
-use crate::{gpu::device::Device, service::Target};
+use super::{
+    CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of,
+    tonemap::ToneMapper,
+};
+use crate::{gpu::device::Device, log, service::Target};
 use std::time::Instant;
 use windows::{
     Win32::{
@@ -20,14 +27,18 @@ use windows::{
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
-                Common::{DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED},
+                Common::{
+                    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
+                },
                 DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
                 DXGI_ERROR_SESSION_DISCONNECTED, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, IDXGIOutput1, IDXGIOutputDuplication,
-                IDXGIResource,
+                DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, IDXGIOutput1, IDXGIOutput5,
+                IDXGIOutputDuplication, IDXGIResource,
             },
             Gdi::HMONITOR,
         },
+        UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
     },
     core::{HRESULT, Interface},
 };
@@ -41,6 +52,11 @@ const PASSING_REFUSALS: [HRESULT; 4] = [
     DXGI_ERROR_ACCESS_LOST,
 ];
 
+/// The formats a duplication of a monitor in HDR may deliver, preferred first: the FP16 scRGB
+/// desktop, or 8-bit BGRA when the desktop is not composed in FP16.
+const SCRGB_FORMATS: [DXGI_FORMAT; 2] =
+    [DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM];
+
 /// A running Desktop Duplication of one monitor.
 pub(super) struct Capture {
     /// The duplicated monitor, as an output of the encoding GPU.
@@ -53,6 +69,12 @@ pub(super) struct Capture {
     /// Whether the current duplication has delivered a picture; its first one is always new.
     primed: bool,
     reopen: ReopenThrottle,
+    /// The pass that turns the scRGB desktop of a monitor in HDR into the encoder's 8-bit
+    /// input; `None` for a monitor in SDR, which is duplicated as 8-bit BGRA.
+    tone_map: Option<ToneMapper>,
+    /// The format the duplication delivers: FP16 when a tone-mapped monitor is in HDR, BGRA
+    /// otherwise.
+    format: DXGI_FORMAT,
 }
 
 /// What asking Windows for the next desktop image came to.
@@ -66,12 +88,18 @@ enum Acquired {
 }
 
 impl Capture {
-    /// Starts duplicating the monitor `target` names, or the monitor its window fills.
-    pub(super) fn start(device: &Device, target: &Target) -> Result<Self, CaptureError> {
+    /// Starts duplicating the monitor `target` names, or the monitor its window fills. With
+    /// `tone_map`, given for a monitor in HDR, the desktop is asked for as FP16 scRGB and
+    /// passed through it into the encoder's input.
+    pub(super) fn start(
+        device: &Device,
+        target: &Target,
+        tone_map: Option<ToneMapper>,
+    ) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
         let output = find_output(device, monitor)?;
         let (duplication, description) =
-            duplicate(&output, device).map_err(first_duplication_failed)?;
+            duplicate(&output, device, tone_map.is_some()).map_err(first_duplication_failed)?;
         if is_rotated(&description) {
             return Err(CaptureError::Unsupported(
                 "the monitor is rotated, which Desktop Duplication does not undo; choose Windows Graphics Capture"
@@ -86,6 +114,8 @@ impl Capture {
             window,
             primed: false,
             reopen: ReopenThrottle::default(),
+            tone_map,
+            format: description.ModeDesc.Format,
         })
     }
 
@@ -95,15 +125,21 @@ impl Capture {
         let Some(now) = self.reopen.attempt() else {
             return Ok(Frame::Unchanged);
         };
-        let (duplication, description) = match duplicate(&self.output, device) {
-            Ok(opened) => opened,
-            Err(error) if PASSING_REFUSALS.contains(&error.code()) => {
-                return self.retry_later(now);
-            }
-            Err(error) => return Err(failed("duplicate the monitor again")(error)),
-        };
+        let (duplication, description) =
+            match duplicate(&self.output, device, self.tone_map.is_some()) {
+                Ok(opened) => opened,
+                Err(error) if PASSING_REFUSALS.contains(&error.code()) => {
+                    return self.retry_later(now);
+                }
+                Err(error) => return Err(failed("duplicate the monitor again")(error)),
+            };
         self.reopen.succeeded();
         if size(&description) != self.size || is_rotated(&description) {
+            return Ok(Frame::Resized);
+        }
+        // HDR turned on or off: the session starts again, deciding afresh how to capture.
+        if description.ModeDesc.Format != self.format {
+            log::info("The captured display's colour format changed");
             return Ok(Frame::Resized);
         }
         self.duplication = Some(duplication);
@@ -161,14 +197,22 @@ impl Source for Capture {
 
         // A frame that only moved the cursor keeps the previous picture.
         let frame = if info.LastPresentTime != 0 || !self.primed {
-            resource
+            let scrgb = self.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            let delivered = resource
                 .ok_or_else(windows::core::Error::empty)
                 .and_then(|resource| resource.cast::<ID3D11Texture2D>())
-                .map(|texture| {
-                    device.copy_region(target, &texture, width, height);
-                    self.primed = true;
-                    Frame::Fresh
-                })
+                .and_then(|texture| match &mut self.tone_map {
+                    Some(mapper) if scrgb => {
+                        mapper.convert(device, &texture, target, width, height)
+                    }
+                    _ => {
+                        device.copy_region(target, &texture, width, height);
+                        Ok(())
+                    }
+                });
+            self.primed |= delivered.is_ok();
+            delivered
+                .map(|()| Frame::Fresh)
                 .map_err(failed("read the desktop image"))
         } else {
             Ok(Frame::Unchanged)
@@ -209,15 +253,50 @@ fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, Captu
 }
 
 /// Opens a duplication of `output` for the device, with its description.
+/// With `scrgb` the duplication is asked for FP16 scRGB, which it delivers while the monitor
+/// is in HDR; where Windows cannot do that, the desktop comes as 8-bit BGRA as it always did.
 fn duplicate(
     output: &IDXGIOutput1,
     device: &Device,
+    scrgb: bool,
 ) -> windows::core::Result<(IDXGIOutputDuplication, DXGI_OUTDUPL_DESC)> {
-    // SAFETY: duplicates a live output for a live device on the output's adapter.
-    let duplication = unsafe { output.DuplicateOutput(&device.d3d) }?;
+    let duplication = match scrgb.then(|| duplicate_scrgb(output, device)) {
+        Some(Ok(duplication)) => duplication,
+        Some(Err(error)) if PASSING_REFUSALS.contains(&error.code()) => return Err(error),
+        fallback => {
+            if let Some(Err(error)) = fallback {
+                log::warning(format!(
+                    "Desktop Duplication could not deliver the HDR desktop as scRGB ({error}); highlights are clipped"
+                ));
+            }
+            // SAFETY: duplicates a live output for a live device on the output's adapter.
+            unsafe { output.DuplicateOutput(&device.d3d) }?
+        }
+    };
     // SAFETY: describes a live duplication.
     let description = unsafe { duplication.GetDesc() };
     Ok((duplication, description))
+}
+
+/// A duplication of `output` that delivers FP16 scRGB when the desktop is composed in it
+/// (HDR on), and BGRA when it is not. `DuplicateOutput1` serves only callers aware of each
+/// monitor's DPI, which this thread becomes for the call.
+fn duplicate_scrgb(
+    output: &IDXGIOutput1,
+    device: &Device,
+) -> windows::core::Result<IDXGIOutputDuplication> {
+    let output: IDXGIOutput5 = output.cast()?;
+    // SAFETY: changes the calling thread's DPI awareness only, and is undone below.
+    let previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    // SAFETY: duplicates a live output for a live device on the output's adapter, with a
+    // list of formats that outlives the call.
+    let duplication = unsafe { output.DuplicateOutput1(&device.d3d, 0, &SCRGB_FORMATS) };
+    if !previous.is_invalid() {
+        // SAFETY: puts back the thread's awareness from before.
+        unsafe { SetThreadDpiAwarenessContext(previous) };
+    }
+    duplication
 }
 
 /// The error for a monitor that could not be duplicated when the session started; a monitor
