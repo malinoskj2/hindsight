@@ -91,7 +91,7 @@ impl Capture {
         cursor: bool,
     ) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
-        let key = saved_key()?;
+        let key = saved_key();
 
         // Only to count adapters the way the driver does.
         // SAFETY: creates the Direct3D 9Ex object; no other preconditions.

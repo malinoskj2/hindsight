@@ -30,7 +30,6 @@ mod clips;
 mod footer;
 mod layout;
 mod logs;
-mod nvfbc_key;
 mod settings;
 mod startup_error;
 mod status;
@@ -196,12 +195,6 @@ impl Main {
         let me = self.clone();
         self.settings.apply.on().bn_clicked(move || {
             me.apply_settings();
-            Ok(())
-        });
-
-        let me = self.clone();
-        self.settings.backend.on().cbn_sel_change(move || {
-            me.on_backend_chosen();
             Ok(())
         });
 
@@ -383,11 +376,6 @@ impl Main {
         shared.worker.start(config);
         drop(shared);
         self.watch_foreground();
-    }
-
-    fn on_backend_chosen(&self) {
-        let accepted = !self.settings.chosen_backend().uses_nvfbc() || nvfbc_key::ask(&self.wnd);
-        self.settings.settle_backend(accepted);
     }
 
     fn on_theme_chosen(&self) {

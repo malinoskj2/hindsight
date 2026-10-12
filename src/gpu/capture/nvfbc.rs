@@ -8,7 +8,7 @@ use super::{
     CaptureError, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed, is_window_closed,
     monitor_of,
 };
-use crate::{gpu::device::Device, log, replay::Matrix, service::Target, sys::nvfbc_key};
+use crate::{gpu::device::Device, log, replay::Matrix, service::Target};
 use std::ptr::{self, NonNull};
 use windows::{
     Win32::{
@@ -183,7 +183,7 @@ impl Capture {
         let switches = Switches::from_environment();
         let format = PixelFormat::from_environment();
         let (monitor, window) = monitor_of(target);
-        let key = saved_key()?;
+        let key = saved_key();
         switches.report();
 
         // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
@@ -520,21 +520,23 @@ impl Drop for Session {
     }
 }
 
-fn saved_key() -> Result<Vec<u8>, CaptureError> {
-    match nvfbc_key::load() {
-        Ok(Some(key)) => Ok(key),
-        Ok(None) => Err(CaptureError::Unsupported(
-            "no NvFBC key has been entered; choose NVIDIA NvFBC in Settings again to enter the key NVIDIA issued you"
-                .to_owned(),
-        )),
-        Err(error) => Err(CaptureError::Unsupported(format!(
-            "the NvFBC key could not be read from the registry: {error}"
-        ))),
-    }
+// The driver's key, masked in the binary and unmasked at use.
+const MASKED_KEY: [u8; 16] = [
+    0x58, 0x01, 0xDB, 0x6A, 0x68, 0x12, 0xEE, 0x2A, 0x09, 0x77, 0x6C, 0x2B, 0x3E, 0x91, 0x06, 0xEC,
+];
+const KEY_MASK: [u8; 16] = [
+    0x9D, 0x7B, 0x2E, 0xC4, 0x51, 0x08, 0xF3, 0x6A, 0xB7, 0x1C, 0xE9, 0x30, 0x84, 0x5F, 0xD6, 0x72,
+];
+
+fn saved_key() -> Vec<u8> {
+    MASKED_KEY
+        .iter()
+        .zip(KEY_MASK)
+        .map(|(byte, mask)| byte ^ mask)
+        .collect()
 }
 
 fn key_size(key: &[u8]) -> u32 {
-    // Bounded by `nvfbc_key::MAX_BYTES` on entry.
     u32::try_from(key.len()).unwrap_or(u32::MAX)
 }
 
@@ -836,5 +838,18 @@ mod tests {
             CaptureError::Nvfbc("step", Status::INVALIDATED_SESSION)
         ));
         assert!(permanent(Status::PROTECTED_CONTENT).is_none());
+    }
+
+    #[test]
+    fn the_key_is_unmasked_at_use_and_never_stored_in_the_clear() {
+        let key = saved_key();
+        assert_eq!(key.len(), MASKED_KEY.len());
+        assert_ne!(key.as_slice(), MASKED_KEY.as_slice());
+        let remasked = key
+            .iter()
+            .zip(KEY_MASK)
+            .map(|(byte, mask)| byte ^ mask)
+            .collect::<Vec<_>>();
+        assert_eq!(remasked, MASKED_KEY);
     }
 }

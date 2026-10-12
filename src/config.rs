@@ -46,16 +46,17 @@ impl fmt::Display for Mode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
-    #[default]
     Wgc,
     Dxgi,
+    #[default]
     Nvfbc,
     #[serde(rename = "nvfbc_cuda")]
     NvfbcCuda,
 }
 
 impl Backend {
-    pub(crate) const ALL: [Self; 4] = [Self::Wgc, Self::Dxgi, Self::Nvfbc, Self::NvfbcCuda];
+    // Cheapest for the game first.
+    pub(crate) const ALL: [Self; 4] = [Self::Nvfbc, Self::NvfbcCuda, Self::Wgc, Self::Dxgi];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -64,10 +65,6 @@ impl Backend {
             Self::Nvfbc => "NVIDIA NvFBC",
             Self::NvfbcCuda => "NVIDIA NvFBC to CUDA",
         }
-    }
-
-    pub(crate) const fn uses_nvfbc(self) -> bool {
-        matches!(self, Self::Nvfbc | Self::NvfbcCuda)
     }
 }
 
@@ -192,7 +189,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Fullscreen,
-            backend: Backend::Wgc,
+            backend: Backend::Nvfbc,
             codec: Codec::H264,
             buffer_seconds: 30,
             frame_rate: 60,
@@ -308,7 +305,7 @@ mod tests {
 
         let config = parse(r#"{"buffer_seconds":120,"codec":"av1"}"#).unwrap();
         assert_eq!(config.mode, Mode::Fullscreen);
-        assert_eq!(config.backend, Backend::Wgc);
+        assert_eq!(config.backend, Backend::Nvfbc);
         assert_eq!(config.codec, Codec::Av1);
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.frame_rate, 60);
@@ -362,11 +359,6 @@ mod tests {
             };
             let json = serde_json::to_string(&config).unwrap();
             assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), config);
-            assert_eq!(
-                backend.uses_nvfbc(),
-                backend.name().contains("NvFBC"),
-                "{backend:?}"
-            );
         }
         assert!(
             serde_json::to_string(&Backend::NvfbcCuda)

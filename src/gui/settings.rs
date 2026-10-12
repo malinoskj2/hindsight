@@ -16,7 +16,6 @@ use crate::{
     log,
     sys::startup,
 };
-use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
@@ -72,7 +71,6 @@ pub(super) struct SettingsPage {
     settings_error: gui::Label,
     pub(super) theme: gui::ComboBox,
     pub(super) start_with_windows: gui::CheckBox,
-    settled_backend: Rc<Cell<Backend>>,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
 }
@@ -122,7 +120,6 @@ impl SettingsPage {
             settings_error: recording.error,
             theme: general.theme,
             start_with_windows: general.check_box,
-            settled_backend: Rc::new(Cell::new(config.backend)),
             codecs: codecs.to_vec(),
         }
     }
@@ -149,21 +146,8 @@ impl SettingsPage {
         validated(self.entered()?)
     }
 
-    pub(super) fn chosen_backend(&self) -> Backend {
-        chosen(&self.backend, &Backend::ALL)
-    }
-
     pub(super) fn chosen_theme(&self) -> Theme {
         chosen(&self.theme, &Theme::ALL)
-    }
-
-    pub(super) fn settle_backend(&self, accepted: bool) {
-        if accepted {
-            self.settled_backend.set(self.chosen_backend());
-        } else {
-            let previous = index_of(&Backend::ALL, self.settled_backend.get());
-            self.backend.items().select(previous);
-        }
     }
 
     pub(super) fn show_settings_error(&self, message: &str) {

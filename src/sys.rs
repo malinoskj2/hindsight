@@ -11,8 +11,6 @@ pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod instance;
 #[cfg(windows)]
-pub(crate) mod nvfbc_key;
-#[cfg(windows)]
 #[expect(unsafe_code)]
 pub(crate) mod shell;
 pub(crate) mod sound;
