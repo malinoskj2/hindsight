@@ -317,6 +317,17 @@ impl Encoder {
     }
 
     fn require_codec(&self) -> Result<(), NvencError> {
+        if self
+            .encode_guids()?
+            .contains(&codec_guid(self.settings.codec))
+        {
+            Ok(())
+        } else {
+            Err(NvencError::Unsupported(self.settings.codec))
+        }
+    }
+
+    fn encode_guids(&self) -> Result<Vec<GUID>, NvencError> {
         let count_guids = entry_point(self.api.get_encode_guid_count, "nvEncGetEncodeGUIDCount")?;
         let list_guids = entry_point(self.api.get_encode_guids, "nvEncGetEncodeGUIDs")?;
         let mut count = 0;
@@ -331,11 +342,7 @@ impl Encoder {
             list_guids(self.session, guids.as_mut_ptr(), count, &raw mut written)
         })?;
         guids.truncate(written as usize);
-        if guids.contains(&codec_guid(self.settings.codec)) {
-            Ok(())
-        } else {
-            Err(NvencError::Unsupported(self.settings.codec))
-        }
+        Ok(guids)
     }
 
     fn require_size(&self) -> Result<(), NvencError> {
@@ -1046,6 +1053,46 @@ fn entry_point<T>(entry: Option<T>, call: &'static str) -> Result<T, NvencError>
     entry.ok_or(NvencError::MissingEntryPoint(call))
 }
 
+/// The codecs this GPU's NVENC has an encoder for, in `Codec::ALL` order.
+pub(super) fn supported_codecs(device: &ID3D11Device) -> Result<Vec<Codec>, NvencError> {
+    let device_lock: ID3D11Multithread = device
+        .cast()
+        .map_err(|error| NvencError::Windows("lock the device", error))?;
+    let mut probe = Encoder {
+        api: Box::new(ffi::FunctionList::zeroed()),
+        session: ptr::null_mut(),
+        settings: Settings {
+            codec: Codec::H264,
+            width: 0,
+            height: 0,
+            frame_rate: 0,
+            bitrate: 0,
+            matrix: Matrix::default(),
+        },
+        slots: Vec::new(),
+        surfaces: Vec::new(),
+        queue: VecDeque::new(),
+        next: 0,
+        latest: None,
+        device_lock,
+        // Never initialized, so `Drop` only destroys the session.
+        stalled: true,
+        ring: None,
+        library: load_library()?,
+    };
+    probe.load_api()?;
+    probe.open_session(device, &EncoderDevice::Direct3D)?;
+    let guids = probe.encode_guids()?;
+    Ok(codecs_among(&guids))
+}
+
+fn codecs_among(guids: &[GUID]) -> Vec<Codec> {
+    Codec::ALL
+        .into_iter()
+        .filter(|&codec| guids.contains(&codec_guid(codec)))
+        .collect()
+}
+
 const fn codec_guid(codec: Codec) -> GUID {
     match codec {
         Codec::H264 => ffi::CODEC_H264,
@@ -1194,5 +1241,20 @@ fn call_error(call: &'static str, status: Status, detail: String) -> NvencError 
         call,
         status,
         detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_codecs_the_driver_lists_are_offered_in_the_usual_order() {
+        assert_eq!(codecs_among(&[]), Vec::<Codec>::new());
+        assert_eq!(
+            codecs_among(&[ffi::CODEC_AV1, GUID::zeroed(), ffi::CODEC_H264]),
+            vec![Codec::H264, Codec::Av1]
+        );
+        assert_eq!(codecs_among(&[ffi::CODEC_HEVC]), vec![Codec::Hevc]);
     }
 }

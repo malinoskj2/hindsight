@@ -73,17 +73,20 @@ pub(super) struct SettingsPage {
     pub(super) theme: gui::ComboBox,
     pub(super) start_with_windows: gui::CheckBox,
     settled_backend: Rc<Cell<Backend>>,
+    /// The codecs offered, in the order of the codec list's items.
+    codecs: Vec<Codec>,
 }
 
 impl SettingsPage {
     pub(super) fn new(
         parent: &(impl GuiParent + 'static),
         config: &Config,
+        codecs: &[Codec],
         start_with_windows: bool,
         skin: &Skin,
     ) -> Self {
         let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
-        let recording = RecordingControls::new(&page, config, skin);
+        let recording = RecordingControls::new(&page, config, codecs, skin);
         let general = GeneralControls::new(&page, config, start_with_windows);
         let frames = vec![recording.frame, general.frame];
         layout::draw(
@@ -120,6 +123,7 @@ impl SettingsPage {
             theme: general.theme,
             start_with_windows: general.check_box,
             settled_backend: Rc::new(Cell::new(config.backend)),
+            codecs: codecs.to_vec(),
         }
     }
 
@@ -235,7 +239,7 @@ impl SettingsPage {
         Ok(Config {
             mode: chosen(&self.mode, &Mode::ALL),
             backend: chosen(&self.backend, &Backend::ALL),
-            codec: chosen(&self.codec, &Codec::ALL),
+            codec: chosen(&self.codec, &self.codecs),
             frame_rate: required(&self.frame_rate)?,
             buffer_seconds: required(&self.buffer_seconds)?,
             bitrate_mbps: required(&self.bitrate)?,
@@ -269,14 +273,14 @@ struct RecordingControls {
 }
 
 impl RecordingControls {
-    fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
+    fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec], skin: &Skin) -> Self {
         let frame = Frame::new(
             page,
             text::GROUP_RECORDING_SETTINGS,
             rows::RECORDING_FRAME,
             rows::RECORDING_HEIGHT,
         );
-        let encoding = EncodingFields::new(page, config);
+        let encoding = EncodingFields::new(page, config, codecs);
         let hotkey = text_field(page, text::HOTKEY, rows::HOTKEY, 110, &config.hotkey);
         let (mode, backend) = source_fields(page, config);
         let folder = text_field(
@@ -339,15 +343,16 @@ struct EncodingFields {
 }
 
 impl EncodingFields {
-    fn new(page: &gui::TabPage, config: &Config) -> Self {
+    fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec]) -> Self {
+        let names = codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>();
         let codec = choice_field(
             page,
             text::CODEC,
             INNER_X,
             rows::ENCODING,
             90,
-            &Codec::ALL.map(Codec::name),
-            index_of(&Codec::ALL, config.codec),
+            &names,
+            index_of(codecs, config.codec).or(Some(0)),
         );
         let (frame_rate, frame_rate_spin) = number_field(
             page,

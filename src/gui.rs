@@ -11,8 +11,8 @@ use self::{
 };
 use crate::{
     APP_NAME,
-    config::{Config, Mode},
-    log,
+    config::{Codec, Config, Mode},
+    gpu, log,
     service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
@@ -83,7 +83,8 @@ impl Main {
         let (start_with_windows, startup_error) = startup_setting();
         let status = StatusPage::new(&wnd, &skin);
         let clips = ClipsPage::new(&wnd, &skin);
-        let settings = SettingsPage::new(&wnd, &config, start_with_windows, &skin);
+        let codecs = offered_codecs(&config);
+        let settings = SettingsPage::new(&wnd, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&wnd, &skin);
         let tab = gui::Tab::new(
             &wnd,
@@ -580,6 +581,28 @@ fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
             | visibility,
         ..Default::default()
     })
+}
+
+/// The codecs the Settings tab offers: those the GPU encodes, or all of them when it cannot say.
+fn offered_codecs(config: &Config) -> Vec<Codec> {
+    let codecs = match gpu::supported_codecs() {
+        Ok(codecs) if !codecs.is_empty() => {
+            log::info(text::codecs_offered(&codecs));
+            codecs
+        }
+        Ok(_) => {
+            log::warning(text::codecs_unknown("the driver lists no codec"));
+            Codec::ALL.to_vec()
+        }
+        Err(error) => {
+            log::warning(text::codecs_unknown(error));
+            Codec::ALL.to_vec()
+        }
+    };
+    if !codecs.contains(&config.codec) {
+        log::warning(text::codec_unsupported(config.codec.name()));
+    }
+    codecs
 }
 
 fn startup_setting() -> (bool, Option<String>) {

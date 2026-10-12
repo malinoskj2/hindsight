@@ -19,4 +19,13 @@ mod vram;
 
 pub(crate) use pipeline::record;
 
-use crate::replay::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, reserved_pages};
+use crate::{
+    config::Codec,
+    replay::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, reserved_pages},
+};
+
+/// The codecs the NVIDIA GPU's encoder supports, or why that could not be asked.
+pub(crate) fn supported_codecs() -> Result<Vec<Codec>, String> {
+    let device = device::Device::create().map_err(|error| error.to_string())?;
+    nvenc::supported_codecs(&device.d3d).map_err(|error| error.to_string())
+}

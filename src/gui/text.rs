@@ -1,7 +1,7 @@
 //! Every string the window shows, log lines included.
 
 use crate::{
-    config::Memory,
+    config::{Codec, Memory},
     service::{DisplayStatus, Status},
 };
 use std::{fmt::Display, path::Path};
@@ -221,6 +221,21 @@ fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.display().to_string(),
+    )
+}
+
+pub(super) fn codecs_offered(codecs: &[Codec]) -> String {
+    let names = codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>();
+    format!("Codecs this GPU encodes: {}", names.join(", "))
+}
+
+pub(super) fn codecs_unknown(error: impl Display) -> String {
+    format!("Could not ask the GPU which codecs it encodes, so every codec is offered: {error}")
+}
+
+pub(super) fn codec_unsupported(codec: &str) -> String {
+    format!(
+        "This GPU's encoder does not support {codec}; choose another codec in Settings and apply"
     )
 }
 
