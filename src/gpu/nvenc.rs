@@ -51,6 +51,9 @@ use windows::{
 };
 
 mod ffi;
+// A by-hand measurement of what each NVENC call costs on Direct3D 11 and Direct3D 12.
+#[cfg(test)]
+mod d3d12_cost;
 
 // Re-exported because `NvencError::Call` carries it.
 pub(super) use ffi::Status;

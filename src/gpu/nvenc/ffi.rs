@@ -39,7 +39,7 @@ const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
 
 /// `NVENCAPI_STRUCT_VERSION`. The header also sets bit 31 in some structures' versions, without
 /// naming it, and so do the constants below.
-const fn struct_version(version: u32) -> u32 {
+pub(super) const fn struct_version(version: u32) -> u32 {
     API_VERSION | (version << 16) | (0x7 << 28)
 }
 
@@ -587,7 +587,9 @@ pub(super) struct InitializeParams {
     pub(super) max_encode_height: u32,
     _max_me_hint_counts: [u32; 8],
     pub(super) tuning_info: u32,
-    _buffer_format_to_stats_level: [u32; 3],
+    /// The input format, which only a Direct3D 12 session reads.
+    pub(super) buffer_format: u32,
+    _state_buffers_to_stats_level: [u32; 2],
     _reserved: [u32; 285],
     _reserved2: [*mut c_void; 64],
 }
@@ -601,6 +603,7 @@ const _: () = assert!(offset_of!(InitializeParams, enable_ptd) == 64);
 const _: () = assert!(offset_of!(InitializeParams, encode_config) == 88);
 const _: () = assert!(offset_of!(InitializeParams, max_encode_width) == 96);
 const _: () = assert!(offset_of!(InitializeParams, tuning_info) == 136);
+const _: () = assert!(offset_of!(InitializeParams, buffer_format) == 140);
 
 /// `NV_ENC_REGISTER_RESOURCE`.
 #[repr(C)]
