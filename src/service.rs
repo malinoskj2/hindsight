@@ -6,7 +6,7 @@ use crate::{
     audio,
     config::{Backend, Config, Mode, Theme},
     log,
-    replay::{self, Clip, Live, SaveError, Snapshot, Stream},
+    replay::{self, Live, SaveError, Snapshot, Stream},
     storage::{Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -104,7 +104,7 @@ const RECORDER: Recorder = crate::gpu::record;
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
 /// Writes a clip into a directory and returns its path.
-type Writer = fn(&Clip, &Path) -> Result<PathBuf, SaveError>;
+type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
 /// Plays a tone about a save.
 type Chime = Box<dyn Fn(Tone) + Send>;
 
@@ -743,11 +743,9 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                // Packets kept in GPU memory are read back here, off the worker.
-                snapshot
-                    .clip()
-                    .map_err(SaveError::from)
-                    .and_then(|clip| write(&clip, &directory))
+                // Packets kept in GPU memory are read back here, off the worker, as they are
+                // written.
+                write(&snapshot, &directory)
             })
     }
 
@@ -1306,13 +1304,13 @@ mod tests {
     }
 
     /// Writes the clip after two and a half seconds.
-    fn slow_write(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
+    fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
         thread::sleep(Duration::from_millis(2500));
-        replay::save(clip, directory)
+        replay::save(snapshot, directory)
     }
 
     /// Fails after a second and a half.
-    fn failing_write(_: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
+    fn failing_write(_: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
         thread::sleep(Duration::from_millis(1500));
         Err(SaveError::Io {
             step: "create",

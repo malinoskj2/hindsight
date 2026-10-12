@@ -195,24 +195,52 @@ impl Entry {
     }
 }
 
-/// The packets of `entries`, those put away read back from their pages: each run of
-/// neighbours in one page in a single read.
-pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
-    let mut packets = Vec::with_capacity(entries.len());
+/// What [`each`] calls with each entry and its packet's bytes.
+pub(crate) type Visit<'a, E> = dyn FnMut(&Entry, &[u8]) -> Result<(), E> + 'a;
+
+/// Calls `visit` with each of `entries` and its packet's bytes, in order, those put away read
+/// back from their pages: each run of neighbours in one page in a single read. Only one packet
+/// is ever held here, and only when it straddles two of the pieces a page reads back in; the
+/// others are handed over straight from the piece. Stops at the first error.
+pub(crate) fn each<E: From<StoreError>>(
+    entries: &[Entry],
+    visit: &mut Visit<'_, E>,
+) -> Result<(), E> {
+    let mut straddling = Vec::new();
     let mut rest = entries;
     while let Some((first, _)) = rest.split_first() {
         match first {
             Entry::Memory(packet) => {
-                packets.push(Arc::clone(packet));
+                visit(first, &packet.data)?;
                 rest = &rest[1..];
             }
             Entry::Stored { slot, .. } => {
                 let run = run_length(rest, slot);
-                packets.extend(read_run(&rest[..run])?);
+                visit_run(&rest[..run], &mut straddling, visit)?;
                 rest = &rest[run..];
             }
         }
     }
+    Ok(())
+}
+
+/// The packets of `entries`, those put away read back from their pages.
+#[cfg(test)]
+pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
+    let mut packets = Vec::with_capacity(entries.len());
+    each(entries, &mut |entry, data| {
+        packets.push(match entry {
+            Entry::Memory(packet) => Arc::clone(packet),
+            Entry::Stored {
+                index, keyframe, ..
+            } => Arc::new(Packet {
+                index: *index,
+                keyframe: *keyframe,
+                data: data.into(),
+            }),
+        });
+        Ok::<_, StoreError>(())
+    })?;
     Ok(packets)
 }
 
@@ -231,56 +259,86 @@ fn run_length(rest: &[Entry], first: &Slot) -> usize {
         .count()
 }
 
-/// Reads back `run`, stored packets in one page at rising offsets, in one pass over the
-/// range they span.
-fn read_run(run: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
-    let slots: Vec<&Slot> = run
-        .iter()
-        .map(|entry| match entry {
-            Entry::Stored { slot, .. } => slot,
-            Entry::Memory(_) => unreachable!("a run holds stored packets only"),
-        })
-        .collect();
-    let (Some(first), Some(last)) = (slots.first(), slots.last()) else {
-        return Ok(Vec::new());
+/// The slot of a stored entry.
+fn slot_of(entry: &Entry) -> &Slot {
+    match entry {
+        Entry::Stored { slot, .. } => slot,
+        Entry::Memory(_) => unreachable!("a run holds stored packets only"),
+    }
+}
+
+/// Reads back `run`, stored packets in one page at rising offsets, in one pass over the range
+/// they span, and calls `visit` with each as it completes. A packet that straddles two pieces
+/// is gathered in `straddling`, whose room is kept for the next one.
+fn visit_run<E: From<StoreError>>(
+    run: &[Entry],
+    straddling: &mut Vec<u8>,
+    visit: &mut Visit<'_, E>,
+) -> Result<(), E> {
+    let (Some(first), Some(last)) = (run.first().map(slot_of), run.last().map(slot_of)) else {
+        return Ok(());
     };
     let start = first.offset;
     let span = last.offset + last.length - start;
-    let mut buffers: Vec<Box<[u8]>> = slots
-        .iter()
-        .map(|slot| vec![0; slot.length].into_boxed_slice())
-        .collect();
 
-    // Each piece is spread over the packets it covers, in order.
+    // The page's sink cannot fail, so an error from `visit` is kept, and the rest of the read
+    // passes over.
+    let mut failed = None;
     let mut next = 0;
     first.page.read(start, span, &mut |at, piece| {
-        let piece_end = at + piece.len();
-        while let Some(slot) = slots.get(next) {
-            let (slot_start, slot_end) = (slot.offset - start, slot.offset - start + slot.length);
-            if slot_start >= piece_end {
-                break;
-            }
-            let (from, to) = (slot_start.max(at), slot_end.min(piece_end));
-            buffers[next][from - slot_start..to - slot_start]
-                .copy_from_slice(&piece[from - at..to - at]);
-            if slot_end > piece_end {
-                break;
-            }
-            next += 1;
+        if failed.is_some() {
+            return;
+        }
+        if let Err(error) = spread(run, start, at, piece, &mut next, straddling, visit) {
+            failed = Some(error);
         }
     })?;
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    // Empty packets at the end of the span lie in no piece.
+    for entry in &run[next..] {
+        visit(entry, &[])?;
+    }
+    Ok(())
+}
 
-    Ok(run
-        .iter()
-        .zip(buffers)
-        .map(|(entry, data)| {
-            Arc::new(Packet {
-                index: entry.index(),
-                keyframe: entry.keyframe(),
-                data,
-            })
-        })
-        .collect())
+/// Hands each packet of `run` that `piece`, the bytes at `at` of the range from `start`,
+/// completes to `visit`, from `next` on, and moves `next` past them. A packet wholly in the
+/// piece goes straight from it; one that begins or ends outside it is gathered in `straddling`.
+fn spread<E>(
+    run: &[Entry],
+    start: usize,
+    at: usize,
+    piece: &[u8],
+    next: &mut usize,
+    straddling: &mut Vec<u8>,
+    visit: &mut Visit<'_, E>,
+) -> Result<(), E> {
+    let piece_end = at + piece.len();
+    while let Some(entry) = run.get(*next) {
+        let slot = slot_of(entry);
+        let (slot_start, slot_end) = (slot.offset - start, slot.offset - start + slot.length);
+        if slot_start >= piece_end {
+            break;
+        }
+        let (from, to) = (slot_start.max(at), slot_end.min(piece_end));
+        let bytes = &piece[from - at..to - at];
+        if from == slot_start && to == slot_end {
+            visit(entry, bytes)?;
+        } else {
+            if from == slot_start {
+                straddling.clear();
+            }
+            straddling.extend_from_slice(bytes);
+            if to < slot_end {
+                break;
+            }
+            visit(entry, straddling)?;
+        }
+        *next += 1;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

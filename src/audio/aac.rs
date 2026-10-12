@@ -23,9 +23,9 @@ use windows::{
     core::Result,
 };
 
-/// The bitrate, 160 kb/s, in the bytes a second the encoder is configured with; it accepts
-/// 12 000, 16 000, 20 000 and 24 000.
-const BYTES_PER_SECOND: u32 = 20_000;
+/// The bitrate, 192 kb/s, in the bytes a second the encoder is configured with; it accepts
+/// 12 000, 16 000, 20 000 and 24 000. The highest, as NVIDIA Instant Replay stores its sound.
+const BYTES_PER_SECOND: u32 = 24_000;
 /// AAC-LC at level 2, as the encoder documents it for stereo up to 48 kHz.
 const AAC_LC_LEVEL_2: u32 = 0x29;
 /// Raw AAC frames, without ADTS headers: the MP4 file describes the stream once.
@@ -316,7 +316,7 @@ mod tests {
         assert!((44..=47).contains(&frames.len()), "{}", frames.len());
         let bytes: usize = frames.iter().map(|frame| frame.len()).sum();
         assert!(
-            (15_000..=25_000).contains(&bytes),
+            (19_000..=29_000).contains(&bytes),
             "{bytes} bytes for a second"
         );
 

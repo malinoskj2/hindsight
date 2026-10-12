@@ -26,7 +26,7 @@ mod store;
 
 pub(crate) use audio::{AudioClip, AudioFormat, AudioFrame, CLOCK_RATE, FRAME_SAMPLES};
 use audio::{AudioRing, tick_time};
-use mp4::MuxError;
+use mp4::{MuxError, Visit};
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
@@ -223,7 +223,7 @@ impl Live {
 
     /// The buffer as it is now, if the stream has started, with the sound from the first
     /// packet's frame to the end of the last one's when there is sound. Cheap: the packets put
-    /// away in a store are read back only when the snapshot becomes a clip.
+    /// away in a store are read back only as a save writes them.
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
         let entries = self.ring().snapshot();
@@ -276,8 +276,9 @@ impl Snapshot {
         )
     }
 
-    /// The clip to write, with every packet in memory: the ones put away in a store are read
-    /// back, which takes as much memory as they do.
+    /// The snapshot with every packet in memory, for tests to look at: the ones put away in a
+    /// store are read back, which takes as much memory as they do. Saving does not need this.
+    #[cfg(test)]
     pub(crate) fn clip(self) -> Result<Clip, StoreError> {
         Ok(Clip {
             stream: self.stream,
@@ -287,17 +288,27 @@ impl Snapshot {
     }
 }
 
-/// What a save writes: the stream and the packets buffered when it was requested, and the sound
-/// that plays alongside them.
+/// The buffered packets as the MP4 writer goes through them: the ones put away in a store read
+/// back a run at a time on each pass, never all at once.
+impl mp4::Packets for [Entry] {
+    fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
+        store::each(self, &mut |entry, data| {
+            each(entry.index(), entry.keyframe(), data)
+        })
+    }
+}
+
+/// A snapshot with every packet in memory, for tests to look at.
+#[cfg(test)]
 pub(crate) struct Clip {
     pub(crate) stream: Stream,
     pub(crate) packets: Vec<Arc<Packet>>,
     pub(crate) audio: Option<AudioClip>,
 }
 
+#[cfg(test)]
 impl Clip {
     /// Seconds of video, from the first packet to the end of the last.
-    #[cfg(test)]
     pub(crate) fn seconds(&self) -> f64 {
         seconds(
             self.packets.first().map(|packet| packet.index),
@@ -326,12 +337,10 @@ pub(crate) enum SaveError {
         #[source]
         source: io::Error,
     },
-    /// The clip could not be muxed, or the muxed bytes could not be written.
+    /// The clip could not be muxed, its packets could not be read back from where they were
+    /// put away, or the muxed bytes could not be written.
     #[error(transparent)]
     Mux(#[from] MuxError),
-    /// The packets could not be read back from where they were put away.
-    #[error("read the buffer back from GPU memory: {0}")]
-    Store(#[from] StoreError),
 }
 
 impl SaveError {
@@ -373,20 +382,21 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
     }
 }
 
-/// Writes `clip` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The file
-/// appears under its final name only once it is complete.
-pub(crate) fn save(clip: &Clip, directory: &Path) -> Result<PathBuf, SaveError> {
+/// Writes `snapshot` into `directory` as `hindsight_<date>_<time>.mp4` and returns its path. The
+/// file appears under its final name only once it is complete. Packets kept in GPU memory are
+/// read back as they are written, so the save holds a few pieces of them at a time, not the clip.
+pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let path = unused_path(directory, &log::file_stamp());
-    write_then_rename(clip, &path)?;
+    write_then_rename(snapshot, &path)?;
     Ok(path)
 }
 
-/// Writes `clip` next to `path` under a partial name and renames it to `path` once complete,
-/// removing the partial file if either step fails.
-fn write_then_rename(clip: &Clip, path: &Path) -> Result<(), SaveError> {
+/// Writes `snapshot` next to `path` under a partial name and renames it to `path` once
+/// complete, removing the partial file if either step fails.
+fn write_then_rename(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
     let partial = path.with_extension(PARTIAL_EXTENSION);
-    let result = write_file(clip, &partial)
+    let result = write_file(snapshot, &partial)
         .and_then(|()| fs::rename(&partial, path).map_err(SaveError::io("finish", path)));
     if result.is_err() {
         // The save already failed; a leftover partial file is all that is lost here.
@@ -395,14 +405,16 @@ fn write_then_rename(clip: &Clip, path: &Path) -> Result<(), SaveError> {
     result
 }
 
-/// Muxes `clip` into a new file at `path` and waits until it is on the disk.
-fn write_file(clip: &Clip, path: &Path) -> Result<(), SaveError> {
+/// Muxes `snapshot` into a new file at `path` and waits until it is on the disk.
+fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    match &clip.audio {
-        Some(audio) => mp4::write_with_audio(&mut output, &clip.stream, &clip.packets, audio)?,
-        None => mp4::write(&mut output, &clip.stream, &clip.packets)?,
-    }
+    mp4::write_from(
+        &mut output,
+        &snapshot.stream,
+        &snapshot.entries[..],
+        snapshot.audio.as_ref(),
+    )?;
     sync(output).map_err(SaveError::io("finish", path))
 }
 
@@ -487,25 +499,86 @@ mod tests {
     #[test]
     fn a_buffer_in_a_store_saves_the_same_clip() {
         let in_memory = live_with(100).clip().unwrap();
-        let live = Live::new(60);
-        live.set_stream(STREAM);
-        live.set_store(Box::new(store::tests::MemoryStore::new(1 << 16, 1000)));
-        push_frames(&live, 100);
-        let snapshot = live.snapshot().unwrap();
-        assert!((snapshot.seconds() - in_memory.seconds()).abs() < 1e-9);
-        let from_store = snapshot.clip().unwrap();
-        assert_eq!(from_store.packets.len(), in_memory.packets.len());
-        for (stored, kept) in from_store.packets.iter().zip(&in_memory.packets) {
-            assert_eq!(stored.index, kept.index);
-            assert_eq!(stored.keyframe, kept.keyframe);
-            assert_eq!(stored.data, kept.data);
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = save(&from_store, directory.path()).unwrap();
         let mut expected = Vec::new();
         mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
-        assert_eq!(fs::read(path).unwrap(), expected);
+        // Whole packets in each piece read back; packets straddling small pieces; and a store
+        // given up mid-session, which leaves the newer packets in memory behind stored ones.
+        for (piece, fail_after) in [(1000, usize::MAX), (7, usize::MAX), (7, 50)] {
+            let live = Live::new(60);
+            live.set_stream(STREAM);
+            let mut memory_store = store::tests::MemoryStore::new(1 << 16, piece);
+            memory_store.fail_after = fail_after;
+            live.set_store(Box::new(memory_store));
+            push_frames(&live, 100);
+            let snapshot = live.snapshot().unwrap();
+            assert!((snapshot.seconds() - in_memory.seconds()).abs() < 1e-9);
+            let kinds: Vec<bool> = snapshot
+                .entries
+                .iter()
+                .map(|entry| matches!(entry, Entry::Memory(_)))
+                .collect();
+            assert_eq!(kinds.contains(&true), fail_after != usize::MAX);
+            assert!(!kinds[0], "the oldest packets are in the store");
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = save(&snapshot, directory.path()).unwrap();
+            assert_eq!(fs::read(path).unwrap(), expected, "pieces of {piece}");
+
+            let from_store = snapshot.clip().unwrap();
+            assert_eq!(from_store.packets.len(), in_memory.packets.len());
+            for (stored, kept) in from_store.packets.iter().zip(&in_memory.packets) {
+                assert_eq!(stored.index, kept.index);
+                assert_eq!(stored.keyframe, kept.keyframe);
+                assert_eq!(stored.data, kept.data);
+            }
+        }
+    }
+
+    /// An H.264 frame of about `bytes`: a keyframe's parameter sets and picture, or a slice,
+    /// with a long run of payload after it that holds no start code.
+    fn large_frame(keyframe_frame: bool, bytes: usize) -> Box<[u8]> {
+        let mut data = if keyframe_frame {
+            keyframe()
+        } else {
+            inter_frame()
+        };
+        data.resize(bytes, 0xAB);
+        data.into()
+    }
+
+    #[test]
+    fn a_save_from_a_store_holds_a_few_packets_not_the_clip() {
+        const FRAMES: usize = 120;
+        const FRAME_BYTES: usize = 256 << 10;
+        let live = Live::new(FRAMES as u64);
+        live.set_stream(STREAM);
+        // Pages of 4 MiB read back in 1 MiB pieces, a scale model of the GPU stores' 32 MiB
+        // reads, so many frames straddle two pieces.
+        live.set_store(Box::new(store::tests::MemoryStore::new(4 << 20, 1 << 20)));
+        for (index, extra) in (0..).zip(0..FRAMES) {
+            let keyframe_packet = index % 30 == 0;
+            let data = large_frame(keyframe_packet, FRAME_BYTES + extra);
+            let packet = Packet {
+                index,
+                keyframe: keyframe_packet,
+                data,
+            };
+            live.push(packet, true);
+        }
+        let snapshot = live.snapshot().unwrap();
+        let clip_bytes = FRAMES * FRAME_BYTES;
+        let directory = tempfile::tempdir().unwrap();
+
+        let saving = heap::peak_during(|| {
+            save(&snapshot, directory.path()).unwrap();
+        });
+        // The write buffer, a packet gathered across two pieces, and the index.
+        assert!(
+            saving < WRITE_BUFFER_BYTES + 2 * FRAME_BYTES + (256 << 10),
+            "a save held {saving} bytes at once"
+        );
+        let reading_all = heap::peak_during(|| drop(snapshot.clip().unwrap()));
+        assert!(reading_all >= clip_bytes, "{reading_all} < {clip_bytes}");
     }
 
     #[test]
@@ -825,11 +898,11 @@ mod tests {
     #[test]
     fn saves_complete_files_under_unique_names() {
         let directory = tempfile::tempdir().unwrap();
-        let clip = live_with(40).clip().unwrap();
+        let snapshot = live_with(40).snapshot().unwrap();
         let target = directory.path().join("clips");
 
-        let first = save(&clip, &target).unwrap();
-        let second = save(&clip, &target).unwrap();
+        let first = save(&snapshot, &target).unwrap();
+        let second = save(&snapshot, &target).unwrap();
 
         assert_ne!(first, second);
         assert!(
@@ -849,20 +922,104 @@ mod tests {
     #[test]
     fn a_failed_save_leaves_no_partial_file() {
         let directory = tempfile::tempdir().unwrap();
-        let clip = Clip {
+        let snapshot = Snapshot {
             stream: STREAM,
-            packets: vec![Arc::new(Packet {
+            entries: vec![Entry::Memory(Arc::new(Packet {
                 index: 0,
                 keyframe: false,
                 data: inter_frame().into(),
-            })],
+            }))],
             audio: None,
         };
 
         assert_matches!(
-            save(&clip, directory.path()),
+            save(&snapshot, directory.path()),
             Err(SaveError::Mux(MuxError::NoSequenceHeader))
         );
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    /// Counts the heap bytes each thread holds and the most it has held, so a test can see what
+    /// a save holds at its peak. Bytes one thread allocates and another frees count against the
+    /// second, which a test on one thread never does.
+    #[expect(unsafe_code)]
+    mod heap {
+        use std::{
+            alloc::{GlobalAlloc, Layout, System},
+            cell::Cell,
+        };
+
+        thread_local! {
+            static HELD: Cell<isize> = const { Cell::new(0) };
+            static PEAK: Cell<isize> = const { Cell::new(0) };
+        }
+
+        /// The system allocator, counting as it goes.
+        struct Counting;
+
+        // SAFETY: every call is passed to the system allocator as it came, and the counting
+        // beside it neither allocates nor touches the memory.
+        unsafe impl GlobalAlloc for Counting {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                // SAFETY: the caller's promises about `layout` are the system allocator's.
+                let pointer = unsafe { System.alloc(layout) };
+                if !pointer.is_null() {
+                    count(size(layout.size()));
+                }
+                pointer
+            }
+
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                // SAFETY: as for `alloc`.
+                let pointer = unsafe { System.alloc_zeroed(layout) };
+                if !pointer.is_null() {
+                    count(size(layout.size()));
+                }
+                pointer
+            }
+
+            unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+                // SAFETY: the caller allocated `pointer` with `layout` here, which is to say in
+                // the system allocator.
+                unsafe { System.dealloc(pointer, layout) };
+                count(-size(layout.size()));
+            }
+
+            unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                // SAFETY: as for `dealloc`, and the caller's promises about `new_size` are the
+                // system allocator's.
+                let moved = unsafe { System.realloc(pointer, layout, new_size) };
+                if !moved.is_null() {
+                    count(size(new_size) - size(layout.size()));
+                }
+                moved
+            }
+        }
+
+        #[global_allocator]
+        static COUNTING: Counting = Counting;
+
+        /// `bytes` as a signed count; no allocation comes near `isize::MAX`.
+        fn size(bytes: usize) -> isize {
+            isize::try_from(bytes).unwrap_or(isize::MAX)
+        }
+
+        /// Adds `bytes` to this thread's count and raises its peak to match. A thread being
+        /// torn down may have lost its counters already; it is not measured.
+        fn count(bytes: isize) {
+            let _ = HELD.try_with(|held| {
+                let now = held.get() + bytes;
+                held.set(now);
+                let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+            });
+        }
+
+        /// The most heap bytes this thread held while `work` ran, above what it held before.
+        pub(super) fn peak_during(work: impl FnOnce()) -> usize {
+            let before = HELD.with(Cell::get);
+            PEAK.with(|peak| peak.set(before));
+            work();
+            usize::try_from(PEAK.with(Cell::get) - before).unwrap_or(0)
+        }
     }
 }

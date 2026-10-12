@@ -1,7 +1,8 @@
 //! A minimal MP4 writer for one video track in H.264, HEVC or AV1 and, when there is sound, one
 //! AAC track. The index (`moov`) is written before the media data, so players can start a clip
-//! without reading to its end; with every packet already in memory, the offsets are known up
-//! front.
+//! without reading to its end. The index needs every sample's size first, so the writer goes
+//! through the packets twice, once for the sizes and once for the media, holding only one packet
+//! at a time; a buffer kept in GPU memory is read back twice rather than all at once.
 //!
 //! Video alone sits in one chunk. With sound, the media data alternates a second of video with
 //! the second of sound that plays alongside it, so a player reads both from one place in the
@@ -11,7 +12,7 @@
 //! The atoms are encoded by the `mp4-atom` crate. The layout is this module's: which samples
 //! make a chunk and where the chunks sit, the edit list, and the index before the media data.
 
-use super::{AudioClip, FRAME_SAMPLES, Packet, Stream, configuration, sample_parts};
+use super::{AudioClip, FRAME_SAMPLES, Packet, StoreError, Stream, configuration, sample_parts};
 use crate::config::Codec;
 use mp4_atom::{
     Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Decode, Dinf, Dref, Edts,
@@ -21,7 +22,7 @@ use mp4_atom::{
     esds::{DecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
     u24,
 };
-use std::{io, ops::Range, sync::Arc};
+use std::{io, slice, sync::Arc};
 use thiserror::Error;
 
 /// Media ticks per frame; the track's time scale is the frame rate times this.
@@ -55,11 +56,10 @@ const DATA_REFERENCE: u16 = 1;
 const BT709: u16 = 1;
 
 /// One packet as the index describes it and the media data stores it.
-struct Sample<'a> {
+struct Sample {
     /// The packet's frame index.
     index: u64,
-    parts: Vec<&'a [u8]>,
-    /// The bytes `parts` take in the media data, lengths included.
+    /// The bytes the packet's parts take in the media data, lengths included.
     size: u32,
     /// Media ticks until the next sample.
     duration: u32,
@@ -70,7 +70,7 @@ struct Sample<'a> {
 struct Track<'a> {
     stream: &'a Stream,
     decoder: &'a [u8],
-    samples: &'a [Sample<'a>],
+    samples: &'a [Sample],
 }
 
 /// The track's lengths in time: its media time scale, and its duration in that scale and in the
@@ -285,50 +285,71 @@ pub(crate) enum MuxError {
     NoSequenceHeader,
     #[error("the clip is too large for an MP4 index")]
     TooLarge,
+    /// The second reading of the packets disagreed with the first, which the index was built
+    /// from; the file would not match its index.
+    #[error("the buffered video changed while it was being saved")]
+    Changed,
     #[error("build the clip's index: {0}")]
     Index(#[from] mp4_atom::Error),
     #[error("write the clip: {0}")]
     Io(#[from] io::Error),
+    /// The packets could not be read back from where they were put away.
+    #[error("read the buffer back from GPU memory: {0}")]
+    Read(#[from] StoreError),
+}
+
+/// What [`Packets::visit`] calls with each packet: its frame index, keyframe flag and bytes.
+pub(crate) type Visit<'a> = dyn FnMut(u64, bool, &[u8]) -> Result<(), MuxError> + 'a;
+
+/// A clip's video packets, oldest first and starting on a keyframe, which the writer goes
+/// through twice: once for the index and once for the media data. Neither pass needs more than
+/// one packet at a time, so packets kept outside system memory never have to be brought into
+/// it all at once.
+pub(crate) trait Packets {
+    /// Calls `each` with every packet's frame index, keyframe flag and bytes, in order, and
+    /// stops at the first error.
+    fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError>;
+}
+
+impl Packets for [Arc<Packet>] {
+    fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
+        self.iter()
+            .try_for_each(|packet| each(packet.index, packet.keyframe, &packet.data))
+    }
 }
 
 /// Writes `packets`, oldest first and starting on a keyframe, as a complete MP4 file.
+#[cfg(test)]
 pub(crate) fn write(
     output: &mut impl io::Write,
     stream: &Stream,
     packets: &[Arc<Packet>],
 ) -> Result<(), MuxError> {
-    write_tracks(output, stream, packets, None)
+    write_from(output, stream, packets, None)
 }
 
 /// Writes `packets`, oldest first and starting on a keyframe, and the sound `audio` that plays
 /// alongside them, as a complete MP4 file.
+#[cfg(test)]
 pub(crate) fn write_with_audio(
     output: &mut impl io::Write,
     stream: &Stream,
     packets: &[Arc<Packet>],
     audio: &AudioClip,
 ) -> Result<(), MuxError> {
-    write_tracks(output, stream, packets, Some(audio))
+    write_from(output, stream, packets, Some(audio))
 }
 
-/// Writes the video track of `packets` and, when there is one, the sound track of `audio`.
-fn write_tracks(
+/// Writes the video track of `packets` and, when there is one, the sound track of `audio`, as a
+/// complete MP4 file. The packets are gone through twice, first for the index and then for the
+/// media data, and only one is needed at a time; the sound is small and stays in memory.
+pub(crate) fn write_from<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     stream: &Stream,
-    packets: &[Arc<Packet>],
+    packets: &P,
     audio: Option<&AudioClip>,
 ) -> Result<(), MuxError> {
-    if packets.is_empty() {
-        return Err(MuxError::Empty);
-    }
-    let decoder = packets
-        .iter()
-        .find_map(|packet| configuration(stream.codec, &packet.data))
-        .ok_or(MuxError::NoSequenceHeader)?;
-    let samples = samples(stream.codec, packets)?;
-    if samples.is_empty() {
-        return Err(MuxError::Empty);
-    }
+    let (decoder, samples) = index(stream.codec, packets)?;
     let track = Track {
         stream,
         decoder: &decoder,
@@ -341,37 +362,70 @@ fn write_tracks(
     let layout = Layout::of(&track, sound.as_ref());
 
     output.write_all(&header(&track, sound.as_ref(), &layout)?)?;
-    write_media(output, &track, sound.as_ref(), &layout)?;
+    write_media(output, &track, sound.as_ref(), &layout, packets)?;
     output.flush()?;
     Ok(())
 }
 
-/// Each packet as a sample; a frame index that skips ahead lengthens the previous sample.
-fn samples(codec: Codec, packets: &[Arc<Packet>]) -> Result<Vec<Sample<'_>>, MuxError> {
-    let prefix = if length_prefixed(codec) {
+/// The first pass over `packets`: the decoder configuration record from the first packet that
+/// carries one, and each packet as a sample, without keeping any packet's bytes.
+fn index<P: Packets + ?Sized>(
+    codec: Codec,
+    packets: &P,
+) -> Result<(Vec<u8>, Vec<Sample>), MuxError> {
+    let mut seen = false;
+    let mut decoder = None;
+    let mut samples: Vec<Sample> = Vec::new();
+    packets.visit(&mut |index, keyframe, data| {
+        seen = true;
+        if decoder.is_none() {
+            decoder = configuration(codec, data);
+        }
+        add_sample(&mut samples, codec, index, keyframe, data)
+    })?;
+    if !seen {
+        return Err(MuxError::Empty);
+    }
+    let decoder = decoder.ok_or(MuxError::NoSequenceHeader)?;
+    if samples.is_empty() {
+        return Err(MuxError::Empty);
+    }
+    Ok((decoder, samples))
+}
+
+/// Adds the packet `data` at frame `index` to `samples`, unless it keeps nothing; a frame index
+/// that skips ahead lengthens the previous sample.
+fn add_sample(
+    samples: &mut Vec<Sample>,
+    codec: Codec,
+    index: u64,
+    keyframe: bool,
+    data: &[u8],
+) -> Result<(), MuxError> {
+    let parts = sample_parts(codec, data);
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let size = stored_size(&parts, prefix_bytes(codec))?;
+    if let Some(last) = samples.last_mut() {
+        last.duration = duration_between(last.index, index)?;
+    }
+    samples.push(Sample {
+        index,
+        size,
+        duration: TICKS_PER_FRAME,
+        keyframe,
+    });
+    Ok(())
+}
+
+/// The bytes of the length in front of each part of a sample.
+fn prefix_bytes(codec: Codec) -> usize {
+    if length_prefixed(codec) {
         usize::from(NAL_LENGTH_BYTES)
     } else {
         0
-    };
-    let mut samples: Vec<Sample<'_>> = Vec::with_capacity(packets.len());
-    for packet in packets {
-        let parts = sample_parts(codec, &packet.data);
-        if parts.is_empty() {
-            continue;
-        }
-        let size = stored_size(&parts, prefix)?;
-        if let Some(last) = samples.last_mut() {
-            last.duration = duration_between(last.index, packet.index)?;
-        }
-        samples.push(Sample {
-            index: packet.index,
-            parts,
-            size,
-            duration: TICKS_PER_FRAME,
-            keyframe: packet.keyframe,
-        });
     }
-    Ok(samples)
 }
 
 /// The bytes `parts` take in the media data, each with a `prefix`-byte length in front.
@@ -407,48 +461,113 @@ fn header(
     Ok(file)
 }
 
-/// Writes the `mdat` atom: its 64-bit size, then the chunks in order, the video samples as
-/// [`write_video_samples`] stores them and the sound frames as they are.
-fn write_media(
+/// The second pass: writes the `mdat` atom, its 64-bit size and then the chunks in order, each
+/// video sample as its packet comes by and the sound frames as they are between them.
+fn write_media<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     track: &Track<'_>,
     sound: Option<&Sound<'_>>,
     layout: &Layout,
+    packets: &P,
 ) -> Result<(), MuxError> {
     output.write_all(&LARGE_SIZE.to_be_bytes())?;
     output.write_all(b"mdat")?;
     output.write_all(&(MDAT_HEADER_BYTES + layout.bytes()).to_be_bytes())?;
-    for chunk in &layout.chunks {
-        let range = chunk.first..chunk.first + chunk.count;
-        match (chunk.kind, sound) {
-            (Kind::Video, _) => write_video_samples(output, track, range)?,
-            (Kind::Audio, Some(sound)) => {
-                for frame in &sound.clip.frames[range] {
-                    output.write_all(frame)?;
-                }
-            }
-            (Kind::Audio, None) => {}
-        }
-    }
-    Ok(())
+    let mut writer = MediaWriter {
+        output,
+        track,
+        sound,
+        chunks: layout.chunks.iter(),
+        written: 0,
+        chunk_end: 0,
+    };
+    packets.visit(&mut |_, _, data| writer.video_sample(data))?;
+    writer.finish()
 }
 
-/// Writes the parts of `track`'s samples in `range`, each behind its length when the codec
-/// stores lengths.
-fn write_video_samples(
-    output: &mut impl io::Write,
-    track: &Track<'_>,
-    range: Range<usize>,
-) -> Result<(), MuxError> {
-    let prefixed = length_prefixed(track.stream.codec);
-    for part in track.samples[range].iter().flat_map(|sample| &sample.parts) {
-        if prefixed {
-            let length: u32 = fit(part.len())?;
-            output.write_all(&length.to_be_bytes())?;
+/// The media data as the second pass writes it: how far it has got through the layout's
+/// chunks and the track's samples.
+struct MediaWriter<'a, W> {
+    output: &'a mut W,
+    track: &'a Track<'a>,
+    sound: Option<&'a Sound<'a>>,
+    /// The chunks not yet started.
+    chunks: slice::Iter<'a, Chunk>,
+    /// The video samples written so far.
+    written: usize,
+    /// The sample the current video chunk ends before.
+    chunk_end: usize,
+}
+
+impl<W: io::Write> MediaWriter<'_, W> {
+    /// Writes the sample of the packet `data`, if it keeps anything, after the sound chunks
+    /// stored ahead of it when it starts a video chunk. Each part goes behind its length when
+    /// the codec stores lengths.
+    fn video_sample(&mut self, data: &[u8]) -> Result<(), MuxError> {
+        let codec = self.track.stream.codec;
+        let parts = sample_parts(codec, data);
+        if parts.is_empty() {
+            return Ok(());
         }
-        output.write_all(part)?;
+        let indexed = self
+            .track
+            .samples
+            .get(self.written)
+            .map(|sample| sample.size);
+        if indexed != Some(stored_size(&parts, prefix_bytes(codec))?) {
+            return Err(MuxError::Changed);
+        }
+        if self.written == self.chunk_end {
+            self.next_video_chunk()?;
+        }
+        for part in parts {
+            if length_prefixed(codec) {
+                let length: u32 = fit(part.len())?;
+                self.output.write_all(&length.to_be_bytes())?;
+            }
+            self.output.write_all(part)?;
+        }
+        self.written += 1;
+        Ok(())
     }
-    Ok(())
+
+    /// Writes the sound chunks up to the next video chunk and starts that one.
+    fn next_video_chunk(&mut self) -> Result<(), MuxError> {
+        while let Some(chunk) = self.chunks.next() {
+            match chunk.kind {
+                Kind::Audio => self.sound_chunk(chunk)?,
+                Kind::Video => {
+                    self.chunk_end = chunk.first + chunk.count;
+                    return Ok(());
+                }
+            }
+        }
+        Err(MuxError::Changed)
+    }
+
+    /// Writes the frames of the sound chunk `chunk`.
+    fn sound_chunk(&mut self, chunk: &Chunk) -> Result<(), MuxError> {
+        if let Some(sound) = self.sound {
+            for frame in &sound.clip.frames[chunk.first..chunk.first + chunk.count] {
+                self.output.write_all(frame)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the sound chunks after the last video one, once every video sample is written.
+    fn finish(mut self) -> Result<(), MuxError> {
+        if self.written != self.track.samples.len() {
+            return Err(MuxError::Changed);
+        }
+        while let Some(chunk) = self.chunks.next() {
+            match chunk.kind {
+                Kind::Audio => self.sound_chunk(chunk)?,
+                Kind::Video => return Err(MuxError::Changed),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// H.264 and HEVC samples are NAL units behind four-byte lengths; AV1 OBUs carry their own.
