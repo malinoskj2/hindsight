@@ -427,7 +427,7 @@ mod tests {
     use super::*;
     use crate::{
         config::Codec,
-        replay::{Packet, Stream},
+        replay::{Matrix, Packet, Stream},
     };
 
     /// Records ten seconds of whatever the machine plays and checks that the frames keep pace
@@ -443,6 +443,7 @@ mod tests {
             width: 64,
             height: 64,
             frame_rate: 60,
+            matrix: Matrix::Bt709,
         });
         live.set_origin(clock::now());
         let packet = |index| Packet {

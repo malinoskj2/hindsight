@@ -56,6 +56,32 @@ pub(crate) struct Stream {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) frame_rate: u32,
+    /// The matrix the picture's YUV was made from RGB with, which a clip signals so that
+    /// players turn it back into the same colours.
+    pub(crate) matrix: Matrix,
+}
+
+/// The matrix coefficients a picture's YUV was derived from RGB with. The primaries and the
+/// transfer are BT.709 and the range is limited whichever it is: only the matrix depends on
+/// what converted the picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Matrix {
+    /// BT.709, which NVENC converts BGRA input with.
+    #[default]
+    Bt709,
+    /// BT.601, as SMPTE 170M names it, which NvFBC converts with when it grabs NV12.
+    Bt601,
+}
+
+impl Matrix {
+    /// The matrix's code point in ISO/IEC 23091-2 (H.273), which the H.264 and HEVC VUI, the
+    /// AV1 sequence header and the MP4 `colr` atom all use.
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::Bt709 => 1,
+            Self::Bt601 => 6,
+        }
+    }
 }
 
 /// A session's buffer and counters, shared between the capture thread and the worker.
@@ -452,6 +478,7 @@ mod tests {
         width: 1280,
         height: 720,
         frame_rate: 30,
+        matrix: Matrix::Bt709,
     };
 
     /// Pushes `frames` H.264 frames with a keyframe every 30, every other one fresh.
@@ -652,6 +679,7 @@ mod tests {
                     width: 128,
                     height: 72,
                     frame_rate: 30,
+                    matrix: Matrix::Bt709,
                 },
                 packets: store::fetch(&ring.snapshot()).unwrap(),
                 audio: None,
@@ -739,6 +767,7 @@ mod tests {
             width: 128,
             height: 72,
             frame_rate: 30,
+            matrix: Matrix::Bt709,
         });
         live.set_origin(0);
         let frames = audio::tests::encoded_fixture();

@@ -93,6 +93,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         width: settings.width,
         height: settings.height,
         frame_rate: settings.frame_rate,
+        matrix: settings.matrix,
     });
     let mut keyframes = Keyframes::new(settings.codec);
     let mut output = |encoded: Encoded| push_frame(live, &mut keyframes, encoded);
@@ -158,16 +159,17 @@ impl Session {
         let mut capture = capture::start(config.backend, &device, period, target, config.cursor)?;
         let (width, height) = encodable(capture.size());
         let on = capture.encoder_device();
-        let output = choose_output(config, on, live);
+        let output = choose_output(config, &on, live);
         let encoder = Encoder::open(
             &device.d3d,
-            on,
+            &on,
             Settings {
                 codec: config.codec,
                 width,
                 height,
                 frame_rate: config.frame_rate,
                 bitrate: config.bitrate(),
+                matrix: capture.colour_matrix(),
             },
             output,
         )?;
@@ -224,8 +226,8 @@ impl Session {
 
 /// Submits the new picture in the capture's surface `surface` as frame `index`: in place,
 /// registering the surface with NVENC the first time it comes, or copied into the encoder's
-/// input once NVENC has refused a surface (`copy_instead`). A surface in CUDA memory cannot be
-/// copied, so a refusal of one is an error.
+/// input once NVENC has refused a surface (`copy_instead`). A surface in CUDA memory or on a
+/// Direct3D 9 device cannot be copied, so a refusal of one is an error.
 fn submit_surface(
     device: &Device,
     capture: &dyn capture::Source,
@@ -259,8 +261,8 @@ fn submit_surface(
 
 /// Submits the newest picture again as frame `index`, since the screen did not change: NVENC
 /// reads it where it is, or, while it is still reading it for the frame before, from a copy in
-/// the encoder's input; a picture in CUDA memory, which has no copy, is read again once NVENC
-/// is done with it.
+/// the encoder's input; a picture in CUDA memory or on a Direct3D 9 device, which has no copy,
+/// is read again once NVENC is done with it.
 fn repeat_latest(
     device: &Device,
     encoder: &mut Encoder,
@@ -283,7 +285,7 @@ fn repeat_latest(
 /// encoder itself, when the session is on a device's primary CUDA context; or, with any other
 /// session, into GPU memory through a Direct3D device of the buffer's own, which `live` is
 /// given as its store. When GPU memory cannot be had the buffer stays in RAM, with a warning.
-fn choose_output(config: &Config, on: EncoderDevice, live: &Live) -> Output {
+fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
     if config.buffer_memory != Memory::Vram {
         return Output::Memory;
     }
@@ -291,7 +293,7 @@ fn choose_output(config: &Config, on: EncoderDevice, live: &Live) -> Output {
     if let EncoderDevice::Cuda {
         primary: Some(device),
         ..
-    } = on
+    } = *on
     {
         match CudaRing::create(device, bytes) {
             Ok(ring) => {

@@ -923,7 +923,7 @@ fn load_totals(store: &Store) -> Option<Totals> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::Packet;
+    use crate::replay::{Matrix, Packet};
     use std::sync::atomic::AtomicUsize;
 
     /// Encodes a fake keyframe every 10 frames until stopped.
@@ -934,6 +934,7 @@ mod tests {
             width: 64,
             height: 64,
             frame_rate: config.frame_rate,
+            matrix: Matrix::Bt709,
         });
         let mut index = 0;
         while !stop.load(Ordering::Relaxed) {

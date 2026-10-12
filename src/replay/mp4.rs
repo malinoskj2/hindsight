@@ -52,7 +52,7 @@ const FILE_TYPE_MINOR_VERSION: u32 = 0x200;
 const UNDETERMINED_LANGUAGE: &str = "und";
 /// The index of the one data reference, which says the media is in this file.
 const DATA_REFERENCE: u16 = 1;
-/// BT.709 primaries, transfer and matrix, limited range: what the encoder signals.
+/// BT.709 primaries and transfer, as the encoder signals them whatever the matrix.
 const BT709: u16 = 1;
 
 /// One packet as the index describes it and the media data stores it.
@@ -717,7 +717,8 @@ fn data_information() -> Dinf {
 }
 
 /// The visual sample entry (`avc1`, `hvc1` or `av01`): the picture's size, then the decoder
-/// configuration record and the colour.
+/// configuration record and the colour: BT.709 primaries and transfer, limited range, and the
+/// matrix the stream was converted with.
 fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<SampleEntry, MuxError> {
     let visual = Visual {
         data_reference_index: DATA_REFERENCE,
@@ -728,7 +729,7 @@ fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<SampleEntry, MuxError
     let colr = Some(Colr::Nclx {
         colour_primaries: BT709,
         transfer_characteristics: BT709,
-        matrix_coefficients: BT709,
+        matrix_coefficients: stream.matrix.code().into(),
         full_range_flag: false,
     });
     // The record arrives as the atom bytes `configuration` built, and the entry takes it as
@@ -907,7 +908,7 @@ pub(super) fn record(atom: &impl Encode) -> Option<Vec<u8>> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::replay::{av1, h264, hevc};
+    use crate::replay::{Matrix, av1, h264, hevc};
     use std::assert_matches;
 
     /// The atoms in `bytes`, as (kind, body) pairs.
@@ -1027,6 +1028,7 @@ pub(super) mod tests {
             width: 1920,
             height: 1080,
             frame_rate: 60,
+            matrix: Matrix::Bt709,
         }
     }
 
@@ -1086,6 +1088,27 @@ pub(super) mod tests {
         assert_eq!(&file[media + 13..media + 17], &h264::tests::SLICE);
         assert_eq!(top[2].1.len(), 9 * 2 + 8 * 4);
         assert_eq!(media + top[2].1.len(), file.len());
+    }
+
+    #[test]
+    fn signals_the_matrix_the_stream_was_converted_with() {
+        let stream = Stream {
+            matrix: Matrix::Bt601,
+            ..stream(Codec::H264)
+        };
+        let record = h264::configuration(&h264::tests::keyframe()).unwrap();
+        let SampleEntry::Avc1(entry) = visual_entry(&stream, &record).unwrap() else {
+            panic!("expected an avc1 entry");
+        };
+        assert_eq!(
+            entry.colr,
+            Some(Colr::Nclx {
+                colour_primaries: 1,
+                transfer_characteristics: 1,
+                matrix_coefficients: 6,
+                full_range_flag: false,
+            })
+        );
     }
 
     #[test]

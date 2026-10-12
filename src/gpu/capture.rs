@@ -6,7 +6,8 @@
 //!   recorded through the monitor it fills.
 //! - [`nvfbc`], NVIDIA Frame Buffer Capture, records whole monitors like Desktop Duplication,
 //!   cursor included when asked for, for licensed vendors holding the key NVIDIA issues. It
-//!   grabs into Direct3D 9 surfaces, or, as [`nvfbc::CudaCapture`], into CUDA memory that an
+//!   grabs into Direct3D 9 surfaces (NV12 ones, behind a switch, which only an encoder on its
+//!   own Direct3D 9 device reads), or, as [`nvfbc::CudaCapture`], into CUDA memory that an
 //!   encoder on a CUDA context reads in place.
 //!
 //! A monitor in HDR is described by [`display`]; Windows Graphics Capture and Desktop
@@ -23,7 +24,7 @@ use super::{
     cuda::{Context, CudaError},
     device::Device,
 };
-use crate::{config::Backend, log, service::Target};
+use crate::{config::Backend, log, replay::Matrix, service::Target};
 use std::{
     ffi::c_void,
     sync::atomic::{AtomicBool, Ordering},
@@ -33,6 +34,7 @@ use thiserror::Error;
 use windows::Win32::{
     Foundation::{HWND, POINT},
     Graphics::{
+        Direct3D9::{IDirect3DDevice9Ex, IDirect3DSurface9},
         Direct3D11::ID3D11Texture2D,
         Gdi::{HMONITOR, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
     },
@@ -76,10 +78,13 @@ pub(super) enum Surface {
     /// Rows of 32-bit BGRA in CUDA device memory, `pitch` bytes apart, which only an encoder
     /// on the source's CUDA context can read.
     CudaBuffer { pointer: u64, pitch: u32 },
+    /// An NV12 plain surface on the source's Direct3D 9Ex device, which Direct3D 11 cannot
+    /// open, so only an encoder on that device can read it.
+    Direct3D9(IDirect3DSurface9),
 }
 
 /// The device the encoder must open its session on to read a source's surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum EncoderDevice {
     /// The shared Direct3D 11 device, which also holds the encoder's own input textures.
     Direct3D,
@@ -91,6 +96,10 @@ pub(super) enum EncoderDevice {
         context: Context,
         primary: Option<super::cuda::Device>,
     },
+    /// The source's own Direct3D 9Ex device, on which its NV12 surfaces live; the encoder then
+    /// has no input textures of its own either. Used from the capture thread only, like the
+    /// source that owns it.
+    Direct3D9(IDirect3DDevice9Ex),
 }
 
 /// What a tick found.
@@ -129,6 +138,12 @@ pub(super) trait Source {
     /// The device the encoder must run on to read this source's surfaces.
     fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Direct3D
+    }
+
+    /// The matrix the source's pictures reach the encoder converted with, if they arrive as YUV;
+    /// BGRA is converted by NVENC with BT.709.
+    fn colour_matrix(&self) -> Matrix {
+        Matrix::Bt709
     }
 
     /// Switches the source, if it captures into textures of its own the size of

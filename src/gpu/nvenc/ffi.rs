@@ -108,6 +108,7 @@ pub(super) const PRESET_P4: GUID = GUID::from_values(
 
 // Field values for the session and frame structures, in the order those structures are declared
 // below.
+/// `NV_ENC_DEVICE_TYPE_DIRECTX`: the device is an `ID3D11Device` or an `IDirect3DDevice9Ex`.
 pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
 /// `NV_ENC_DEVICE_TYPE_CUDA`: the device is a `CUcontext`.
 pub(super) const DEVICE_TYPE_CUDA: u32 = 1;
@@ -119,6 +120,9 @@ pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
 /// `NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`: a `CUdeviceptr` to pitch-linear rows.
 pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
+/// `NV_ENC_BUFFER_FORMAT_NV12`: a plane of 8-bit luma, then a half-height plane of interleaved
+/// 8-bit chroma, as NvFBC grabs into a Direct3D 9 surface.
+pub(super) const BUFFER_FORMAT_NV12: u32 = 0x1;
 /// 32-bit words with blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
 /// `NV_ENC_BUFFER_FORMAT_U8`: plain bytes, the format of an output buffer in video memory.
@@ -412,16 +416,16 @@ pub(super) struct Vui {
 }
 
 impl Vui {
-    /// Signals limited-range BT.709, as the RGB-to-YUV conversion produces and players assume
-    /// for HD.
-    pub(super) fn signal_bt709(&mut self) {
+    /// Signals limited range with BT.709 primaries and transfer, as players assume for HD, and
+    /// `matrix` (an ISO/IEC 23091-2 code point), the one the picture was converted to YUV with.
+    pub(super) fn signal_colour(&mut self, matrix: u32) {
         self.video_signal_type_present_flag = 1;
         self.video_format = VIDEO_FORMAT_UNSPECIFIED;
         self.video_full_range_flag = LIMITED_RANGE;
         self.colour_description_present_flag = 1;
         self.colour_primaries = BT709;
         self.transfer_characteristics = BT709;
-        self.colour_matrix = BT709;
+        self.colour_matrix = matrix;
     }
 }
 
@@ -497,11 +501,12 @@ pub(super) struct Av1Config {
 }
 
 impl Av1Config {
-    /// Signals limited-range BT.709, as [`Vui::signal_bt709`] does for H.264 and HEVC.
-    pub(super) fn signal_bt709(&mut self) {
+    /// Signals limited range, BT.709 primaries and transfer and `matrix`, as
+    /// [`Vui::signal_colour`] does for H.264 and HEVC.
+    pub(super) fn signal_colour(&mut self, matrix: u32) {
         self.color_primaries = BT709;
         self.transfer_characteristics = BT709;
-        self.matrix_coefficients = BT709;
+        self.matrix_coefficients = matrix;
         self.color_range = LIMITED_RANGE;
     }
 }

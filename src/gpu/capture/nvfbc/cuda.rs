@@ -182,6 +182,11 @@ impl Capture {
                 .map_err(nvfbc_failed("create the NvFBC session"))?,
         };
         self.settle_context()?;
+        // Waiting for each grab would otherwise spin a core: measured, 1,568 Mcycles/s against
+        // 690 with the thread blocked until the copy lands.
+        self.cuda.block_on_synchronize().map_err(cuda_failed(
+            "let CUDA block rather than spin while a grab lands",
+        ))?;
         if self.buffers.is_empty() {
             self.allocate_buffers(&session)?;
         }

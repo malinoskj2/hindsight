@@ -16,18 +16,12 @@ use windows::{
 /// Nanoseconds in the 100 ns unit Windows measures timer due times and capture intervals in.
 pub(super) const HUNDRED_NANOSECONDS: u128 = 100;
 
-/// Ticks `frame_rate` times a second, counted from its creation.
-pub(super) struct Pacer {
-    timer: Owned<HANDLE>,
-    start: Instant,
-    period: Duration,
-    /// The tick the next call returns, unless the thread has fallen behind it.
-    next: u64,
-}
+/// A high-resolution waitable timer the calling thread sleeps on, armed once at a time.
+pub(super) struct Timer(Owned<HANDLE>);
 
-impl Pacer {
-    /// Starts a clock whose first tick is due at once.
-    pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
+impl Timer {
+    /// Creates the timer, unarmed.
+    pub(super) fn new() -> windows::core::Result<Self> {
         // SAFETY: an unnamed timer with default security.
         let timer = unsafe {
             CreateWaitableTimerExW(
@@ -38,9 +32,39 @@ impl Pacer {
             )
         }?;
         // SAFETY: the timer was just created, and only this `Owned` closes it.
-        let timer = unsafe { Owned::new(timer) };
+        Ok(Self(unsafe { Owned::new(timer) }))
+    }
+
+    /// Arms the timer to fire once after `duration` and sleeps until it does.
+    pub(super) fn sleep(&self, duration: Duration) -> windows::core::Result<()> {
+        // Relative due times are negative, in 100 ns units.
+        let relative =
+            -i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
+        // SAFETY: the timer is open; `relative` outlives the call; a one-shot timer (period 0)
+        // with no completion routine.
+        unsafe { SetWaitableTimer(*self.0, &raw const relative, 0, None, None, false) }?;
+        // SAFETY: waits on the open timer.
+        if unsafe { WaitForSingleObject(*self.0, INFINITE) } != WAIT_OBJECT_0 {
+            return Err(windows::core::Error::from_thread());
+        }
+        Ok(())
+    }
+}
+
+/// Ticks `frame_rate` times a second, counted from its creation.
+pub(super) struct Pacer {
+    timer: Timer,
+    start: Instant,
+    period: Duration,
+    /// The tick the next call returns, unless the thread has fallen behind it.
+    next: u64,
+}
+
+impl Pacer {
+    /// Starts a clock whose first tick is due at once.
+    pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
         Ok(Self {
-            timer,
+            timer: Timer::new()?,
             start: Instant::now(),
             period: Duration::from_secs(1) / frame_rate,
             next: 0,
@@ -65,25 +89,10 @@ impl Pacer {
         let due = Duration::from_nanos(
             u64::try_from(self.period.as_nanos() * u128::from(self.next)).unwrap_or(u64::MAX),
         );
-        self.sleep(due.saturating_sub(elapsed))?;
+        self.timer.sleep(due.saturating_sub(elapsed))?;
         let index = self.next;
         self.next += 1;
         Ok(index)
-    }
-
-    /// Arms the timer to fire once after `duration` and sleeps until it does.
-    fn sleep(&self, duration: Duration) -> windows::core::Result<()> {
-        // Relative due times are negative, in 100 ns units.
-        let relative =
-            -i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
-        // SAFETY: the timer is open; `relative` outlives the call; a one-shot timer (period 0)
-        // with no completion routine.
-        unsafe { SetWaitableTimer(*self.timer, &raw const relative, 0, None, None, false) }?;
-        // SAFETY: waits on the open timer.
-        if unsafe { WaitForSingleObject(*self.timer, INFINITE) } != WAIT_OBJECT_0 {
-            return Err(windows::core::Error::from_thread());
-        }
-        Ok(())
     }
 }
 

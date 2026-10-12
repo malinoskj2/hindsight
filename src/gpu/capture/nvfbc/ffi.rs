@@ -48,6 +48,10 @@ pub(super) const TO_DX9_VID: u32 = 0x2003;
 pub(super) const STATE_ENABLE: u32 = 1;
 /// `NVFBC_TODX9VID_ARGB`: 32-bit words with blue in the low byte, `D3DFMT_A8R8G8B8`.
 pub(super) const TODX9VID_ARGB: u32 = 0;
+/// `NVFBC_TODX9VID_NV12`: a plane of 8-bit luma, then a half-height plane of interleaved 8-bit
+/// chroma, converted with the BT.601 matrix into limited range. Not listed in the SDK 7.1 guide;
+/// the driver accepts it (`docs/backend-overhead.md`, "NV12 from NvFBC").
+pub(super) const TODX9VID_NV12: u32 = 1;
 /// `NVFBC_TODX9VID_SOURCEMODE_FULL`: the whole display at its own size.
 pub(super) const TODX9VID_SOURCEMODE_FULL: u32 = 0;
 /// `NVFBC_TODX9VID_SOURCEMODE_SCALE`: the whole display scaled to the target size.

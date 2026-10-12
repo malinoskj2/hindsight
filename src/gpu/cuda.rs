@@ -128,6 +128,7 @@ type MemcpyDtoH = unsafe extern "system" fn(*mut c_void, DevicePointer, usize) -
 type MemcpyDtoD = unsafe extern "system" fn(DevicePointer, DevicePointer, usize) -> Status;
 type StreamSynchronize = unsafe extern "system" fn(*mut c_void) -> Status;
 type CtxSynchronize = unsafe extern "system" fn() -> Status;
+type CtxSetFlags = unsafe extern "system" fn(u32) -> Status;
 
 /// The loaded driver library and its entry points. Everything made through it (contexts,
 /// memory) must be released before it is dropped, which unloads the library.
@@ -149,6 +150,7 @@ pub(super) struct Driver {
     memcpy_dtod: MemcpyDtoD,
     stream_synchronize: StreamSynchronize,
     ctx_synchronize: CtxSynchronize,
+    ctx_set_flags: CtxSetFlags,
     /// Declared last, so it is unloaded after the entry points above are no longer reachable.
     _library: Owned<HMODULE>,
 }
@@ -211,6 +213,7 @@ impl Driver {
             memcpy_dtod: entry_point!(module, "cuMemcpyDtoD_v2", MemcpyDtoD),
             stream_synchronize: entry_point!(module, "cuStreamSynchronize", StreamSynchronize),
             ctx_synchronize: entry_point!(module, "cuCtxSynchronize", CtxSynchronize),
+            ctx_set_flags: entry_point!(module, "cuCtxSetFlags", CtxSetFlags),
             _library: library,
         };
         // SAFETY: the flags must be 0.
@@ -356,6 +359,13 @@ impl Driver {
 
     /// Waits for all the work queued in the current context, on every stream, the driver's
     /// own included.
+    /// Makes the current context's synchronising calls block the thread rather than spin
+    /// (`CU_CTX_SCHED_BLOCKING_SYNC`).
+    pub(super) fn block_on_synchronize(&self) -> Result<(), CudaError> {
+        // SAFETY: a context is current; the flag is a documented scheduling flag.
+        unsafe { (self.ctx_set_flags)(0x04) }.ok("cuCtxSetFlags")
+    }
+
     pub(super) fn synchronize_context(&self) -> Result<(), CudaError> {
         // SAFETY: a context is current; the call takes no arguments.
         unsafe { (self.ctx_synchronize)() }.ok("cuCtxSynchronize")

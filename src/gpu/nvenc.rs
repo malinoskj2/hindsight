@@ -16,19 +16,26 @@
 //! every frame is read from one of the capture's surfaces. Such a session can also write each
 //! frame's bitstream into a buffer of the application's in video memory ([`Output::VideoMemory`]),
 //! from which it is moved into the replay buffer there without ever crossing to system memory.
+//! Likewise, for NvFBC grabbing NV12, which Direct3D 9 holds only in plain surfaces that
+//! Direct3D 11 cannot open, the session runs on NvFBC's Direct3D 9Ex device and reads the NV12
+//! surfaces in place, signalling the BT.601 matrix NvFBC converted them with.
 
 use super::{
     capture::{EncoderDevice, Surface},
     cuda::DevicePointer,
     cuda_output::CudaRing,
 };
-use crate::{config::Codec, replay::Slot as StoreSlot};
+use crate::{
+    config::Codec,
+    replay::{Matrix, Slot as StoreSlot},
+};
 use std::{collections::VecDeque, ffi::CStr, ptr};
 use thiserror::Error;
 use windows::{
     Win32::{
         Foundation::{HANDLE, HMODULE, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Graphics::{
+            Direct3D9::IDirect3DSurface9,
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
                 ID3D11Multithread, ID3D11Texture2D,
@@ -119,6 +126,9 @@ pub(super) struct Settings {
     pub(super) height: u32,
     pub(super) frame_rate: u32,
     pub(super) bitrate: u32,
+    /// The matrix the input was converted to YUV with, or NVENC converts BGRA input with, which
+    /// the bitstream signals.
+    pub(super) matrix: Matrix,
 }
 
 /// Where the encoder puts the frames it finishes.
@@ -269,7 +279,7 @@ impl Encoder {
     /// around the session's calls whichever device the session runs on.
     pub(super) fn open(
         device: &ID3D11Device,
-        on: EncoderDevice,
+        on: &EncoderDevice,
         settings: Settings,
         output: Output,
     ) -> Result<Self, NvencError> {
@@ -349,12 +359,17 @@ impl Encoder {
 
     /// Opens the encode session on `on`, destroying whatever half-open session a failed
     /// attempt leaves behind.
-    fn open_session(&mut self, device: &ID3D11Device, on: EncoderDevice) -> Result<(), NvencError> {
+    fn open_session(
+        &mut self,
+        device: &ID3D11Device,
+        on: &EncoderDevice,
+    ) -> Result<(), NvencError> {
         let mut params = ffi::OpenEncodeSessionExParams::zeroed();
         params.version = ffi::OPEN_ENCODE_SESSION_EX_PARAMS_VER;
         (params.device_type, params.device) = match on {
             EncoderDevice::Direct3D => (ffi::DEVICE_TYPE_DIRECTX, device.as_raw()),
             EncoderDevice::Cuda { context, .. } => (ffi::DEVICE_TYPE_CUDA, context.as_ptr()),
+            EncoderDevice::Direct3D9(device) => (ffi::DEVICE_TYPE_DIRECTX, device.as_raw()),
         };
         params.api_version = ffi::API_VERSION;
         let open = entry_point(self.api.open_encode_session_ex, "nvEncOpenEncodeSessionEx")?;
@@ -485,11 +500,11 @@ impl Encoder {
     fn create_slot(
         &mut self,
         device: &ID3D11Device,
-        on: EncoderDevice,
+        on: &EncoderDevice,
     ) -> Result<Slot, NvencError> {
         let texture = match on {
             EncoderDevice::Direct3D => Some(create_input_texture(device, self.settings)?),
-            EncoderDevice::Cuda { .. } => None,
+            EncoderDevice::Cuda { .. } | EncoderDevice::Direct3D9(_) => None,
         };
         let staging = match self.ring.as_mut() {
             Some(ring) => Some(
@@ -578,7 +593,26 @@ impl Encoder {
 
     /// Registers `texture`, on the session's Direct3D device, as an input NVENC can map.
     fn register_texture(&self, texture: &ID3D11Texture2D) -> Result<ffi::Registered, NvencError> {
-        self.register_resource(ffi::INPUT_RESOURCE_TYPE_DIRECTX, texture.as_raw(), 0)
+        self.register_resource(
+            ffi::INPUT_RESOURCE_TYPE_DIRECTX,
+            texture.as_raw(),
+            0,
+            ffi::BUFFER_FORMAT_ARGB,
+        )
+    }
+
+    /// Registers the NV12 `surface`, on the session's Direct3D 9Ex device, as an input NVENC
+    /// can map.
+    fn register_nv12_surface(
+        &self,
+        surface: &IDirect3DSurface9,
+    ) -> Result<ffi::Registered, NvencError> {
+        self.register_resource(
+            ffi::INPUT_RESOURCE_TYPE_DIRECTX,
+            surface.as_raw(),
+            0,
+            ffi::BUFFER_FORMAT_NV12,
+        )
     }
 
     /// Registers the CUDA buffer at `pointer`, in the session's context, with rows `pitch`
@@ -597,16 +631,19 @@ impl Encoder {
             ffi::INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER,
             resource,
             pitch,
+            ffi::BUFFER_FORMAT_ARGB,
         )
     }
 
-    /// Registers `resource` of `resource_type`, holding BGRA of the encoded size with rows
-    /// `pitch` bytes apart where the type needs telling, as an input NVENC can map.
+    /// Registers `resource` of `resource_type`, holding pictures of the encoded size in
+    /// `buffer_format` with rows `pitch` bytes apart where the type needs telling, as an input
+    /// NVENC can map.
     fn register_resource(
         &self,
         resource_type: u32,
         resource: *mut std::ffi::c_void,
         pitch: u32,
+        buffer_format: u32,
     ) -> Result<ffi::Registered, NvencError> {
         let mut params = ffi::RegisterResource::zeroed();
         params.version = ffi::REGISTER_RESOURCE_VER;
@@ -615,7 +652,7 @@ impl Encoder {
         params.height = self.settings.height;
         params.pitch = pitch;
         params.resource_to_register = resource;
-        params.buffer_format = ffi::BUFFER_FORMAT_ARGB;
+        params.buffer_format = buffer_format;
         params.buffer_usage = ffi::INPUT_IMAGE;
         let register = entry_point(self.api.register_resource, "nvEncRegisterResource")?;
         // SAFETY: the resource stays alive, and registered, as long as the slot or surface
@@ -663,7 +700,7 @@ impl Encoder {
     }
 
     /// The texture the next frame must be drawn into, once [`reserve`](Self::reserve) has freed
-    /// its slot; none on a CUDA session, which only reads the capture's surfaces.
+    /// its slot; none on a CUDA or Direct3D 9 session, which only reads the capture's surfaces.
     pub(super) fn input(&self) -> Option<&ID3D11Texture2D> {
         self.slots[self.next].texture.as_ref()
     }
@@ -674,13 +711,13 @@ impl Encoder {
     }
 
     /// The texture holding the newest submitted picture, to copy when it cannot be mapped
-    /// again; none when the newest picture is in CUDA memory.
+    /// again; none when the newest picture is in CUDA memory or on a Direct3D 9 device.
     pub(super) fn latest_texture(&self) -> Option<&ID3D11Texture2D> {
         match self.latest? {
             Input::Slot(slot) => self.slots[slot].texture.as_ref(),
             Input::Surface(surface) => match &self.registered_surface(surface).handle {
                 Surface::Texture(texture) => Some(texture),
-                Surface::CudaBuffer { .. } => None,
+                Surface::CudaBuffer { .. } | Surface::Direct3D9(_) => None,
             },
         }
     }
@@ -714,6 +751,7 @@ impl Encoder {
             Surface::CudaBuffer { pointer, pitch } => {
                 self.register_cuda_buffer(*pointer, *pitch)?
             }
+            Surface::Direct3D9(nv12) => self.register_nv12_surface(nv12)?,
         };
         if self.surfaces.len() <= surface {
             self.surfaces.resize_with(surface + 1, || None);
@@ -783,7 +821,7 @@ impl Encoder {
     /// Encodes the newest submitted picture again as frame `index`, reading it where it is,
     /// after waiting for NVENC to finish reading it for the frame before, handing every frame
     /// collected meanwhile to `output`. For a picture that cannot be copied instead, since it
-    /// is in CUDA memory; the wait is at most one frame's encode.
+    /// is in CUDA memory or on a Direct3D 9 device; the wait is at most one frame's encode.
     pub(super) fn repeat_once_free(
         &mut self,
         index: u64,
@@ -1192,9 +1230,10 @@ const fn profile_guid(codec: Codec) -> GUID {
 /// Adapts the preset's configuration the way NVIDIA's Instant Replay sets up its encoder: the
 /// codec's [profile](profile_guid), a keyframe every 30 frames, no B-frames, and the rate
 /// control of [`configure_rate_control`]. Each codec's own settings make the picture 8-bit
-/// 4:2:0 with BT.709 signalled, and repeat the sequence header on every keyframe so any of them
-/// can start a clip.
+/// 4:2:0 with BT.709 primaries and transfer and the input's matrix signalled, and repeat the
+/// sequence header on every keyframe so any of them can start a clip.
 fn configure(config: &mut ffi::Config, settings: Settings) {
+    let matrix = u32::from(settings.matrix.code());
     config.profile_guid = profile_guid(settings.codec);
     config.gop_length = GOP_FRAMES;
     // Every frame after a keyframe is a P-frame: no B-frames.
@@ -1202,11 +1241,11 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
     configure_rate_control(&mut config.rc, settings.bitrate);
     match settings.codec {
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }),
+        Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }, matrix),
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::Hevc => configure_hevc(unsafe { &mut config.codec.hevc }),
+        Codec::Hevc => configure_hevc(unsafe { &mut config.codec.hevc }, matrix),
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::Av1 => configure_av1(unsafe { &mut config.codec.av1 }),
+        Codec::Av1 => configure_av1(unsafe { &mut config.codec.av1 }, matrix),
     }
 }
 
@@ -1222,33 +1261,33 @@ fn configure_rate_control(rc: &mut ffi::RcParams, bitrate: u32) {
     rc.multi_pass = ffi::MULTI_PASS_DISABLED;
 }
 
-/// Makes H.264 4:2:0 with limited-range BT.709 signalled, an IDR on every keyframe and the
-/// parameter sets repeated before each.
-fn configure_h264(h264: &mut ffi::H264Config) {
+/// Makes H.264 4:2:0 with limited range, BT.709 primaries and transfer and `matrix` signalled,
+/// an IDR on every keyframe and the parameter sets repeated before each.
+fn configure_h264(h264: &mut ffi::H264Config, matrix: u32) {
     h264.flags |= ffi::H264_REPEAT_SPS_PPS;
     h264.idr_period = GOP_FRAMES;
     h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
-    h264.vui.signal_bt709();
+    h264.vui.signal_colour(matrix);
 }
 
-/// Makes HEVC 8-bit 4:2:0 with limited-range BT.709 signalled, an IDR on every keyframe and the
-/// parameter sets repeated before each, held to 16×16 to 32×32 coding units, which keeps the
-/// encoder fast.
-fn configure_hevc(hevc: &mut ffi::HevcConfig) {
+/// Makes HEVC 8-bit 4:2:0 with limited range, BT.709 primaries and transfer and `matrix`
+/// signalled, an IDR on every keyframe and the parameter sets repeated before each, held to
+/// 16×16 to 32×32 coding units, which keeps the encoder fast.
+fn configure_hevc(hevc: &mut ffi::HevcConfig, matrix: u32) {
     hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
     hevc.flags |=
         ffi::HEVC_REPEAT_SPS_PPS | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
     hevc.idr_period = GOP_FRAMES;
     hevc.min_cu_size = ffi::HEVC_CU_SIZE_16;
     hevc.max_cu_size = ffi::HEVC_CU_SIZE_32;
-    hevc.vui.signal_bt709();
+    hevc.vui.signal_colour(matrix);
 }
 
-/// Makes AV1 8-bit 4:2:0 with limited-range BT.709 signalled, a key frame on every keyframe and
-/// the sequence header repeated before each, held to 16×16 to 32×32 partitions, which keeps the
-/// encoder fast. The stream is plain low-overhead OBUs, without Annex B framing or the optional
+/// Makes AV1 8-bit 4:2:0 with limited range, BT.709 primaries and transfer and `matrix`
+/// signalled, a key frame on every keyframe and the sequence header repeated before each, held
+/// to 16×16 to 32×32 partitions, which keeps the encoder fast. The stream is plain low-overhead OBUs, without Annex B framing or the optional
 /// timing, decoder model and frame id fields.
-fn configure_av1(av1: &mut ffi::Av1Config) {
+fn configure_av1(av1: &mut ffi::Av1Config, matrix: u32) {
     av1.flags &= !(ffi::AV1_ANNEX_B
         | ffi::AV1_TIMING_INFO
         | ffi::AV1_DECODER_MODEL_INFO
@@ -1261,7 +1300,7 @@ fn configure_av1(av1: &mut ffi::Av1Config) {
     av1.idr_period = GOP_FRAMES;
     av1.min_part_size = ffi::AV1_PART_SIZE_16;
     av1.max_part_size = ffi::AV1_PART_SIZE_32;
-    av1.signal_bt709();
+    av1.signal_colour(matrix);
 }
 
 /// The session parameters for encoding `settings` with `config`, which they point to and which
