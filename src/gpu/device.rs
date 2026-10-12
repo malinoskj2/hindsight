@@ -13,8 +13,9 @@ use windows::{
                 ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
             },
             Dxgi::{
-                CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
-                DXGI_ERROR_NOT_FOUND, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+                CreateDXGIFactory1, DXGI_ADAPTER_DESC, DXGI_ADAPTER_DESC1,
+                DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1, IDXGIDevice,
+                IDXGIFactory1,
             },
         },
     },
@@ -108,18 +109,19 @@ impl Device {
 
     /// The locally unique id of the device's adapter, which other graphics APIs report too.
     pub(super) fn luid(&self) -> windows::core::Result<LUID> {
-        let device = self.dxgi()?;
-        // SAFETY: reads the adapter of a live device and then its description.
-        let description = unsafe { device.GetAdapter()?.GetDesc() }?;
-        Ok(description.AdapterLuid)
+        Ok(self.adapter_description()?.AdapterLuid)
     }
 
     /// Bytes of memory on the adapter itself, as DXGI reports them.
     pub(super) fn dedicated_video_memory(&self) -> windows::core::Result<usize> {
+        Ok(self.adapter_description()?.DedicatedVideoMemory)
+    }
+
+    /// DXGI's description of the device's adapter.
+    fn adapter_description(&self) -> windows::core::Result<DXGI_ADAPTER_DESC> {
         let device = self.dxgi()?;
         // SAFETY: reads the adapter of a live device and then its description.
-        let description = unsafe { device.GetAdapter()?.GetDesc() }?;
-        Ok(description.DedicatedVideoMemory)
+        unsafe { device.GetAdapter()?.GetDesc() }
     }
 
     /// Lets the device's copies run ahead of a game that keeps the GPU busy.

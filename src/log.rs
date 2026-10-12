@@ -86,17 +86,14 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
 /// takes this lock first and the journal lock inside it, which keeps the file in sequence order.
 static MIRROR: Mutex<Option<File>> = Mutex::new(None);
 
-/// Records `message` as information.
 pub(crate) fn info(message: impl Display) {
     record(Level::Info, message);
 }
 
-/// Records `message` as a warning.
 pub(crate) fn warning(message: impl Display) {
     record(Level::Warning, message);
 }
 
-/// Records `message` as an error.
 pub(crate) fn error(message: impl Display) {
     record(Level::Error, message);
 }

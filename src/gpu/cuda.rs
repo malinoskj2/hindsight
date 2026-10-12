@@ -327,8 +327,8 @@ impl Driver {
         into: &mut [u8],
         from: DevicePointer,
     ) -> Result<(), CudaError> {
-        // SAFETY: a context is current, the device range is allocated and the host slice is
-        // writable for its length.
+        // SAFETY: the host slice is writable for exactly the length passed; a device range
+        // that is not allocated is reported by the driver, not written from.
         unsafe { (self.memcpy_dtoh)(into.as_mut_ptr().cast(), from, into.len()) }.ok("cuMemcpyDtoH")
     }
 
@@ -340,7 +340,8 @@ impl Driver {
         from: DevicePointer,
         bytes: usize,
     ) -> Result<(), CudaError> {
-        // SAFETY: both ranges are allocated and do not overlap.
+        // SAFETY: the copy touches device memory only, through the driver, which reports a
+        // range that is not allocated instead of touching host memory.
         unsafe { (self.memcpy_dtod)(to, from, bytes) }.ok("cuMemcpyDtoD")
     }
 

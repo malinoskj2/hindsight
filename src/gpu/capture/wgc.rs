@@ -55,7 +55,6 @@ pub(super) struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
-    /// Whether the target is a window rather than a monitor.
     captures_window: bool,
     /// Set when Windows ends the capture: the monitor was unplugged, the window closed or the
     /// device was lost.

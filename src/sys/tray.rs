@@ -46,8 +46,6 @@ pub(crate) struct Tray {
 
 impl Tray {
     pub(crate) fn new(on_action: impl Fn(TrayAction) + 'static) -> Result<Self, TrayError> {
-        set_handler(Rc::new(on_action));
-
         let menu = Menu::new();
         let show = MenuItem::new(format!("Show {APP_NAME}"), true, None);
         let save = MenuItem::new("Save replay", true, None);
@@ -61,6 +59,9 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
+        // Installed only once nothing can fail any more: a handler left behind by a failed
+        // setup would keep the window, and through it the worker, alive for good.
+        set_handler(Rc::new(on_action));
         route_events([
             (show.id().clone(), TrayAction::Show),
             (save.id().clone(), TrayAction::Save),

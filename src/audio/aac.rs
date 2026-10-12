@@ -87,38 +87,9 @@ impl Encoder {
         // SAFETY: creates the in-process encoder; COM is initialised on this thread.
         let transform: IMFTransform =
             unsafe { CoCreateInstance(&AACMFTEncoder, None, CLSCTX_INPROC_SERVER) }?;
-        // The encoder wants its output type before its input type.
-        let output_type = audio_type(&MFAudioFormat_AAC, rate, channels)?;
-        // SAFETY: attributes of a live media type; then the type is handed to the encoder.
-        unsafe {
-            output_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, BYTES_PER_SECOND)?;
-            output_type.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, RAW_PAYLOAD)?;
-            output_type.SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_LC_LEVEL_2)?;
-            transform.SetOutputType(0, &output_type, 0)?;
-        }
-        let input_type = audio_type(&MFAudioFormat_PCM, rate, channels)?;
-        let block = u32::from(channels) * PCM_BITS / 8;
-        // SAFETY: as above.
-        unsafe {
-            input_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block)?;
-            input_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, block * rate)?;
-            transform.SetInputType(0, &input_type, 0)?;
-        }
-
+        set_types(&transform, rate, channels)?;
         let config = specific_config(&transform)?;
-        // SAFETY: queries and messages to the configured encoder.
-        let output = unsafe {
-            let info = transform.GetOutputStreamInfo(0)?;
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
-            if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0.cast_unsigned() == 0 {
-                let sample = MFCreateSample()?;
-                sample.AddBuffer(&MFCreateMemoryBuffer(info.cbSize.max(FRAME_BYTES_MAX))?)?;
-                Some(sample)
-            } else {
-                None
-            }
-        };
+        let output = start_streaming(&transform)?;
         Ok(Self {
             transform,
             rate,
@@ -209,6 +180,45 @@ impl Encoder {
 
 /// The most bytes one AAC-LC frame can take: 6144 bits per channel, for two channels.
 const FRAME_BYTES_MAX: u32 = 2 * 6144 / 8;
+
+/// Gives `transform` its output type, AAC at the bitrate, and then its input type, 16-bit PCM
+/// of `channels` channels at `rate`; the encoder wants them in that order.
+fn set_types(transform: &IMFTransform, rate: u32, channels: u16) -> Result<()> {
+    let output_type = audio_type(&MFAudioFormat_AAC, rate, channels)?;
+    // SAFETY: attributes of a live media type; then the type is handed to the encoder.
+    unsafe {
+        output_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, BYTES_PER_SECOND)?;
+        output_type.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, RAW_PAYLOAD)?;
+        output_type.SetUINT32(&MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_LC_LEVEL_2)?;
+        transform.SetOutputType(0, &output_type, 0)?;
+    }
+    let input_type = audio_type(&MFAudioFormat_PCM, rate, channels)?;
+    let block = u32::from(channels) * PCM_BITS / 8;
+    // SAFETY: as above.
+    unsafe {
+        input_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block)?;
+        input_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, block * rate)?;
+        transform.SetInputType(0, &input_type, 0)?;
+    }
+    Ok(())
+}
+
+/// Tells the configured `transform` that streaming starts, and makes the sample its frames are
+/// written into, unless it brings its own.
+fn start_streaming(transform: &IMFTransform) -> Result<Option<IMFSample>> {
+    // SAFETY: queries and messages to the configured encoder.
+    unsafe {
+        let info = transform.GetOutputStreamInfo(0)?;
+        transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
+        transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+        if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0.cast_unsigned() != 0 {
+            return Ok(None);
+        }
+        let sample = MFCreateSample()?;
+        sample.AddBuffer(&MFCreateMemoryBuffer(info.cbSize.max(FRAME_BYTES_MAX))?)?;
+        Ok(Some(sample))
+    }
+}
 
 /// A media type for `subtype` audio of 16-bit samples, `channels` channels at `rate`.
 fn audio_type(subtype: &windows::core::GUID, rate: u32, channels: u16) -> Result<IMFMediaType> {

@@ -107,50 +107,22 @@ impl From<windows::core::Error> for Failure {
 
 /// Records sound into `live` until `stop` is set.
 fn record(live: &Live, stop: &Signal) {
-    let started = Com::start().and_then(|com| Ok((com, MediaFoundation::start()?)));
-    let (_com, _media) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            log::warning(format!(
-                "Sound is not recorded: Media Foundation is unavailable ({error})"
-            ));
-            return;
-        }
+    let Some(mut pipeline) = Pipeline::open(live) else {
+        return;
     };
-    let opened = Devices::new().and_then(|devices| Ok((devices, Track::open(live)?)));
-    let (devices, mut track) = match opened {
-        Ok(opened) => opened,
-        Err(error) => {
-            log::warning(format!(
-                "Sound is not recorded: the AAC encoder could not be opened ({error})"
-            ));
-            return;
-        }
-    };
-
-    let watch = match devices.watch() {
-        Ok(watch) => Some(watch),
-        Err(error) => {
-            log::warning(format!(
-                "Windows will not report audio device changes ({error}); checking every {} s instead",
-                DEFAULT_CHECK_INTERVAL.as_secs()
-            ));
-            None
-        }
-    };
-    let mut device = Device::new(watch);
+    let mut device = Device::new(watch_default(&pipeline.devices));
     let mut placed = false;
     loop {
         if !placed {
             placed = sys::thread::keep_off_capture_core();
         }
-        device.update(&devices);
+        device.update(&pipeline.devices);
         if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
             break;
         }
         let result = device
-            .read(&mut track)
-            .and_then(|()| track.catch_up(clock::now() - SILENCE_LAG));
+            .read(&mut pipeline.track)
+            .and_then(|()| pipeline.track.catch_up(clock::now() - SILENCE_LAG));
         match result {
             Ok(()) => {}
             Err(Failure::Device(error)) => device.lost(&error),
@@ -163,6 +135,53 @@ fn record(live: &Live, stop: &Signal) {
         }
     }
     log::info("Sound recording stopped");
+}
+
+/// What the audio thread records with. The fields drop in this order: the encoder and the
+/// device list release their COM objects before Media Foundation and COM are shut down.
+struct Pipeline<'a> {
+    track: Track<'a>,
+    devices: Devices,
+    _media: MediaFoundation,
+    _com: Com,
+}
+
+impl<'a> Pipeline<'a> {
+    /// Starts COM and Media Foundation on this thread and opens the device list and the
+    /// encoder, or logs which of them keeps the session's sound from being recorded.
+    fn open(live: &'a Live) -> Option<Self> {
+        let com = started(Com::start(), "COM is unavailable")?;
+        let media = started(MediaFoundation::start(), "Media Foundation is unavailable")?;
+        let devices = started(Devices::new(), "the audio devices could not be listed")?;
+        let track = started(Track::open(live), "the AAC encoder could not be opened")?;
+        Some(Self {
+            track,
+            devices,
+            _media: media,
+            _com: com,
+        })
+    }
+}
+
+/// What `result` started, or `None` once the reason sound is not recorded, `what`, is logged.
+fn started<T>(result: windows::core::Result<T>, what: &str) -> Option<T> {
+    result
+        .inspect_err(|error| log::warning(format!("Sound is not recorded: {what} ({error})")))
+        .ok()
+}
+
+/// Asks Windows to report changes of the default output device, or logs that the device will
+/// be polled instead.
+fn watch_default(devices: &Devices) -> Option<Watch> {
+    devices
+        .watch()
+        .inspect_err(|error| {
+            log::warning(format!(
+                "Windows will not report audio device changes ({error}); checking every {} s instead",
+                DEFAULT_CHECK_INTERVAL.as_secs()
+            ));
+        })
+        .ok()
 }
 
 /// The capture of the default output device, opened again whenever it fails or another device

@@ -52,7 +52,6 @@ pub(super) struct Capture {
     window: Option<HWND>,
     /// Whether the current duplication has delivered a picture; its first one is always new.
     primed: bool,
-    /// Paces the attempts to open a lost duplication again.
     reopen: ReopenThrottle,
 }
 

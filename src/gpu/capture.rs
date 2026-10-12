@@ -231,3 +231,36 @@ fn is_window_closed(window: Option<HWND>) -> bool {
     // SAFETY: IsWindow accepts any handle, live or not.
     window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reopen_is_attempted_at_once_until_refused() {
+        let mut throttle = ReopenThrottle::default();
+        let now = throttle
+            .attempt()
+            .expect("the first attempt is due at once");
+        throttle.refused(now);
+        assert!(
+            throttle.attempt().is_none(),
+            "a refusal holds the next attempt back"
+        );
+        throttle.succeeded();
+        assert!(
+            throttle.attempt().is_some(),
+            "a success lets the next attempt go ahead"
+        );
+    }
+
+    #[test]
+    fn reopen_is_attempted_again_once_the_interval_has_passed() {
+        let mut throttle = ReopenThrottle::default();
+        let Some(refused_at) = Instant::now().checked_sub(REOPEN_INTERVAL) else {
+            return;
+        };
+        throttle.refused(refused_at);
+        assert!(throttle.attempt().is_some());
+    }
+}

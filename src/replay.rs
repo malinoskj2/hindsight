@@ -41,7 +41,9 @@ const WRITE_BUFFER_BYTES: usize = 1 << 20;
 /// One encoded frame: an H.264 or HEVC access unit in Annex B form, or an AV1 temporal unit.
 #[derive(Debug)]
 pub(crate) struct Packet {
-    /// The frame's tick of the session's frame clock; skipped ticks leave gaps.
+    /// The frame's tick of the session's frame clock; skipped ticks leave gaps. Packets come
+    /// in rising order of index, as the frame clock and an encoder without B-frames give them;
+    /// the ring's trimming counts on it.
     pub(crate) index: u64,
     pub(crate) keyframe: bool,
     pub(crate) data: Box<[u8]>,
@@ -141,12 +143,7 @@ impl Live {
                 "The replay buffer could not be kept in GPU memory ({error}); it continues in RAM"
             ));
         }
-        self.oldest
-            .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
-        self.encoded.fetch_add(1, Ordering::Relaxed);
-        if fresh {
-            self.fresh.fetch_add(1, Ordering::Relaxed);
-        }
+        self.count_frame(oldest, fresh);
     }
 
     /// Adds an encoded frame that the encoder put away in a store of its own, at `slot`;
@@ -163,6 +160,12 @@ impl Live {
             });
             ring.first_index()
         };
+        self.count_frame(oldest, fresh);
+    }
+
+    /// Counts a frame that went through the buffer, `fresh` when it carried new screen content,
+    /// and notes the `oldest` frame the buffer kept after it, for the sound's trimming.
+    fn count_frame(&self, oldest: Option<u64>, fresh: bool) {
         self.oldest
             .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
         self.encoded.fetch_add(1, Ordering::Relaxed);
@@ -439,9 +442,8 @@ mod tests {
         frame_rate: 30,
     };
 
-    fn live_with(frames: u64) -> Live {
-        let live = Live::new(60);
-        live.set_stream(STREAM);
+    /// Pushes `frames` H.264 frames with a keyframe every 30, every other one fresh.
+    fn push_frames(live: &Live, frames: u64) {
         for index in 0..frames {
             let keyframe_packet = index % 30 == 0;
             let data = if keyframe_packet {
@@ -458,6 +460,12 @@ mod tests {
                 index % 2 == 0,
             );
         }
+    }
+
+    fn live_with(frames: u64) -> Live {
+        let live = Live::new(60);
+        live.set_stream(STREAM);
+        push_frames(&live, frames);
         live
     }
 
@@ -482,22 +490,7 @@ mod tests {
         let live = Live::new(60);
         live.set_stream(STREAM);
         live.set_store(Box::new(store::tests::MemoryStore::new(1 << 16, 1000)));
-        for index in 0..100 {
-            let keyframe_packet = index % 30 == 0;
-            let data = if keyframe_packet {
-                keyframe()
-            } else {
-                inter_frame()
-            };
-            live.push(
-                Packet {
-                    index,
-                    keyframe: keyframe_packet,
-                    data: data.into(),
-                },
-                true,
-            );
-        }
+        push_frames(&live, 100);
         let snapshot = live.snapshot().unwrap();
         assert!((snapshot.seconds() - in_memory.seconds()).abs() < 1e-9);
         let from_store = snapshot.clip().unwrap();

@@ -335,3 +335,19 @@ pub(super) struct ToDx9VidVtable {
     pub(super) release: unsafe extern "system" fn(*mut ToDx9Vid) -> Status,
     _cursor_capture: unsafe extern "system" fn(*mut ToDx9Vid, *mut c_void) -> Status,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_show_their_name_with_the_code() {
+        assert_eq!(
+            Status::INVALIDATED_SESSION.to_string(),
+            "NVFBC_ERROR_INVALIDATED_SESSION (-3)"
+        );
+        assert_eq!(Status(-99).to_string(), "unknown NvFBC status (-99)");
+        assert!(Status::SUCCESS.ok().is_ok());
+        assert_eq!(Status::UNSUPPORTED.ok(), Err(Status::UNSUPPORTED));
+    }
+}

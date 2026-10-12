@@ -74,7 +74,6 @@ const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
 /// Surfaces grabbed into in turn: the most the driver accepts (it refuses four), one for the
 /// grab on its way and two for the frames NVENC may still be reading.
 const SLOT_COUNT: u32 = 3;
-/// [`SLOT_COUNT`] as an array length.
 const SLOTS: usize = SLOT_COUNT as usize;
 /// The variable naming the process whose frames to grab; see [`Switches`].
 const PROCESS_VARIABLE: &str = "HINDSIGHT_NVFBC_PROCESS";
@@ -107,7 +106,6 @@ pub(super) struct Capture {
     monitor: HMONITOR,
     /// The window whose monitor is recorded, when the target is one.
     window: Option<HWND>,
-    /// Paces the attempts to open a lost session again.
     reopen: ReopenThrottle,
     /// Whether the driver draws the mouse cursor into each grab.
     cursor: bool,
@@ -160,21 +158,31 @@ impl Switches {
     /// What the environment asks for; a variable that is unset, empty or unreadable leaves
     /// its default.
     fn from_environment() -> Self {
-        let variable = |name: &str| {
-            std::env::var(name)
-                .ok()
+        let variable = |name| std::env::var(name).ok();
+        Self::parse(
+            variable(PROCESS_VARIABLE).as_deref(),
+            variable(GRAB_MODE_VARIABLE).as_deref(),
+            variable(WAIT_TIMEOUT_VARIABLE).as_deref(),
+        )
+    }
+
+    /// The switches the variables' values ask for, each read without regard to case or
+    /// surrounding whitespace; a value that is missing, empty or malformed leaves its default.
+    fn parse(process: Option<&str>, grab_mode: Option<&str>, wait_timeout: Option<&str>) -> Self {
+        let value = |value: Option<&str>| {
+            value
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty())
         };
-        let grab_mode = match variable(GRAB_MODE_VARIABLE).as_deref() {
+        let grab_mode = match value(grab_mode).as_deref() {
             Some("scale") => GrabMode::Scale,
             Some("crop") => GrabMode::Crop,
             _ => GrabMode::Full,
         };
         Self {
-            process: variable(PROCESS_VARIABLE).and_then(|value| value.parse().ok()),
+            process: value(process).and_then(|value| value.parse().ok()),
             grab_mode,
-            wait_timeout: variable(WAIT_TIMEOUT_VARIABLE).and_then(|value| value.parse().ok()),
+            wait_timeout: value(wait_timeout).and_then(|value| value.parse().ok()),
         }
     }
 
@@ -247,23 +255,24 @@ impl Capture {
             switches,
             reported: false,
         };
-        capture.session = Some(
-            capture
-                .open_session()
-                .map_err(nvfbc_failed("create the NvFBC session"))?,
-        );
+        capture.session = Some(capture.open_session()?);
         Ok(capture)
     }
 
-    /// Creates the driver's capture object on the device and hands it the surfaces.
-    fn open_session(&self) -> Result<Session, Status> {
-        let object = self.create_object()?;
+    /// Creates the driver's capture object on the device and hands it the surfaces. A refusal
+    /// that trying again may change comes back as [`CaptureError::Nvfbc`].
+    fn open_session(&self) -> Result<Session, CaptureError> {
+        let object = self
+            .create_object()
+            .map_err(nvfbc_failed("create the NvFBC session"))?;
         // Released by `Drop` should setup fail.
         let session = Session {
             object,
             buffers: Box::new(output_buffers(&self.slots)),
         };
-        session.set_up(self.cursor)?;
+        session
+            .set_up(self.cursor)
+            .map_err(nvfbc_failed("set the NvFBC session up"))?;
         Ok(session)
     }
 
@@ -305,10 +314,9 @@ impl Capture {
                 self.session = Some(session);
                 self.reopen.succeeded();
             }
-            Err(status) => match permanent(status) {
-                Some(error) => return Err(error),
-                None => self.reopen.refused(now),
-            },
+            // A permanent refusal already reads as unsupported; any other status may pass.
+            Err(CaptureError::Nvfbc(..)) => self.reopen.refused(now),
+            Err(error) => return Err(error),
         }
         Ok(Frame::Unchanged)
     }
@@ -354,7 +362,6 @@ impl Capture {
                 Ok(Grab::Started)
             }
             Status::INVALIDATED_SESSION => Ok(Grab::Lost),
-            // Protected video is on screen; the driver withholds the picture until it is gone.
             Status::PROTECTED_CONTENT => Ok(Grab::Withheld),
             status => Err(nvfbc_failed("grab the display with NvFBC")(status)),
         }
@@ -362,7 +369,7 @@ impl Capture {
 
     /// Queues the query that tells when the grab just started into the next slot has finished
     /// on the GPU and sends both to the GPU, leaves that slot for the next tick to collect and
-    /// sends the following grab to the other slot.
+    /// moves the following grab on to the slot after it.
     fn follow_grab(&mut self) -> Result<(), CaptureError> {
         let slot = &self.slots[self.next as usize];
         // SAFETY: marks the end of the grab's work on the device.
@@ -401,6 +408,8 @@ impl Source for Capture {
         match self.grab()? {
             Grab::Started | Grab::Withheld => {}
             Grab::Resized => return Ok(Frame::Resized),
+            // The frame just collected is delivered first; the next tick, with nothing left
+            // to collect, opens the session again.
             Grab::Lost if collected.is_some() => self.session = None,
             Grab::Lost => {
                 self.session = None;
@@ -443,7 +452,6 @@ impl Drop for Capture {
 struct Library(HMODULE);
 
 impl Library {
-    /// Loads the library the driver installed.
     fn load() -> Result<Self, CaptureError> {
         // The driver installs the library in System32; never look anywhere a planted copy
         // could be.
@@ -474,7 +482,6 @@ struct EntryPoints {
 }
 
 impl EntryPoints {
-    /// Looks the entry points up in the loaded library.
     fn look_up(library: &Library) -> Result<Self, CaptureError> {
         let library = library.0;
         let missing = |name: &str| {
@@ -527,7 +534,6 @@ struct Session {
 }
 
 impl Session {
-    /// The object's method table.
     fn methods(&self) -> &ffi::ToDx9VidVtable {
         // SAFETY: the object is live (see the field), and a live object's table pointer is
         // valid for as long as the library that made it is loaded.
@@ -850,8 +856,9 @@ fn wait_for(query: &IDirect3DQuery9) -> Result<(), CaptureError> {
     let deadline = Instant::now() + GRAB_TIMEOUT;
     while !is_done(query)? {
         if Instant::now() >= deadline {
-            return Err(CaptureError::Unsupported(
-                "the NVIDIA driver stopped completing NvFBC grabs".to_owned(),
+            // A wedged driver is usually mended by a fresh session, so this is not permanent.
+            return Err(CaptureError::Restart(
+                "the NVIDIA driver stopped completing NvFBC grabs",
             ));
         }
         std::thread::yield_now();
@@ -882,4 +889,38 @@ fn permanent(status: Status) -> Option<CaptureError> {
         _ => return None,
     };
     Some(CaptureError::Unsupported(format!("{reason} ({status})")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switches_default_when_unset_or_malformed() {
+        assert!(Switches::parse(None, None, None) == Switches::DEFAULT);
+        assert!(Switches::parse(Some(""), Some("  "), Some("")) == Switches::DEFAULT);
+        assert!(Switches::parse(Some("game"), Some("tiled"), Some("-1")) == Switches::DEFAULT);
+    }
+
+    #[test]
+    fn switches_read_their_values_loosely() {
+        let switches = Switches::parse(Some(" 4321 "), Some("Crop"), Some("16"));
+        assert_eq!(switches.process, Some(4321));
+        assert!(switches.grab_mode == GrabMode::Crop);
+        assert_eq!(switches.wait_timeout, Some(16));
+        assert!(Switches::parse(None, Some("SCALE"), None).grab_mode == GrabMode::Scale);
+    }
+
+    #[test]
+    fn permanent_refusals_read_as_unsupported_and_others_keep_their_step() {
+        assert!(matches!(
+            nvfbc_failed("step")(Status::UNSUPPORTED),
+            CaptureError::Unsupported(_)
+        ));
+        assert!(matches!(
+            nvfbc_failed("step")(Status::INVALIDATED_SESSION),
+            CaptureError::Nvfbc("step", Status::INVALIDATED_SESSION)
+        ));
+        assert!(permanent(Status::PROTECTED_CONTENT).is_none());
+    }
 }

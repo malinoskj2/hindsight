@@ -48,7 +48,6 @@ use windows::Win32::{
 /// Buffers grabbed into in turn: one for the grab just handed over and two for the frames
 /// NVENC may still be reading, as with the Direct3D 9 backend's surfaces.
 const SLOT_COUNT: u32 = 3;
-/// [`SLOT_COUNT`] as a length.
 const SLOTS: usize = SLOT_COUNT as usize;
 /// Bytes per pixel of the ARGB the driver writes.
 const BYTES_PER_PIXEL: u32 = 4;
@@ -85,7 +84,6 @@ pub(in crate::gpu::capture) struct Capture {
     monitor: HMONITOR,
     /// The window whose monitor is recorded, when the target is one.
     window: Option<HWND>,
-    /// Paces the attempts to open a lost session again.
     reopen: ReopenThrottle,
     /// Whether the driver draws the mouse cursor into each grab.
     cursor: bool,
@@ -147,22 +145,7 @@ impl Capture {
 
         let library = Library::load()?;
         let create = prepare(&library, &key, adapter)?;
-        let cuda = Driver::load().map_err(cuda_failed("load the CUDA driver"))?;
-        let cuda_device = pick_device(&cuda, device)?;
-        let version = cuda
-            .version()
-            .map_err(cuda_failed("read the CUDA driver version"))?;
-        log::info(format!(
-            "NvFBC grabs into CUDA memory on CUDA device {cuda_device}, driver API {}.{}",
-            version / 1000,
-            version % 1000 / 10
-        ));
-        let context = cuda
-            .retain_primary_context(cuda_device)
-            .map_err(cuda_failed("open the CUDA context"))?;
-        // Current for the rest of the session; `Drop` takes it off again.
-        cuda.push_context(context)
-            .map_err(cuda_failed("make the CUDA context current"))?;
+        let (cuda, cuda_device, context) = open_primary_context(device)?;
 
         let mut capture = Self {
             _library: library,
@@ -311,13 +294,14 @@ impl Capture {
         match status {
             Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
             Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
-            Status::SUCCESS if !self.note_pitch(&info) => Ok(Grab::Resized),
             Status::SUCCESS => {
+                if !self.note_pitch(&info) {
+                    return Ok(Grab::Resized);
+                }
                 self.next = (self.next + 1) % SLOT_COUNT;
                 Ok(Grab::Done(slot))
             }
             Status::INVALIDATED_SESSION => Ok(Grab::Lost),
-            // Protected video is on screen; the driver withholds the picture until it is gone.
             Status::PROTECTED_CONTENT => Ok(Grab::Withheld),
             status => Err(nvfbc_failed("grab the display with NvFBC into CUDA memory")(status)),
         }
@@ -432,7 +416,8 @@ impl Drop for Capture {
         if let SessionContext::Primary { device, .. } = self.context {
             let _ = self.cuda.release_primary_context(device);
         }
-        // The fields then unload the CUDA driver and, last, the NvFBC library.
+        // The fields then unload the NvFBC library, which nothing of the driver's is left in,
+        // and the CUDA driver.
     }
 }
 
@@ -444,7 +429,6 @@ struct Session {
 }
 
 impl Session {
-    /// The object's method table.
     fn methods(&self) -> &ffi::ToCudaVtable {
         // SAFETY: the object is live (see the field), and a live object's table pointer is
         // valid for as long as the library that made it is loaded.
@@ -519,6 +503,31 @@ fn require_even((width, height): (u32, u32)) -> Result<(), CaptureError> {
     Err(CaptureError::Unsupported(format!(
         "the display is {width}×{height}; NvFBC to CUDA encodes its grabs in place and needs an even width and height, so choose NVIDIA NvFBC"
     )))
+}
+
+/// The CUDA driver with the encoding GPU's primary context retained and current on this
+/// thread, for the session to run in; which device and driver were found is logged.
+fn open_primary_context(device: &Device) -> Result<(Driver, CudaDevice, Context), CaptureError> {
+    let cuda = Driver::load().map_err(cuda_failed("load the CUDA driver"))?;
+    let cuda_device = pick_device(&cuda, device)?;
+    let version = cuda
+        .version()
+        .map_err(cuda_failed("read the CUDA driver version"))?;
+    log::info(format!(
+        "NvFBC grabs into CUDA memory on CUDA device {cuda_device}, driver API {}.{}",
+        version / 1000,
+        version % 1000 / 10
+    ));
+    let context = cuda
+        .retain_primary_context(cuda_device)
+        .map_err(cuda_failed("open the CUDA context"))?;
+    // Current for the rest of the session; `Capture`'s `Drop` takes it off again. Until the
+    // capture holds it, nothing else would give the retained context back.
+    if let Err(error) = cuda.push_context(context) {
+        let _ = cuda.release_primary_context(cuda_device);
+        return Err(cuda_failed("make the CUDA context current")(error));
+    }
+    Ok((cuda, cuda_device, context))
 }
 
 /// The CUDA device of the encoding GPU, found by the adapter LUID both APIs report, or the

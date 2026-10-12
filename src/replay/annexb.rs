@@ -5,27 +5,28 @@ const START_CODE: [u8; 3] = [0, 0, 1];
 /// The byte inserted after two zero bytes so that a payload never contains a start code.
 const EMULATION_PREVENTION: u8 = 3;
 
-/// NAL units of an Annex B stream, without their start codes.
-pub(super) fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
-    let mut units = Vec::new();
-    let mut start = None;
-    let mut index = 0;
-    while index + START_CODE.len() <= stream.len() {
-        if !stream[index..].starts_with(&START_CODE) {
-            index += 1;
-            continue;
+/// NAL units of an Annex B stream, without their start codes; empty ones are left out. Lazy,
+/// since telling a keyframe needs only the first few units of every frame.
+pub(super) fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
+    // The stream from the next start code on, or nothing once the last unit has been given.
+    let mut rest = start_code(stream).map(|at| &stream[at..]);
+    std::iter::from_fn(move || {
+        loop {
+            let after_code = &rest?[START_CODE.len()..];
+            let next = start_code(after_code);
+            rest = next.map(|at| &after_code[at..]);
+            let unit = trim_trailing_zeros(&after_code[..next.unwrap_or(after_code.len())]);
+            if !unit.is_empty() {
+                return Some(unit);
+            }
         }
-        if let Some(start) = start {
-            units.push(trim_trailing_zeros(&stream[start..index]));
-        }
-        index += START_CODE.len();
-        start = Some(index);
-    }
-    if let Some(start) = start {
-        units.push(trim_trailing_zeros(&stream[start..]));
-    }
-    units.retain(|unit| !unit.is_empty());
-    units
+    })
+}
+
+/// Where the first start code in `data` begins.
+fn start_code(data: &[u8]) -> Option<usize> {
+    data.windows(START_CODE.len())
+        .position(|window| window == START_CODE)
 }
 
 /// The unit's payload with emulation prevention bytes (the `03` in `00 00 03`) removed, up to
@@ -88,11 +89,16 @@ mod tests {
     fn splits_on_three_and_four_byte_start_codes() {
         let stream = [0, 0, 0, 1, 9, 16, 0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x65, 7];
         assert_eq!(
-            nal_units(&stream),
+            nal_units(&stream).collect::<Vec<_>>(),
             [&[9, 16][..], &[0x67, 1, 2], &[0x65, 7]]
         );
-        assert_eq!(nal_units(&[0, 0, 0, 0]).len(), 0);
-        assert_eq!(nal_units(&[]).len(), 0);
+        assert_eq!(nal_units(&[0, 0, 0, 0]).count(), 0);
+        assert_eq!(nal_units(&[]).count(), 0);
+        // Start codes with nothing between them, and a trailing one, yield no units.
+        assert_eq!(
+            nal_units(&[0, 0, 1, 0, 0, 1, 5, 0, 0, 1]).collect::<Vec<_>>(),
+            [&[5][..]]
+        );
     }
 
     #[test]

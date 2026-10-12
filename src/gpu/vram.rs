@@ -9,7 +9,11 @@
 //! crossing the bus back into system memory when a clip is saved. What it buys: the system's
 //! memory stays free of the buffer while the game runs.
 
-use super::device::{Device, DeviceError};
+use super::{
+    CHUNK_BYTES, MEBIBYTE, PAGE_BYTES,
+    device::{Device, DeviceError},
+    reserved_pages,
+};
 use crate::replay::{Page, Pages, Slot, Store, StoreError};
 use std::{thread, time::Duration};
 use thiserror::Error;
@@ -22,15 +26,8 @@ use windows::Win32::Graphics::{
     Dxgi::DXGI_ERROR_WAS_STILL_DRAWING,
 };
 
-/// Bytes in a page. A packet never straddles two pages, so a page's last bytes may go unused.
-const PAGE_BYTES: usize = 64 << 20;
-/// Bytes read back at a time: the size of the staging buffer in system memory while a clip
-/// is saved.
-const CHUNK_BYTES: usize = 32 << 20;
 /// How long a read-back waits between asking whether its copy has finished.
 const POLL: Duration = Duration::from_millis(1);
-/// Bytes in a mebibyte, for the log.
-const MEBIBYTE: usize = 1 << 20;
 
 /// Why the buffer could not be placed in GPU memory.
 #[derive(Debug, Error)]
@@ -60,18 +57,15 @@ impl VideoMemory {
     /// are made as needed if the packets outgrow the estimate.
     pub(crate) fn create(bytes: u64) -> Result<Self, VramError> {
         let device = Device::create()?;
-        let needed = usize::try_from(bytes)
-            .unwrap_or(usize::MAX)
-            .div_ceil(PAGE_BYTES)
-            .saturating_add(1)
-            .saturating_mul(PAGE_BYTES);
+        let pages = reserved_pages(bytes);
+        let needed = pages.saturating_mul(PAGE_BYTES);
         let available = device
             .dedicated_video_memory()
             .map_err(VramError::Adapter)?;
         if needed > available {
             return Err(VramError::TooLarge { needed, available });
         }
-        let reserved = (0..needed / PAGE_BYTES)
+        let reserved = (0..pages)
             .map(|_| VramPage::create(&device))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
@@ -111,7 +105,6 @@ struct VramPage {
 }
 
 impl VramPage {
-    /// A page on `device`.
     fn create(device: &Device) -> Result<Self, VramError> {
         let description = D3D11_BUFFER_DESC {
             ByteWidth: width(PAGE_BYTES),

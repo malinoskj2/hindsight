@@ -173,7 +173,6 @@ impl Skin {
         }))
     }
 
-    /// The look chosen.
     pub(super) fn theme(&self) -> Theme {
         self.0.theme.get()
     }
@@ -333,8 +332,8 @@ impl Skin {
         let (Ok(brush), Ok(pen)) = (solid_brush(fill), solid_pen(edge)) else {
             return co::CDRF::DODEFAULT;
         };
-        // The corners show what is behind the button, not the button's own background.
-        let behind = self.brush(Surface::Dialog).unwrap_or(w::HBRUSH::NULL);
+        // The corners show what is behind the button: the group panel it sits on.
+        let behind = self.brush(Surface::Page).unwrap_or(w::HBRUSH::NULL);
         let _ = hdc.FillRect(draw.rc, &behind);
         if !round_rect(hdc, draw.rc, &pen, &brush) {
             return co::CDRF::DODEFAULT;
@@ -580,15 +579,8 @@ fn paint_title(hdc: &w::HDC, palette: &Palette, panel: &w::HBRUSH, frame: &Frame
 
 /// Paints the strip of tabs and the frame round the pages onto `hdc`.
 fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::RECT) {
-    let hwnd = tab.hwnd();
-    let items = tab.items();
-    let count = items.count().unwrap_or(0);
-    let selected = items.selected().map(|item| item.index());
-    let strip_bottom = (0..count)
-        .filter_map(|index| tab_rect(hwnd, index))
-        .map(|rect| rect.bottom)
-        .max()
-        .unwrap_or(0);
+    let faces = tab_faces(tab);
+    let strip_bottom = faces.iter().map(|face| face.rect.bottom).max().unwrap_or(0);
 
     let Ok(pen) = solid_pen(palette.border) else {
         return;
@@ -598,7 +590,7 @@ fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::R
     };
     let _ = hdc.FillRect(client, &background);
 
-    let font = control_font(hwnd);
+    let font = control_font(tab.hwnd());
     let _font = font.as_ref().and_then(|font| hdc.SelectObject(font).ok());
     let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
 
@@ -612,17 +604,26 @@ fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::R
 
     // The pen stays selected for every tab's outline.
     let _pen = hdc.SelectObject(&*pen);
-    for index in 0..count {
-        let Some(rect) = tab_rect(hwnd, index) else {
-            continue;
-        };
-        let face = TabFace {
-            rect,
-            text: items.get(index).text().unwrap_or_default(),
-            selected: selected == Some(index),
-        };
-        paint_tab(hdc, palette, &face);
+    for face in &faces {
+        paint_tab(hdc, palette, face);
     }
+}
+
+/// The tabs of the strip in order, as they are drawn; one whose rectangle the control cannot
+/// give is left out.
+fn tab_faces(tab: &gui::Tab) -> Vec<TabFace> {
+    let hwnd = tab.hwnd();
+    let items = tab.items();
+    let selected = items.selected().map(|item| item.index());
+    (0..items.count().unwrap_or(0))
+        .filter_map(|index| {
+            Some(TabFace {
+                rect: tab_rect(hwnd, index)?,
+                text: items.get(index).text().unwrap_or_default(),
+                selected: selected == Some(index),
+            })
+        })
+        .collect()
 }
 
 /// Paints one tab with the pen already selected into `hdc`: its fill, its outline open towards
@@ -846,6 +847,24 @@ fn display_rect(tab: &w::HWND, client: w::RECT) -> Option<w::RECT> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixing_moves_each_channel_part_of_the_way_and_rounds_to_nearest() {
+        assert_eq!(mix(0x0010_2030, 0x00FF_FFFF, 0), 0x0010_2030);
+        assert_eq!(mix(0x0010_2030, 0x00FF_FFFF, 255), 0x00FF_FFFF);
+        // Halfway from black to white is 128 (127.5 rounded up) in every channel.
+        assert_eq!(mix(BLACK_RGB, 0x00FF_FFFF, 128), 0x0080_8080);
+        assert_eq!(mix(0x0000_0000, 0x00FF_0000, 51), 0x0033_0000);
+    }
+
+    #[test]
+    fn a_colour_keeps_its_channels_in_the_order_windows_wants() {
+        let colour = colour(0x0012_3456);
+        assert_eq!(
+            (colour.GetRValue(), colour.GetGValue(), colour.GetBValue()),
+            (0x12, 0x34, 0x56)
+        );
+    }
 
     #[test]
     fn a_disabled_button_looks_the_same_in_either_role() {

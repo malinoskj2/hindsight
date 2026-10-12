@@ -11,12 +11,10 @@ pub(super) const WINDOW_WIDTH: i32 = 470;
 pub(super) const MARGIN: i32 = 8;
 /// What the tab control's frame takes from the width of its pages, both sides together.
 const TAB_FRAME: i32 = 8;
-/// Width of a tab page.
 const PAGE_WIDTH: i32 = WINDOW_WIDTH - 2 * MARGIN - TAB_FRAME;
 
 /// Where a group's frame starts on its page.
 pub(super) const GROUP_X: i32 = 8;
-/// Width of a group's frame.
 pub(super) const GROUP_WIDTH: i32 = PAGE_WIDTH - 2 * GROUP_X;
 /// Gap between a group's frame and the controls inside it, either side.
 const GROUP_PADDING: i32 = 12;
@@ -35,9 +33,7 @@ const TITLE_INDENT: i32 = 8;
 
 /// Pitch of a row of text.
 pub(super) const LINE: i32 = 18;
-/// Width of a push button.
 pub(super) const BUTTON_WIDTH: i32 = 120;
-/// Height of a push button.
 pub(super) const BUTTON_HEIGHT: i32 = 24;
 
 // The colours labels are drawn in, as classic shows them; a character theme gives the black,
@@ -136,7 +132,6 @@ impl TintedLabel {
         }
     }
 
-    /// The label itself.
     pub(super) fn label(&self) -> &gui::Label {
         &self.label
     }
@@ -400,7 +395,6 @@ fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
     }
 }
 
-/// Shows or hides a control.
 pub(super) fn show(control: &impl GuiWindow, visible: bool) {
     control
         .hwnd()

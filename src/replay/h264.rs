@@ -20,15 +20,13 @@ const CHROMA_420: u8 = 1;
 
 /// Whether the access unit holds an IDR picture.
 pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
-    nal_units(access_unit)
-        .iter()
-        .any(|unit| nal_type(unit) == NAL_IDR)
+    nal_units(access_unit).any(|unit| nal_type(unit) == NAL_IDR)
 }
 
 /// The `avcC` record for the parameter sets in `access_unit`, if it carries both: the profile,
 /// compatibility flags and level from the SPS, then the one SPS and the one PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
-    let units = nal_units(access_unit);
+    let units: Vec<&[u8]> = nal_units(access_unit).collect();
     let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
     let mut record = Avcc::new(of_type(NAL_SPS)?, of_type(NAL_PPS)?).ok()?;
     record.length_size = NAL_LENGTH_BYTES;
@@ -46,7 +44,6 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
 /// access unit delimiters carry nothing an MP4 reader needs.
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
     nal_units(access_unit)
-        .into_iter()
         .filter(|unit| !matches!(nal_type(unit), NAL_SPS | NAL_PPS | NAL_AUD))
         .collect()
 }

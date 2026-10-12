@@ -76,7 +76,8 @@ impl Main {
         let main = Self::create(worker, config, start_hidden);
         main.draw();
         main.window_events();
-        main.control_events();
+        main.status_events();
+        main.settings_events();
         main.run(start_hidden)
     }
 
@@ -120,7 +121,6 @@ impl Main {
     /// Installs the handlers that draw the window's own parts and its strip of tabs; the pages
     /// install their own.
     fn draw(&self) {
-        // A character theme draws the strip of tabs itself; classic leaves it to Windows.
         let skin = self.skin.clone();
         let tab = self.tab.clone();
         self.tab.on_subclass().wm_paint(move || {
@@ -196,8 +196,8 @@ impl Main {
         });
     }
 
-    /// Wires the buttons, lists and fields of the pages to what they do.
-    fn control_events(&self) {
+    /// Wires the Status tab's buttons to what they do.
+    fn status_events(&self) {
         let me = self.clone();
         self.status.save.on().bn_clicked(move || {
             me.save();
@@ -209,7 +209,11 @@ impl Main {
             me.toggle_recording();
             Ok(())
         });
+    }
 
+    /// Wires the Settings tab's controls whose effect reaches beyond the page: Apply, the
+    /// choices that act at once, and the Run-key switch. The page wires its own estimate.
+    fn settings_events(&self) {
         let me = self.clone();
         self.settings.apply.on().bn_clicked(move || {
             me.apply_settings();
@@ -228,20 +232,6 @@ impl Main {
             Ok(())
         });
 
-        for field in self.settings.estimate_inputs() {
-            let me = self.clone();
-            field.on().en_change(move || {
-                me.settings.update_estimate();
-                Ok(())
-            });
-        }
-
-        let me = self.clone();
-        self.settings.memory.on().cbn_sel_change(move || {
-            me.settings.update_estimate();
-            Ok(())
-        });
-
         let me = self.clone();
         self.settings.start_with_windows.on().bn_clicked(move || {
             if me.settings.toggle_startup() {
@@ -249,6 +239,8 @@ impl Main {
             }
             Ok(())
         });
+
+        self.settings.estimate_events();
     }
 
     /// Runs the window until it is destroyed, shown at once unless it starts in the tray.
@@ -309,7 +301,6 @@ impl Main {
         match Tray::new(move |action| me.on_tray(action)) {
             Ok(tray) => self.shared.borrow_mut().tray = Some(tray),
             Err(error) => {
-                // Without a tray, closing quits; the footer row appears to say so.
                 let message = text::tray_unavailable(error);
                 log::warning(&message);
                 self.footer.show_hint(&message);
@@ -336,7 +327,6 @@ impl Main {
 
     /// Asks the worker for fresh figures and shows the ones it published last.
     fn on_timer(&self) {
-        // The worker publishes what it asked for; the figures shown are from the last one.
         self.shared.borrow().worker.refresh();
         self.refresh();
     }
@@ -364,17 +354,25 @@ impl Main {
         if to_tray {
             log::info(text::CLOSED_TO_TRAY);
             self.wnd.hwnd().ShowWindow(co::SW::HIDE);
-        } else {
-            let _ = self.wnd.hwnd().DestroyWindow();
+            return;
         }
+        // Destroying the window frees its handlers, the one running this included, so the
+        // call goes through a copy on the stack and nothing touches `self` after it.
+        let wnd = self.wnd.clone();
+        let _ = wnd.hwnd().DestroyWindow();
     }
 
     /// Breaks the reference cycles through the tray's and the hook's callbacks so the worker
     /// is dropped, which stops recording and finishes a clip being saved.
     fn on_destroy(&self) {
-        let mut shared = self.shared.borrow_mut();
-        shared.tray = None;
-        shared.foreground_hook = None;
+        // Dropped outside the borrow: the tray destroys a window of its own as it goes, and
+        // anything that fires from that must find the shared state free.
+        let (tray, hook) = {
+            let mut shared = self.shared.borrow_mut();
+            (shared.tray.take(), shared.foreground_hook.take())
+        };
+        drop(tray);
+        drop(hook);
     }
 
     /// Does what was chosen from the tray icon's menu.
@@ -666,6 +664,24 @@ fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
 fn startup_setting() -> (bool, Option<String>) {
     match startup::enabled() {
         Ok(enabled) => (enabled, None),
-        Err(error) => (false, Some(text::startup_setting_failed(error))),
+        Err(error) => (false, Some(text::startup_setting_unreadable(error))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_grows_by_the_footer_only_once_it_is_shown() {
+        let mut heights = Heights::default();
+        assert_eq!(heights.fit(40), (40, 40));
+        // The same need again changes nothing.
+        assert_eq!(heights.fit(40), (0, 0));
+        heights.footer = footer::HEIGHT;
+        assert_eq!(heights.fit(40), (0, footer::HEIGHT));
+        // Giving the room back shrinks the pages and the window alike; the footer stays.
+        assert_eq!(heights.fit(0), (-40, -40));
+        assert_eq!(heights.window, footer::HEIGHT);
     }
 }

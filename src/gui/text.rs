@@ -74,6 +74,10 @@ pub(super) fn tray_unavailable(error: impl Display) -> String {
     format!("Tray unavailable; closing this window stops recording and quits: {error}")
 }
 
+pub(super) fn startup_setting_unreadable(error: impl Display) -> String {
+    format!("The Start with Windows entry could not be read: {error}")
+}
+
 pub(super) fn startup_setting_failed(error: impl Display) -> String {
     format!("Could not update the Start with Windows entry: {error}")
 }
@@ -179,4 +183,43 @@ fn gigabytes(bytes: Option<u64>) -> String {
         || NO_VALUE.to_owned(),
         |bytes| format!("{:.2} GB", bytes as f64 / GIGABYTE),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn totals_are_shown_in_gigabytes_to_two_decimals_or_as_a_dash() {
+        assert_eq!(gigabytes(None), "—");
+        assert_eq!(gigabytes(Some(0)), "0.00 GB");
+        assert_eq!(gigabytes(Some(1_073_741_824)), "1.00 GB");
+        assert_eq!(gigabytes(Some(1_610_612_736)), "1.50 GB");
+    }
+
+    #[test]
+    fn the_encoder_line_needs_a_stream_and_the_rate_line_rounds_to_whole_frames() {
+        let mut status = Status {
+            bitrate_mbps: 20,
+            ..Status::default()
+        };
+        assert_eq!(encoder(&status), "—");
+        assert_eq!(rates(&status), "—");
+        status.encode_rate = Some(59.6);
+        assert_eq!(rates(&status), "60 fps");
+    }
+
+    #[test]
+    fn the_buffer_estimate_names_where_the_buffer_lives() {
+        assert_eq!(
+            buffer_estimate(500, Memory::Ram),
+            format!(
+                "Buffer in {} at this bitrate: about 500 MB",
+                Memory::Ram.short_name()
+            )
+        );
+        assert!(
+            buffer_estimate(500, Memory::Vram).ends_with("plus as much RAM while a clip is saved")
+        );
+    }
 }

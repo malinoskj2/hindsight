@@ -196,7 +196,8 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn spawn(store: Store, config: Config) -> Self {
+    /// Starts the worker thread; the error is that thread failing to start.
+    pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
         Self::spawn_with(RECORDER, RETRY_INTERVAL, Some(store), config)
     }
 
@@ -205,7 +206,7 @@ impl Worker {
         retry_interval: Duration,
         store: Option<Store>,
         config: Config,
-    ) -> Self {
+    ) -> io::Result<Self> {
         Self::spawn_saving_with(recorder, retry_interval, store, config, Saver::real())
     }
 
@@ -215,7 +216,7 @@ impl Worker {
         store: Option<Store>,
         config: Config,
         saver: Saver,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
         let wake = commands.clone();
         let status = Arc::new(Mutex::new(Status::default()));
@@ -226,14 +227,13 @@ impl Worker {
                 let mut machine =
                     Machine::new(recorder, retry_interval, store, config, output, wake, saver);
                 machine.run(&receiver);
-            })
-            .expect("spawn the recording worker thread");
+            })?;
 
-        Self {
+        Ok(Self {
             commands,
             status,
             join: Some(join),
-        }
+        })
     }
 
     pub(crate) fn status(&self) -> Status {
@@ -291,6 +291,8 @@ impl Drop for Worker {
 /// A running capture session.
 struct Session {
     stop: Arc<AtomicBool>,
+    /// Set by the capture thread as it ends; its outcome can then be joined without a wait.
+    done: Arc<AtomicBool>,
     join: JoinHandle<Result<Ended>>,
     /// The sound capture feeding the same buffer, when there is one; dropping the session
     /// stops it.
@@ -300,9 +302,29 @@ struct Session {
 /// A clip being written.
 struct Saving {
     seconds: f64,
+    /// Set by the save thread as it ends; its outcome can then be joined without a wait.
+    done: Arc<AtomicBool>,
     join: JoinHandle<Result<PathBuf, SaveError>>,
     /// When the progress tone plays next.
     next_tick: Instant,
+}
+
+/// Marks a capture or save thread as done and wakes the worker when it is dropped, which is as
+/// the thread's closure ends, whether it returned or panicked. The worker then joins the
+/// thread, which is handing back its result by then. `JoinHandle::is_finished` alone would not
+/// do: it says no until the result is stored, so a wake sent from inside the closure could
+/// find the thread unfinished and its outcome would wait for the next publish.
+struct Ending {
+    done: Arc<AtomicBool>,
+    wake: Sender<Command>,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        // Once the worker is gone there is nobody to wake.
+        let _ = self.wake.send(Command::Wake);
+    }
 }
 
 /// Counters at the previous refresh, for the rates.
@@ -421,7 +443,6 @@ impl Machine {
     /// exits.
     fn shut_down(&mut self) {
         self.stop_session();
-        // A clip being written is finished before the application goes away.
         if let Some(saving) = self.saving.take() {
             self.finish_save(saving);
         }
@@ -488,11 +509,13 @@ impl Machine {
         };
 
         let seconds = snapshot.seconds();
-        match self.spawn_save(snapshot) {
+        let (done, ending) = self.ending();
+        match self.spawn_save(snapshot, ending) {
             Ok(join) => {
                 (self.saver.chime)(Tone::Progress);
                 self.saving = Some(Saving {
                     seconds,
+                    done,
                     join,
                     next_tick: Instant::now() + PROGRESS_INTERVAL,
                 });
@@ -547,7 +570,8 @@ impl Machine {
         let audio = (self.config.audio && !cfg!(test))
             .then(|| audio::start(&live))
             .flatten();
-        let spawned = self.spawn_capture(&target, &live, &stop);
+        let (done, ending) = self.ending();
+        let spawned = self.spawn_capture(&target, &live, &stop, ending);
 
         self.retry_at = None;
         self.sample = None;
@@ -556,6 +580,7 @@ impl Machine {
             Ok(join) => {
                 self.session = Some(Session {
                     stop,
+                    done,
                     join,
                     _audio: audio,
                 });
@@ -567,13 +592,14 @@ impl Machine {
         }
     }
 
-    /// Starts a thread that records `target` into `live` until `stop` is set, and wakes the
-    /// worker when the session ends.
+    /// Starts a thread that records `target` into `live` until `stop` is set; `ending` marks
+    /// the session done and wakes the worker when it ends.
     fn spawn_capture(
         &self,
         target: &Target,
         live: &Arc<Live>,
         stop: &Arc<AtomicBool>,
+        ending: Ending,
     ) -> io::Result<JoinHandle<Result<Ended>>> {
         let (recorder, config, target, live, stop) = (
             self.recorder,
@@ -582,23 +608,32 @@ impl Machine {
             Arc::clone(live),
             Arc::clone(stop),
         );
-        let wake = self.waker();
         thread::Builder::new()
             .name("capture".to_owned())
             .spawn(move || {
-                let ended = recorder(&config, &target, &live, &stop);
-                wake();
-                ended
+                let _ending = ending;
+                recorder(&config, &target, &live, &stop)
             })
     }
 
-    /// A callback that wakes the worker, for the capture and save threads and the stream
-    /// listener; once the worker is gone it does nothing.
+    /// A callback that wakes the worker, for the stream listener; once the worker is gone it
+    /// does nothing.
     fn waker(&self) -> impl Fn() + Send + Sync + 'static {
         let wake = self.wake.clone();
         move || {
             let _ = wake.send(Command::Wake);
         }
+    }
+
+    /// A flag and the guard that sets it: the guard goes to a capture or save thread, whose end
+    /// sets the flag and wakes the worker.
+    fn ending(&self) -> (Arc<AtomicBool>, Ending) {
+        let done = Arc::new(AtomicBool::new(false));
+        let ending = Ending {
+            done: Arc::clone(&done),
+            wake: self.wake.clone(),
+        };
+        (done, ending)
     }
 
     /// Starts a capture session of the current target again, after a resize or a retry.
@@ -641,7 +676,10 @@ impl Machine {
     /// Notices a session that ended by itself, a retry that is due, a save that finished and a
     /// progress tone that is due.
     fn poll(&mut self) {
-        if let Some(session) = self.session.take_if(|session| session.join.is_finished()) {
+        if let Some(session) = self
+            .session
+            .take_if(|session| session.done.load(Ordering::Acquire))
+        {
             self.session_ended(session.join.join());
         }
 
@@ -650,7 +688,10 @@ impl Machine {
         }
 
         // A finished save is reported before the tick, so no blip plays after its outcome.
-        if let Some(saving) = self.saving.take_if(|saving| saving.join.is_finished()) {
+        if let Some(saving) = self
+            .saving
+            .take_if(|saving| saving.done.load(Ordering::Acquire))
+        {
             self.finish_save(saving);
         }
         self.tick_save();
@@ -707,25 +748,27 @@ impl Machine {
         }
     }
 
-    /// Starts a thread that writes `clip` to the clip directory, and wakes the worker when it is
-    /// done.
-    fn spawn_save(&self, snapshot: Snapshot) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
+    /// Starts a thread that writes `snapshot` as a clip to the clip directory; `ending` marks
+    /// the save done and wakes the worker when it ends.
+    fn spawn_save(
+        &self,
+        snapshot: Snapshot,
+        ending: Ending,
+    ) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
         let directory = self.config.clip_directory();
         let write = self.saver.write;
-        let wake = self.waker();
         thread::Builder::new()
             .name("save".to_owned())
             .spawn(move || {
+                let _ending = ending;
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
                 // Packets kept in GPU memory are read back here, off the worker.
-                let saved = snapshot
+                snapshot
                     .clip()
                     .map_err(SaveError::from)
-                    .and_then(|clip| write(&clip, &directory));
-                wake();
-                saved
+                    .and_then(|clip| write(&clip, &directory))
             })
     }
 
@@ -950,6 +993,12 @@ mod tests {
         ))
     }
 
+    /// Ends at once, as if the display went away.
+    #[expect(clippy::unnecessary_wraps)]
+    fn closing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
+        Ok(Ended::Closed)
+    }
+
     /// Sessions in order: the first window ends as if its app closed, a second window yields
     /// no frames, and a monitor records steadily.
     static SESSIONS: AtomicUsize = AtomicUsize::new(0);
@@ -979,6 +1028,27 @@ mod tests {
             });
             let _ = steady(config, &Target::primary_monitor(), live, &ended);
         });
+    }
+
+    /// A worker of `recorder`'s sessions with the real saver; a test's thread always starts.
+    fn spawn(
+        recorder: Recorder,
+        retry_interval: Duration,
+        store: Option<Store>,
+        config: Config,
+    ) -> Worker {
+        Worker::spawn_with(recorder, retry_interval, store, config).unwrap()
+    }
+
+    /// A worker of `recorder`'s sessions saving through `saver`; a test's thread always starts.
+    fn spawn_saving(
+        recorder: Recorder,
+        retry_interval: Duration,
+        store: Option<Store>,
+        config: Config,
+        saver: Saver,
+    ) -> Worker {
+        Worker::spawn_saving_with(recorder, retry_interval, store, config, saver).unwrap()
     }
 
     fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
@@ -1023,7 +1093,7 @@ mod tests {
     #[test]
     fn desktop_mode_records_and_saves_a_clip() {
         let directory = tempfile::tempdir().unwrap();
-        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
+        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
 
         let status = wait_for(&worker, |status| {
             status.state == DisplayStatus::Recording && status.session_written_bytes > 0
@@ -1040,13 +1110,33 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_that_ends_wakes_the_worker_without_a_refresh() {
+        // Nothing asks for figures here: a session's end must reach the status on its own.
+        let worker = spawn(closing, RETRY_INTERVAL, None, desktop());
+        thread::sleep(Duration::from_millis(300));
+        let status = worker.status();
+        assert_eq!(status.state, DisplayStatus::Retrying, "{status:?}");
+        assert!(status.error.unwrap().contains(text::DISPLAY_GONE));
+
+        // Likewise a save's outcome.
+        let directory = tempfile::tempdir().unwrap();
+        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
+        wait_for(&worker, |status| status.session_written_bytes > 0);
+        worker.save();
+        thread::sleep(Duration::from_millis(500));
+        let status = worker.status();
+        assert!(status.last_clip.is_some(), "{status:?}");
+        assert!(!status.saving);
+    }
+
+    #[test]
     fn the_lifetime_totals_grow_and_survive_a_restart() {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
         let clips = directory.path().join("clips");
         let config = config_in(&clips);
         let store = Store::at(state.clone()).unwrap();
-        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, Some(store), config.clone());
+        let worker = spawn(steady, RETRY_INTERVAL, Some(store), config.clone());
         let status = wait_for(&worker, |status| status.saved_bytes.is_some());
         assert_eq!(status.saved_bytes, Some(0));
 
@@ -1059,7 +1149,7 @@ mod tests {
         drop(worker);
 
         let store = Store::at(state).unwrap();
-        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, Some(store), config);
+        let worker = spawn(steady, RETRY_INTERVAL, Some(store), config);
         let status = wait_for(&worker, |status| status.saved_bytes.is_some());
         assert_eq!(status.saved_bytes, Some(clip_bytes));
         assert!(status.buffered_lifetime_bytes.unwrap() >= buffered);
@@ -1068,7 +1158,7 @@ mod tests {
     #[test]
     fn stopping_ends_the_session_and_its_buffer_stays_saveable() {
         let directory = tempfile::tempdir().unwrap();
-        let worker = Worker::spawn_with(steady, RETRY_INTERVAL, None, config_in(directory.path()));
+        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
         worker.stop();
@@ -1082,7 +1172,7 @@ mod tests {
 
     #[test]
     fn a_failed_session_is_retried() {
-        let worker = Worker::spawn_with(failing, Duration::from_millis(50), None, desktop());
+        let worker = spawn(failing, Duration::from_millis(50), None, desktop());
 
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
         assert!(status.error.unwrap().contains("no capture device"));
@@ -1094,7 +1184,7 @@ mod tests {
 
     #[test]
     fn an_unsupported_configuration_is_not_retried() {
-        let worker = Worker::spawn_with(unsupported, Duration::from_millis(10), None, desktop());
+        let worker = spawn(unsupported, Duration::from_millis(10), None, desktop());
 
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Unsupported);
         assert!(status.error.unwrap().contains("AV1"));
@@ -1111,7 +1201,7 @@ mod tests {
             ..config_in(directory.path())
         };
         SESSIONS.store(0, Ordering::Relaxed);
-        let worker = Worker::spawn_with(scripted, RETRY_INTERVAL, None, config);
+        let worker = spawn(scripted, RETRY_INTERVAL, None, config);
 
         let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
         assert!(!status.recording);
@@ -1144,7 +1234,7 @@ mod tests {
             mode: Mode::Fullscreen,
             ..Config::default()
         };
-        let worker = Worker::spawn_with(failing, Duration::from_millis(100), None, config);
+        let worker = spawn(failing, Duration::from_millis(100), None, config);
         wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
 
         worker.target(window(1));
@@ -1167,7 +1257,7 @@ mod tests {
     fn applying_settings_persists_them_and_restarts() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::at(directory.path().join("state")).unwrap();
-        let worker = Worker::spawn_with(
+        let worker = spawn(
             steady,
             RETRY_INTERVAL,
             Some(store),
@@ -1197,7 +1287,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
         let config = config_in(directory.path());
-        let worker = Worker::spawn_with(
+        let worker = spawn(
             steady,
             RETRY_INTERVAL,
             Some(Store::at(state.clone()).unwrap()),
@@ -1277,7 +1367,7 @@ mod tests {
     fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
         let directory = tempfile::tempdir().unwrap();
         let (saver, heard) = listening(slow_write);
-        let worker = Worker::spawn_saving_with(
+        let worker = spawn_saving(
             steady,
             RETRY_INTERVAL,
             None,
@@ -1302,7 +1392,7 @@ mod tests {
     fn a_failed_save_sounds_failed_and_stops_ticking() {
         let directory = tempfile::tempdir().unwrap();
         let (saver, heard) = listening(failing_write);
-        let worker = Worker::spawn_saving_with(
+        let worker = spawn_saving(
             steady,
             RETRY_INTERVAL,
             None,
@@ -1325,8 +1415,7 @@ mod tests {
     #[test]
     fn nothing_to_save_sounds_failed_without_ticking() {
         let (saver, heard) = listening(slow_write);
-        let worker =
-            Worker::spawn_saving_with(failing, Duration::from_secs(60), None, desktop(), saver);
+        let worker = spawn_saving(failing, Duration::from_secs(60), None, desktop(), saver);
         wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
 
         worker.save();

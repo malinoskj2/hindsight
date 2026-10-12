@@ -69,7 +69,6 @@ impl fmt::Debug for Slot {
 }
 
 impl Slot {
-    /// Whether both slots lie in the same page.
     fn shares_page(&self, other: &Self) -> bool {
         ptr::addr_eq(Arc::as_ptr(&self.page), Arc::as_ptr(&other.page))
     }
@@ -116,16 +115,19 @@ impl<P: Page + 'static> Pages<P> {
         if length > self.page_bytes {
             return Err(StoreError::TooLarge(length));
         }
-        if self.used.is_empty() || self.fill + length > self.page_bytes {
-            self.reclaim();
-            let page = match self.free.pop() {
-                Some(page) => page,
-                None => Arc::new(make()?),
-            };
-            self.used.push_back(page);
-            self.fill = 0;
-        }
-        let page = Arc::clone(self.used.back().expect("a page is in use"));
+        let page = match self.used.back() {
+            Some(page) if self.fill + length <= self.page_bytes => Arc::clone(page),
+            _ => {
+                self.reclaim();
+                let page = match self.free.pop() {
+                    Some(page) => page,
+                    None => Arc::new(make()?),
+                };
+                self.used.push_back(Arc::clone(&page));
+                self.fill = 0;
+                page
+            }
+        };
         let offset = self.fill;
         self.fill += length;
         Ok((page, offset))
@@ -144,12 +146,8 @@ impl<P: Page + 'static> Pages<P> {
     /// pages free up from the front. The page being filled stays in use even when empty.
     fn reclaim(&mut self) {
         while self.used.len() > 1
-            && self
-                .used
-                .front()
-                .is_some_and(|page| Arc::strong_count(page) == 1)
+            && let Some(page) = self.used.pop_front_if(|page| Arc::strong_count(page) == 1)
         {
-            let page = self.used.pop_front().expect("a page is at the front");
             self.free.push(page);
         }
     }
@@ -181,7 +179,6 @@ impl Entry {
         }
     }
 
-    /// Whether the packet is a keyframe.
     pub(crate) fn keyframe(&self) -> bool {
         match self {
             Self::Memory(packet) => packet.keyframe,
@@ -210,18 +207,28 @@ pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
                 rest = &rest[1..];
             }
             Entry::Stored { slot, .. } => {
-                let run = rest
-                    .iter()
-                    .take_while(|entry| {
-                        matches!(entry, Entry::Stored { slot: other, .. } if slot.shares_page(other) && other.offset >= slot.offset)
-                    })
-                    .count();
+                let run = run_length(rest, slot);
                 packets.extend(read_run(&rest[..run])?);
                 rest = &rest[run..];
             }
         }
     }
     Ok(packets)
+}
+
+/// How many entries from the start of `rest`, the first of them at `first`, lie in one page
+/// one after another without overlapping: what one read can bring back.
+fn run_length(rest: &[Entry], first: &Slot) -> usize {
+    let mut end = first.offset;
+    rest.iter()
+        .take_while(|entry| match entry {
+            Entry::Stored { slot, .. } if slot.shares_page(first) && slot.offset >= end => {
+                end = slot.offset + slot.length;
+                true
+            }
+            _ => false,
+        })
+        .count()
 }
 
 /// Reads back `run`, stored packets in one page at rising offsets, in one pass over the
@@ -399,6 +406,36 @@ pub(crate) mod tests {
             [0, 1, 2, 3, 4]
         );
         assert!(packets[0].keyframe && !packets[1].keyframe);
+    }
+
+    #[test]
+    fn a_run_ends_where_the_offsets_stop_rising() {
+        // One page read back whole at once; slots that go backwards or overlap in it, as a
+        // store other than `Pages` might hand out, are read in separate passes.
+        let page: Arc<MemoryPage> = Arc::new(MemoryPage {
+            bytes: Mutex::new((0..10).collect()),
+            piece: 10,
+        });
+        let entry = |index, offset, length| Entry::Stored {
+            index,
+            keyframe: false,
+            slot: Pages::slot(Arc::clone(&page), offset, length),
+        };
+        let entries = [
+            entry(0, 6, 2),
+            entry(1, 2, 3),
+            entry(2, 4, 2),
+            entry(3, 6, 1),
+        ];
+
+        let packets = fetch(&entries).unwrap();
+        let data: Vec<&[u8]> = packets.iter().map(|packet| &packet.data[..]).collect();
+        assert_eq!(data, [&[6, 7][..], &[2, 3, 4], &[4, 5], &[6]]);
+        assert_eq!(
+            run_length(&entries, &Pages::slot(Arc::clone(&page), 6, 2)),
+            1
+        );
+        assert_eq!(run_length(&entries[1..], &Pages::slot(page, 2, 3)), 1);
     }
 
     #[test]

@@ -13,7 +13,9 @@
 //!
 //! The session runs on the shared Direct3D 11 device, or, for a capture that grabs into CUDA
 //! memory, on that capture's CUDA context: then the slots have no textures of their own, and
-//! every frame is read from one of the capture's surfaces.
+//! every frame is read from one of the capture's surfaces. Such a session can also write each
+//! frame's bitstream into a buffer of the application's in video memory ([`Output::VideoMemory`]),
+//! from which it is moved into the replay buffer there without ever crossing to system memory.
 
 use super::{
     capture::{EncoderDevice, Surface},
@@ -105,7 +107,6 @@ pub(crate) enum NvencError {
     Windows(&'static str, windows::core::Error),
     #[error("{0}: {1}")]
     Cuda(&'static str, super::cuda::CudaError),
-    /// A frame could not be moved into the ring in video memory.
     #[error("move a frame into the replay buffer in GPU memory: {0}")]
     Ring(crate::replay::StoreError),
 }
@@ -704,6 +705,10 @@ impl Encoder {
         surface: usize,
         handle: &Surface,
     ) -> Result<(), NvencError> {
+        debug_assert!(
+            !self.has_surface(surface),
+            "a surface is registered once; registering it again would leak the first handle"
+        );
         let registered = match handle {
             Surface::Texture(texture) => self.register_texture(texture)?,
             Surface::CudaBuffer { pointer, pitch } => {
@@ -895,15 +900,11 @@ impl Encoder {
             .take()
             .expect("a queued slot has a frame in flight");
 
+        // The device lock is let go before `output` runs, which takes the replay buffer's lock.
         let result = {
-            let device_lock = self.device_lock.clone();
-            let _locked = Locked::new(&device_lock);
-            let result = match self.slots[slot]
-                .output
-                .as_ref()
-                .map(|output| output.staging)
-            {
-                Some(staging) => self.take_from_video_memory(staging),
+            let _locked = Locked::new(&self.device_lock);
+            let result = match &self.slots[slot].output {
+                Some(output) => take_from_video_memory(self.ring.as_mut(), output.staging),
                 None => self.read_bitstream(slot),
             };
             self.unmap(frame.mapped);
@@ -917,21 +918,6 @@ impl Encoder {
             data,
         });
         Ok(true)
-    }
-
-    /// Moves the completed frame in the output buffer at `staging` into the ring in video
-    /// memory. NVENC reports no picture type this way; the keyframes are told from the
-    /// bitstream's first bytes instead.
-    fn take_from_video_memory(
-        &mut self,
-        staging: DevicePointer,
-    ) -> Result<(Option<u32>, Payload), NvencError> {
-        let ring = self
-            .ring
-            .as_mut()
-            .expect("a slot has an output buffer in video memory only with a ring");
-        let (slot, head) = ring.take(staging).map_err(NvencError::Ring)?;
-        Ok((None, Payload::Stored { slot, head }))
     }
 
     /// Waits as long as `wait` allows for the frame in `slot` to complete; reports whether it
@@ -968,15 +954,20 @@ impl Encoder {
         self.check("nvEncLockBitstream", unsafe {
             lock_bitstream(self.session, &raw mut lock)
         })?;
-        // SAFETY: while locked, the driver guarantees `bitstream_size_in_bytes` readable bytes
-        // at `bitstream_buffer_ptr`.
-        let data: Box<[u8]> = unsafe {
-            std::slice::from_raw_parts(
-                lock.bitstream_buffer_ptr.cast::<u8>(),
-                lock.bitstream_size_in_bytes as usize,
-            )
-        }
-        .into();
+        let data: Box<[u8]> = if lock.bitstream_buffer_ptr.is_null() {
+            // A frame without output; a slice may not be made from a null pointer.
+            Box::default()
+        } else {
+            // SAFETY: while locked, the driver guarantees `bitstream_size_in_bytes` readable
+            // bytes at `bitstream_buffer_ptr`, which is not null.
+            unsafe {
+                std::slice::from_raw_parts(
+                    lock.bitstream_buffer_ptr.cast::<u8>(),
+                    lock.bitstream_size_in_bytes as usize,
+                )
+            }
+            .into()
+        };
         // SAFETY: unlocks the buffer locked above; `data` no longer points into it.
         self.check("nvEncUnlockBitstream", unsafe {
             unlock_bitstream(self.session, self.slots[slot].bitstream)
@@ -1123,6 +1114,18 @@ impl Drop for Encoder {
             let _ = unsafe { destroy(self.session) };
         }
     }
+}
+
+/// Moves the completed frame in the output buffer at `staging` into `ring`, the one in video
+/// memory that the encoder has whenever a slot has such a buffer. NVENC reports no picture type
+/// this way; the keyframes are told from the bitstream's first bytes instead.
+fn take_from_video_memory(
+    ring: Option<&mut CudaRing>,
+    staging: DevicePointer,
+) -> Result<(Option<u32>, Payload), NvencError> {
+    let ring = ring.expect("a slot has an output buffer in video memory only with a ring");
+    let (slot, head) = ring.take(staging).map_err(NvencError::Ring)?;
+    Ok((None, Payload::Stored { slot, head }))
 }
 
 /// Loads the NVENC library the driver installs.
@@ -1314,8 +1317,10 @@ fn create_input_texture(
 
 /// Bytes of an output buffer in video memory for frames of `settings`' size: twice the
 /// uncompressed picture, as NVIDIA's sample sizes it, plus the header NVENC writes in front.
+/// Never less than the ring reads back from it for a frame's head, whatever the picture's size.
 fn staging_bytes(settings: Settings) -> usize {
-    2 * settings.width as usize * settings.height as usize * 4 + ffi::ENCODE_OUT_PARAMS_BYTES
+    let picture = settings.width as usize * settings.height as usize * 4;
+    (2 * picture).max(super::cuda_output::HEAD_BYTES) + ffi::ENCODE_OUT_PARAMS_BYTES
 }
 
 /// Creates the auto-reset event NVENC signals when a slot's frame completes.

@@ -3,8 +3,8 @@
 
 use super::{
     layout::{
-        self, BLACK, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X, LINE, RED,
-        button, label, skin_button,
+        self, BLACK, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH,
+        INNER_X, LINE, RED, button, label, skin_button,
     },
     text,
     theme::{ButtonRole, Skin, Surface},
@@ -30,6 +30,44 @@ const FIELD_OFFSET: i32 = 88;
 const NUMBER_WIDTH: i32 = 52;
 /// Bytes in a megabyte, as the memory estimate counts them.
 const BYTES_PER_MEGABYTE: u64 = 1_000_000;
+/// How far below the top of a group's frame its first row sits.
+const FIRST_ROW: i32 = 20;
+/// Pitch of the rows of fields.
+const FIELD_PITCH: i32 = 28;
+/// Pitch of the rows of check boxes.
+const CHECK_PITCH: i32 = LINE + 4;
+
+/// Where each row of the page sits, top to bottom. Each is placed below the one before, so a
+/// row added or removed moves the rest; the tests pin the pixels this comes to.
+mod rows {
+    use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_ROW, LINE};
+
+    /// Top of the Recording group's frame.
+    pub(super) const RECORDING_FRAME: i32 = 6;
+    /// Codec and frame rate.
+    pub(super) const ENCODING: i32 = RECORDING_FRAME + FIRST_ROW;
+    /// Buffer length and bitrate.
+    pub(super) const BUFFER: i32 = ENCODING + FIELD_PITCH;
+    /// The save hotkey and what to record.
+    pub(super) const HOTKEY: i32 = BUFFER + FIELD_PITCH;
+    pub(super) const BACKEND: i32 = HOTKEY + FIELD_PITCH;
+    pub(super) const FOLDER: i32 = BACKEND + FIELD_PITCH;
+    pub(super) const MEMORY: i32 = FOLDER + FIELD_PITCH;
+    pub(super) const AUDIO: i32 = MEMORY + FIELD_PITCH;
+    pub(super) const CURSOR: i32 = AUDIO + CHECK_PITCH;
+    /// The memory estimate, a little clear of the switches.
+    pub(super) const ESTIMATE: i32 = CURSOR + CHECK_PITCH + 4;
+    pub(super) const APPLY: i32 = ESTIMATE + LINE;
+    /// Down to the Apply button, with room under it.
+    pub(super) const RECORDING_HEIGHT: i32 = APPLY + BUTTON_HEIGHT + 14 - RECORDING_FRAME;
+    /// Top of the General group's frame, right under the Recording group's.
+    pub(super) const GENERAL_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
+    pub(super) const THEME: i32 = GENERAL_FRAME + FIRST_ROW;
+    pub(super) const START_WITH_WINDOWS: i32 = THEME + FIELD_PITCH;
+    pub(super) const STARTUP_ERROR: i32 = START_WITH_WINDOWS + CHECK_PITCH;
+    /// Compact, down to the check box; the error line is made room for only while it shows.
+    pub(super) const GENERAL_HEIGHT: i32 = START_WITH_WINDOWS + LINE + 6 - GENERAL_FRAME;
+}
 
 #[derive(Clone)]
 pub(super) struct SettingsPage {
@@ -46,7 +84,7 @@ pub(super) struct SettingsPage {
     mode: gui::ComboBox,
     pub(super) backend: gui::ComboBox,
     folder: gui::Edit,
-    pub(super) memory: gui::ComboBox,
+    memory: gui::ComboBox,
     audio: gui::CheckBox,
     cursor: gui::CheckBox,
     estimate: gui::Label,
@@ -164,19 +202,30 @@ impl SettingsPage {
         layout::set_text(&self.hotkey, hotkey);
     }
 
-    /// Shows how much memory the buffer takes at the entered bitrate and length, and where.
+    /// Wires the fields and the drop-down list the memory estimate follows.
+    pub(super) fn estimate_events(&self) {
+        for field in [&self.buffer_seconds, &self.bitrate] {
+            let page = self.clone();
+            field.on().en_change(move || {
+                page.update_estimate();
+                Ok(())
+            });
+        }
+        let page = self.clone();
+        self.memory.on().cbn_sel_change(move || {
+            page.update_estimate();
+            Ok(())
+        });
+    }
+
+    /// Shows how much memory the buffer takes at the entered bitrate and length, and where;
+    /// nothing while either is not a number Apply would accept.
     pub(super) fn update_estimate(&self) {
-        let estimate = number(&self.buffer_seconds).zip(number(&self.bitrate)).map(
-            |(buffer_seconds, bitrate_mbps)| {
-                Config {
-                    buffer_seconds,
-                    bitrate_mbps,
-                    ..Config::default()
-                }
-                .estimated_buffer_bytes()
-                    / BYTES_PER_MEGABYTE
-            },
-        );
+        let estimate = number(&self.buffer_seconds)
+            .zip(number(&self.bitrate))
+            .and_then(|(buffer_seconds, bitrate_mbps)| {
+                estimate_megabytes(buffer_seconds, bitrate_mbps)
+            });
         let memory = chosen(&self.memory, &Memory::ALL);
         layout::set_text(
             &self.estimate,
@@ -184,11 +233,6 @@ impl SettingsPage {
                 text::buffer_estimate(megabytes, memory)
             }),
         );
-    }
-
-    /// The fields whose changes alter the memory estimate.
-    pub(super) fn estimate_inputs(&self) -> [&gui::Edit; 2] {
-        [&self.buffer_seconds, &self.bitrate]
     }
 
     /// Writes the Start-with-Windows choice to the Run key, undoing the tick when that fails,
@@ -268,46 +312,19 @@ impl RecordingControls {
     /// Lays out the Recording group on `page`, filled in from `config`, its button in the look
     /// of `skin`.
     fn new(page: &gui::TabPage, config: &Config, skin: &Skin) -> Self {
-        let frame = Frame::new(page, text::GROUP_RECORDING_SETTINGS, 6, 292);
-        let codec = choice_field(
+        let frame = Frame::new(
             page,
-            text::CODEC,
-            INNER_X,
-            26,
-            90,
-            &Codec::ALL.map(Codec::name),
-            index_of(&Codec::ALL, config.codec),
+            text::GROUP_RECORDING_SETTINGS,
+            rows::RECORDING_FRAME,
+            rows::RECORDING_HEIGHT,
         );
-        let (frame_rate, frame_rate_spin) = number_field(
-            page,
-            text::FRAME_RATE,
-            COLUMN_X,
-            26,
-            (MIN_FRAME_RATE, MAX_FRAME_RATE),
-            config.frame_rate,
-        );
-        let (buffer_seconds, buffer_spin) = number_field(
-            page,
-            text::BUFFER_SECONDS,
-            INNER_X,
-            54,
-            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
-            config.buffer_seconds,
-        );
-        let (bitrate, bitrate_spin) = number_field(
-            page,
-            text::BITRATE,
-            COLUMN_X,
-            54,
-            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
-            config.bitrate_mbps,
-        );
-        let hotkey = text_field(page, text::HOTKEY, 82, 110, &config.hotkey);
+        let encoding = EncodingFields::new(page, config);
+        let hotkey = text_field(page, text::HOTKEY, rows::HOTKEY, 110, &config.hotkey);
         let (mode, backend) = source_fields(page, config);
         let folder = text_field(
             page,
             text::FOLDER,
-            138,
+            rows::FOLDER,
             INNER_WIDTH - FIELD_OFFSET,
             &config.clip_directory().display().to_string(),
         );
@@ -315,26 +332,34 @@ impl RecordingControls {
             page,
             text::MEMORY,
             INNER_X,
-            166,
+            rows::MEMORY,
             190,
             &Memory::ALL.map(Memory::name),
             index_of(&Memory::ALL, config.buffer_memory),
         );
-        let audio = check_box(page, text::AUDIO, 194, config.audio);
-        let cursor = check_box(page, text::CURSOR, 216, config.cursor);
-        let estimate = label(page, "", INNER_X, 242, INNER_WIDTH, 1);
-        let apply = button(page, text::APPLY, INNER_X, 260, BUTTON_WIDTH);
+        let audio = check_box(page, text::AUDIO, rows::AUDIO, config.audio);
+        let cursor = check_box(page, text::CURSOR, rows::CURSOR, config.cursor);
+        let estimate = label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1);
+        let apply = button(page, text::APPLY, INNER_X, rows::APPLY, BUTTON_WIDTH);
         skin_button(&apply, skin, ButtonRole::Primary);
-        // The error line starts just right of the button.
+        // The error line starts just right of the button, a little higher so its two lines
+        // sit level with it.
         let error_x = BUTTON_WIDTH + 8;
-        let error = label(page, "", INNER_X + error_x, 258, INNER_WIDTH - error_x, 2);
+        let error = label(
+            page,
+            "",
+            INNER_X + error_x,
+            rows::APPLY - 2,
+            INNER_WIDTH - error_x,
+            2,
+        );
         Self {
             frame,
-            codec,
-            frame_rate,
-            buffer_seconds,
-            bitrate,
-            spins: [frame_rate_spin, buffer_spin, bitrate_spin],
+            codec: encoding.codec,
+            frame_rate: encoding.frame_rate,
+            buffer_seconds: encoding.buffer_seconds,
+            bitrate: encoding.bitrate,
+            spins: encoding.spins,
             hotkey,
             mode,
             backend,
@@ -345,6 +370,62 @@ impl RecordingControls {
             estimate,
             apply,
             error,
+        }
+    }
+}
+
+/// The first two rows of the Recording group: the codec and frame rate, then the buffer
+/// length and bitrate, each number with its spin buttons.
+struct EncodingFields {
+    codec: gui::ComboBox,
+    frame_rate: gui::Edit,
+    buffer_seconds: gui::Edit,
+    bitrate: gui::Edit,
+    spins: [gui::UpDown; 3],
+}
+
+impl EncodingFields {
+    /// Lays out the encoding fields on `page`, filled in from `config`.
+    fn new(page: &gui::TabPage, config: &Config) -> Self {
+        let codec = choice_field(
+            page,
+            text::CODEC,
+            INNER_X,
+            rows::ENCODING,
+            90,
+            &Codec::ALL.map(Codec::name),
+            index_of(&Codec::ALL, config.codec),
+        );
+        let (frame_rate, frame_rate_spin) = number_field(
+            page,
+            text::FRAME_RATE,
+            COLUMN_X,
+            rows::ENCODING,
+            (MIN_FRAME_RATE, MAX_FRAME_RATE),
+            config.frame_rate,
+        );
+        let (buffer_seconds, buffer_spin) = number_field(
+            page,
+            text::BUFFER_SECONDS,
+            INNER_X,
+            rows::BUFFER,
+            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
+            config.buffer_seconds,
+        );
+        let (bitrate, bitrate_spin) = number_field(
+            page,
+            text::BITRATE,
+            COLUMN_X,
+            rows::BUFFER,
+            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
+            config.bitrate_mbps,
+        );
+        Self {
+            codec,
+            frame_rate,
+            buffer_seconds,
+            bitrate,
+            spins: [frame_rate_spin, buffer_spin, bitrate_spin],
         }
     }
 }
@@ -363,18 +444,28 @@ impl GeneralControls {
     /// Lays out the General group on `page`, filled in from `config` and the Run key's state.
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
         // Compact; the group adds a line for the error label when one occurs.
-        let frame = Frame::new(page, text::GROUP_GENERAL, 298, 72);
+        let frame = Frame::new(
+            page,
+            text::GROUP_GENERAL,
+            rows::GENERAL_FRAME,
+            rows::GENERAL_HEIGHT,
+        );
         let theme = choice_field(
             page,
             text::THEME,
             INNER_X,
-            318,
+            rows::THEME,
             190,
             &Theme::ALL.map(Theme::name),
             index_of(&Theme::ALL, config.theme),
         );
-        let check_box = check_box(page, text::START_WITH_WINDOWS, 346, start_with_windows);
-        let error = label(page, "", INNER_X, 368, INNER_WIDTH, 1);
+        let check_box = check_box(
+            page,
+            text::START_WITH_WINDOWS,
+            rows::START_WITH_WINDOWS,
+            start_with_windows,
+        );
+        let error = label(page, "", INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1);
         let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
         Self {
             frame,
@@ -508,7 +599,7 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         page,
         text::MODE,
         COLUMN_X,
-        82,
+        rows::HOTKEY,
         INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
         &Mode::ALL.map(Mode::name),
         index_of(&Mode::ALL, config.mode),
@@ -517,7 +608,7 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         page,
         text::BACKEND,
         INNER_X,
-        110,
+        rows::BACKEND,
         INNER_WIDTH - FIELD_OFFSET,
         &Backend::ALL.map(Backend::name),
         index_of(&Backend::ALL, config.backend),
@@ -550,6 +641,23 @@ fn stored_folder(entered: &str) -> String {
     } else {
         entered.to_owned()
     }
+}
+
+/// The buffer's size in megabytes at `buffer_seconds` of `bitrate_mbps`, as the configuration
+/// counts it. `None` outside the limits Apply enforces, where the figure would mean nothing
+/// and the configuration's arithmetic would overflow.
+fn estimate_megabytes(buffer_seconds: u32, bitrate_mbps: u32) -> Option<u64> {
+    let within = (MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&buffer_seconds)
+        && (MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&bitrate_mbps);
+    within.then(|| {
+        Config {
+            buffer_seconds,
+            bitrate_mbps,
+            ..Config::default()
+        }
+        .estimated_buffer_bytes()
+            / BYTES_PER_MEGABYTE
+    })
 }
 
 /// The whole number in `field`, if it holds one.
@@ -585,5 +693,44 @@ mod tests {
         let default = config::default_clip_directory().display().to_string();
         assert_eq!(stored_folder(&default), "");
         assert_eq!(stored_folder(r"D:\Clips"), r"D:\Clips");
+    }
+
+    #[test]
+    fn the_rows_sit_where_they_were_laid_by_hand() {
+        assert_eq!(
+            [
+                rows::ENCODING,
+                rows::BUFFER,
+                rows::HOTKEY,
+                rows::BACKEND,
+                rows::FOLDER,
+                rows::MEMORY,
+                rows::AUDIO,
+                rows::CURSOR,
+                rows::ESTIMATE,
+                rows::APPLY,
+            ],
+            [26, 54, 82, 110, 138, 166, 194, 216, 242, 260]
+        );
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 292));
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (298, 72));
+        assert_eq!(
+            [rows::THEME, rows::START_WITH_WINDOWS, rows::STARTUP_ERROR],
+            [318, 346, 368]
+        );
+    }
+
+    #[test]
+    fn the_estimate_covers_the_accepted_range_and_nothing_beyond_it() {
+        // 60 seconds at 20 Mbps: 150 MB of encoded video.
+        assert_eq!(estimate_megabytes(60, 20), Some(150));
+        assert_eq!(
+            estimate_megabytes(MAX_BUFFER_SECONDS, MAX_BITRATE_MBPS),
+            Some(u64::from(MAX_BUFFER_SECONDS) * u64::from(MAX_BITRATE_MBPS) / 8)
+        );
+        // Beyond the limits the configuration's own arithmetic would overflow.
+        assert_eq!(estimate_megabytes(60, u32::MAX), None);
+        assert_eq!(estimate_megabytes(MAX_BUFFER_SECONDS + 1, 20), None);
+        assert_eq!(estimate_megabytes(60, MIN_BITRATE_MBPS - 1), None);
     }
 }

@@ -18,7 +18,10 @@ use crate::{
     sys,
 };
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 /// How long a window capture may go without a first frame before it is judged unable to see
 /// the window (exclusive full screen, which DWM does not compose), in seconds.
@@ -74,8 +77,8 @@ fn raise_thread_instead(error: &windows::core::Error) {
     }
 }
 
-/// Opens the device, the capture and the encoder, then encodes one frame per tick of the frame
-/// clock until the session ends.
+/// Opens the device, the frame clock, the capture and the encoder, then encodes one frame per
+/// tick of the clock until the session ends.
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     sys::thread::note_capture_thread();
     let device = open_device(config)?;
@@ -83,96 +86,140 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     // The pacer's first tick is due at once: frame `i` stands for this time plus `i` periods,
     // which is how the sound is lined up with the video.
     live.set_origin(sys::clock::now());
-    let mut capture = capture::start(
-        config.backend,
-        &device,
-        pacer.period(),
-        target,
-        config.cursor,
-    )?;
-    let (width, height) = encodable(capture.size());
-    let on = capture.encoder_device();
-    let output = choose_output(config, on, live);
-    let mut encoder = Encoder::open(
-        &device.d3d,
-        on,
-        Settings {
-            codec: config.codec,
-            width,
-            height,
-            frame_rate: config.frame_rate,
-            bitrate: config.bitrate(),
-        },
-        output,
-    )?;
-    // NVENC reads a capture's own surfaces in place where it can, which saves copying every
-    // frame into the encoder's input.
-    if capture.size() == (width, height) {
-        capture.hand_over_surfaces();
-    }
-    let mut copy_surfaces = false;
-    let settings = encoder.settings();
+    let mut session = Session::open(config, device, pacer.period(), target, live)?;
+    let settings = session.encoder.settings();
     live.set_stream(Stream {
         codec: settings.codec,
         width: settings.width,
         height: settings.height,
         frame_rate: settings.frame_rate,
     });
-
     let mut keyframes = Keyframes::new(settings.codec);
-    let mut output = |encoded: Encoded| {
-        let keyframe = keyframes.classify(&encoded);
-        match encoded.data {
-            Payload::Memory(data) => live.push(
-                Packet {
-                    index: encoded.index,
-                    keyframe,
-                    data,
-                },
-                encoded.fresh,
-            ),
-            Payload::Stored { slot, .. } => {
-                live.push_stored(encoded.index, keyframe, slot, encoded.fresh);
-            }
-        }
-    };
+    let mut output = |encoded: Encoded| push_frame(live, &mut keyframes, encoded);
 
-    let first_frame_deadline = capture
-        .captures_window()
-        .then(|| u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS);
     let ended = loop {
         if stop.load(Ordering::Relaxed) {
             break Ended::Stopped;
         }
         let index = pacer.wait().context("wait for the frame timer")?;
-        encoder.collect(&mut output)?;
-
-        encoder.reserve(&mut output)?;
-        if let Some(surface) = capture.next_surface() {
-            encoder.release_surface(surface, &mut output)?;
-        }
-        capture.release_surfaces(&|surface| encoder.holds_surface(surface));
-        match fill_input(&device, &mut *capture, &encoder, (width, height))? {
-            Input::Ready => encoder.submit(index, true)?,
-            Input::Repeat => repeat_latest(&device, &mut encoder, index, &mut output)?,
-            Input::InSurface(surface) => submit_surface(
-                &device,
-                &*capture,
-                &mut encoder,
-                index,
-                surface,
-                &mut copy_surfaces,
-            )?,
-            Input::Empty if first_frame_deadline.is_some_and(|deadline| index >= deadline) => {
-                break Ended::NoFrames;
-            }
-            Input::Empty => {}
-            Input::Ended(ended) => break ended,
+        if let Some(ended) = session.tick(index, &mut output)? {
+            break ended;
         }
     };
-
-    encoder.finish(&mut output)?;
+    session.encoder.finish(&mut output)?;
     Ok(ended)
+}
+
+/// Puts a finished frame into the buffer, wherever the encoder left its bitstream: in the
+/// packet, or in a slot of the ring in video memory.
+fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
+    let keyframe = keyframes.classify(&encoded);
+    match encoded.data {
+        Payload::Memory(data) => live.push(
+            Packet {
+                index: encoded.index,
+                keyframe,
+                data,
+            },
+            encoded.fresh,
+        ),
+        Payload::Stored { slot, .. } => {
+            live.push_stored(encoded.index, keyframe, slot, encoded.fresh);
+        }
+    }
+}
+
+/// The capture and the encoder of one session, and what a tick needs to move a picture from
+/// the one to the other. The encoder is declared first, so that it is dropped before the
+/// capture, whose surfaces (and CUDA context) it reads, and before the device.
+struct Session {
+    encoder: Encoder,
+    capture: Box<dyn capture::Source>,
+    device: Device,
+    /// NVENC refused to read the capture's surfaces in place, so each new picture is copied
+    /// into the encoder's input instead.
+    copy_surfaces: bool,
+    /// The tick by which a window capture must have delivered a first frame, or the window is
+    /// judged invisible to it.
+    first_frame_deadline: Option<u64>,
+}
+
+impl Session {
+    /// Starts capturing `target` on `device`, paced to `period`, and opens the encoder on the
+    /// device the capture's surfaces are reachable from, sending its frames where `config`
+    /// asks.
+    fn open(
+        config: &Config,
+        device: Device,
+        period: Duration,
+        target: &Target,
+        live: &Live,
+    ) -> Result<Self> {
+        let mut capture = capture::start(config.backend, &device, period, target, config.cursor)?;
+        let (width, height) = encodable(capture.size());
+        let on = capture.encoder_device();
+        let output = choose_output(config, on, live);
+        let encoder = Encoder::open(
+            &device.d3d,
+            on,
+            Settings {
+                codec: config.codec,
+                width,
+                height,
+                frame_rate: config.frame_rate,
+                bitrate: config.bitrate(),
+            },
+            output,
+        )?;
+        // NVENC reads a capture's own surfaces in place where it can, which saves copying
+        // every frame into the encoder's input.
+        if capture.size() == (width, height) {
+            capture.hand_over_surfaces();
+        }
+        let first_frame_deadline = capture
+            .captures_window()
+            .then(|| u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS);
+        Ok(Self {
+            encoder,
+            capture,
+            device,
+            copy_surfaces: false,
+            first_frame_deadline,
+        })
+    }
+
+    /// Encodes frame `index`: hands `output` what NVENC has finished, frees a slot, and submits
+    /// the newest picture, new or repeated, from wherever the capture left it. Reports how the
+    /// session ended when the capture ended it, or when a window capture has shown nothing by
+    /// its deadline.
+    fn tick(&mut self, index: u64, output: &mut impl FnMut(Encoded)) -> Result<Option<Ended>> {
+        let Self {
+            encoder,
+            capture,
+            device,
+            copy_surfaces,
+            first_frame_deadline,
+        } = self;
+        encoder.collect(output)?;
+        encoder.reserve(output)?;
+        if let Some(surface) = capture.next_surface() {
+            encoder.release_surface(surface, output)?;
+        }
+        capture.release_surfaces(&|surface| encoder.holds_surface(surface));
+        match fill_input(device, &mut **capture, encoder)? {
+            Input::Ready => encoder.submit(index, true)?,
+            Input::Repeat => repeat_latest(device, encoder, index, output)?,
+            Input::InSurface(surface) => {
+                submit_surface(device, &**capture, encoder, index, surface, copy_surfaces)?;
+            }
+            Input::Empty if first_frame_deadline.is_some_and(|deadline| index >= deadline) => {
+                return Ok(Some(Ended::NoFrames));
+            }
+            Input::Empty => {}
+            Input::Ended(ended) => return Ok(Some(ended)),
+        }
+        Ok(None)
+    }
 }
 
 /// Submits the new picture in the capture's surface `surface` as frame `index`: in place,
@@ -331,14 +378,14 @@ enum Input {
 }
 
 /// Fills the input of the slot [`Encoder::reserve`] freed with the newest captured picture of
-/// `width` × `height`, unless the capture left it in a surface of its own or the screen did not
+/// the encoded size, unless the capture left it in a surface of its own or the screen did not
 /// change.
 fn fill_input(
     device: &Device,
     capture: &mut dyn capture::Source,
     encoder: &Encoder,
-    (width, height): (u32, u32),
 ) -> Result<Input, CaptureError> {
+    let Settings { width, height, .. } = encoder.settings();
     let frame = match capture.take(device, encoder.input(), width, height) {
         Ok(frame) => frame,
         Err(CaptureError::Closed) => return Ok(Input::Ended(Ended::Closed)),

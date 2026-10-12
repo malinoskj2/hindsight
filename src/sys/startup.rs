@@ -30,15 +30,23 @@ pub(crate) fn enabled() -> io::Result<bool> {
 
 /// Adds the entry for this executable, or removes it.
 pub(crate) fn set(enabled: bool) -> io::Result<()> {
-    let key =
-        RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)?;
-    if !enabled {
-        // An entry that is already gone is what was asked for.
-        return match key.delete_value(APP_NAME) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        };
+    if enabled {
+        return add();
     }
+    // An entry that is already gone, or a `Run` key that was never made, is what was asked for.
+    let removed = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
+        .and_then(|key| key.delete_value(APP_NAME));
+    match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// Adds the entry for this executable, making the `Run` key if it is missing.
+fn add() -> io::Result<()> {
+    let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)?;
     let executable = std::env::current_exe()?;
     key.set_value(APP_NAME, &command(executable.as_os_str()))
 }

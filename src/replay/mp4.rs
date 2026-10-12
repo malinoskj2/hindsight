@@ -21,7 +21,7 @@ use mp4_atom::{
     esds::{DecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
     u24,
 };
-use std::{io, sync::Arc};
+use std::{io, ops::Range, sync::Arc};
 use thiserror::Error;
 
 /// Media ticks per frame; the track's time scale is the frame rate times this.
@@ -318,6 +318,9 @@ fn write_tracks(
     packets: &[Arc<Packet>],
     audio: Option<&AudioClip>,
 ) -> Result<(), MuxError> {
+    if packets.is_empty() {
+        return Err(MuxError::Empty);
+    }
     let decoder = packets
         .iter()
         .find_map(|packet| configuration(stream.codec, &packet.data))
@@ -404,32 +407,21 @@ fn header(
     Ok(file)
 }
 
-/// Writes the `mdat` atom: its 64-bit size, then the chunks in order: every video sample's
-/// parts, each behind its length when the codec stores lengths, and the sound frames as they
-/// are.
+/// Writes the `mdat` atom: its 64-bit size, then the chunks in order, the video samples as
+/// [`write_video_samples`] stores them and the sound frames as they are.
 fn write_media(
     output: &mut impl io::Write,
     track: &Track<'_>,
     sound: Option<&Sound<'_>>,
     layout: &Layout,
 ) -> Result<(), MuxError> {
-    let prefixed = length_prefixed(track.stream.codec);
-
     output.write_all(&LARGE_SIZE.to_be_bytes())?;
     output.write_all(b"mdat")?;
     output.write_all(&(MDAT_HEADER_BYTES + layout.bytes()).to_be_bytes())?;
     for chunk in &layout.chunks {
         let range = chunk.first..chunk.first + chunk.count;
         match (chunk.kind, sound) {
-            (Kind::Video, _) => {
-                for part in track.samples[range].iter().flat_map(|sample| &sample.parts) {
-                    if prefixed {
-                        let length: u32 = fit(part.len())?;
-                        output.write_all(&length.to_be_bytes())?;
-                    }
-                    output.write_all(part)?;
-                }
-            }
+            (Kind::Video, _) => write_video_samples(output, track, range)?,
             (Kind::Audio, Some(sound)) => {
                 for frame in &sound.clip.frames[range] {
                     output.write_all(frame)?;
@@ -437,6 +429,24 @@ fn write_media(
             }
             (Kind::Audio, None) => {}
         }
+    }
+    Ok(())
+}
+
+/// Writes the parts of `track`'s samples in `range`, each behind its length when the codec
+/// stores lengths.
+fn write_video_samples(
+    output: &mut impl io::Write,
+    track: &Track<'_>,
+    range: Range<usize>,
+) -> Result<(), MuxError> {
+    let prefixed = length_prefixed(track.stream.codec);
+    for part in track.samples[range].iter().flat_map(|sample| &sample.parts) {
+        if prefixed {
+            let length: u32 = fit(part.len())?;
+            output.write_all(&length.to_be_bytes())?;
+        }
+        output.write_all(part)?;
     }
     Ok(())
 }
@@ -492,7 +502,6 @@ fn movie(
             layout.placement(Kind::Audio, media_offset)?,
         )?);
     }
-    // The next free track id follows the sound track's when there is one.
     let next_track_id = if sound.is_some() {
         AUDIO_TRACK_ID
     } else {
@@ -1230,7 +1239,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn refuses_streams_without_a_sequence_header() {
+    fn refuses_empty_buffers_and_streams_without_a_sequence_header() {
         let mut file = Vec::new();
         for codec in Codec::ALL {
             assert_matches!(
@@ -1240,7 +1249,7 @@ pub(super) mod tests {
         }
         assert_matches!(
             write(&mut file, &stream(Codec::H264), &[]),
-            Err(MuxError::NoSequenceHeader)
+            Err(MuxError::Empty)
         );
         assert_eq!(file.len(), 0);
     }

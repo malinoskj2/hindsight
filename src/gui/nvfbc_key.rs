@@ -16,9 +16,7 @@ use crate::{
 use std::{cell::Cell, rc::Rc};
 use winsafe::{co, gui, prelude::*};
 
-/// Width of the window.
 const WIDTH: i32 = 400;
-/// Height of the window.
 const HEIGHT: i32 = 170;
 /// Gap between the window's edges and what it holds.
 const PADDING: i32 = 12;

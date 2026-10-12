@@ -38,9 +38,10 @@ impl Layout {
 /// 16-bit samples. Mono is played on both sides; channels past the first two are dropped (a
 /// capture of more channels asks Windows to mix them down instead).
 pub(crate) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
+    // A layout of no channels is read as mono, so every frame holds the sample read from it.
     let channels = usize::from(layout.channels.max(1));
     let width = layout.sample.bytes();
-    for frame in data.chunks_exact(layout.frame_bytes().max(1)) {
+    for frame in data.chunks_exact(width * channels) {
         let left = read(&frame[..width], layout.sample);
         let right = if channels > 1 {
             read(&frame[width..2 * width], layout.sample)

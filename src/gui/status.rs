@@ -366,3 +366,34 @@ fn notice_text(status: &Status, hotkey_error: Option<&str>) -> String {
 fn row_caption(page: &gui::TabPage, caption: &str, y: i32) -> gui::Label {
     label(page, caption, INNER_X, y, VALUE_X - INNER_X, 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_notice_line_lists_what_there_is_one_per_line() {
+        let mut status = Status::default();
+        assert_eq!(notice_text(&status, None), "");
+        status.error = Some("capture failed".to_owned());
+        assert_eq!(notice_text(&status, None), "capture failed");
+        status.notice = Some("sound is off".to_owned());
+        assert_eq!(
+            notice_text(&status, Some("hotkey taken")),
+            "hotkey taken\r\nsound is off\r\ncapture failed"
+        );
+    }
+
+    #[test]
+    fn recording_counts_as_on_while_waiting_for_a_full_screen_app() {
+        let mut status = Status {
+            state: DisplayStatus::Waiting,
+            ..Status::default()
+        };
+        assert!(is_on(&status));
+        status.state = DisplayStatus::Stopped;
+        assert!(!is_on(&status));
+        status.recording = true;
+        assert!(is_on(&status));
+    }
+}

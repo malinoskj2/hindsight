@@ -723,3 +723,34 @@ const _: () = assert!(offset_of!(LockBitstream, bitstream_size_in_bytes) == 36);
 const _: () = assert!(offset_of!(LockBitstream, _output_time_stamp) == 40);
 const _: () = assert!(offset_of!(LockBitstream, bitstream_buffer_ptr) == 56);
 const _: () = assert!(offset_of!(LockBitstream, picture_type) == 64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_are_named_with_their_codes() {
+        assert_eq!(Status::SUCCESS.to_string(), "NV_ENC_SUCCESS (0)");
+        assert_eq!(
+            Status::INVALID_VERSION.to_string(),
+            "NV_ENC_ERR_INVALID_VERSION (15)"
+        );
+        assert_eq!(Status(26).to_string(), "NV_ENC_ERR_NEED_MORE_OUTPUT (26)");
+        assert_eq!(Status(99).to_string(), "unknown NVENC status (99)");
+    }
+
+    #[test]
+    fn structure_versions_carry_the_api_version() {
+        for version in [
+            FUNCTION_LIST_VER,
+            OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+            CONFIG_VER,
+            REGISTER_RESOURCE_VER,
+            PIC_PARAMS_VER,
+            LOCK_BITSTREAM_VER,
+        ] {
+            assert_eq!(version & 0xFFFF, API_VERSION & 0xFFFF);
+            assert_eq!(version >> 24 & 0xF, API_MINOR);
+        }
+    }
+}

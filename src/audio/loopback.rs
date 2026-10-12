@@ -115,11 +115,12 @@ pub(crate) enum Wake {
 
 /// Waits until `stop` is set, `wake` (a change signal) is, or `timeout` passes.
 pub(crate) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wake {
-    let mut handles = vec![*stop.0];
-    handles.extend(wake);
+    // On the stack: this runs every read interval.
+    let handles = [*stop.0, wake.unwrap_or_default()];
+    let handles = &handles[..=usize::from(wake.is_some())];
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-    // SAFETY: both handles are open events for the length of the call.
-    let woken = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
+    // SAFETY: the handles waited on are open events for the length of the call.
+    let woken = unsafe { WaitForMultipleObjects(handles, false, milliseconds) };
     if woken == WAIT_OBJECT_0 {
         Wake::Stop
     } else {
@@ -451,7 +452,6 @@ impl Loopback {
         self.layout
     }
 
-    /// The device's id.
     pub(crate) fn id(&self) -> &str {
         &self.id
     }

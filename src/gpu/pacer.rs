@@ -116,4 +116,14 @@ mod tests {
         assert!(ticks.windows(2).all(|pair| pair[1] > pair[0]));
         assert!(started.elapsed() >= pacer.period() * 22);
     }
+
+    #[test]
+    fn a_thread_that_fell_behind_skips_the_missed_ticks() {
+        let mut pacer = Pacer::new(240).unwrap();
+        let first = pacer.wait().unwrap();
+        std::thread::sleep(pacer.period() * 4);
+        let late = pacer.wait().unwrap();
+        assert!(late >= first + 4, "{late} after {first}");
+        assert!(pacer.wait().unwrap() > late);
+    }
 }

@@ -17,7 +17,6 @@ pub(crate) const MIN_BITRATE_MBPS: u32 = 5;
 pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
 const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
-/// Clips go to `%USERPROFILE%\Videos\hindsight` unless a folder is chosen.
 const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
 const VIDEOS_DIRECTORY: &str = "Videos";
 const CLIP_DIRECTORY: &str = "hindsight";
@@ -207,7 +206,6 @@ pub(crate) struct Config {
     /// Whether the mouse cursor is drawn into the picture, where the backend can (NvFBC and
     /// Windows Graphics Capture; Desktop Duplication never draws it).
     pub(crate) cursor: bool,
-    /// Where the replay buffer is kept.
     pub(crate) buffer_memory: Memory,
 }
 
@@ -249,14 +247,14 @@ impl Config {
         Ok(())
     }
 
-    /// The hotkey chord, parsed.
     pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
         Ok(self.hotkey.parse()?)
     }
 
-    /// The bitrate in bits per second.
+    /// The bitrate in bits per second. Saturates rather than overflows, since the Settings tab
+    /// estimates the buffer from whatever is typed before the value is checked.
     pub(crate) const fn bitrate(&self) -> u32 {
-        self.bitrate_mbps * BITS_PER_MEGABIT
+        self.bitrate_mbps.saturating_mul(BITS_PER_MEGABIT)
     }
 
     /// Frames the buffer keeps, at least: the clip length at the capture rate.
@@ -460,6 +458,21 @@ mod tests {
             }
             .clip_directory(),
             PathBuf::from(r"D:\Clips")
+        );
+    }
+
+    #[test]
+    fn an_absurd_bitrate_typed_into_the_estimate_does_not_overflow() {
+        // The Settings tab estimates from the typed value before it is validated.
+        let config = Config {
+            bitrate_mbps: u32::MAX,
+            buffer_seconds: MAX_BUFFER_SECONDS,
+            ..Config::default()
+        };
+        assert_eq!(config.bitrate(), u32::MAX);
+        assert_eq!(
+            config.estimated_buffer_bytes(),
+            u64::from(MAX_BUFFER_SECONDS) * u64::from(u32::MAX) / BITS_PER_BYTE
         );
     }
 }

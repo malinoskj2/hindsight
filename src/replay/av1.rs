@@ -36,7 +36,6 @@ type Bits<'a> = BitReader<&'a [u8], BigEndian>;
 /// Whether the temporal unit's first frame is a key frame.
 pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
     obus(temporal_unit)
-        .iter()
         .find(|obu| matches!(obu.kind, OBU_FRAME_HEADER | OBU_FRAME))
         .and_then(|obu| {
             let mut bits = Bits::new(obu.payload);
@@ -49,9 +48,7 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
 
 /// The `av1C` record for the sequence header in `temporal_unit`, if it carries one.
 pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
-    let obu = obus(temporal_unit)
-        .into_iter()
-        .find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
+    let obu = obus(temporal_unit).find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload).ok()?;
     let mut record = sequence.record()?;
     write_sized_obu(&mut record.config_obus, &obu);
@@ -69,7 +66,6 @@ fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
 /// The OBUs a stored sample keeps, whole: everything but temporal delimiters and padding.
 pub(super) fn sample_obus(temporal_unit: &[u8]) -> Vec<&[u8]> {
     obus(temporal_unit)
-        .into_iter()
         .filter(|obu| !matches!(obu.kind, OBU_TEMPORAL_DELIMITER | OBU_PADDING))
         .map(|obu| obu.bytes)
         .collect()
@@ -102,14 +98,14 @@ struct Obu<'a> {
     bytes: &'a [u8],
 }
 
-/// The OBUs of a low-overhead bitstream; stops at the first malformed one.
-fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
-    let mut found = Vec::new();
-    while let Some(obu) = first_obu(data) {
+/// The OBUs of a low-overhead bitstream; stops at the first malformed one. Lazy, since telling
+/// a keyframe needs only the first frame of every temporal unit.
+fn obus(mut data: &[u8]) -> impl Iterator<Item = Obu<'_>> {
+    std::iter::from_fn(move || {
+        let obu = first_obu(data)?;
         data = &data[obu.bytes.len()..];
-        found.push(obu);
-    }
-    found
+        Some(obu)
+    })
 }
 
 /// The OBU at the start of `data`, unless `data` is empty or the OBU is malformed.
