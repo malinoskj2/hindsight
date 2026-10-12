@@ -8,6 +8,26 @@ use super::Packet;
 use std::{collections::VecDeque, error::Error, fmt, ptr, sync::Arc};
 use thiserror::Error;
 
+// What the stores share: those in GPU memory (`gpu::vram`, `gpu::cuda_output`) and the one on
+// disk (`disk`).
+
+/// Bytes in a page of a store. A packet never straddles two pages, so a page's last bytes may go
+/// unused.
+pub(crate) const PAGE_BYTES: usize = 64 << 20;
+/// Bytes a save reads back at a time: the size of the buffer in system memory it reads through.
+pub(crate) const CHUNK_BYTES: usize = 32 << 20;
+/// Bytes in a mebibyte, for the log.
+pub(crate) const MEBIBYTE: usize = 1 << 20;
+
+/// Pages to reserve up front for `bytes` of packets: enough to hold them, and one more for the
+/// group of pictures the buffer keeps beyond its span.
+pub(crate) fn reserved_pages(bytes: u64) -> usize {
+    usize::try_from(bytes)
+        .unwrap_or(usize::MAX)
+        .div_ceil(PAGE_BYTES)
+        .saturating_add(1)
+}
+
 /// Why a store could not take a packet or give it back.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
@@ -516,6 +536,16 @@ pub(crate) mod tests {
         let fifth = store.put(&[5; 6]).unwrap();
         assert_eq!(store.pages(), 3, "both pages are held, so a third is made");
         drop((held, third, fourth, fifth));
+    }
+
+    #[test]
+    fn a_buffer_reserves_its_pages_and_one_more() {
+        let page = PAGE_BYTES as u64;
+        assert_eq!(reserved_pages(0), 1);
+        assert_eq!(reserved_pages(1), 2);
+        assert_eq!(reserved_pages(page), 2);
+        assert_eq!(reserved_pages(page + 1), 3);
+        assert_eq!(reserved_pages(10 * page), 11);
     }
 
     #[test]

@@ -218,19 +218,21 @@ impl SettingsPage {
         });
     }
 
-    /// Shows how much memory the buffer takes at the entered bitrate and length, and where;
-    /// nothing while either is not a number Apply would accept.
+    /// Shows how much memory the buffer takes at the entered bitrate and length, and where
+    /// (with what a buffer on disk writes an hour); nothing while either is not a number Apply
+    /// would accept.
     pub(super) fn update_estimate(&self) {
         let estimate = number(&self.buffer_seconds)
             .zip(number(&self.bitrate))
             .and_then(|(buffer_seconds, bitrate_mbps)| {
                 estimate_megabytes(buffer_seconds, bitrate_mbps)
+                    .map(|megabytes| (megabytes, bitrate_mbps))
             });
         let memory = chosen(&self.memory, &Memory::ALL);
         layout::set_text(
             &self.estimate,
-            &estimate.map_or_else(String::new, |megabytes| {
-                text::buffer_estimate(megabytes, memory)
+            &estimate.map_or_else(String::new, |(megabytes, bitrate_mbps)| {
+                text::buffer_estimate(megabytes, memory, bitrate_mbps)
             }),
         );
     }

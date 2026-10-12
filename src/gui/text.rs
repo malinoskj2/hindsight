@@ -207,15 +207,29 @@ pub(super) fn lifetime_saved(status: &Status) -> String {
 }
 
 /// The memory the replay buffer takes at the entered bitrate and length, where it is kept; a
-/// buffer in GPU memory passes through system memory again when a clip is saved.
-pub(super) fn buffer_estimate(megabytes: u64, memory: Memory) -> String {
-    let name = memory.short_name();
+/// buffer in GPU memory passes through system memory again when a clip is saved, and one on
+/// disk writes the whole stream to the drive, which is what it costs an SSD in wear.
+pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
+    let place = memory.place();
     match memory {
-        Memory::Ram => format!("Buffer in {name} at this bitrate: about {megabytes} MB"),
+        Memory::Ram => format!("Buffer {place} at this bitrate: about {megabytes} MB"),
         Memory::Vram => format!(
-            "Buffer in {name} at this bitrate: about {megabytes} MB, plus as much RAM while a clip is saved"
+            "Buffer {place} at this bitrate: about {megabytes} MB, plus as much RAM while a clip is saved"
+        ),
+        Memory::Disk => format!(
+            "Buffer {place} at this bitrate: about {megabytes} MB, writing about {} GB an hour",
+            gigabytes_an_hour(bitrate_mbps)
         ),
     }
+}
+
+/// Gigabytes a stream of `bitrate_mbps` amounts to in an hour, to the nearest whole one.
+fn gigabytes_an_hour(bitrate_mbps: u32) -> u64 {
+    const SECONDS_AN_HOUR: u64 = 3600;
+    const BITS_PER_BYTE: u64 = 8;
+    const MEGABYTES_PER_GIGABYTE: u64 = 1000;
+    let megabytes = u64::from(bitrate_mbps) * SECONDS_AN_HOUR / BITS_PER_BYTE;
+    (megabytes + MEGABYTES_PER_GIGABYTE / 2) / MEGABYTES_PER_GIGABYTE
 }
 
 /// A total in gigabytes, or a dash while it is not known. Shown to two decimals, far coarser
@@ -275,14 +289,25 @@ mod tests {
     #[test]
     fn the_buffer_estimate_names_where_the_buffer_lives() {
         assert_eq!(
-            buffer_estimate(500, Memory::Ram),
-            format!(
-                "Buffer in {} at this bitrate: about 500 MB",
-                Memory::Ram.short_name()
-            )
+            buffer_estimate(500, Memory::Ram, 50),
+            "Buffer in RAM at this bitrate: about 500 MB"
         );
         assert!(
-            buffer_estimate(500, Memory::Vram).ends_with("plus as much RAM while a clip is saved")
+            buffer_estimate(500, Memory::Vram, 50)
+                .ends_with("plus as much RAM while a clip is saved")
         );
+        assert_eq!(
+            buffer_estimate(1250, Memory::Disk, 100),
+            "Buffer on disk at this bitrate: about 1250 MB, writing about 45 GB an hour"
+        );
+    }
+
+    #[test]
+    fn the_hourly_write_volume_is_the_bitrate_for_an_hour() {
+        assert_eq!(gigabytes_an_hour(100), 45);
+        assert_eq!(gigabytes_an_hour(50), 23);
+        assert_eq!(gigabytes_an_hour(5), 2);
+        assert_eq!(gigabytes_an_hour(150), 68);
+        assert_eq!(gigabytes_an_hour(u32::MAX), 1_932_735_283);
     }
 }

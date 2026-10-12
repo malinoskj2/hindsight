@@ -1,6 +1,7 @@
 //! The rolling buffer: encoded packets for the last stretch of gameplay, trimmed from the front a
 //! whole group of pictures at a time so that whatever is saved starts on a keyframe. The packets
-//! are held in memory, or put away in a store (the GPU's memory) when one is given.
+//! are held in memory, or put away in a store (the GPU's memory, or a file on disk) when one is
+//! given.
 
 use super::{
     Packet,

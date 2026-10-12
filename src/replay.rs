@@ -18,6 +18,7 @@ use thiserror::Error;
 mod annexb;
 mod audio;
 mod av1;
+mod disk;
 mod h264;
 mod hevc;
 mod mp4;
@@ -26,11 +27,13 @@ mod store;
 
 pub(crate) use audio::{AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip};
 use audio::{AudioRing, tick_time};
+#[cfg(windows)]
+pub(crate) use disk::DiskStore;
 use mp4::{MuxError, Visit};
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
-pub(crate) use store::{Page, Pages, Slot};
+pub(crate) use store::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, reserved_pages};
 pub(crate) use store::{Store, StoreError};
 
 const CLIP_PREFIX: &str = "hindsight";
@@ -149,8 +152,8 @@ impl Live {
         let _ = self.origin.set(time);
     }
 
-    /// Keeps the packets from now on in `store` (the GPU's memory) rather than in system
-    /// memory; a store that refuses a packet is given up with a warning.
+    /// Keeps the packets from now on in `store` (the GPU's memory, or a file on disk) rather than
+    /// in system memory; a store that refuses a packet is given up with a warning.
     pub(crate) fn set_store(&self, store: Box<dyn Store>) {
         self.ring().set_store(store);
     }
@@ -166,7 +169,7 @@ impl Live {
         };
         if let Some(error) = refused {
             log::warning(format!(
-                "The replay buffer could not be kept in GPU memory ({error}); it continues in RAM"
+                "The replay buffer could no longer be kept outside RAM ({error}); it continues in RAM"
             ));
         }
         self.count_frame(oldest, fresh);
@@ -569,6 +572,59 @@ mod tests {
                 assert_eq!(stored.data, kept.data);
             }
         }
+    }
+
+    #[test]
+    fn a_buffer_on_disk_saves_the_same_clip() {
+        // Frames of a few hundred bytes, so that they fill several of the small store's blocks
+        // and pages, but not more than its writer may fall behind by.
+        let push = |live: &Live| {
+            for index in 0..100 {
+                let keyframe_packet = index % 30 == 0;
+                let data = large_frame(keyframe_packet, 200 + 5 * usize::try_from(index).unwrap());
+                let packet = Packet {
+                    index,
+                    keyframe: keyframe_packet,
+                    data,
+                };
+                live.push(packet, true);
+            }
+        };
+        let in_memory = Live::new(60);
+        in_memory.set_stream(STREAM);
+        push(&in_memory);
+        let in_memory = in_memory.clip().unwrap();
+        let mut expected = Vec::new();
+        mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
+
+        // Saved with every packet still in staging, and again once the writer has put them in
+        // the file, but for the block it is filling.
+        let folder = tempfile::tempdir().unwrap();
+        let store = disk::DiskStore::small(folder.path(), 4);
+        let control = store.control();
+        control.hold(true);
+        let live = Live::new(60);
+        live.set_stream(STREAM);
+        live.set_store(Box::new(store));
+        push(&live);
+        let snapshot = live.snapshot().unwrap();
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| matches!(entry, Entry::Stored { .. }))
+        );
+        assert!(control.queued() > 0);
+
+        let clips = tempfile::tempdir().unwrap();
+        let path = save(&snapshot, clips.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected, "from staging");
+        fs::remove_file(path).unwrap();
+
+        control.hold(false);
+        control.settle();
+        let path = save(&snapshot, clips.path()).unwrap();
+        assert_eq!(fs::read(path).unwrap(), expected, "from the file");
     }
 
     /// An H.264 frame of about `bytes`: a keyframe's parameter sets and picture, or a slice,

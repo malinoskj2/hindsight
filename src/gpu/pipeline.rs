@@ -13,9 +13,9 @@ use super::{
 use crate::{
     config::{Codec, Config, Memory},
     log,
-    replay::{self, Live, Packet, Stream},
+    replay::{self, DiskStore, Live, Packet, Stream},
     service::{Ended, Target},
-    sys,
+    storage, sys,
 };
 use anyhow::{Context, Result};
 use std::{
@@ -281,13 +281,19 @@ fn repeat_latest(
     }
 }
 
-/// Where the encoder's frames go, as `config` asks: into RAM; into GPU memory written by the
-/// encoder itself, when the session is on a device's primary CUDA context; or, with any other
-/// session, into GPU memory through a Direct3D device of the buffer's own, which `live` is
-/// given as its store. When GPU memory cannot be had the buffer stays in RAM, with a warning.
+/// Where the encoder's frames go, as `config` asks: into RAM; into a file on disk, which `live`
+/// is given as its store; into GPU memory written by the encoder itself, when the session is
+/// on a device's primary CUDA context; or, with any other session, into GPU memory through a
+/// Direct3D device of the buffer's own, which `live` is given as its store. When the disk or
+/// GPU memory cannot be had the buffer stays in RAM, with a warning.
 fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
-    if config.buffer_memory != Memory::Vram {
-        return Output::Memory;
+    match config.buffer_memory {
+        Memory::Ram => return Output::Memory,
+        Memory::Disk => {
+            keep_on_disk(config, live);
+            return Output::Memory;
+        }
+        Memory::Vram => {}
     }
     let bytes = config.estimated_buffer_bytes();
     if let EncoderDevice::Cuda {
@@ -315,6 +321,21 @@ fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
         )),
     }
     Output::Memory
+}
+
+/// Gives `live` a store in the buffer file in the state directory, sized for the buffer
+/// `config` asks for; when the drive lacks the room or the file cannot be made, the buffer
+/// stays in RAM, with a warning.
+fn keep_on_disk(config: &Config, live: &Live) {
+    match DiskStore::create(&storage::buffer_file(), config.estimated_buffer_bytes()) {
+        Ok(store) => {
+            log::info(store.description());
+            live.set_store(Box::new(store));
+        }
+        Err(error) => log::warning(format!(
+            "The replay buffer could not be placed on disk ({error}); keeping it in RAM"
+        )),
+    }
 }
 
 /// Creates the device to capture and encode on, logs it, and raises its GPU thread priority

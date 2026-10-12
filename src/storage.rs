@@ -24,6 +24,7 @@ const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
 const TOTALS_FILE: &str = "totals.json";
+const BUFFER_FILE: &str = "buffer.bin";
 const PENDING_EXTENSION: &str = "pending";
 
 /// Lifetime totals, kept across runs. `written_bytes` is the name the total had before it was
@@ -121,6 +122,12 @@ pub(crate) fn state_directory() -> PathBuf {
     std::env::var_os(STATE_DIRECTORY_ENV)
         .map_or_else(std::env::temp_dir, PathBuf::from)
         .join(STATE_DIRECTORY)
+}
+
+/// The file a replay buffer on disk is kept in, `buffer.bin` in the state directory. It lasts
+/// as long as the buffer, and the next session's buffer replaces it.
+pub(crate) fn buffer_file() -> PathBuf {
+    state_directory().join(BUFFER_FILE)
 }
 
 /// Opens `root`'s instance lock file and locks it exclusively, failing with

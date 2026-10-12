@@ -117,32 +117,37 @@ impl fmt::Display for Codec {
     }
 }
 
-/// Where the replay buffer is kept: in system memory, or in the GPU's own, which leaves the
-/// system's free for the game and costs the GPU's instead. A save reads a buffer in GPU memory
-/// back through system memory, so for a moment it takes as much of both.
+/// Where the replay buffer is kept: in system memory; in the GPU's own, which leaves the
+/// system's free for the game and costs the GPU's instead; or in a file on disk, which leaves
+/// both free and costs the drive the bitrate in writes for as long as recording runs. A save
+/// reads a buffer in GPU memory back through system memory, so for a moment it takes as much
+/// of both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Memory {
     #[default]
     Ram,
     Vram,
+    Disk,
 }
 
 impl Memory {
-    pub(crate) const ALL: [Self; 2] = [Self::Ram, Self::Vram];
+    pub(crate) const ALL: [Self; 3] = [Self::Ram, Self::Vram, Self::Disk];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Ram => "System memory (RAM)",
             Self::Vram => "GPU memory (VRAM)",
+            Self::Disk => "Disk (SSD)",
         }
     }
 
-    /// The short name, for log lines and estimates.
-    pub(crate) const fn short_name(self) -> &'static str {
+    /// Where the buffer is, as the words that follow "buffer" in log lines and estimates.
+    pub(crate) const fn place(self) -> &'static str {
         match self {
-            Self::Ram => "RAM",
-            Self::Vram => "VRAM",
+            Self::Ram => "in RAM",
+            Self::Vram => "in VRAM",
+            Self::Disk => "on disk",
         }
     }
 }
@@ -355,7 +360,12 @@ mod tests {
             parse(r#"{"buffer_memory":"vram"}"#).unwrap().buffer_memory,
             Memory::Vram
         );
+        assert_eq!(
+            parse(r#"{"buffer_memory":"disk"}"#).unwrap().buffer_memory,
+            Memory::Disk
+        );
         assert!(parse(r#"{"buffer_memory":"gpu"}"#).is_err());
+        assert!(parse(r#"{"buffer_memory":"ssd"}"#).is_err());
 
         assert_eq!(parse(r#"{"mode":"desktop"}"#).unwrap().mode, Mode::Desktop);
         assert_eq!(
@@ -399,6 +409,22 @@ mod tests {
                 .unwrap()
                 .contains("nvfbc_cuda")
         );
+    }
+
+    #[test]
+    fn buffer_places_round_trip_under_their_own_names() {
+        for (memory, name) in Memory::ALL.into_iter().zip(["ram", "vram", "disk"]) {
+            assert_eq!(
+                serde_json::to_string(&memory).unwrap(),
+                format!("\"{name}\"")
+            );
+            let config = Config {
+                buffer_memory: memory,
+                ..Config::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), config);
+        }
     }
 
     #[test]
