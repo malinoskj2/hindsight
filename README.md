@@ -8,8 +8,12 @@
   <img src="assets/logo/monochrome-with-text.png" alt="hindsight" width="520">
 </p>
 
-**The lowest-overhead instant replay for Windows: captured and encoded on the GPU, no overlay, no launcher, no bloat.**  
-hindsight keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. What it costs, measured with cs2 running CPU-bound at about 690 fps on a Ryzen 9 9950X3D and an RTX 5090: recording at the defaults (H.264, 60 fps) takes about 2.5% of one CPU core and 0.7% of the game's frame rate; at AV1, 240 fps and 100 Mb/s with NVIDIA NvFBC about 5.5% of a core and 2.3% of the frame rate, where Instant Replay at the same settings takes 8.5% and 3.2%. Nothing is spent while no full-screen app is running. Of the backends, NvFBC costs the game least, then Windows Graphics Capture, then DXGI Desktop Duplication.
+**The lowest-overhead instant replay for Windows: captured and encoded on the GPU, no overlay, no launcher, no bloat.**
+
+- **A tray icon and one small window.** No overlay, no account, no launcher.
+- **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game; see [the performance guide](docs/performance.md) for the numbers.
+- **Buffer in RAM, VRAM or on disk**, your choice.
+- **H.264, HEVC or AV1** at up to 240 fps, with system sound as AAC.
 
 You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with a current driver (531 or newer).
 
