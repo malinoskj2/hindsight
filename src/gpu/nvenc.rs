@@ -8,6 +8,7 @@ use crate::{
         cuda_output::{CudaRing, StagingId, StagingLayout},
         device::{Locked, null_output},
         ffi::{Library, Symbol, Zeroed},
+        pacer::FrameIndex,
     },
     replay::{Matrix, Picture, Slot as StoreSlot},
 };
@@ -111,7 +112,8 @@ pub(super) struct Settings {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) frame_rate: u32,
-    pub(super) bitrate: u32,
+    /// Bits per second.
+    pub(super) bitrate_bps: u32,
     pub(super) matrix: Matrix,
 }
 
@@ -122,7 +124,7 @@ pub(super) enum Output {
 }
 
 pub(super) struct Encoded {
-    pub(super) index: u64,
+    pub(super) index: FrameIndex,
     pub(super) picture: Picture,
     /// Reported only for a frame locked in system memory.
     picture_type: Option<u32>,
@@ -177,7 +179,7 @@ struct Session {
 }
 
 struct Frame {
-    index: u64,
+    index: FrameIndex,
     picture: Picture,
     input: Input,
     mapped: ffi::Mapped,
@@ -585,16 +587,20 @@ impl Encoder {
         })
     }
 
-    pub(super) fn submit(&mut self, index: u64, picture: Picture) -> Result<(), NvencError> {
+    pub(super) fn submit(&mut self, index: FrameIndex, picture: Picture) -> Result<(), NvencError> {
         self.submit_input(index, picture, Input::Slot(self.next))
     }
 
-    pub(super) fn submit_surface(&mut self, index: u64, surface: usize) -> Result<(), NvencError> {
+    pub(super) fn submit_surface(
+        &mut self,
+        index: FrameIndex,
+        surface: usize,
+    ) -> Result<(), NvencError> {
         self.submit_input(index, Picture::Fresh, Input::Surface(surface))
     }
 
     /// False while NVENC is still reading the picture for the frame before: a texture is mapped for one frame at a time.
-    pub(super) fn repeat(&mut self, index: u64) -> Result<bool, NvencError> {
+    pub(super) fn repeat(&mut self, index: FrameIndex) -> Result<bool, NvencError> {
         let Some(latest) = self.latest else {
             return Ok(false);
         };
@@ -607,7 +613,7 @@ impl Encoder {
 
     pub(super) fn repeat_once_free(
         &mut self,
-        index: u64,
+        index: FrameIndex,
         output: &mut impl FnMut(Encoded),
     ) -> Result<(), NvencError> {
         let latest = self
@@ -621,7 +627,7 @@ impl Encoder {
 
     fn submit_input(
         &mut self,
-        index: u64,
+        index: FrameIndex,
         picture: Picture,
         input: Input,
     ) -> Result<(), NvencError> {
@@ -660,14 +666,14 @@ impl Encoder {
     fn encode_picture(
         &self,
         slot: usize,
-        index: u64,
+        index: FrameIndex,
         map: &ffi::MapInputResource,
     ) -> Result<(), NvencError> {
         let mut picture = ffi::PicParams::zeroed();
         picture.version = ffi::PIC_PARAMS_VER;
         picture.input_width = self.settings.width;
         picture.input_height = self.settings.height;
-        picture.input_time_stamp = index;
+        picture.input_time_stamp = index.get();
         picture.input_buffer = map.mapped_resource;
         picture.output_bitstream = match &self.slots[slot].output {
             SlotOutput::Bitstream(bitstream) => *bitstream,
@@ -1105,7 +1111,7 @@ fn configure(config: &mut ffi::Config, settings: Settings) {
     config.gop_length = gop;
     // No B-frames.
     config.frame_interval_p = 1;
-    configure_rate_control(&mut config.rc, settings.bitrate);
+    configure_rate_control(&mut config.rc, settings.bitrate_bps);
     match settings.codec {
         // SAFETY: the preset filled the union member for the configured codec.
         Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }, gop, matrix),
@@ -1123,10 +1129,10 @@ const fn gop_frames(frame_rate: u32) -> u32 {
 }
 
 /// Single-pass VBR with no lookahead or adaptive quantization: nothing runs on the shader cores.
-fn configure_rate_control(rc: &mut ffi::RcParams, bitrate: u32) {
+fn configure_rate_control(rc: &mut ffi::RcParams, bitrate_bps: u32) {
     rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
-    rc.average_bit_rate = bitrate;
-    rc.max_bit_rate = bitrate.saturating_mul(2);
+    rc.average_bit_rate = bitrate_bps;
+    rc.max_bit_rate = bitrate_bps.saturating_mul(2);
     rc.vbv_buffer_size = rc.max_bit_rate;
     rc.flags = 0;
     rc.multi_pass = ffi::MULTI_PASS_DISABLED;

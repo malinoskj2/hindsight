@@ -1,6 +1,9 @@
 //! The frame clock: a high-resolution waitable timer the capture thread sleeps on between frames.
 
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU32,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         Foundation::{HANDLE, WAIT_OBJECT_0},
@@ -49,42 +52,94 @@ impl Timer {
     }
 }
 
-pub(super) struct Pacer {
+/// A tick of the frame clock, counted from the start of the session: the frame shown then.
+/// NVENC carries it through a frame's encode as the picture's timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct FrameIndex(u64);
+
+impl FrameIndex {
+    pub(super) const fn new(index: u64) -> Self {
+        Self(index)
+    }
+
+    pub(super) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Where the pacer reads the time and how it sleeps; a fake one makes its tests exact.
+pub(super) trait Clock {
+    /// Time since the clock started.
+    fn elapsed(&self) -> Duration;
+
+    fn sleep(&mut self, duration: Duration) -> windows::core::Result<()>;
+}
+
+/// The wall clock, slept on through the high-resolution timer.
+pub(super) struct WallClock {
     timer: Timer,
     start: Instant,
+}
+
+impl WallClock {
+    fn new() -> windows::core::Result<Self> {
+        Ok(Self {
+            timer: Timer::new()?,
+            start: Instant::now(),
+        })
+    }
+}
+
+impl Clock for WallClock {
+    fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    fn sleep(&mut self, duration: Duration) -> windows::core::Result<()> {
+        self.timer.sleep(duration)
+    }
+}
+
+pub(super) struct Pacer<C = WallClock> {
+    clock: C,
     period: Duration,
     next: u64,
 }
 
 impl Pacer {
-    pub(super) fn new(frame_rate: u32) -> windows::core::Result<Self> {
-        Ok(Self {
-            timer: Timer::new()?,
-            start: Instant::now(),
-            period: Duration::from_secs(1) / frame_rate,
+    pub(super) fn new(frame_rate: NonZeroU32) -> windows::core::Result<Self> {
+        Ok(Self::with_clock(WallClock::new()?, frame_rate))
+    }
+}
+
+impl<C: Clock> Pacer<C> {
+    fn with_clock(clock: C, frame_rate: NonZeroU32) -> Self {
+        Self {
+            clock,
+            period: Duration::from_secs(1) / frame_rate.get(),
             next: 0,
-        })
+        }
     }
 
     pub(super) const fn period(&self) -> Duration {
         self.period
     }
 
-    pub(super) fn wait(&mut self) -> windows::core::Result<u64> {
-        let elapsed = self.start.elapsed();
+    pub(super) fn wait(&mut self) -> windows::core::Result<FrameIndex> {
+        let elapsed = self.clock.elapsed();
         let current = tick(elapsed, self.period);
         if current >= self.next {
             self.next = current + 1;
-            return Ok(current);
+            return Ok(FrameIndex(current));
         }
 
         let due = Duration::from_nanos(
             u64::try_from(self.period.as_nanos() * u128::from(self.next)).unwrap_or(u64::MAX),
         );
-        self.timer.sleep(due.saturating_sub(elapsed))?;
+        self.clock.sleep(due.saturating_sub(elapsed))?;
         let index = self.next;
         self.next += 1;
-        Ok(index)
+        Ok(FrameIndex(index))
     }
 }
 
@@ -95,6 +150,27 @@ fn tick(elapsed: Duration, period: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Time moves only when the pacer sleeps or a test moves it.
+    #[derive(Default)]
+    struct FakeClock {
+        now: Duration,
+    }
+
+    impl Clock for FakeClock {
+        fn elapsed(&self) -> Duration {
+            self.now
+        }
+
+        fn sleep(&mut self, duration: Duration) -> windows::core::Result<()> {
+            self.now += duration;
+            Ok(())
+        }
+    }
+
+    fn pacer() -> Pacer<FakeClock> {
+        Pacer::with_clock(FakeClock::default(), NonZeroU32::new(240).unwrap())
+    }
 
     #[test]
     fn ticks_count_whole_periods() {
@@ -109,21 +185,31 @@ mod tests {
 
     #[test]
     fn paces_without_returning_a_tick_twice() {
-        let mut pacer = Pacer::new(240).unwrap();
-        let started = Instant::now();
-        let ticks: Vec<u64> = (0..24).map(|_| pacer.wait().unwrap()).collect();
+        let mut pacer = pacer();
+        let ticks: Vec<u64> = (0..24).map(|_| pacer.wait().unwrap().get()).collect();
 
-        assert!(ticks.windows(2).all(|pair| pair[1] > pair[0]));
-        assert!(started.elapsed() >= pacer.period() * 22);
+        assert_eq!(ticks, (0..24).collect::<Vec<u64>>());
+        assert_eq!(pacer.clock.elapsed(), pacer.period() * 23);
+    }
+
+    #[test]
+    fn a_tick_is_returned_once_its_period_has_begun() {
+        let mut pacer = pacer();
+        assert_eq!(pacer.wait().unwrap(), FrameIndex(0));
+        pacer.clock.now = pacer.period() / 2;
+        assert_eq!(pacer.wait().unwrap(), FrameIndex(1));
+        assert_eq!(pacer.clock.elapsed(), pacer.period());
     }
 
     #[test]
     fn a_thread_that_fell_behind_skips_the_missed_ticks() {
-        let mut pacer = Pacer::new(240).unwrap();
+        let mut pacer = pacer();
         let first = pacer.wait().unwrap();
-        std::thread::sleep(pacer.period() * 4);
+        pacer.clock.now += pacer.period() * 4;
         let late = pacer.wait().unwrap();
-        assert!(late >= first + 4, "{late} after {first}");
-        assert!(pacer.wait().unwrap() > late);
+        assert_eq!((first, late), (FrameIndex(0), FrameIndex(4)));
+        let before = pacer.clock.elapsed();
+        assert_eq!(pacer.wait().unwrap(), FrameIndex(5));
+        assert_eq!(pacer.clock.elapsed(), before + pacer.period());
     }
 }

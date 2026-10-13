@@ -515,7 +515,7 @@ impl Bench {
             width: WIDTH,
             height: HEIGHT,
             frame_rate: FRAME_RATE,
-            bitrate: 100_000_000,
+            bitrate_bps: 100_000_000,
             matrix: Matrix::Bt709,
         };
         let device = Device::create().map_err(|error| error.to_string())?;

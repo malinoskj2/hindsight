@@ -7,7 +7,7 @@ use crate::{
         cuda_output::CudaRing,
         device::{Device, DeviceError},
         nvenc::{self, Encoded, Encoder, NvencError, Output, Payload, Settings},
-        pacer::Pacer,
+        pacer::{FrameIndex, Pacer},
         priority, vram,
     },
     log,
@@ -17,6 +17,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use std::{
+    num::NonZeroU32,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -75,7 +76,8 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         live.note_capture_processor(processor);
     }
     let device = open_device(config)?;
-    let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
+    let frame_rate = NonZeroU32::new(config.frame_rate).context("the frame rate is zero")?;
+    let mut pacer = Pacer::new(frame_rate).context("create the frame timer")?;
     // Frame `i` is this instant plus `i` periods; the audio is lined up against it.
     live.set_origin(sys::clock::now());
     let mut session = Session::open(config, device, pacer.period(), target, live)?;
@@ -108,14 +110,14 @@ fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
     match encoded.data {
         Payload::Memory(data) => live.push(
             Packet {
-                index: encoded.index,
+                index: encoded.index.get(),
                 keyframe,
                 data,
             },
             encoded.picture,
         ),
         Payload::Stored { slot, .. } => {
-            live.push_stored(encoded.index, keyframe, slot, encoded.picture);
+            live.push_stored(encoded.index.get(), keyframe, slot, encoded.picture);
         }
     }
 }
@@ -126,7 +128,7 @@ struct Session {
     capture: Box<dyn capture::Source>,
     device: Device,
     surfaces: SurfaceDelivery,
-    first_frame_deadline: Option<u64>,
+    first_frame_deadline: Option<FrameIndex>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -157,7 +159,7 @@ impl Session {
                 width,
                 height,
                 frame_rate: config.frame_rate,
-                bitrate: config.bitrate(),
+                bitrate_bps: config.bitrate(),
                 matrix: capture.colour_matrix(),
             },
             output,
@@ -168,7 +170,7 @@ impl Session {
         }
         let first_frame_deadline = capture
             .captures_window()
-            .then(|| u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS);
+            .then(|| FrameIndex::new(u64::from(config.frame_rate) * FIRST_FRAME_TIMEOUT_SECONDS));
         Ok(Self {
             encoder,
             capture,
@@ -178,7 +180,11 @@ impl Session {
         })
     }
 
-    fn tick(&mut self, index: u64, output: &mut impl FnMut(Encoded)) -> Result<Option<Ended>> {
+    fn tick(
+        &mut self,
+        index: FrameIndex,
+        output: &mut impl FnMut(Encoded),
+    ) -> Result<Option<Ended>> {
         self.encoder.collect(output)?;
         self.encoder.reserve(output)?;
         if let Some(surface) = self.capture.next_surface() {
@@ -204,7 +210,7 @@ impl Session {
         Ok(None)
     }
 
-    fn submit_surface(&mut self, index: u64, surface: usize) -> Result<(), NvencError> {
+    fn submit_surface(&mut self, index: FrameIndex, surface: usize) -> Result<(), NvencError> {
         let handle = self
             .capture
             .surface(surface)
@@ -235,7 +241,7 @@ impl Session {
 fn repeat_latest(
     device: &Device,
     encoder: &mut Encoder,
-    index: u64,
+    index: FrameIndex,
     output: &mut impl FnMut(Encoded),
 ) -> Result<(), NvencError> {
     if encoder.repeat(index)? {
