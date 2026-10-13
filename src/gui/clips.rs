@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     log,
+    replay::ClipName,
     service::Status,
     sys::shell::{self, Thumbnail, ThumbnailError},
 };
@@ -27,9 +28,7 @@ const THUMB_HEIGHT: i32 = 72;
 const CELL_WIDTH: i32 = 134;
 const CELL_HEIGHT: i32 = THUMB_HEIGHT + 2 * LINE + 8;
 const COLUMNS: usize = 3;
-const CLIP_PREFIX: &str = "hindsight_";
-const CLIP_EXTENSION: &str = "mp4";
-const STAMP_LENGTH: usize = 19;
+
 const CARD: w::COLORREF = w::COLORREF::from_rgb(0xE4, 0xE4, 0xE4);
 const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 
@@ -506,7 +505,7 @@ impl Clip {
         let file_name = path.file_name()?.to_str()?;
         if !file_name
             .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(CLIP_EXTENSION))
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(ClipName::EXTENSION))
         {
             return None;
         }
@@ -533,49 +532,6 @@ impl Clip {
     fn order(&self) -> (Option<&ClipName>, String) {
         (self.name.as_ref(), self.file_name())
     }
-}
-
-/// The time in `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4`; `-n` counts a second clip in one second.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ClipName {
-    stamp: String,
-    attempt: u32,
-}
-
-impl ClipName {
-    fn parse(file_name: &str) -> Option<Self> {
-        let rest = file_name
-            .strip_prefix(CLIP_PREFIX)?
-            .strip_suffix(CLIP_EXTENSION)?
-            .strip_suffix('.')?;
-        let (stamp, attempt) = rest.split_at_checked(STAMP_LENGTH)?;
-        if !is_stamp(stamp) {
-            return None;
-        }
-        let attempt = if attempt.is_empty() {
-            1
-        } else {
-            attempt.strip_prefix('-')?.parse().ok()?
-        };
-        Some(Self {
-            stamp: stamp.to_owned(),
-            attempt,
-        })
-    }
-
-    fn title(&self) -> String {
-        let (date, time) = self.stamp.split_at(10);
-        format!("{date} {}", time[1..].replace('-', ":"))
-    }
-}
-
-fn is_stamp(stamp: &str) -> bool {
-    stamp.len() == STAMP_LENGTH
-        && stamp.bytes().enumerate().all(|(index, byte)| match index {
-            4 | 7 | 13 | 16 => byte == b'-',
-            10 => byte == b'_',
-            _ => byte.is_ascii_digit(),
-        })
 }
 
 fn list_clips(folder: &Path) -> Vec<Clip> {
@@ -659,26 +615,6 @@ mod tests {
 
     fn clip(name: &str) -> Clip {
         Clip::new(PathBuf::from(r"D:\Clips").join(name), 0).unwrap()
-    }
-
-    #[test]
-    fn a_clips_name_gives_the_time_it_was_taken_and_its_attempt() {
-        let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
-        assert_eq!(name.title(), "2026-10-12 21:14:05");
-        assert_eq!(name.attempt, 1);
-        let again = ClipName::parse("hindsight_2026-10-12_21-14-05-2.mp4").unwrap();
-        assert_eq!(again.stamp, name.stamp);
-        assert_eq!(again.attempt, 2);
-        for other in [
-            "hindsight_2026-10-12_21-14-05.mp4.partial",
-            "hindsight_2026-10-12_21-14.mp4",
-            "hindsight_2026-10-12_21-14-05-x.mp4",
-            "hindsight_2026-10-12-21-14-05.mp4",
-            "boss fight.mp4",
-            "hindsight_2026-10-12_21-14-05.mkv",
-        ] {
-            assert_eq!(ClipName::parse(other), None, "{other}");
-        }
     }
 
     #[test]
