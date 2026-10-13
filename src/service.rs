@@ -82,6 +82,8 @@ type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 type Audio = fn(&Arc<Live>) -> Option<audio::Capture>;
 type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
+/// The worker's sense of time: retries and save ticks fall due by it.
+type Clock = Box<dyn Fn() -> Instant + Send>;
 
 #[cfg(windows)]
 const RECORDER: Recorder = crate::gpu::record;
@@ -95,6 +97,7 @@ struct Services {
     write: Writer,
     chime: Chime,
     retry_interval: Duration,
+    clock: Clock,
 }
 
 impl Services {
@@ -108,6 +111,7 @@ impl Services {
                 let _ = sounds.send(tone);
             }),
             retry_interval: RETRY_INTERVAL,
+            clock: Box::new(Instant::now),
         }
     }
 }
@@ -410,10 +414,14 @@ impl Machine {
         self.shut_down();
     }
 
+    fn now(&self) -> Instant {
+        (self.services.clock)()
+    }
+
     fn receive(&self, commands: &Receiver<Command>) -> Result<Command, RecvTimeoutError> {
         let tick = self.saving.as_ref().map(|saving| saving.next_tick);
         match self.retry_at.into_iter().chain(tick).min() {
-            Some(due) => commands.recv_timeout(due.saturating_duration_since(Instant::now())),
+            Some(due) => commands.recv_timeout(due.saturating_duration_since(self.now())),
             None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
     }
@@ -428,7 +436,7 @@ impl Machine {
     }
 
     fn apply(&mut self, config: Config) {
-        if !self.save_settings(&config) {
+        if self.save_settings(&config).is_err() {
             return;
         }
         log::info(text::settings_applied(&config));
@@ -506,7 +514,7 @@ impl Machine {
                     seconds,
                     done,
                     join,
-                    next_tick: Instant::now() + PROGRESS_INTERVAL,
+                    next_tick: self.now() + PROGRESS_INTERVAL,
                 });
                 self.status.nothing_to_save = false;
             }
@@ -519,18 +527,16 @@ impl Machine {
             theme,
             ..self.config.clone()
         };
-        self.save_settings(&config);
+        // The failure is reported; the look still changes for this run.
+        let _ = self.save_settings(&config);
         self.config = config;
     }
 
-    fn save_settings(&mut self, config: &Config) -> bool {
-        match self.ledger.save_config(config) {
-            Ok(()) => true,
-            Err(error) => {
-                self.report_error(text::save_settings_failed(log::chain(&error)));
-                false
-            }
-        }
+    /// Reports a failure on the Status tab as well as returning it.
+    fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
+        self.ledger
+            .save_config(config)
+            .inspect_err(|error| self.report_error(text::save_settings_failed(log::chain(error))))
     }
 
     fn begin(&mut self) {
@@ -637,7 +643,7 @@ impl Machine {
     fn fail(&mut self, error: impl Display) {
         self.report_error(text::session_failed(error));
         self.status.state = DisplayStatus::Retrying;
-        self.retry_at = Some(Instant::now() + self.services.retry_interval);
+        self.retry_at = Some(self.now() + self.services.retry_interval);
     }
 
     fn report_error(&mut self, message: String) {
@@ -653,7 +659,7 @@ impl Machine {
             self.session_ended(session.join.join());
         }
 
-        if self.retry_at.is_some_and(|due| Instant::now() >= due) {
+        if self.retry_at.is_some_and(|due| self.now() >= due) {
             self.retry();
         }
 
@@ -731,7 +737,7 @@ impl Machine {
     }
 
     fn tick_save(&mut self) {
-        let now = Instant::now();
+        let now = self.now();
         let Some(saving) = self
             .saving
             .as_mut()
@@ -791,7 +797,7 @@ impl Machine {
             live_bytes,
             held: live.map(Live::held),
             sample: Sample {
-                at: Instant::now(),
+                at: self.now(),
                 encoded,
             },
         }
@@ -864,460 +870,4 @@ fn load_totals(store: &Store) -> Option<Totals> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::replay::{Matrix, Packet, Picture};
-    use std::sync::atomic::AtomicUsize;
-
-    #[expect(clippy::unnecessary_wraps)]
-    fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
-        live.set_stream(Stream {
-            codec: config.codec,
-            width: 64,
-            height: 64,
-            frame_rate: config.frame_rate,
-            matrix: Matrix::Bt709,
-        });
-        let mut index = 0;
-        while !stop.load(Ordering::Relaxed) {
-            let keyframe = index % 10 == 0;
-            let data: &[u8] = if keyframe {
-                &[
-                    0, 0, 0, 1, 0x67, 0x64, 0, 0x1F, 0, 0, 0, 1, 0x68, 0xEE, 0, 0, 1, 0x65, 0x88,
-                ]
-            } else {
-                &[0, 0, 0, 1, 0x41, 0x9A]
-            };
-            live.push(
-                Packet {
-                    index,
-                    keyframe,
-                    data: data.into(),
-                },
-                Picture::Fresh,
-            );
-            index += 1;
-            thread::sleep(Duration::from_millis(1));
-        }
-        Ok(Ended::Stopped)
-    }
-
-    fn failing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
-        anyhow::bail!("no capture device")
-    }
-
-    #[expect(clippy::unnecessary_wraps)]
-    fn unsupported(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
-        Ok(Ended::Unsupported(
-            "this GPU's NVENC has no AV1 encoder".to_owned(),
-        ))
-    }
-
-    #[expect(clippy::unnecessary_wraps)]
-    fn closing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
-        Ok(Ended::Closed)
-    }
-
-    static SESSIONS: AtomicUsize = AtomicUsize::new(0);
-
-    fn scripted(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
-        SESSIONS.fetch_add(1, Ordering::Relaxed);
-        match target {
-            Target::Window { window: 1, .. } => {
-                steady_until(config, live, stop, Duration::from_millis(1500));
-                Ok(Ended::Closed)
-            }
-            Target::Window { .. } => Ok(Ended::NoFrames),
-            Target::Monitor { .. } => steady(config, target, live, stop),
-        }
-    }
-
-    fn steady_until(config: &Config, live: &Live, stop: &AtomicBool, span: Duration) {
-        let ended = AtomicBool::new(false);
-        let deadline = Instant::now() + span;
-        thread::scope(|scope| {
-            scope.spawn(|| {
-                while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                ended.store(true, Ordering::Relaxed);
-            });
-            let _ = steady(config, &Target::primary_monitor(), live, &ended);
-        });
-    }
-
-    fn services(record: Recorder, retry_interval: Duration) -> Services {
-        Services {
-            record,
-            audio: |_| None,
-            write: replay::save,
-            chime: Box::new(|_| {}),
-            retry_interval,
-        }
-    }
-
-    fn spawn(
-        record: Recorder,
-        retry_interval: Duration,
-        store: Option<Store>,
-        config: Config,
-    ) -> Worker {
-        Worker::spawn_with(services(record, retry_interval), store, config).unwrap()
-    }
-
-    fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            worker.refresh();
-            let status = worker.status();
-            if done(&status) {
-                return status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out; last status {status:?}"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn desktop() -> Config {
-        Config {
-            mode: Mode::Desktop,
-            ..Config::default()
-        }
-    }
-
-    fn config_in(directory: &Path) -> Config {
-        Config {
-            clip_directory: Some(directory.to_path_buf()),
-            ..desktop()
-        }
-    }
-
-    fn window(window: isize) -> Target {
-        Target::Window {
-            window,
-            monitor: 7,
-            name: format!("game{window}.exe"),
-        }
-    }
-
-    #[test]
-    fn desktop_mode_records_and_saves_a_clip() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-
-        let status = wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
-        });
-        assert!(status.recording);
-        assert_eq!(status.stream.unwrap().frame_rate, 60);
-        assert_eq!(status.source.as_deref(), Some("the primary monitor"));
-
-        worker.save();
-        let status = wait_for(&worker, |status| status.last_clip.is_some());
-        let clip = status.last_clip.unwrap();
-        assert!(clip.starts_with(directory.path()));
-        assert_eq!(&std::fs::read(&clip).unwrap()[4..8], b"ftyp");
-    }
-
-    #[test]
-    fn a_thread_that_ends_wakes_the_worker_without_a_refresh() {
-        let worker = spawn(closing, RETRY_INTERVAL, None, desktop());
-        thread::sleep(Duration::from_millis(300));
-        let status = worker.status();
-        assert_eq!(status.state, DisplayStatus::Retrying, "{status:?}");
-        assert!(status.error.unwrap().contains(text::DISPLAY_GONE));
-
-        let directory = tempfile::tempdir().unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-        wait_for(&worker, |status| status.session_written_bytes > 0);
-        worker.save();
-        thread::sleep(Duration::from_millis(500));
-        let status = worker.status();
-        assert!(status.last_clip.is_some(), "{status:?}");
-    }
-
-    #[test]
-    fn the_lifetime_totals_grow_and_survive_a_restart() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().join("state");
-        let clips = directory.path().join("clips");
-        let config = config_in(&clips);
-        let store = Store::at(state.clone()).unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, Some(store), config.clone());
-        let status = wait_for(&worker, |status| status.saved_bytes.is_some());
-        assert_eq!(status.saved_bytes, Some(0));
-
-        worker.save();
-        let status = wait_for(&worker, |status| status.last_clip.is_some());
-        let clip_bytes = std::fs::metadata(status.last_clip.unwrap()).unwrap().len();
-        assert_eq!(status.saved_bytes, Some(clip_bytes));
-        let buffered = status.buffered_lifetime_bytes.unwrap();
-        assert!(buffered > 0, "the recording went into the buffer");
-        drop(worker);
-
-        let store = Store::at(state).unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, Some(store), config);
-        let status = wait_for(&worker, |status| status.saved_bytes.is_some());
-        assert_eq!(status.saved_bytes, Some(clip_bytes));
-        assert!(status.buffered_lifetime_bytes.unwrap() >= buffered);
-    }
-
-    #[test]
-    fn pausing_keeps_the_buffer_saveable_and_resuming_records_again() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-        wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
-        });
-
-        worker.pause();
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Paused);
-        assert!(!status.recording);
-        worker.save();
-        let status = wait_for(&worker, |status| status.last_clip.is_some());
-        assert_eq!(status.state, DisplayStatus::Paused);
-
-        worker.resume();
-        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-        let before = worker.status().session_written_bytes;
-        worker.restart();
-        wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.session_written_bytes > before
-        });
-    }
-
-    #[test]
-    fn a_failed_session_is_retried() {
-        let worker = spawn(failing, Duration::from_millis(50), None, desktop());
-
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
-        assert!(status.error.unwrap().contains("no capture device"));
-
-        worker.save();
-        wait_for(&worker, |status| status.nothing_to_save);
-    }
-
-    #[test]
-    fn an_unsupported_configuration_is_not_retried() {
-        let worker = spawn(unsupported, Duration::from_millis(10), None, desktop());
-
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Unsupported);
-        assert!(status.error.unwrap().contains("AV1"));
-        assert!(!status.recording);
-        thread::sleep(Duration::from_millis(100));
-        assert_eq!(worker.status().state, DisplayStatus::Unsupported);
-    }
-
-    #[test]
-    fn full_screen_mode_waits_for_an_app_and_follows_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = Config {
-            mode: Mode::Fullscreen,
-            ..config_in(directory.path())
-        };
-        SESSIONS.store(0, Ordering::Relaxed);
-        let worker = spawn(scripted, RETRY_INTERVAL, None, config);
-
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-        assert!(!status.recording);
-        assert!(status.source.is_none());
-
-        worker.target(window(1));
-        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-        worker.target(window(1));
-        worker.target(window(1));
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-        assert_eq!(SESSIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(status.source.as_deref(), Some("game1.exe"));
-        worker.save();
-        wait_for(&worker, |status| status.last_clip.is_some());
-
-        worker.target(window(2));
-        let status = wait_for(&worker, |status| {
-            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
-        });
-        assert_eq!(SESSIONS.load(Ordering::Relaxed), 3);
-        assert_eq!(status.source.as_deref(), Some("game2.exe"));
-    }
-
-    #[test]
-    fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
-        let config = Config {
-            mode: Mode::Fullscreen,
-            ..Config::default()
-        };
-        let worker = spawn(failing, Duration::from_millis(100), None, config);
-        wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-
-        worker.target(window(1));
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
-        assert!(status.error.is_some());
-        worker.target(window(1));
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(worker.status().state, DisplayStatus::Retrying);
-        wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-    }
-
-    #[test]
-    fn applying_settings_persists_them_and_restarts() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::at(directory.path().join("state")).unwrap();
-        let worker = spawn(
-            steady,
-            RETRY_INTERVAL,
-            Some(store),
-            config_in(directory.path()),
-        );
-        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-
-        let config = Config {
-            frame_rate: 30,
-            ..config_in(directory.path())
-        };
-        worker.start(config.clone());
-        wait_for(&worker, |status| {
-            status.stream.is_some_and(|stream| stream.frame_rate == 30)
-        });
-        drop(worker);
-
-        let saved = Store::at(directory.path().join("state"))
-            .unwrap()
-            .load_config()
-            .unwrap();
-        assert_eq!(saved, config);
-    }
-
-    #[test]
-    fn choosing_a_look_is_saved_and_leaves_recording_alone() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().join("state");
-        let config = config_in(directory.path());
-        let worker = spawn(
-            steady,
-            RETRY_INTERVAL,
-            Some(Store::at(state.clone()).unwrap()),
-            config.clone(),
-        );
-        wait_for(&worker, |status| status.session_written_bytes > 0);
-
-        worker.set_theme(Theme::Nova);
-        let status = wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-        assert!(status.recording, "the session carries on");
-        drop(worker);
-
-        let saved = Store::at(state).unwrap().load_config().unwrap();
-        assert_eq!(
-            saved,
-            Config {
-                theme: Theme::Nova,
-                ..config
-            }
-        );
-    }
-
-    type Heard = Arc<Mutex<Vec<(Instant, Tone)>>>;
-
-    fn spawn_listening(mut services: Services, write: Writer, config: Config) -> (Worker, Heard) {
-        let heard = Heard::default();
-        let ear = Arc::clone(&heard);
-        services.write = write;
-        services.chime = Box::new(move |tone| {
-            ear.lock().unwrap().push((Instant::now(), tone));
-        });
-        (Worker::spawn_with(services, None, config).unwrap(), heard)
-    }
-
-    fn tones(heard: &Heard) -> Vec<Tone> {
-        heard
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|&(_, tone)| tone)
-            .collect()
-    }
-
-    fn assert_ticks_then(heard: &Heard, outcome: Tone) -> usize {
-        let heard = heard.lock().unwrap();
-        let (last, blips) = heard.split_last().expect("a tone played");
-        assert_eq!(last.1, outcome, "the outcome comes last: {heard:?}");
-        assert!(blips.iter().all(|&(_, tone)| tone == Tone::Progress));
-        for pair in blips.windows(2) {
-            let gap = pair[1].0.duration_since(pair[0].0);
-            assert!(gap >= Duration::from_millis(900), "blips {gap:?} apart");
-        }
-        blips.len()
-    }
-
-    fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
-        thread::sleep(Duration::from_millis(2500));
-        replay::save(snapshot, directory)
-    }
-
-    fn failing_write(_: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
-        thread::sleep(Duration::from_millis(1500));
-        Err(SaveError::Io {
-            step: "create",
-            path: directory.to_owned(),
-            error: io::Error::other("the disk is full"),
-        })
-    }
-
-    #[test]
-    fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let (worker, heard) = spawn_listening(
-            services(steady, RETRY_INTERVAL),
-            slow_write,
-            config_in(directory.path()),
-        );
-        wait_for(&worker, |status| status.session_written_bytes > 0);
-
-        worker.save();
-        wait_for(&worker, |_| !tones(&heard).is_empty());
-        assert_eq!(tones(&heard), [Tone::Progress], "the first blip is at once");
-        wait_for(&worker, |status| status.last_clip.is_some());
-        let blips = assert_ticks_then(&heard, Tone::Saved);
-        assert!((2..=3).contains(&blips), "{blips} blips in 2.5 seconds");
-
-        thread::sleep(PROGRESS_INTERVAL + Duration::from_millis(300));
-        assert_eq!(tones(&heard).len(), blips + 1);
-    }
-
-    #[test]
-    fn a_failed_save_sounds_failed_and_stops_ticking() {
-        let directory = tempfile::tempdir().unwrap();
-        let (worker, heard) = spawn_listening(
-            services(steady, RETRY_INTERVAL),
-            failing_write,
-            config_in(directory.path()),
-        );
-        wait_for(&worker, |status| status.session_written_bytes > 0);
-
-        worker.save();
-        let status = wait_for(&worker, |status| status.error.is_some());
-        assert!(status.error.unwrap().contains("the disk is full"));
-        assert!(status.last_clip.is_none());
-        let blips = assert_ticks_then(&heard, Tone::Failed);
-        assert!((1..=2).contains(&blips), "{blips} blips in 1.5 seconds");
-
-        thread::sleep(PROGRESS_INTERVAL + Duration::from_millis(300));
-        assert_eq!(tones(&heard).len(), blips + 1);
-    }
-
-    #[test]
-    fn nothing_to_save_sounds_failed_without_ticking() {
-        let (worker, heard) = spawn_listening(
-            services(failing, Duration::from_secs(60)),
-            slow_write,
-            desktop(),
-        );
-        wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
-
-        worker.save();
-        wait_for(&worker, |status| status.nothing_to_save);
-        assert_eq!(tones(&heard), [Tone::Failed]);
-    }
-}
+mod tests;
