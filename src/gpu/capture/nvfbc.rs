@@ -189,24 +189,26 @@ impl Source for Capture {
                 return self.reopen();
             }
         }
-        Ok(collected.map_or(Frame::Unchanged, Frame::InSurface))
+        Ok(
+            collected.map_or(Frame::Unchanged, |index| Frame::InSurface {
+                index,
+                surface: Surface::Direct3D9(self.slots[index].surface.clone()),
+            }),
+        )
     }
+}
 
-    fn hand_over_surfaces(&mut self) -> bool {
+impl Capture {
+    pub(super) fn hand_over_surfaces(&mut self) -> bool {
         self.handed_over = true;
         true
     }
 
-    fn surface(&self, index: usize) -> Option<Surface> {
-        let slot = self.slots.get(index)?;
-        Some(Surface::Direct3D9(slot.surface.clone()))
-    }
-
-    fn next_surface(&self) -> Option<usize> {
+    pub(super) fn next_surface(&self) -> Option<usize> {
         self.handed_over.then_some(self.next as usize)
     }
 
-    fn encoder_device(&self) -> EncoderDevice {
+    pub(super) fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Direct3D9(self.device.clone())
     }
 }

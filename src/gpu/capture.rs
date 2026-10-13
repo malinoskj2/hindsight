@@ -12,7 +12,8 @@ mod wgc;
 use crate::{
     config::Backend,
     gpu::{
-        cuda::{Context, CudaError, DeviceBuffer},
+        cuda::{ContextHold, CudaError, DeviceBuffer},
+        cuda_output::CudaRing,
         device::Device,
     },
     log,
@@ -69,14 +70,14 @@ pub(super) enum Surface {
     Direct3D9(IDirect3DSurface9),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum EncoderDevice {
     Direct3D,
-    /// `primary` is the device whose primary context this is, so memory that must outlive
-    /// the source can retain it again.
+    /// The source's context, held as long as the encoder keeps this: a primary context is
+    /// retained by the hold, one the NvFBC driver opened by the source's session. `ring`, when
+    /// given, takes the encoded frames in video memory: only a CUDA session can write there.
     Cuda {
-        context: Context,
-        primary: Option<super::cuda::Device>,
+        hold: Arc<ContextHold>,
+        ring: Option<CudaRing>,
     },
     /// Capture thread only.
     Direct3D9(IDirect3DDevice9Ex),
@@ -84,9 +85,12 @@ pub(super) enum EncoderDevice {
 
 pub(super) enum Frame {
     Fresh,
-    /// Left in the source's own surface with this index; only after
-    /// [`Source::hand_over_surfaces`].
-    InSurface(usize),
+    /// Left in the source's own surface, numbered `index` among them; only after
+    /// [`Capture::hand_over_surfaces`].
+    InSurface {
+        index: usize,
+        surface: Surface,
+    },
     Unchanged,
     Resized,
 }
@@ -100,7 +104,8 @@ pub(super) struct CopyTarget<'a> {
     pub(super) height: u32,
 }
 
-pub(super) trait Source {
+/// What every backend does; the rest differs by backend and is on [`Capture`].
+trait Source {
     fn size(&self) -> (u32, u32);
 
     /// A window capture may never deliver a frame: exclusive full screen is not composed.
@@ -109,34 +114,97 @@ pub(super) trait Source {
     /// Copies the newest frame into `target`; there is none when the encoder runs on CUDA or
     /// reads the source's surfaces in place.
     fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError>;
+}
 
-    fn encoder_device(&self) -> EncoderDevice {
-        EncoderDevice::Direct3D
+/// A capture by one of the backends.
+pub(super) struct Capture(ByBackend);
+
+enum ByBackend {
+    Wgc(wgc::Capture),
+    Dxgi(dxgi_dd::Capture),
+    Nvfbc(nvfbc::Capture),
+    NvfbcCuda(nvfbc::CudaCapture),
+}
+
+impl Capture {
+    fn source(&self) -> &dyn Source {
+        match &self.0 {
+            ByBackend::Wgc(capture) => capture,
+            ByBackend::Dxgi(capture) => capture,
+            ByBackend::Nvfbc(capture) => capture,
+            ByBackend::NvfbcCuda(capture) => capture,
+        }
     }
 
-    /// For YUV surfaces; BGRA is converted by NVENC with BT.709.
-    fn colour_matrix(&self) -> Matrix {
+    fn source_mut(&mut self) -> &mut dyn Source {
+        match &mut self.0 {
+            ByBackend::Wgc(capture) => capture,
+            ByBackend::Dxgi(capture) => capture,
+            ByBackend::Nvfbc(capture) => capture,
+            ByBackend::NvfbcCuda(capture) => capture,
+        }
+    }
+
+    pub(super) fn size(&self) -> (u32, u32) {
+        self.source().size()
+    }
+
+    /// A window capture may never deliver a frame: exclusive full screen is not composed.
+    pub(super) fn captures_window(&self) -> bool {
+        self.source().captures_window()
+    }
+
+    /// Copies the newest frame into `target`; there is none when the encoder runs on CUDA or
+    /// reads the source's surfaces in place.
+    pub(super) fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
+        self.source_mut().take(target)
+    }
+
+    /// What the encoder must run on to read this capture's surfaces.
+    pub(super) fn encoder_device(&self) -> EncoderDevice {
+        match &self.0 {
+            ByBackend::Wgc(_) | ByBackend::Dxgi(_) => EncoderDevice::Direct3D,
+            ByBackend::Nvfbc(capture) => capture.encoder_device(),
+            ByBackend::NvfbcCuda(capture) => capture.encoder_device(),
+        }
+    }
+
+    /// For YUV surfaces; every backend delivers BGRA, which NVENC converts with BT.709.
+    #[expect(
+        clippy::unused_self,
+        reason = "a backend delivering YUV would answer for itself"
+    )]
+    pub(super) const fn colour_matrix(&self) -> Matrix {
         Matrix::Bt709
     }
 
     /// Switches to leaving each picture in a surface of its own, reported as
     /// [`Frame::InSurface`]; reports whether it did.
-    fn hand_over_surfaces(&mut self) -> bool {
-        false
-    }
-
-    /// Stays the same memory for the session.
-    fn surface(&self, _index: usize) -> Option<Surface> {
-        None
+    pub(super) fn hand_over_surfaces(&mut self) -> bool {
+        match &mut self.0 {
+            ByBackend::Wgc(capture) => capture.hand_over_surfaces(),
+            ByBackend::Dxgi(_) => false,
+            ByBackend::Nvfbc(capture) => capture.hand_over_surfaces(),
+            ByBackend::NvfbcCuda(capture) => capture.hand_over_surfaces(),
+        }
     }
 
     /// The surface the next [`take`](Self::take) captures into; the encoder must be done with it.
-    fn next_surface(&self) -> Option<usize> {
-        None
+    pub(super) fn next_surface(&self) -> Option<usize> {
+        match &self.0 {
+            ByBackend::Wgc(_) | ByBackend::Dxgi(_) => None,
+            ByBackend::Nvfbc(capture) => capture.next_surface(),
+            ByBackend::NvfbcCuda(capture) => capture.next_surface(),
+        }
     }
 
     /// Hands back the surfaces for which `in_use` is false.
-    fn release_surfaces(&mut self, _in_use: &dyn Fn(usize) -> bool) {}
+    pub(super) fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
+        match &mut self.0 {
+            ByBackend::Wgc(capture) => capture.release_surfaces(in_use),
+            ByBackend::Dxgi(_) | ByBackend::Nvfbc(_) | ByBackend::NvfbcCuda(_) => {}
+        }
+    }
 }
 
 #[derive(Default)]
@@ -166,7 +234,7 @@ pub(super) fn start(
     period: Duration,
     target: &Target,
     cursor: bool,
-) -> Result<Box<dyn Source>, CaptureError> {
+) -> Result<Capture, CaptureError> {
     let display = display::describe(monitor_of(target).0);
     if let Some(display) = &display {
         log::info(format!("Display {display}"));
@@ -180,14 +248,16 @@ pub(super) fn start(
         }
         _ => None,
     };
-    Ok(match backend {
-        Backend::Wgc => Box::new(wgc::Capture::start(
+    Ok(Capture(match backend {
+        Backend::Wgc => ByBackend::Wgc(wgc::Capture::start(
             device, period, target, cursor, tone_map,
         )?),
-        Backend::Dxgi => Box::new(dxgi_dd::Capture::start(device, target, tone_map)?),
-        Backend::Nvfbc => Box::new(nvfbc::Capture::start(device, target, cursor)?),
-        Backend::NvfbcCuda => Box::new(nvfbc::CudaCapture::start(device, target, cursor)?),
-    })
+        Backend::Dxgi => ByBackend::Dxgi(dxgi_dd::Capture::start(device, target, tone_map)?),
+        Backend::Nvfbc => ByBackend::Nvfbc(nvfbc::Capture::start(device, target, cursor)?),
+        Backend::NvfbcCuda => {
+            ByBackend::NvfbcCuda(nvfbc::CudaCapture::start(device, target, cursor)?)
+        }
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,8 +309,12 @@ fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
     move |error| CaptureError::Windows(step, error)
 }
 
-fn target_of(target: Option<CopyTarget<'_>>) -> CopyTarget<'_> {
-    target.expect("a source that copies frames runs with an encoder on the Direct3D device")
+/// A copying source reports [`EncoderDevice::Direct3D`], whose encoder always has an input to
+/// copy into; without one there is nothing to deliver to, and the session starts over.
+fn target_of(target: Option<CopyTarget<'_>>) -> Result<CopyTarget<'_>, CaptureError> {
+    target.ok_or(CaptureError::Restart(
+        "the encoder has no Direct3D input to copy the captured frame into",
+    ))
 }
 
 /// Puts `source` into `target`, through the tone-map pass when there is one.

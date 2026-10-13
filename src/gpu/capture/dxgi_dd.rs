@@ -144,7 +144,7 @@ impl Source for Capture {
         if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
-        let target = super::target_of(target);
+        let target = super::target_of(target)?;
 
         let Some(duplication) = &self.duplication else {
             return self.reopen(target.device);

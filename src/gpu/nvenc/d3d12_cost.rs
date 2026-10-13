@@ -2,7 +2,7 @@
 //! 11, 12 and 9Ex sessions: `cargo test --release d3d12_encode_cost -- --ignored --nocapture`.
 
 use super::{
-    Session, Settings, configure, create_input_texture,
+    Session, SessionDevice, Settings, configure, create_input_texture,
     ffi::{self, Status},
     initialize_params,
 };
@@ -509,7 +509,7 @@ impl Bench {
                 unreachable!("open_d3d9 opens Direct3D 9")
             };
             (
-                Session::open_on(ffi::DEVICE_TYPE_DIRECTX, d3d9.as_raw())
+                Session::open(SessionDevice::Direct3D9(d3d9.clone()))
                     .map_err(|error| error.to_string())?,
                 backend,
             )
@@ -519,14 +519,14 @@ impl Bench {
                 unreachable!("open_d3d12 opens Direct3D 12")
             };
             (
-                Session::open_on(ffi::DEVICE_TYPE_DIRECTX, d3d12.as_raw())
+                Session::open(SessionDevice::Direct3D12(d3d12.clone()))
                     .map_err(|error| error.to_string())?,
                 backend,
             )
         } else {
             let texture =
                 create_input_texture(&device.d3d, settings).map_err(|error| error.to_string())?;
-            let session = Session::open_on(ffi::DEVICE_TYPE_DIRECTX, device.d3d.as_raw())
+            let session = Session::open(SessionDevice::Direct3D11(device.d3d.clone()))
                 .map_err(|error| error.to_string())?;
             let backend = Backend::D3d11 {
                 _device: device,

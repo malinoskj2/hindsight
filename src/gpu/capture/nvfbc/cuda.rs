@@ -273,7 +273,7 @@ impl Source for Capture {
         }
         let slot = self.next as usize;
         match self.grab(slot)? {
-            Grabbed::Frame => Ok(Frame::InSurface(slot)),
+            Grabbed::Frame => self.in_surface(slot),
             Grabbed::Withheld => Ok(Frame::Unchanged),
             Grabbed::Resized => Ok(Frame::Resized),
             Grabbed::Lost => {
@@ -282,26 +282,36 @@ impl Source for Capture {
             }
         }
     }
+}
 
-    fn hand_over_surfaces(&mut self) -> bool {
+impl Capture {
+    pub(in crate::gpu::capture) fn hand_over_surfaces(&mut self) -> bool {
         self.handed_over = true;
         true
     }
 
-    fn surface(&self, index: usize) -> Option<Surface> {
-        let buffer = Arc::clone(self.buffers.get(index)?);
-        let pitch = self.pitch?;
-        Some(Surface::CudaBuffer { buffer, pitch })
+    /// A grab into `slot`'s buffer, which noted the pitch.
+    fn in_surface(&self, slot: usize) -> Result<Frame, CaptureError> {
+        let pitch = self.pitch.ok_or(CaptureError::Restart(
+            "NvFBC delivered a grab without its pitch",
+        ))?;
+        Ok(Frame::InSurface {
+            index: slot,
+            surface: Surface::CudaBuffer {
+                buffer: Arc::clone(&self.buffers[slot]),
+                pitch,
+            },
+        })
     }
 
-    fn next_surface(&self) -> Option<usize> {
+    pub(in crate::gpu::capture) fn next_surface(&self) -> Option<usize> {
         self.handed_over.then_some(self.next as usize)
     }
 
-    fn encoder_device(&self) -> EncoderDevice {
+    pub(in crate::gpu::capture) fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Cuda {
-            context: self.cuda.context(),
-            primary: self.cuda.primary(),
+            hold: Arc::clone(&self.cuda),
+            ring: None,
         }
     }
 }

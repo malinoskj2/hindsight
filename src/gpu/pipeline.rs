@@ -6,7 +6,7 @@ use crate::{
         capture::{self, CaptureError, CopyTarget, EncoderDevice, Frame, Surface},
         cuda_output::CudaRing,
         device::{Device, DeviceError},
-        nvenc::{self, Encoded, Encoder, NvencError, Output, Payload, Settings},
+        nvenc::{self, Encoded, Encoder, NvencError, Payload, Settings},
         pacer::{FrameIndex, Pacer},
         priority, vram,
     },
@@ -122,10 +122,12 @@ fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
     }
 }
 
-/// The encoder is declared first: it is dropped before the capture it reads and the device.
+/// The encoder owns what it runs on and what it reads in place, except a CUDA context the NvFBC
+/// driver opened, which lives with the capture's session; so it is declared first and dropped
+/// before the capture.
 struct Session {
     encoder: Encoder,
-    capture: Box<dyn capture::Source>,
+    capture: capture::Capture,
     device: Device,
     surfaces: SurfaceDelivery,
     first_frame_deadline: Option<FrameIndex>,
@@ -149,11 +151,11 @@ impl Session {
     ) -> Result<Self> {
         let mut capture = capture::start(config.backend, &device, period, target, config.cursor)?;
         let (width, height) = encodable(capture.size());
-        let on = capture.encoder_device();
-        let output = choose_output(config, &on, live);
+        let mut on = capture.encoder_device();
+        choose_output(config, &mut on, live);
         let encoder = Encoder::open(
             &device.d3d,
-            &on,
+            on,
             Settings {
                 codec: config.codec,
                 width,
@@ -162,7 +164,6 @@ impl Session {
                 bitrate_bps: config.bitrate(),
                 matrix: capture.colour_matrix(),
             },
-            output,
         )?;
         // Surfaces are read in place only when nothing needs cropping.
         if capture.size() == (width, height) {
@@ -193,10 +194,10 @@ impl Session {
         let encoder = &self.encoder;
         self.capture
             .release_surfaces(&|surface| encoder.holds_surface(surface));
-        match fill_input(&self.device, &mut *self.capture, &self.encoder)? {
+        match fill_input(&self.device, &mut self.capture, &self.encoder)? {
             Input::Ready => self.encoder.submit(index, Picture::Fresh)?,
             Input::Repeat => repeat_latest(&self.device, &mut self.encoder, index, output)?,
-            Input::InSurface(surface) => self.submit_surface(index, surface)?,
+            Input::InSurface { surface, handle } => self.submit_surface(index, surface, &handle)?,
             Input::Empty
                 if self
                     .first_frame_deadline
@@ -210,14 +211,15 @@ impl Session {
         Ok(None)
     }
 
-    fn submit_surface(&mut self, index: FrameIndex, surface: usize) -> Result<(), NvencError> {
-        let handle = self
-            .capture
-            .surface(surface)
-            .expect("a capture reports only surfaces of its own");
+    fn submit_surface(
+        &mut self,
+        index: FrameIndex,
+        surface: usize,
+        handle: &Surface,
+    ) -> Result<(), NvencError> {
         if self.surfaces == SurfaceDelivery::InPlace
             && !self.encoder.has_surface(surface)
-            && let Err(error) = self.encoder.register_surface(surface, &handle)
+            && let Err(error) = self.encoder.register_surface(surface, handle)
         {
             if !matches!(handle, Surface::Texture(_)) || self.encoder.input().is_none() {
                 return Err(error);
@@ -228,7 +230,7 @@ impl Session {
             self.surfaces = SurfaceDelivery::Copied;
         }
         if self.surfaces == SurfaceDelivery::Copied
-            && let (Surface::Texture(texture), Some(input)) = (&handle, self.encoder.input())
+            && let (Surface::Texture(texture), Some(input)) = (handle, self.encoder.input())
         {
             let Settings { width, height, .. } = self.encoder.settings();
             self.device.copy_region(input, texture, width, height);
@@ -256,25 +258,26 @@ fn repeat_latest(
     }
 }
 
-fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
+/// Where the replay buffer goes: a store for the replay buffer, or a ring in the CUDA session
+/// `on` for the encoder to write into.
+fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
     match config.buffer_memory {
-        Memory::Ram => return Output::Memory,
+        Memory::Ram => return,
         Memory::Disk => {
             keep_on_disk(config, live);
-            return Output::Memory;
+            return;
         }
         Memory::Vram => {}
     }
     let bytes = config.estimated_buffer_bytes();
-    if let EncoderDevice::Cuda {
-        primary: Some(device),
-        ..
-    } = *on
+    if let EncoderDevice::Cuda { hold, ring } = on
+        && let Some(device) = hold.primary()
     {
         match CudaRing::create(device, bytes, nvenc::STAGING_LAYOUT) {
-            Ok(ring) => {
-                log::info(ring.description());
-                return Output::VideoMemory(ring);
+            Ok(created) => {
+                log::info(created.description());
+                *ring = Some(created);
+                return;
             }
             Err(error) => log::warning(format!(
                 "The replay buffer could not be placed in CUDA memory ({error}); trying a Direct3D buffer"
@@ -290,7 +293,6 @@ fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
             "The replay buffer could not be placed in GPU memory ({error}); keeping it in RAM"
         )),
     }
-    Output::Memory
 }
 
 fn keep_on_disk(config: &Config, live: &Live) {
@@ -348,14 +350,14 @@ impl Keyframes {
 enum Input {
     Ready,
     Repeat,
-    InSurface(usize),
+    InSurface { surface: usize, handle: Surface },
     Empty,
     Ended(Ended),
 }
 
 fn fill_input(
     device: &Device,
-    capture: &mut dyn capture::Source,
+    capture: &mut capture::Capture,
     encoder: &Encoder,
 ) -> Result<Input, CaptureError> {
     let Settings { width, height, .. } = encoder.settings();
@@ -372,7 +374,10 @@ fn fill_input(
     };
     Ok(match frame {
         Frame::Fresh => Input::Ready,
-        Frame::InSurface(surface) => Input::InSurface(surface),
+        Frame::InSurface { index, surface } => Input::InSurface {
+            surface: index,
+            handle: surface,
+        },
         Frame::Unchanged if encoder.has_latest() => Input::Repeat,
         Frame::Unchanged => Input::Empty,
         Frame::Resized => Input::Ended(Ended::Resized),

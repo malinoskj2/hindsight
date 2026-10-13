@@ -125,7 +125,7 @@ impl Source for Capture {
         if self.closed.load(Ordering::Relaxed) {
             return Err(CaptureError::Closed);
         }
-        let target = super::target_of(target);
+        let target = super::target_of(target)?;
         if self.hdr_turned_off() {
             log::info("HDR was turned off on the captured display");
             return Ok(Frame::Resized);
@@ -148,7 +148,10 @@ impl Source for Capture {
             if let Some(older) = self.held[index].replace(frame) {
                 let _ = older.Close();
             }
-            return Ok(Frame::InSurface(index));
+            return Ok(Frame::InSurface {
+                index,
+                surface: Surface::Texture(texture),
+            });
         }
         // Not handed over (always so in HDR), or the pool replaced its buffers.
         let copied = deliver(self.tone_map.as_mut(), &texture, target);
@@ -157,8 +160,10 @@ impl Source for Capture {
             .map(|()| Frame::Fresh)
             .map_err(failed("tone-map the HDR frame"))
     }
+}
 
-    fn hand_over_surfaces(&mut self) -> bool {
+impl Capture {
+    pub(super) fn hand_over_surfaces(&mut self) -> bool {
         // NVENC cannot read FP16 frames.
         if self.tone_map.is_some() {
             return false;
@@ -174,11 +179,7 @@ impl Source for Capture {
         self.handed_over
     }
 
-    fn surface(&self, index: usize) -> Option<Surface> {
-        self.surfaces.get(index).cloned().map(Surface::Texture)
-    }
-
-    fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
+    pub(super) fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
         for (index, held) in self.held.iter_mut().enumerate() {
             if !in_use(index)
                 && let Some(frame) = held.take()
