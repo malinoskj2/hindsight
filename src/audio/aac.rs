@@ -1,7 +1,10 @@
 //! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over a clip's PCM.
 
-use super::{EncodeError, loopback::Com};
-use crate::replay::{AudioClip, FRAME_SAMPLES, PcmClip, ticks_of};
+use super::EncodeError;
+use crate::{
+    replay::{AudioClip, FRAME_SAMPLES, PcmClip, ticks_of},
+    sys::com::Apartment,
+};
 use std::{mem::ManuallyDrop, sync::Arc};
 use windows::{
     Win32::{
@@ -232,7 +235,7 @@ fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> EncodeErro
 /// A fresh encoder started at the clip's first sample keeps its frames in step with the video;
 /// the input runs `HELD_BACK` past the clip's end so the encoder finishes the last frame.
 pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
-    let _com = Com::start().map_err(failed("initialise COM"))?;
+    let _com = Apartment::multi_threaded().map_err(failed("initialise COM"))?;
     let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;
     let format = &clip.format;
     let mut encoder = Encoder::open(format.sample_rate, format.channels)
@@ -272,8 +275,8 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
 mod tests {
     use super::{super::testing, *};
 
-    fn encoder() -> Option<(Com, MediaFoundation, Encoder)> {
-        let com = Com::start().unwrap();
+    fn encoder() -> Option<(Apartment, MediaFoundation, Encoder)> {
+        let com = Apartment::multi_threaded().unwrap();
         let media = MediaFoundation::start().ok()?;
         match Encoder::open(48_000, 2) {
             Ok(encoder) => Some((com, media, encoder)),

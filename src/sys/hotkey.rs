@@ -1,5 +1,6 @@
 //! The global hotkey that saves a clip, written as text such as `Alt+F10`.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
 use thiserror::Error;
 
@@ -50,10 +51,32 @@ pub(crate) enum ParseError {
     NeedsModifier(String),
 }
 
+/// Stored and shown as its text, so the settings file reads `"Alt+F10"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hotkey {
     modifiers: u16,
     key: u16,
+}
+
+impl Hotkey {
+    pub(crate) const DEFAULT: Self = Self {
+        modifiers: MOD_ALT,
+        key: VK_F1 + 9,
+    };
+}
+
+impl Serialize for Hotkey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Hotkey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
+    }
 }
 
 impl FromStr for Hotkey {

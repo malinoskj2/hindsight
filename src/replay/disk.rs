@@ -76,7 +76,6 @@ pub(crate) struct DiskStore {
     pages: Pages<DiskPage>,
     /// File offset of the next page made beyond the reserved ones.
     end: u64,
-    reserved: usize,
     path: PathBuf,
 }
 
@@ -129,7 +128,6 @@ impl DiskStore {
             shared,
             pages: Pages::new(layout.page, reserved),
             end: length,
-            reserved: pages,
             path: path.to_owned(),
         })
     }
@@ -137,9 +135,8 @@ impl DiskStore {
     pub(crate) fn description(&self) -> String {
         let layout = self.shared.layout;
         format!(
-            "Replay buffer on disk: {} MiB reserved in {} MiB pages in {}, written without the file cache in {} MiB blocks",
-            self.reserved * layout.page / MEBIBYTE,
-            layout.page / MEBIBYTE,
+            "Replay buffer on disk: {} in {}, written without the file cache in {} MiB blocks",
+            self.pages.summary(),
             self.path.display(),
             layout.block / MEBIBYTE
         )

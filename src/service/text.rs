@@ -66,7 +66,7 @@ pub(super) fn capture_thread_failed(error: impl Display) -> String {
 
 // Saving.
 
-pub(super) const NOTHING_TO_SAVE: &str =
+pub(crate) const NOTHING_TO_SAVE: &str =
     "Nothing to save yet; the replay buffer fills once capture starts.";
 pub(super) const ALREADY_SAVING: &str = "A clip is already being saved";
 pub(super) const SAVE_PANICKED: &str = "the save thread panicked";

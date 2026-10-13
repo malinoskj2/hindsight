@@ -9,7 +9,7 @@ use crate::{
         device::Locked,
         ffi::{Library, Zeroed},
     },
-    replay::{Matrix, Slot as StoreSlot},
+    replay::{Matrix, Picture, Slot as StoreSlot},
 };
 use std::{
     collections::VecDeque,
@@ -119,16 +119,9 @@ pub(super) enum Output {
     VideoMemory(CudaRing),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Picture {
-    Fresh,
-    /// The last picture, encoded once more.
-    Repeated,
-}
-
 pub(super) struct Encoded {
     pub(super) index: u64,
-    pub(super) fresh: bool,
+    pub(super) picture: Picture,
     /// Reported only for a frame locked in system memory.
     picture_type: Option<u32>,
     pub(super) data: Payload,
@@ -183,7 +176,7 @@ struct Session {
 
 struct Frame {
     index: u64,
-    fresh: bool,
+    picture: Picture,
     input: Input,
     mapped: ffi::Mapped,
 }
@@ -642,7 +635,7 @@ impl Encoder {
         self.encode_picture(slot, index, &map)?;
         self.slots[slot].in_flight = Some(Frame {
             index,
-            fresh: picture == Picture::Fresh,
+            picture,
             input,
             mapped: map.mapped_resource,
         });
@@ -738,7 +731,7 @@ impl Encoder {
         let (picture_type, data) = result?;
         output(Encoded {
             index: frame.index,
-            fresh: frame.fresh,
+            picture: frame.picture,
             picture_type,
             data,
         });

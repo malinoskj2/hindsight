@@ -240,7 +240,10 @@ impl Row {
 fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
     let notices: Vec<&str> = window_notices
         .into_iter()
-        .chain([status.notice.as_deref(), status.error.as_deref()])
+        .chain([
+            status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
+            status.error.as_deref(),
+        ])
         .flatten()
         .collect();
     notices.join("\r\n")
@@ -286,10 +289,13 @@ mod tests {
         assert_eq!(notice_text(&status, [None, None]), "");
         status.error = Some("capture failed".to_owned());
         assert_eq!(notice_text(&status, [None, None]), "capture failed");
-        status.notice = Some("sound is off".to_owned());
+        status.nothing_to_save = true;
         assert_eq!(
             notice_text(&status, [Some("hotkey taken"), Some("no tray")]),
-            "hotkey taken\r\nno tray\r\nsound is off\r\ncapture failed"
+            format!(
+                "hotkey taken\r\nno tray\r\n{}\r\ncapture failed",
+                text::NOTHING_TO_SAVE
+            )
         );
     }
 }

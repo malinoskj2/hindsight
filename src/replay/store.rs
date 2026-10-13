@@ -18,6 +18,30 @@ pub(crate) fn reserved_pages(bytes: u64) -> usize {
         .saturating_add(1)
 }
 
+/// The pages for `bytes` of packets, refused when they would not fit in `available`.
+pub(crate) fn pages_within(bytes: u64, available: usize) -> Result<usize, BufferTooLarge> {
+    let pages = reserved_pages(bytes);
+    let needed = pages.saturating_mul(PAGE_BYTES);
+    if needed > available {
+        return Err(BufferTooLarge { needed, available });
+    }
+    Ok(pages)
+}
+
+#[derive(Debug, Error)]
+#[error("the buffer would take {} MiB and the GPU has {} MiB", needed / MEBIBYTE, available / MEBIBYTE)]
+pub(crate) struct BufferTooLarge {
+    needed: usize,
+    available: usize,
+}
+
+/// Offsets and lengths that cover `length` bytes `chunk` at a time.
+pub(crate) fn pieces(length: usize, chunk: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..length)
+        .step_by(chunk.max(1))
+        .map(move |done| (done, chunk.min(length - done)))
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
     #[error("a {0} byte packet is larger than a page of the store")]
@@ -102,16 +126,38 @@ pub(crate) struct Pages<P> {
     /// Bytes written to the newest page in use.
     fill: usize,
     page_bytes: usize,
+    reserved: usize,
 }
 
 impl<P: Page + 'static> Pages<P> {
     pub(crate) fn new(page_bytes: usize, reserved: Vec<P>) -> Self {
         Self {
             used: VecDeque::new(),
+            reserved: reserved.len(),
             free: reserved.into_iter().map(Arc::new).collect(),
             fill: 0,
             page_bytes,
         }
+    }
+
+    /// `count` pages made up front, so recording never waits on one.
+    pub(crate) fn reserve<E>(
+        page_bytes: usize,
+        count: usize,
+        make: impl FnMut() -> Result<P, E>,
+    ) -> Result<Self, E> {
+        let reserved = std::iter::repeat_with(make)
+            .take(count)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::new(page_bytes, reserved))
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} MiB reserved in {} MiB pages",
+            self.reserved * self.page_bytes / MEBIBYTE,
+            self.page_bytes / MEBIBYTE
+        )
     }
 
     /// A page and offset for `length` bytes; a packet never straddles two pages.
@@ -330,6 +376,24 @@ pub(crate) mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+
+    #[test]
+    fn pieces_cover_the_length_a_chunk_at_a_time() {
+        assert_eq!(pieces(10, 4).collect::<Vec<_>>(), [(0, 4), (4, 4), (8, 2)]);
+        assert_eq!(pieces(4, 4).collect::<Vec<_>>(), [(0, 4)]);
+        assert_eq!(pieces(0, 4).count(), 0);
+        assert_eq!(pieces(0, 0).count(), 0);
+    }
+
+    #[test]
+    fn the_reservation_is_refused_when_the_pages_would_not_fit() {
+        assert_eq!(pages_within(PAGE_BYTES as u64, 3 * PAGE_BYTES).unwrap(), 2);
+        let refused = pages_within(PAGE_BYTES as u64, PAGE_BYTES).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "the buffer would take 128 MiB and the GPU has 64 MiB"
+        );
+    }
 
     pub(crate) struct MemoryPage {
         bytes: Mutex<Vec<u8>>,

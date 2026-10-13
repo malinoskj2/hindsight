@@ -6,12 +6,12 @@ use crate::{
         capture::{self, CaptureError, CopyTarget, EncoderDevice, Frame, Surface},
         cuda_output::CudaRing,
         device::{Device, DeviceError},
-        nvenc::{self, Encoded, Encoder, NvencError, Output, Payload, Picture, Settings},
+        nvenc::{self, Encoded, Encoder, NvencError, Output, Payload, Settings},
         pacer::Pacer,
         priority, vram,
     },
     log,
-    replay::{self, DiskStore, Live, Packet, Stream},
+    replay::{self, DiskStore, Live, Packet, Picture, Stream},
     service::{Ended, Target},
     storage, sys,
 };
@@ -71,7 +71,9 @@ fn raise_thread_instead(error: &windows::core::Error) {
 }
 
 fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
-    sys::thread::note_capture_thread();
+    if let Some(processor) = sys::thread::ideal_processor() {
+        live.note_capture_processor(processor);
+    }
     let device = open_device(config)?;
     let mut pacer = Pacer::new(config.frame_rate).context("create the frame timer")?;
     // Frame `i` is this instant plus `i` periods; the audio is lined up against it.
@@ -110,10 +112,10 @@ fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
                 keyframe,
                 data,
             },
-            encoded.fresh,
+            encoded.picture,
         ),
         Payload::Stored { slot, .. } => {
-            live.push_stored(encoded.index, keyframe, slot, encoded.fresh);
+            live.push_stored(encoded.index, keyframe, slot, encoded.picture);
         }
     }
 }

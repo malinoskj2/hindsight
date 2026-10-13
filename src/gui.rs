@@ -348,19 +348,19 @@ impl Main {
     }
 
     fn apply_settings(&self) {
-        let (config, hotkey) = match self.0.settings.configuration() {
+        let config = match self.0.settings.configuration() {
             Ok(entered) => entered,
             Err(error) => {
                 self.0.settings.show_settings_error(&error);
                 return;
             }
         };
-        if let Err(error) = self.switch_hotkey(hotkey) {
+        if let Err(error) = self.switch_hotkey(config.hotkey) {
             self.0.settings.show_settings_error(&error);
             return;
         }
         self.0.settings.show_settings_error("");
-        self.0.settings.show_hotkey(&config.hotkey);
+        self.0.settings.show_hotkey(&config.hotkey.to_string());
         *self.0.config.borrow_mut() = config.clone();
         self.0.worker.start(config);
         self.watch_foreground();
@@ -428,13 +428,8 @@ impl Main {
     }
 
     fn register_configured_hotkey(&self) {
-        let configured = self.0.config.borrow().parsed_hotkey();
-        match configured {
-            Ok(hotkey) => {
-                let _ = self.register_hotkey(hotkey);
-            }
-            Err(error) => self.note_hotkey_error(Some(error.to_string())),
-        }
+        let configured = self.0.config.borrow().hotkey;
+        let _ = self.register_hotkey(configured);
     }
 
     fn register_hotkey(&self, hotkey: Hotkey) -> Result<(), String> {

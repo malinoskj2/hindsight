@@ -14,7 +14,7 @@ use crate::{
         MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
     },
     log,
-    sys::{hotkey::Hotkey, startup},
+    sys::startup,
 };
 use std::rc::Rc;
 use winsafe::{co, gui, prelude::*};
@@ -175,9 +175,11 @@ impl SettingsPage {
         });
     }
 
-    /// The configuration as entered, with its hotkey parsed.
-    pub(super) fn configuration(&self) -> Result<(Config, Hotkey), String> {
-        validated(self.entered()?)
+    /// The configuration as entered, validated.
+    pub(super) fn configuration(&self) -> Result<Config, String> {
+        let config = self.entered()?;
+        config.validate().map_err(|error| error.to_string())?;
+        Ok(config)
     }
 
     pub(super) fn show_settings_error(&self, message: &str) {
@@ -264,7 +266,7 @@ impl SettingsPage {
             frame_rate: required(&encoding.frame_rate)?,
             buffer_seconds: required(&encoding.buffer_seconds)?,
             bitrate_mbps: required(&encoding.bitrate)?,
-            hotkey: hotkey.trim().to_owned(),
+            hotkey: hotkey.trim().parse().map_err(|error| format!("{error}"))?,
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
             cursor: recording.cursor.is_checked(),
@@ -296,7 +298,7 @@ impl RecordingControls {
             text::HOTKEY,
             rows::HOTKEY,
             HOTKEY_WIDTH,
-            &config.hotkey,
+            &config.hotkey.to_string(),
         );
         let (mode, backend) = source_fields(page, config);
         let folder = text_field(
@@ -564,20 +566,9 @@ fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
     let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
 }
 
-fn validated(mut config: Config) -> Result<(Config, Hotkey), String> {
-    config.validate().map_err(|error| error.to_string())?;
-    let hotkey = config.parsed_hotkey().map_err(|error| error.to_string())?;
-    config.hotkey = hotkey.to_string();
-    Ok((config, hotkey))
-}
-
-/// Empty for the default folder, so a moved default is followed.
-fn stored_folder(entered: &str) -> String {
-    if entered == config::default_clip_directory().display().to_string() {
-        String::new()
-    } else {
-        entered.to_owned()
-    }
+/// `None` for the default folder, so a moved default is followed.
+fn stored_folder(entered: &str) -> Option<String> {
+    (entered != config::default_clip_directory().display().to_string()).then(|| entered.to_owned())
 }
 
 /// `None` outside the limits Apply enforces, where the configuration's arithmetic overflows.
@@ -621,10 +612,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_clip_folder_is_stored_as_empty_and_any_other_as_entered() {
+    fn the_default_clip_folder_is_stored_as_none_and_any_other_as_entered() {
         let default = config::default_clip_directory().display().to_string();
-        assert_eq!(stored_folder(&default), "");
-        assert_eq!(stored_folder(r"D:\Clips"), r"D:\Clips");
+        assert_eq!(stored_folder(&default), None);
+        assert_eq!(stored_folder(r"D:\Clips").as_deref(), Some(r"D:\Clips"));
     }
 
     #[test]

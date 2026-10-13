@@ -1,6 +1,6 @@
 //! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
 
-use super::thread;
+use super::{com::Apartment, thread};
 use std::{
     ffi::OsString,
     os::windows::ffi::OsStrExt,
@@ -13,9 +13,6 @@ use windows::{
         Foundation::{HWND, SIZE},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
-        },
-        System::Com::{
-            COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
         },
         UI::{
             Shell::{
@@ -102,7 +99,7 @@ pub(crate) fn serve_thumbnails(
     results: &Sender<(PathBuf, Result<Thumbnail, ThumbnailError>)>,
 ) {
     let _ = thread::enter_background_mode();
-    let com = Com::start();
+    let com = Apartment::single_threaded();
     for path in requests {
         let made = match &com {
             Ok(_) => thumbnail(&path, size),
@@ -206,24 +203,6 @@ fn select_argument(path: &Path) -> OsString {
 
 fn path_list(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0, 0]).collect()
-}
-
-/// A single-threaded apartment, which the shell's thumbnail providers expect.
-struct Com(());
-
-impl Com {
-    fn start() -> windows::core::Result<Self> {
-        // SAFETY: every success is matched by the uninitialise in `drop`.
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.ok()?;
-        Ok(Self(()))
-    }
-}
-
-impl Drop for Com {
-    fn drop(&mut self) {
-        // SAFETY: matches the successful initialise that made `self`, on the same thread.
-        unsafe { CoUninitialize() };
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,7 +473,7 @@ mod tests {
     #[test]
     #[ignore = "needs a clip in %USERPROFILE%\\Videos\\hindsight and the shell's video codecs"]
     fn by_hand_the_shell_gives_a_thumbnail_for_a_real_clip() {
-        let _com = Com::start().unwrap();
+        let _com = Apartment::single_threaded().unwrap();
         let folder = crate::config::default_clip_directory();
         let clip = std::fs::read_dir(&folder)
             .unwrap()

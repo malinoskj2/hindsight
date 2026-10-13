@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 use thiserror::Error;
@@ -33,7 +33,9 @@ use mp4::{MuxError, Visit};
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
-pub(crate) use store::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, reserved_pages};
+pub(crate) use store::{
+    BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, pages_within, pieces,
+};
 pub(crate) use store::{Store, StoreError};
 
 const CLIP_PREFIX: &str = "hindsight";
@@ -48,6 +50,13 @@ pub(crate) struct Packet {
     pub(crate) index: u64,
     pub(crate) keyframe: bool,
     pub(crate) data: Box<[u8]>,
+}
+
+/// Whether a frame brought new screen content or repeated the last picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Picture {
+    Fresh,
+    Repeated,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +94,8 @@ pub(crate) struct Live {
     origin: OnceLock<i64>,
     audio: OnceLock<Arc<AudioFormat>>,
     sound: Mutex<AudioRing>,
+    /// Logical processor of the capture thread, or `u32::MAX` until it has said.
+    capture_processor: AtomicU32,
 }
 
 /// Tallies of the frames pushed, read without the ring's lock.
@@ -107,12 +118,12 @@ impl Counters {
         }
     }
 
-    fn frame(&self, bytes: usize, oldest: Option<u64>, fresh: bool) {
+    fn frame(&self, bytes: usize, oldest: Option<u64>, picture: Picture) {
         self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         self.oldest
             .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
         self.encoded.fetch_add(1, Ordering::Relaxed);
-        if fresh {
+        if picture == Picture::Fresh {
             self.fresh.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -128,7 +139,18 @@ impl Live {
             origin: OnceLock::new(),
             audio: OnceLock::new(),
             sound: Mutex::new(AudioRing::default()),
+            capture_processor: AtomicU32::new(u32::MAX),
         }
+    }
+
+    /// Where the capture thread runs, so the audio thread can keep away from it.
+    pub(crate) fn note_capture_processor(&self, processor: u32) {
+        self.capture_processor.store(processor, Ordering::Relaxed);
+    }
+
+    pub(crate) fn capture_processor(&self) -> Option<u32> {
+        let processor = self.capture_processor.load(Ordering::Relaxed);
+        (processor != u32::MAX).then_some(processor)
     }
 
     /// Runs `callback` on the capture thread once the stream is recorded.
@@ -161,23 +183,23 @@ impl Live {
         self.ring().set_store(store);
     }
 
-    pub(crate) fn push(&self, packet: Packet, fresh: bool) {
-        self.push_entry(packet.into(), fresh);
+    pub(crate) fn push(&self, packet: Packet, picture: Picture) {
+        self.push_entry(packet.into(), picture);
     }
 
     #[cfg(windows)]
-    pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, fresh: bool) {
+    pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, picture: Picture) {
         self.push_entry(
             Entry {
                 index,
                 keyframe,
                 data: store::Data::Stored(slot),
             },
-            fresh,
+            picture,
         );
     }
 
-    fn push_entry(&self, entry: Entry, fresh: bool) {
+    fn push_entry(&self, entry: Entry, picture: Picture) {
         let bytes = entry.length();
         let (oldest, refused) = {
             let mut ring = self.ring();
@@ -189,7 +211,7 @@ impl Live {
                 "The replay buffer could no longer be kept outside RAM ({error}); it continues in RAM"
             ));
         }
-        self.counters.frame(bytes, oldest, fresh);
+        self.counters.frame(bytes, oldest, picture);
     }
 
     pub(crate) fn set_audio(&self, mut format: AudioFormat) {
@@ -473,7 +495,14 @@ mod tests {
 
     fn push_frames(live: &Live, frames: u64) {
         for index in 0..frames {
-            live.push(h264_packet(index, 0), index % 2 == 0);
+            live.push(
+                h264_packet(index, 0),
+                if index % 2 == 0 {
+                    Picture::Fresh
+                } else {
+                    Picture::Repeated
+                },
+            );
         }
     }
 
@@ -540,7 +569,7 @@ mod tests {
         let push = |live: &Live| {
             for index in 0..100 {
                 let bytes = 200 + 5 * usize::try_from(index).unwrap();
-                live.push(h264_packet(index, bytes), true);
+                live.push(h264_packet(index, bytes), Picture::Fresh);
             }
         };
         let in_memory = Live::new(60);
@@ -586,7 +615,7 @@ mod tests {
         live.set_stream(STREAM);
         live.set_store(Box::new(store::tests::MemoryStore::new(4 << 20, 1 << 20)));
         for (index, extra) in (0..).zip(0..FRAMES) {
-            live.push(h264_packet(index, FRAME_BYTES + extra), true);
+            live.push(h264_packet(index, FRAME_BYTES + extra), Picture::Fresh);
         }
         let snapshot = live.snapshot().unwrap();
         let clip_bytes = FRAMES * FRAME_BYTES;
@@ -747,7 +776,7 @@ mod tests {
             priming: FRAME_SAMPLES,
         });
         for packet in encoded_fixture(Codec::H264) {
-            live.push(packet, true);
+            live.push(packet, Picture::Fresh);
         }
         live.push_audio(0, audio::tests::numbered(0, 120_000));
 
@@ -839,7 +868,7 @@ mod tests {
         let read: u64 = 2880;
         let mut next_sample: u64 = 0;
         for index in 0..150 {
-            live.push(h264_packet(index, 0), true);
+            live.push(h264_packet(index, 0), Picture::Fresh);
             let now = tick_time(0, 30, index);
             while i64::try_from((next_sample + read) * 10_000_000 / 48_000).unwrap() <= now {
                 live.push_audio(next_sample, audio::tests::numbered(next_sample, read));

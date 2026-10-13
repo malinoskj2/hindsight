@@ -7,6 +7,9 @@ pub(crate) mod callback;
 pub(crate) mod clock;
 #[cfg(windows)]
 #[expect(unsafe_code)]
+pub(crate) mod com;
+#[cfg(windows)]
+#[expect(unsafe_code)]
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
 #[cfg(windows)]

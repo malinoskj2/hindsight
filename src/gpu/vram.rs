@@ -3,7 +3,8 @@
 use crate::{
     gpu::device::{Device, DeviceError},
     replay::{
-        CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, Store, StoreError, reserved_pages,
+        BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, Store, StoreError,
+        pages_within, pieces,
     },
 };
 use std::{thread, time::Duration};
@@ -25,8 +26,8 @@ pub(super) enum VramError {
     Device(#[from] DeviceError),
     #[error("read the adapter's memory size: {0}")]
     Adapter(windows::core::Error),
-    #[error("the buffer would take {} MiB and the GPU has {} MiB", needed / MEBIBYTE, available / MEBIBYTE)]
-    TooLarge { needed: usize, available: usize },
+    #[error(transparent)]
+    TooLarge(#[from] BufferTooLarge),
     #[error("reserve a page of GPU memory: {0}")]
     Page(windows::core::Error),
 }
@@ -34,35 +35,23 @@ pub(super) enum VramError {
 pub(super) struct VideoMemory {
     device: Device,
     pages: Pages<VramPage>,
-    reserved: usize,
 }
 
 impl VideoMemory {
     pub(super) fn create(bytes: u64) -> Result<Self, VramError> {
         let device = Device::create()?;
-        let pages = reserved_pages(bytes);
-        let needed = pages.saturating_mul(PAGE_BYTES);
         let available = device
             .dedicated_video_memory()
             .map_err(VramError::Adapter)?;
-        if needed > available {
-            return Err(VramError::TooLarge { needed, available });
-        }
-        let reserved = (0..pages)
-            .map(|_| VramPage::create(&device))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            device,
-            reserved: reserved.len(),
-            pages: Pages::new(PAGE_BYTES, reserved),
-        })
+        let count = pages_within(bytes, available)?;
+        let pages = Pages::reserve(PAGE_BYTES, count, || VramPage::create(&device))?;
+        Ok(Self { device, pages })
     }
 
     pub(super) fn description(&self) -> String {
         format!(
-            "Replay buffer in GPU memory: {} MiB reserved in {} MiB pages on {}",
-            self.reserved * PAGE_BYTES / MEBIBYTE,
-            PAGE_BYTES / MEBIBYTE,
+            "Replay buffer in GPU memory: {} on {}",
+            self.pages.summary(),
             self.device.adapter
         )
     }
@@ -140,9 +129,7 @@ impl Page for VramPage {
         };
         let staging = create_buffer(&self.d3d, &description)
             .map_err(StoreError::call("make a staging buffer"))?;
-        let mut done = 0;
-        while done < length {
-            let piece = chunk.min(length - done);
+        for (done, piece) in pieces(length, chunk) {
             let region = byte_range(offset + done, piece);
             // SAFETY: both buffers are live and the ranges lie within them.
             unsafe {
@@ -164,7 +151,6 @@ impl Page for VramPage {
             sink(done, bytes);
             // SAFETY: unmaps the mapping made just above.
             unsafe { self.context.Unmap(&staging, 0) };
-            done += piece;
         }
         Ok(())
     }

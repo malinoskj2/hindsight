@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod text;
+pub(crate) mod text;
 
 const RATE_SPAN: Duration = Duration::from_secs(10);
 const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
@@ -134,10 +134,10 @@ pub(crate) struct Status {
     pub(crate) encode_rate: Option<f64>,
     pub(crate) session_written_bytes: u64,
     pub(crate) session_saved_bytes: u64,
-    pub(crate) saving: bool,
     pub(crate) last_clip: Option<PathBuf>,
     pub(crate) error: Option<String>,
-    pub(crate) notice: Option<String>,
+    /// A save was asked for before the buffer held anything.
+    pub(crate) nothing_to_save: bool,
 }
 
 #[derive(Debug)]
@@ -430,7 +430,7 @@ impl Machine {
         }
         let Some(snapshot) = self.live.as_ref().and_then(|live| live.snapshot()) else {
             log::warning(text::NOTHING_TO_SAVE);
-            self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
+            self.status.nothing_to_save = true;
             (self.services.chime)(Tone::Failed);
             return;
         };
@@ -446,7 +446,7 @@ impl Machine {
                     join,
                     next_tick: Instant::now() + PROGRESS_INTERVAL,
                 });
-                self.status.notice = None;
+                self.status.nothing_to_save = false;
             }
             Err(error) => self.report_failed_save(text::save_failed(error)),
         }
@@ -750,7 +750,6 @@ impl Machine {
         self.status.backend = reading.running.then_some(self.config.backend);
         self.status.stream = reading.stream;
         self.status.bitrate_mbps = self.config.bitrate_mbps;
-        self.status.saving = self.saving.is_some();
     }
 
     fn count_bytes(&mut self, live_bytes: u64) {
@@ -793,7 +792,7 @@ fn load_totals(store: &Store) -> Option<Totals> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::{Matrix, Packet};
+    use crate::replay::{Matrix, Packet, Picture};
     use std::sync::atomic::AtomicUsize;
 
     #[expect(clippy::unnecessary_wraps)]
@@ -821,7 +820,7 @@ mod tests {
                     keyframe,
                     data: data.into(),
                 },
-                true,
+                Picture::Fresh,
             );
             index += 1;
             thread::sleep(Duration::from_millis(1));
@@ -917,7 +916,7 @@ mod tests {
 
     fn config_in(directory: &Path) -> Config {
         Config {
-            clip_directory: directory.display().to_string(),
+            clip_directory: Some(directory.display().to_string()),
             ..desktop()
         }
     }
@@ -964,7 +963,6 @@ mod tests {
         thread::sleep(Duration::from_millis(500));
         let status = worker.status();
         assert!(status.last_clip.is_some(), "{status:?}");
-        assert!(!status.saving);
     }
 
     #[test]
@@ -1001,8 +999,7 @@ mod tests {
         assert!(status.error.unwrap().contains("no capture device"));
 
         worker.save();
-        let status = wait_for(&worker, |status| status.notice.is_some());
-        assert_eq!(status.notice.as_deref(), Some(text::NOTHING_TO_SAVE));
+        wait_for(&worker, |status| status.nothing_to_save);
     }
 
     #[test]
@@ -1181,7 +1178,7 @@ mod tests {
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
         worker.save();
-        wait_for(&worker, |status| status.saving);
+        wait_for(&worker, |_| !tones(&heard).is_empty());
         assert_eq!(tones(&heard), [Tone::Progress], "the first blip is at once");
         wait_for(&worker, |status| status.last_clip.is_some());
         let blips = assert_ticks_then(&heard, Tone::Saved);
@@ -1202,7 +1199,7 @@ mod tests {
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
         worker.save();
-        let status = wait_for(&worker, |status| status.error.is_some() && !status.saving);
+        let status = wait_for(&worker, |status| status.error.is_some());
         assert!(status.error.unwrap().contains("the disk is full"));
         assert!(status.last_clip.is_none());
         let blips = assert_ticks_then(&heard, Tone::Failed);
@@ -1222,7 +1219,7 @@ mod tests {
         wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
 
         worker.save();
-        wait_for(&worker, |status| status.notice.is_some());
+        wait_for(&worker, |status| status.nothing_to_save);
         assert_eq!(tones(&heard), [Tone::Failed]);
     }
 }

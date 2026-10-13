@@ -3,14 +3,14 @@
 
 use super::{
     CHANNELS, SAMPLE_RATE, aac,
-    loopback::{self, Com, Devices, Loopback, OpenError, Packet, Signal, Wake, Watch},
+    loopback::{self, Devices, Loopback, OpenError, Packet, Signal, Wake, Watch},
     pcm::{self, Layout},
     timeline::Timeline,
 };
 use crate::{
     log,
     replay::{AudioFormat, CLOCK_RATE, Live},
-    sys::{self, clock},
+    sys::{self, clock, com::Apartment},
 };
 use std::{
     sync::Arc,
@@ -74,8 +74,9 @@ fn record(live: &Live, stop: &Signal) {
     let mut device = Device::new(watch_default(&pipeline.devices));
     let mut placed = false;
     loop {
-        if !placed {
-            placed = sys::thread::keep_off_capture_core();
+        if !placed && let Some(capture) = live.capture_processor() {
+            sys::thread::keep_off(capture);
+            placed = true;
         }
         device.update(&pipeline.devices);
         if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
@@ -94,12 +95,12 @@ fn record(live: &Live, stop: &Signal) {
 struct Pipeline<'a> {
     track: Track<'a>,
     devices: Devices,
-    _com: Com,
+    _com: Apartment,
 }
 
 impl<'a> Pipeline<'a> {
     fn open(live: &'a Live) -> Option<Self> {
-        let com = started(Com::start(), "COM is unavailable")?;
+        let com = started(Apartment::multi_threaded(), "COM is unavailable")?;
         let devices = started(Devices::new(), "the audio devices could not be listed")?;
         Some(Self {
             track: Track::open(live),
@@ -313,7 +314,7 @@ mod tests {
     use super::*;
     use crate::{
         config::Codec,
-        replay::{Matrix, Packet, Stream},
+        replay::{Matrix, Packet, Picture, Stream},
     };
 
     #[test]
@@ -333,10 +334,10 @@ mod tests {
             keyframe: true,
             data: Box::new([0]),
         };
-        live.push(packet(0), true);
+        live.push(packet(0), Picture::Fresh);
         let capture = start(&live).unwrap();
         thread::sleep(Duration::from_secs(10));
-        live.push(packet(599), true);
+        live.push(packet(599), Picture::Fresh);
         drop(capture);
 
         for entry in log::since(0) {

@@ -1,6 +1,5 @@
 //! Scheduling of the application's own helper threads.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(windows)]
 use windows::Win32::System::{
     Kernel::PROCESSOR_NUMBER,
@@ -12,32 +11,21 @@ use windows::Win32::System::{
 
 /// Logical processors per Windows processor group.
 const GROUP_SIZE: u32 = 64;
-static CAPTURE_PROCESSOR: AtomicU32 = AtomicU32::new(u32::MAX);
 
-pub(crate) fn note_capture_thread() {
-    if let Some(processor) = ideal_processor() {
-        CAPTURE_PROCESSOR.store(processor, Ordering::Relaxed);
-    }
-}
-
-/// Hints the scheduler to run the caller half the machine away from the capture thread, so they
-/// share neither a core nor a cache complex; `false` until the capture thread has published.
-pub(crate) fn keep_off_capture_core() -> bool {
-    let capture = CAPTURE_PROCESSOR.load(Ordering::Relaxed);
-    if capture == u32::MAX {
-        return false;
-    }
+/// Hints the scheduler to run the caller half the machine away from the thread on processor
+/// `other`, so they share neither a core nor a cache complex.
+pub(crate) fn keep_off(other: u32) {
     let count = std::thread::available_parallelism()
         .map_or(1, |count| u32::try_from(count.get()).unwrap_or(u32::MAX));
     if count < 4 {
-        return true;
+        return;
     }
-    prefer_processor((capture + count / 2) % count);
-    true
+    prefer_processor((other + count / 2) % count);
 }
 
+/// The logical processor the scheduler prefers for the calling thread.
 #[cfg(windows)]
-fn ideal_processor() -> Option<u32> {
+pub(crate) fn ideal_processor() -> Option<u32> {
     let mut number = PROCESSOR_NUMBER::default();
     // SAFETY: the pseudo-handle names the calling thread; the out-parameter is a live local.
     unsafe { GetThreadIdealProcessorEx(GetCurrentThread(), &raw mut number) }.ok()?;
@@ -56,7 +44,7 @@ fn prefer_processor(processor: u32) {
 }
 
 #[cfg(not(windows))]
-fn ideal_processor() -> Option<u32> {
+pub(crate) fn ideal_processor() -> Option<u32> {
     None
 }
 

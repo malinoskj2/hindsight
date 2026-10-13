@@ -21,8 +21,7 @@ use windows::{
         },
         System::{
             Com::{
-                CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-                CoUninitialize, STGM_READ,
+                CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ,
                 StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             },
             Threading::{
@@ -40,23 +39,6 @@ const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
 /// 200 ms in 100 ns units; a late read loses nothing.
 const BUFFER_DURATION: i64 = 2_000_000;
 const FLOAT_BITS: u16 = 32;
-
-pub(super) struct Com(());
-
-impl Com {
-    pub(super) fn start() -> windows::core::Result<Self> {
-        // SAFETY: paired with the uninitialise in `drop`, including for "already initialised".
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
-        Ok(Self(()))
-    }
-}
-
-impl Drop for Com {
-    fn drop(&mut self) {
-        // SAFETY: matches the successful initialise that made `self`, on the same thread.
-        unsafe { CoUninitialize() };
-    }
-}
 
 pub(super) struct Signal(Owned<HANDLE>);
 

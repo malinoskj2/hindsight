@@ -6,6 +6,8 @@ use crate::{
 };
 use std::{fmt::Display, path::Path};
 
+pub(super) use crate::service::text::NOTHING_TO_SAVE;
+
 const NO_VALUE: &str = "—";
 const GIGABYTE: f64 = 1_073_741_824.0;
 const MEGABYTE: f64 = 1_048_576.0;

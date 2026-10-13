@@ -2,7 +2,10 @@
 
 use crate::{
     gpu::cuda::{Context, CudaError, Device, DevicePointer, Driver},
-    replay::{CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, StoreError, reserved_pages},
+    replay::{
+        BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, StoreError, pages_within,
+        pieces,
+    },
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -21,8 +24,8 @@ pub(super) struct StagingLayout {
 pub(super) enum CudaRingError {
     #[error("{0}: {1}")]
     Cuda(&'static str, CudaError),
-    #[error("the buffer would take {} MiB and the GPU has {} MiB", needed / MEBIBYTE, available / MEBIBYTE)]
-    TooLarge { needed: usize, available: usize },
+    #[error(transparent)]
+    TooLarge(#[from] BufferTooLarge),
 }
 
 #[derive(Debug, Error)]
@@ -62,7 +65,6 @@ pub(super) struct CudaRing {
     staging: Vec<Staging>,
     layout: StagingLayout,
     head: Box<[u8]>,
-    reserved: usize,
 }
 
 impl CudaRing {
@@ -82,23 +84,16 @@ impl CudaRing {
             device,
             context,
         });
-        let pages = reserved_pages(bytes);
-        let needed = pages.saturating_mul(PAGE_BYTES);
         let (_, available) = hold
             .driver
             .memory_info()
             .map_err(|error| CudaRingError::Cuda("read the GPU's memory size", error))?;
-        if needed > available {
-            return Err(CudaRingError::TooLarge { needed, available });
-        }
-        let reserved = (0..pages)
-            .map(|_| CudaPage::allocate(&hold))
-            .collect::<Result<Vec<_>, _>>()
+        let count = pages_within(bytes, available)?;
+        let pages = Pages::reserve(PAGE_BYTES, count, || CudaPage::allocate(&hold))
             .map_err(|error| CudaRingError::Cuda("reserve a page of GPU memory", error))?;
         Ok(Self {
             hold,
-            reserved: reserved.len(),
-            pages: Pages::new(PAGE_BYTES, reserved),
+            pages,
             staging: Vec::new(),
             layout,
             head: vec![0; layout.header_bytes + layout.head_bytes].into_boxed_slice(),
@@ -107,9 +102,8 @@ impl CudaRing {
 
     pub(super) fn description(&self) -> String {
         format!(
-            "Replay buffer in CUDA memory, written by the encoder: {} MiB reserved in {} MiB pages",
-            self.reserved * PAGE_BYTES / MEBIBYTE,
-            PAGE_BYTES / MEBIBYTE
+            "Replay buffer in CUDA memory, written by the encoder: {}",
+            self.pages.summary()
         )
     }
 
@@ -218,14 +212,11 @@ impl Page for CudaPage {
         let _current = Current::push(driver, self.hold.context)
             .map_err(StoreError::call("make the CUDA context current"))?;
         let mut chunk = vec![0; length.min(CHUNK_BYTES)];
-        let mut done = 0;
-        while done < length {
-            let piece = chunk.len().min(length - done);
+        for (done, piece) in pieces(length, chunk.len()) {
             driver
                 .copy_to_host(&mut chunk[..piece], self.pointer.offset(offset + done))
                 .map_err(StoreError::call("read a page back"))?;
             sink(done, &chunk[..piece]);
-            done += piece;
         }
         Ok(())
     }

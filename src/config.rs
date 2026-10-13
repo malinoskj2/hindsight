@@ -1,7 +1,7 @@
 //! The user's settings, stored as JSON and validated before use.
 
-use crate::sys::hotkey::{Hotkey, ParseError};
-use serde::{Deserialize, Serialize};
+use crate::sys::hotkey::Hotkey;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, path::PathBuf};
 use thiserror::Error;
 
@@ -157,9 +157,10 @@ pub(crate) struct Config {
     pub(crate) buffer_seconds: u32,
     pub(crate) frame_rate: u32,
     pub(crate) bitrate_mbps: u32,
-    pub(crate) hotkey: String,
-    /// Empty for the default folder.
-    pub(crate) clip_directory: String,
+    pub(crate) hotkey: Hotkey,
+    /// `None` for the default folder; older files wrote it as an empty string.
+    #[serde(deserialize_with = "folder_or_none")]
+    pub(crate) clip_directory: Option<String>,
     pub(crate) theme: Theme,
     pub(crate) audio: bool,
     /// Drawn where the backend can; Desktop Duplication never draws it.
@@ -176,8 +177,8 @@ impl Default for Config {
             buffer_seconds: 30,
             frame_rate: 60,
             bitrate_mbps: 50,
-            hotkey: "Alt+F10".to_owned(),
-            clip_directory: String::new(),
+            hotkey: Hotkey::DEFAULT,
+            clip_directory: None,
             theme: Theme::Classic,
             audio: true,
             cursor: false,
@@ -197,15 +198,12 @@ impl Config {
         if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
             return Err(ConfigError::Bitrate);
         }
-        self.parsed_hotkey()?;
-        if !self.clip_directory.is_empty() && !is_absolute_directory(&self.clip_directory) {
+        if let Some(folder) = &self.clip_directory
+            && !is_absolute_directory(folder)
+        {
             return Err(ConfigError::ClipDirectory);
         }
         Ok(())
-    }
-
-    pub(crate) fn parsed_hotkey(&self) -> Result<Hotkey, ConfigError> {
-        Ok(self.hotkey.parse()?)
     }
 
     /// Saturates: the Settings tab estimates from unvalidated input.
@@ -218,11 +216,9 @@ impl Config {
     }
 
     pub(crate) fn clip_directory(&self) -> PathBuf {
-        if self.clip_directory.is_empty() {
-            default_clip_directory()
-        } else {
-            PathBuf::from(&self.clip_directory)
-        }
+        self.clip_directory
+            .as_ref()
+            .map_or_else(default_clip_directory, PathBuf::from)
     }
 
     pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
@@ -250,10 +246,12 @@ pub(crate) enum ConfigError {
         MAX_BITRATE_MBPS
     )]
     Bitrate,
-    #[error(transparent)]
-    Hotkey(#[from] ParseError),
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
     ClipDirectory,
+}
+
+fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|folder| !folder.is_empty()))
 }
 
 pub(crate) fn default_clip_directory() -> PathBuf {
@@ -291,7 +289,7 @@ mod tests {
         assert_eq!(config.codec, Codec::Av1);
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.frame_rate, 60);
-        assert_eq!(config.hotkey, "Alt+F10");
+        assert_eq!(config.hotkey.to_string(), "Alt+F10");
         assert_eq!(config.theme, Theme::Classic);
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
@@ -330,6 +328,32 @@ mod tests {
         assert!(parse(r#"{"codec":"vp9"}"#).is_err());
         assert!(parse(r#"{"theme":"neon"}"#).is_err());
         assert!(parse(r#"{"buffer_secs":120}"#).is_err());
+    }
+
+    #[test]
+    fn the_hotkey_and_the_clip_folder_are_read_as_text() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        let config = parse(r#"{"hotkey":"ctrl+shift+s"}"#).unwrap();
+        assert_eq!(config.hotkey.to_string(), "Ctrl+Shift+S");
+        assert!(parse(r#"{"hotkey":"F"}"#).is_err());
+        assert!(parse(r#"{"hotkey":""}"#).is_err());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""hotkey":"Ctrl+Shift+S""#), "{json}");
+        assert_eq!(parse(&json).unwrap(), config);
+
+        assert_eq!(
+            parse(r#"{"clip_directory":""}"#).unwrap().clip_directory,
+            None
+        );
+        assert_eq!(
+            parse(r#"{"clip_directory":null}"#).unwrap().clip_directory,
+            None
+        );
+        let config = parse(r#"{"clip_directory":"D:\\Clips"}"#).unwrap();
+        assert_eq!(config.clip_directory.as_deref(), Some(r"D:\Clips"));
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(parse(&json).unwrap(), config);
     }
 
     #[test]
@@ -382,13 +406,9 @@ mod tests {
         assert_matches!(config.validate(), Err(ConfigError::Bitrate));
         config.bitrate_mbps = 50;
 
-        config.hotkey = "F".to_owned();
-        assert_matches!(config.validate(), Err(ConfigError::Hotkey(_)));
-        config.hotkey = "Ctrl+Shift+S".to_owned();
-
-        config.clip_directory = r"Clips\here".to_owned();
+        config.clip_directory = Some(r"Clips\here".to_owned());
         assert_matches!(config.validate(), Err(ConfigError::ClipDirectory));
-        config.clip_directory = r"D:\Clips".to_owned();
+        config.clip_directory = Some(r"D:\Clips".to_owned());
         assert!(config.validate().is_ok());
     }
 
@@ -417,7 +437,7 @@ mod tests {
         assert!(config.clip_directory().ends_with(CLIP_DIRECTORY));
         assert_eq!(
             Config {
-                clip_directory: r"D:\Clips".to_owned(),
+                clip_directory: Some(r"D:\Clips".to_owned()),
                 ..Config::default()
             }
             .clip_directory(),
