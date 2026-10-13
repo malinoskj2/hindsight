@@ -35,7 +35,9 @@ use windows::{
 };
 
 #[cfg(test)]
+#[expect(unsafe_code)]
 mod d3d12_cost;
+#[expect(unsafe_code)]
 mod ffi;
 
 pub(super) use ffi::Status;
@@ -170,12 +172,90 @@ pub(super) struct Encoder {
     session: Session,
 }
 
-/// An open encode session and the library it lives in; `Drop` destroys it.
+/// An open encode session and the library it lives in; `Drop` destroys it. Its methods are the
+/// only calls into NVENC.
 struct Session {
-    api: Box<ffi::FunctionList>,
+    api: Api,
     handle: ffi::Handle,
     /// Declared last so it is freed last.
     _library: Library,
+}
+
+/// The entry points of the function list this program calls, each checked present once, when
+/// the session opens.
+struct Api {
+    open_encode_session_ex: ffi::OpenEncodeSessionEx,
+    get_encode_guid_count: ffi::GetEncodeGuidCount,
+    get_encode_guids: ffi::GetEncodeGuids,
+    get_encode_caps: ffi::GetEncodeCaps,
+    get_encode_preset_config_ex: ffi::GetEncodePresetConfigEx,
+    initialize_encoder: ffi::InitializeEncoder,
+    create_bitstream_buffer: ffi::CreateBitstreamBufferFn,
+    destroy_bitstream_buffer: ffi::WithPointer,
+    encode_picture: ffi::EncodePicture,
+    lock_bitstream: ffi::LockBitstreamFn,
+    unlock_bitstream: ffi::WithPointer,
+    register_async_event: ffi::EventFn,
+    unregister_async_event: ffi::EventFn,
+    map_input_resource: ffi::MapInputResourceFn,
+    unmap_input_resource: ffi::WithPointer,
+    register_resource: ffi::RegisterResourceFn,
+    unregister_resource: ffi::WithPointer,
+    destroy_encoder: ffi::DestroyEncoder,
+    get_last_error_string: ffi::GetLastErrorString,
+}
+
+impl Api {
+    fn resolve(list: &ffi::FunctionList) -> Result<Self, NvencError> {
+        Ok(Self {
+            open_encode_session_ex: entry_point(
+                list.open_encode_session_ex,
+                "nvEncOpenEncodeSessionEx",
+            )?,
+            get_encode_guid_count: entry_point(
+                list.get_encode_guid_count,
+                "nvEncGetEncodeGUIDCount",
+            )?,
+            get_encode_guids: entry_point(list.get_encode_guids, "nvEncGetEncodeGUIDs")?,
+            get_encode_caps: entry_point(list.get_encode_caps, "nvEncGetEncodeCaps")?,
+            get_encode_preset_config_ex: entry_point(
+                list.get_encode_preset_config_ex,
+                "nvEncGetEncodePresetConfigEx",
+            )?,
+            initialize_encoder: entry_point(list.initialize_encoder, "nvEncInitializeEncoder")?,
+            create_bitstream_buffer: entry_point(
+                list.create_bitstream_buffer,
+                "nvEncCreateBitstreamBuffer",
+            )?,
+            destroy_bitstream_buffer: entry_point(
+                list.destroy_bitstream_buffer,
+                "nvEncDestroyBitstreamBuffer",
+            )?,
+            encode_picture: entry_point(list.encode_picture, "nvEncEncodePicture")?,
+            lock_bitstream: entry_point(list.lock_bitstream, "nvEncLockBitstream")?,
+            unlock_bitstream: entry_point(list.unlock_bitstream, "nvEncUnlockBitstream")?,
+            register_async_event: entry_point(
+                list.register_async_event,
+                "nvEncRegisterAsyncEvent",
+            )?,
+            unregister_async_event: entry_point(
+                list.unregister_async_event,
+                "nvEncUnregisterAsyncEvent",
+            )?,
+            map_input_resource: entry_point(list.map_input_resource, "nvEncMapInputResource")?,
+            unmap_input_resource: entry_point(
+                list.unmap_input_resource,
+                "nvEncUnmapInputResource",
+            )?,
+            register_resource: entry_point(list.register_resource, "nvEncRegisterResource")?,
+            unregister_resource: entry_point(list.unregister_resource, "nvEncUnregisterResource")?,
+            destroy_encoder: entry_point(list.destroy_encoder, "nvEncDestroyEncoder")?,
+            get_last_error_string: entry_point(
+                list.get_last_error_string,
+                "nvEncGetLastErrorString",
+            )?,
+        })
+    }
 }
 
 struct Frame {
@@ -216,6 +296,7 @@ enum Wait {
     Block,
 }
 
+#[expect(unsafe_code)]
 impl Encoder {
     pub(super) fn open(
         device: &ID3D11Device,
@@ -297,41 +378,13 @@ impl Encoder {
     }
 
     fn initialize(&self) -> Result<(), NvencError> {
-        let mut config = self.preset_config()?;
+        let mut config = self.session.preset_config(self.settings.codec)?;
         configure(&mut config, self.settings);
-        let mut params = initialize_params(self.settings, &mut config);
+        let mut params = initialize_params(self.settings);
         if self.ring.is_some() {
             params.flags |= ffi::INITIALIZE_OUTPUT_IN_VIDMEM;
         }
-        let initialize = entry_point(
-            self.session.api.initialize_encoder,
-            "nvEncInitializeEncoder",
-        )?;
-        // SAFETY: `params` and the configuration it points to live across the call.
-        self.check("nvEncInitializeEncoder", unsafe {
-            initialize(self.session.handle, &raw mut params)
-        })
-    }
-
-    fn preset_config(&self) -> Result<ffi::Config, NvencError> {
-        let mut preset = ffi::PresetConfig::zeroed();
-        preset.version = ffi::PRESET_CONFIG_VER;
-        preset.config.version = ffi::CONFIG_VER;
-        let get_preset = entry_point(
-            self.session.api.get_encode_preset_config_ex,
-            "nvEncGetEncodePresetConfigEx",
-        )?;
-        // SAFETY: the preset structure is versioned and writable.
-        self.check("nvEncGetEncodePresetConfigEx", unsafe {
-            get_preset(
-                self.session.handle,
-                codec_guid(self.settings.codec),
-                ffi::PRESET_P4,
-                ffi::TUNING_HIGH_QUALITY,
-                &raw mut preset,
-            )
-        })?;
-        Ok(preset.config)
+        self.session.initialize(params, &mut config)
     }
 
     fn create_slot(
@@ -393,24 +446,20 @@ impl Encoder {
         params.resource_to_register = pointer.as_api_pointer();
         params.buffer_format = ffi::BUFFER_FORMAT_U8;
         params.buffer_usage = ffi::OUTPUT_BITSTREAM;
-        let register = entry_point(self.session.api.register_resource, "nvEncRegisterResource")?;
-        // SAFETY: the buffer stays allocated and registered as long as its slot.
-        self.check("nvEncRegisterResource", unsafe {
-            register(self.session.handle, &raw mut params)
-        })?;
-        let registered = params.registered_resource;
+        // SAFETY: the ring keeps the buffer allocated until it is dropped, after the slot that
+        // unregisters it.
+        let registered = unsafe { self.session.register_resource(&mut params) }?;
         // Mapped once: one frame at a time writes the buffer.
-        match self.map_input(registered) {
+        // SAFETY: registered just above and not mapped yet.
+        match unsafe { self.session.map_input(registered) } {
             Ok(map) => Ok(VideoOutput {
                 staging,
                 registered,
                 mapped: map.mapped_resource,
             }),
             Err(error) => {
-                if let Some(unregister) = self.session.api.unregister_resource {
-                    // SAFETY: the resource is registered and not mapped.
-                    let _ = unsafe { unregister(self.session.handle, registered) };
-                }
+                // SAFETY: registered above, not mapped, and never used again.
+                unsafe { self.session.unregister_resource(registered) };
                 Err(error)
             }
         }
@@ -466,40 +515,19 @@ impl Encoder {
         params.resource_to_register = resource;
         params.buffer_format = buffer_format;
         params.buffer_usage = ffi::INPUT_IMAGE;
-        let register = entry_point(self.session.api.register_resource, "nvEncRegisterResource")?;
-        // SAFETY: the resource stays alive and registered as long as its slot or surface.
-        self.check("nvEncRegisterResource", unsafe {
-            register(self.session.handle, &raw mut params)
-        })?;
-        Ok(params.registered_resource)
+        // SAFETY: the resource stays alive while registered: a slot's texture is owned by the
+        // slot, a surface's handle is kept with its registration, and the capture outlives both.
+        unsafe { self.session.register_resource(&mut params) }
     }
 
     fn create_bitstream(&self) -> Result<ffi::Bitstream, NvencError> {
-        let mut buffer = ffi::CreateBitstreamBuffer::zeroed();
-        buffer.version = ffi::CREATE_BITSTREAM_BUFFER_VER;
-        let create = entry_point(
-            self.session.api.create_bitstream_buffer,
-            "nvEncCreateBitstreamBuffer",
-        )?;
-        // SAFETY: a versioned structure for an initialized session.
-        self.check("nvEncCreateBitstreamBuffer", unsafe {
-            create(self.session.handle, &raw mut buffer)
-        })?;
-        Ok(buffer.bitstream_buffer)
+        self.session.create_bitstream()
     }
 
     fn register_event(&self, event: &Owned<HANDLE>) -> Result<(), NvencError> {
-        let mut params = ffi::EventParams::zeroed();
-        params.version = ffi::EVENT_PARAMS_VER;
-        params.completion_event = event.0;
-        let register_event = entry_point(
-            self.session.api.register_async_event,
-            "nvEncRegisterAsyncEvent",
-        )?;
-        // SAFETY: the event stays open until it is unregistered with the slot.
-        self.check("nvEncRegisterAsyncEvent", unsafe {
-            register_event(self.session.handle, &raw mut params)
-        })
+        // SAFETY: the event belongs to the slot, which unregisters it in `release_slot` before
+        // the `Owned` closes it.
+        unsafe { self.session.register_event(**event) }
     }
 
     /// Frees the slot the next frame goes into, collecting older frames as needed.
@@ -637,7 +665,9 @@ impl Encoder {
             Input::Slot(slot) => self.slots[slot].registered,
             Input::Surface(surface) => self.registered_surface(surface).registered,
         };
-        let map = self.map_input(registered)?;
+        // SAFETY: registered by this session and not mapped: `reserve`, `repeat` and
+        // `release_surface` wait for the frame that last read it.
+        let map = unsafe { self.session.map_input(registered) }?;
         self.encode_picture(slot, index, &map)?;
         self.slots[slot].in_flight = Some(Frame {
             index,
@@ -649,18 +679,6 @@ impl Encoder {
         self.latest = Some(input);
         self.next = (slot + 1) % SLOTS;
         Ok(())
-    }
-
-    fn map_input(&self, registered: ffi::Registered) -> Result<ffi::MapInputResource, NvencError> {
-        let mut map = ffi::MapInputResource::zeroed();
-        map.version = ffi::MAP_INPUT_RESOURCE_VER;
-        map.registered_resource = registered;
-        let map_input = entry_point(self.session.api.map_input_resource, "nvEncMapInputResource")?;
-        // SAFETY: the resource is registered and not mapped; `reserve`, `repeat` and `release_surface` see to that.
-        self.check("nvEncMapInputResource", unsafe {
-            map_input(self.session.handle, &raw mut map)
-        })?;
-        Ok(map)
     }
 
     fn encode_picture(
@@ -682,13 +700,9 @@ impl Encoder {
         picture.completion_event = self.slots[slot].event.0;
         picture.buffer_format = map.mapped_buffer_format;
         picture.picture_struct = ffi::PIC_STRUCT_FRAME;
-        let queued =
-            entry_point(self.session.api.encode_picture, "nvEncEncodePicture").and_then(|encode| {
-                // SAFETY: the input is mapped and the output buffer is not locked or in flight.
-                let status = unsafe { encode(self.session.handle, &raw mut picture) };
-                self.check("nvEncEncodePicture", status)
-            });
-        if let Err(error) = queued {
+        // SAFETY: the input was just mapped; the slot's output buffer is neither locked nor in
+        // flight, since `reserve` collected its last frame; its event is registered.
+        if let Err(error) = unsafe { self.session.encode_picture(&mut picture) } {
             self.unmap(map.mapped_resource);
             return Err(error);
         }
@@ -723,16 +737,21 @@ impl Encoder {
             .expect("a queued slot has a frame in flight");
 
         // The device lock is let go before `output` runs, which takes the replay buffer's lock.
-        let result = {
-            let _locked = Locked::new(&self.device_lock);
-            let result = match &self.slots[slot].output {
-                SlotOutput::Bitstream(bitstream) => self.read_bitstream(*bitstream),
-                SlotOutput::VideoMemory(output) => {
-                    take_from_video_memory(self.ring.as_mut(), output.staging)
-                }
-            };
-            self.unmap(frame.mapped);
-            result
+        let result = match &self.slots[slot].output {
+            SlotOutput::Bitstream(bitstream) => {
+                let _locked = Locked::new(&self.device_lock);
+                let result = self.read_bitstream(*bitstream);
+                self.unmap(frame.mapped);
+                result
+            }
+            SlotOutput::VideoMemory(output) => {
+                // Not under the device lock: the move is a synchronous copy on the GPU, and the
+                // capture threads would wait for it.
+                let result = take_from_video_memory(self.ring.as_mut(), output.staging);
+                let _locked = Locked::new(&self.device_lock);
+                self.unmap(frame.mapped);
+                result
+            }
         };
         let (picture_type, data) = result?;
         output(Encoded {
@@ -768,46 +787,17 @@ impl Encoder {
         &self,
         bitstream: ffi::Bitstream,
     ) -> Result<(Option<u32>, Payload), NvencError> {
-        let mut lock = ffi::LockBitstream::zeroed();
-        lock.version = ffi::LOCK_BITSTREAM_VER;
-        lock.output_bitstream = bitstream;
-        // The event has fired; a lock that could wait still pays for it.
-        lock.flags = ffi::LOCK_DO_NOT_WAIT;
-        let lock_bitstream = entry_point(self.session.api.lock_bitstream, "nvEncLockBitstream")?;
-        let unlock_bitstream =
-            entry_point(self.session.api.unlock_bitstream, "nvEncUnlockBitstream")?;
-        // SAFETY: the buffer's frame has completed; it stays locked only while it is copied.
-        self.check("nvEncLockBitstream", unsafe {
-            lock_bitstream(self.session.handle, &raw mut lock)
-        })?;
-        let data: Box<[u8]> = if lock.bitstream_buffer_ptr.is_null() {
-            Box::default()
-        } else {
-            // SAFETY: while locked, `bitstream_size_in_bytes` bytes are readable at the non-null pointer.
-            unsafe {
-                std::slice::from_raw_parts(
-                    lock.bitstream_buffer_ptr.cast::<u8>(),
-                    lock.bitstream_size_in_bytes as usize,
-                )
-            }
-            .into()
-        };
-        // SAFETY: unlocks the buffer locked above; `data` no longer points into it.
-        self.check("nvEncUnlockBitstream", unsafe {
-            unlock_bitstream(self.session.handle, bitstream)
-        })?;
-        Ok((Some(lock.picture_type), Payload::Memory(data)))
+        // SAFETY: the slot's buffer, created by this session; its event has fired, so the
+        // frame written into it is complete.
+        let (picture_type, data) = unsafe { self.session.read_bitstream(bitstream) }?;
+        Ok((Some(picture_type), Payload::Memory(data)))
     }
 
+    /// `mapped` must have come from a map of this session's that has not been undone, and the
+    /// frame reading it must be done or never queued.
     fn unmap(&self, mapped: ffi::Mapped) {
-        if let Some(unmap) = self.session.api.unmap_input_resource {
-            // SAFETY: `mapped` came from a successful map that has not been undone.
-            let _ = unsafe { unmap(self.session.handle, mapped) };
-        }
-    }
-
-    fn check(&self, call: &'static str, status: Status) -> Result<(), NvencError> {
-        self.session.check(call, status)
+        // SAFETY: as the callers see to above.
+        unsafe { self.session.unmap_input(mapped) };
     }
 
     fn await_in_flight(&self) {
@@ -823,28 +813,21 @@ impl Encoder {
     }
 
     fn end_of_stream(&self) {
-        let (Some(encode), Some(slot)) = (self.session.api.encode_picture, self.slots.first())
-        else {
+        let Some(slot) = self.slots.first() else {
             return;
         };
-        let mut picture = ffi::PicParams::zeroed();
-        picture.version = ffi::PIC_PARAMS_VER;
-        picture.encode_pic_flags = ffi::PIC_FLAG_EOS;
-        picture.completion_event = slot.event.0;
-        // SAFETY: an end-of-stream picture carries no buffers.
-        if unsafe { encode(self.session.handle, &raw mut picture) } == Status::SUCCESS {
+        // SAFETY: the slot's event is registered with this session and open.
+        if unsafe { self.session.end_of_stream(*slot.event) }.is_ok() {
             // SAFETY: the slot's event is open.
             let _ = unsafe { WaitForSingleObject(*slot.event, ENCODE_TIMEOUT_MS) };
         }
     }
 
     fn unregister_surfaces(&self) {
-        let Some(unregister) = self.session.api.unregister_resource else {
-            return;
-        };
         for surface in self.surfaces.iter().flatten() {
-            // SAFETY: the resource is registered and unmapped.
-            let _ = unsafe { unregister(self.session.handle, surface.registered) };
+            // SAFETY: registered by this session; every frame is collected or abandoned with the
+            // session, so none is mapped; never used again.
+            unsafe { self.session.unregister_resource(surface.registered) };
         }
     }
 
@@ -852,33 +835,23 @@ impl Encoder {
         if let Some(frame) = &slot.in_flight {
             self.unmap(frame.mapped);
         }
-        if let Some(unregister_event) = self.session.api.unregister_async_event {
-            let mut params = ffi::EventParams::zeroed();
-            params.version = ffi::EVENT_PARAMS_VER;
-            params.completion_event = slot.event.0;
-            // SAFETY: unregistering an event that is not registered is reported, not fatal.
-            let _ = unsafe { unregister_event(self.session.handle, &raw mut params) };
-        }
+        // SAFETY: the slot's event, still open; unregistering one that never was is reported,
+        // not fatal.
+        unsafe { self.session.unregister_event(*slot.event) };
         match &slot.output {
             SlotOutput::Bitstream(bitstream) => {
-                if let Some(destroy) = self.session.api.destroy_bitstream_buffer {
-                    // SAFETY: the buffer is unlocked and no longer in flight.
-                    let _ = unsafe { destroy(self.session.handle, *bitstream) };
-                }
+                // SAFETY: created by this session, unlocked, and no longer in flight.
+                unsafe { self.session.destroy_bitstream(*bitstream) };
             }
             SlotOutput::VideoMemory(output) => {
                 self.unmap(output.mapped);
-                if let Some(unregister) = self.session.api.unregister_resource {
-                    // SAFETY: unmapped and no longer in flight; the ring frees it afterwards.
-                    let _ = unsafe { unregister(self.session.handle, output.registered) };
-                }
+                // SAFETY: unmapped just above and no longer in flight; the ring frees it afterwards.
+                unsafe { self.session.unregister_resource(output.registered) };
             }
         }
-        if !slot.registered.is_null()
-            && let Some(unregister) = self.session.api.unregister_resource
-        {
-            // SAFETY: the resource is unmapped.
-            let _ = unsafe { unregister(self.session.handle, slot.registered) };
+        if !slot.registered.is_null() {
+            // SAFETY: the slot's texture, registered by this session and unmapped above.
+            unsafe { self.session.unregister_resource(slot.registered) };
         }
     }
 }
@@ -906,6 +879,7 @@ impl Drop for Encoder {
     }
 }
 
+#[expect(unsafe_code)]
 impl Session {
     fn open(device: &ID3D11Device, on: &EncoderDevice) -> Result<Self, NvencError> {
         let (device_type, device) = match on {
@@ -925,7 +899,6 @@ impl Session {
         params.device_type = device_type;
         params.device = device;
         params.api_version = ffi::API_VERSION;
-        let open = entry_point(api.open_encode_session_ex, "nvEncOpenEncodeSessionEx")?;
         let mut session = Self {
             api,
             handle: ptr::null_mut(),
@@ -933,24 +906,24 @@ impl Session {
         };
         // SAFETY: the device outlives the session. A failed open may still hand back a
         // handle, which `Drop` destroys.
-        let status = unsafe { open(&raw mut params, &raw mut session.handle) };
+        let status = unsafe {
+            (session.api.open_encode_session_ex)(&raw mut params, &raw mut session.handle)
+        };
         session.check("nvEncOpenEncodeSessionEx", status)?;
         Ok(session)
     }
 
     fn encode_guids(&self) -> Result<Vec<GUID>, NvencError> {
-        let count_guids = entry_point(self.api.get_encode_guid_count, "nvEncGetEncodeGUIDCount")?;
-        let list_guids = entry_point(self.api.get_encode_guids, "nvEncGetEncodeGUIDs")?;
         let mut count = 0;
-        // SAFETY: writes one integer for an open session.
+        // SAFETY: an open session; writes one integer to a live local.
         self.check("nvEncGetEncodeGUIDCount", unsafe {
-            count_guids(self.handle, &raw mut count)
+            (self.api.get_encode_guid_count)(self.handle, &raw mut count)
         })?;
         let mut guids = vec![GUID::zeroed(); count as usize];
         let mut written = 0;
-        // SAFETY: the array holds `count` GUIDs.
+        // SAFETY: an open session; the array has room for the `count` GUIDs it is told of.
         self.check("nvEncGetEncodeGUIDs", unsafe {
-            list_guids(self.handle, guids.as_mut_ptr(), count, &raw mut written)
+            (self.api.get_encode_guids)(self.handle, guids.as_mut_ptr(), count, &raw mut written)
         })?;
         guids.truncate(written as usize);
         Ok(guids)
@@ -960,11 +933,10 @@ impl Session {
         let mut query = ffi::CapsParam::zeroed();
         query.version = ffi::CAPS_PARAM_VER;
         query.caps_to_query = capability;
-        let get_caps = entry_point(self.api.get_encode_caps, "nvEncGetEncodeCaps")?;
         let mut value = 0;
-        // SAFETY: a versioned query structure and one integer to write.
+        // SAFETY: an open session, a versioned query structure and one integer to write.
         self.check("nvEncGetEncodeCaps", unsafe {
-            get_caps(
+            (self.api.get_encode_caps)(
                 self.handle,
                 codec_guid(codec),
                 &raw mut query,
@@ -974,19 +946,220 @@ impl Session {
         u32::try_from(value).map_err(|_| NvencError::BadCapability { capability, value })
     }
 
+    fn preset_config(&self, codec: Codec) -> Result<ffi::Config, NvencError> {
+        let mut preset = ffi::PresetConfig::zeroed();
+        preset.version = ffi::PRESET_CONFIG_VER;
+        preset.config.version = ffi::CONFIG_VER;
+        // SAFETY: an open session and a versioned preset structure the driver fills in.
+        self.check("nvEncGetEncodePresetConfigEx", unsafe {
+            (self.api.get_encode_preset_config_ex)(
+                self.handle,
+                codec_guid(codec),
+                ffi::PRESET_P4,
+                ffi::TUNING_HIGH_QUALITY,
+                &raw mut preset,
+            )
+        })?;
+        Ok(preset.config)
+    }
+
+    /// Points `params` at `config` for the call only; the driver copies both.
+    fn initialize(
+        &self,
+        mut params: ffi::InitializeParams,
+        config: &mut ffi::Config,
+    ) -> Result<(), NvencError> {
+        params.encode_config = &raw mut *config;
+        // SAFETY: an open session; `params` is versioned and the configuration it points to is
+        // borrowed across the call.
+        self.check("nvEncInitializeEncoder", unsafe {
+            (self.api.initialize_encoder)(self.handle, &raw mut params)
+        })
+    }
+
+    /// Returns the registration.
+    ///
+    /// # Safety
+    ///
+    /// `params.resource_to_register` must be a live resource of the kind `params.resource_type`
+    /// names, on this session's device, and stay alive until the registration is undone with
+    /// [`unregister_resource`](Self::unregister_resource).
+    unsafe fn register_resource(
+        &self,
+        params: &mut ffi::RegisterResource,
+    ) -> Result<ffi::Registered, NvencError> {
+        // SAFETY: an open session; the caller vouches for the resource.
+        self.check("nvEncRegisterResource", unsafe {
+            (self.api.register_resource)(self.handle, params)
+        })?;
+        Ok(params.registered_resource)
+    }
+
+    /// Errors are ignored: this is teardown.
+    ///
+    /// # Safety
+    ///
+    /// `registered` must come from [`register_resource`](Self::register_resource) on this
+    /// session, be unmapped, read or written by no frame in flight, and not be used afterwards.
+    unsafe fn unregister_resource(&self, registered: ffi::Registered) {
+        // SAFETY: as the caller vouches.
+        let _ = unsafe { (self.api.unregister_resource)(self.handle, registered) };
+    }
+
+    /// # Safety
+    ///
+    /// `registered` must be a live registration of this session's that is not mapped.
+    unsafe fn map_input(
+        &self,
+        registered: ffi::Registered,
+    ) -> Result<ffi::MapInputResource, NvencError> {
+        let mut map = ffi::MapInputResource::zeroed();
+        map.version = ffi::MAP_INPUT_RESOURCE_VER;
+        map.registered_resource = registered;
+        // SAFETY: an open session, a versioned structure, and a registration the caller vouches for.
+        self.check("nvEncMapInputResource", unsafe {
+            (self.api.map_input_resource)(self.handle, &raw mut map)
+        })?;
+        Ok(map)
+    }
+
+    /// Errors are ignored: an unmap that fails leaves nothing to undo.
+    ///
+    /// # Safety
+    ///
+    /// `mapped` must come from [`map_input`](Self::map_input) on this session and not have been
+    /// unmapped since, and no frame still in flight may read it.
+    unsafe fn unmap_input(&self, mapped: ffi::Mapped) {
+        // SAFETY: as the caller vouches.
+        let _ = unsafe { (self.api.unmap_input_resource)(self.handle, mapped) };
+    }
+
+    fn create_bitstream(&self) -> Result<ffi::Bitstream, NvencError> {
+        let mut buffer = ffi::CreateBitstreamBuffer::zeroed();
+        buffer.version = ffi::CREATE_BITSTREAM_BUFFER_VER;
+        // SAFETY: an initialized session and a versioned structure for the driver to fill in.
+        self.check("nvEncCreateBitstreamBuffer", unsafe {
+            (self.api.create_bitstream_buffer)(self.handle, &raw mut buffer)
+        })?;
+        Ok(buffer.bitstream_buffer)
+    }
+
+    /// Errors are ignored: this is teardown.
+    ///
+    /// # Safety
+    ///
+    /// `bitstream` must come from [`create_bitstream`](Self::create_bitstream) on this session,
+    /// be unlocked and in no frame in flight, and not be used afterwards.
+    unsafe fn destroy_bitstream(&self, bitstream: ffi::Bitstream) {
+        // SAFETY: as the caller vouches.
+        let _ = unsafe { (self.api.destroy_bitstream_buffer)(self.handle, bitstream) };
+    }
+
+    /// Copies out the frame in `bitstream`, holding the buffer locked only during the copy.
+    /// Returns its picture type and bytes.
+    ///
+    /// # Safety
+    ///
+    /// `bitstream` must come from [`create_bitstream`](Self::create_bitstream) on this session,
+    /// and the frame last queued into it must have completed.
+    unsafe fn read_bitstream(
+        &self,
+        bitstream: ffi::Bitstream,
+    ) -> Result<(u32, Box<[u8]>), NvencError> {
+        let mut lock = ffi::LockBitstream::zeroed();
+        lock.version = ffi::LOCK_BITSTREAM_VER;
+        lock.output_bitstream = bitstream;
+        // The frame has completed; a lock that could wait still pays for it.
+        lock.flags = ffi::LOCK_DO_NOT_WAIT;
+        // SAFETY: a completed buffer of this session's, as the caller vouches; unlocked below.
+        self.check("nvEncLockBitstream", unsafe {
+            (self.api.lock_bitstream)(self.handle, &raw mut lock)
+        })?;
+        let data: Box<[u8]> = if lock.bitstream_buffer_ptr.is_null() {
+            Box::default()
+        } else {
+            // SAFETY: while locked, `bitstream_size_in_bytes` bytes are readable at the non-null
+            // pointer; they are copied out before the unlock.
+            unsafe {
+                std::slice::from_raw_parts(
+                    lock.bitstream_buffer_ptr.cast::<u8>(),
+                    lock.bitstream_size_in_bytes as usize,
+                )
+            }
+            .into()
+        };
+        // SAFETY: unlocks the buffer locked above; `data` is a copy and does not point into it.
+        self.check("nvEncUnlockBitstream", unsafe {
+            (self.api.unlock_bitstream)(self.handle, bitstream)
+        })?;
+        Ok((lock.picture_type, data))
+    }
+
+    /// # Safety
+    ///
+    /// `event` must stay open until it is unregistered with
+    /// [`unregister_event`](Self::unregister_event).
+    unsafe fn register_event(&self, event: HANDLE) -> Result<(), NvencError> {
+        let mut params = ffi::EventParams::zeroed();
+        params.version = ffi::EVENT_PARAMS_VER;
+        params.completion_event = event.0;
+        // SAFETY: an open session and a versioned structure; the caller keeps the event open.
+        self.check("nvEncRegisterAsyncEvent", unsafe {
+            (self.api.register_async_event)(self.handle, &raw mut params)
+        })
+    }
+
+    /// Errors are ignored: this is teardown, and an event never registered is only reported.
+    ///
+    /// # Safety
+    ///
+    /// `event` must still be open.
+    unsafe fn unregister_event(&self, event: HANDLE) {
+        let mut params = ffi::EventParams::zeroed();
+        params.version = ffi::EVENT_PARAMS_VER;
+        params.completion_event = event.0;
+        // SAFETY: an open session, a versioned structure and an open event.
+        let _ = unsafe { (self.api.unregister_async_event)(self.handle, &raw mut params) };
+    }
+
+    /// Queues a frame.
+    ///
+    /// # Safety
+    ///
+    /// `picture.input_buffer` must be mapped by this session; `picture.output_bitstream` must
+    /// be this session's, unlocked and in no other frame in flight; `picture.completion_event`
+    /// must be registered with this session. All must stay so until the frame completes.
+    unsafe fn encode_picture(&self, picture: &mut ffi::PicParams) -> Result<(), NvencError> {
+        // SAFETY: an initialized session; the caller vouches for the buffers and event.
+        self.check("nvEncEncodePicture", unsafe {
+            (self.api.encode_picture)(self.handle, picture)
+        })
+    }
+
+    /// Flushes the encoder; `event` is signalled once every queued frame is done.
+    ///
+    /// # Safety
+    ///
+    /// `event` must be registered with this session and open.
+    unsafe fn end_of_stream(&self, event: HANDLE) -> Result<(), NvencError> {
+        let mut picture = ffi::PicParams::zeroed();
+        picture.version = ffi::PIC_PARAMS_VER;
+        picture.encode_pic_flags = ffi::PIC_FLAG_EOS;
+        picture.completion_event = event.0;
+        // SAFETY: an end-of-stream picture carries no buffers; the caller vouches for the event.
+        unsafe { self.encode_picture(&mut picture) }
+    }
+
     fn check(&self, call: &'static str, status: Status) -> Result<(), NvencError> {
         check(call, status, || self.last_error_detail())
     }
 
     fn last_error_detail(&self) -> String {
-        let Some(last_error) = self.api.get_last_error_string else {
-            return String::new();
-        };
         if self.handle.is_null() {
             return String::new();
         }
-        // SAFETY: returns a NUL-terminated string owned by the session, or null.
-        let text = unsafe { last_error(self.handle) };
+        // SAFETY: an open session; returns a NUL-terminated string it owns, or null.
+        let text = unsafe { (self.api.get_last_error_string)(self.handle) };
         if text.is_null() {
             return String::new();
         }
@@ -1003,10 +1176,9 @@ impl Session {
         if self.handle.is_null() {
             return;
         }
-        if let Some(destroy) = self.api.destroy_encoder {
-            // SAFETY: a live handle, used by nothing afterwards.
-            let _ = unsafe { destroy(self.handle) };
-        }
+        // SAFETY: a live handle, used by nothing afterwards; the caller has released every
+        // buffer and registration of the session.
+        let _ = unsafe { (self.api.destroy_encoder)(self.handle) };
         self.handle = ptr::null_mut();
     }
 }
@@ -1030,17 +1202,19 @@ fn load_library() -> Result<Library, NvencError> {
     Library::load(w!("nvEncodeAPI64.dll")).map_err(|_| NvencError::Library)
 }
 
-fn create_api(library: &Library) -> Result<Box<ffi::FunctionList>, NvencError> {
+#[expect(unsafe_code)]
+fn create_api(library: &Library) -> Result<Api, NvencError> {
     let (max_version, create_instance) = resolve_exports(library)?;
     require_driver_version(*max_version)?;
-    let mut api = Box::new(ffi::FunctionList::zeroed());
-    api.version = ffi::FUNCTION_LIST_VER;
+    let mut list = Box::new(ffi::FunctionList::zeroed());
+    list.version = ffi::FUNCTION_LIST_VER;
     // SAFETY: the list is a properly versioned, writable `NV_ENCODE_API_FUNCTION_LIST`.
-    let status = unsafe { create_instance(&raw mut *api) };
+    let status = unsafe { create_instance(&raw mut *list) };
     check("NvEncodeAPICreateInstance", status, String::new)?;
-    Ok(api)
+    Api::resolve(&list)
 }
 
+#[expect(unsafe_code)]
 fn require_driver_version(max_version: ffi::GetMaxSupportedVersion) -> Result<(), NvencError> {
     let mut version = 0;
     // SAFETY: writes one integer.
@@ -1053,6 +1227,7 @@ fn require_driver_version(max_version: ffi::GetMaxSupportedVersion) -> Result<()
     Ok(())
 }
 
+#[expect(unsafe_code)]
 fn resolve_exports(
     library: &Library,
 ) -> Result<
@@ -1104,6 +1279,7 @@ const fn profile_guid(codec: Codec) -> GUID {
     }
 }
 
+#[expect(unsafe_code)]
 fn configure(config: &mut ffi::Config, settings: Settings) {
     let matrix = u32::from(settings.matrix.code());
     let gop = gop_frames(settings.frame_rate);
@@ -1173,8 +1349,8 @@ fn configure_av1(av1: &mut ffi::Av1Config, gop: u32, matrix: u32) {
     av1.signal_colour(matrix);
 }
 
-/// `config` is pointed to, not copied; it must stay in place until the session is initialized.
-fn initialize_params(settings: Settings, config: &mut ffi::Config) -> ffi::InitializeParams {
+/// Without the configuration, which [`Session::initialize`] points it at.
+fn initialize_params(settings: Settings) -> ffi::InitializeParams {
     let mut params = ffi::InitializeParams::zeroed();
     params.version = ffi::INITIALIZE_PARAMS_VER;
     params.encode_guid = codec_guid(settings.codec);
@@ -1187,13 +1363,13 @@ fn initialize_params(settings: Settings, config: &mut ffi::Config) -> ffi::Initi
     params.frame_rate_den = 1;
     params.enable_encode_async = 1;
     params.enable_ptd = 1;
-    params.encode_config = &raw mut *config;
     params.max_encode_width = settings.width;
     params.max_encode_height = settings.height;
     params.tuning_info = ffi::TUNING_HIGH_QUALITY;
     params
 }
 
+#[expect(unsafe_code)]
 fn create_input_texture(
     device: &ID3D11Device,
     settings: Settings,
@@ -1227,6 +1403,7 @@ fn staging_bytes(settings: Settings) -> usize {
     (2 * picture).max(STAGING_LAYOUT.head_bytes) + STAGING_LAYOUT.header_bytes
 }
 
+#[expect(unsafe_code)]
 fn create_event() -> Result<Owned<HANDLE>, NvencError> {
     // SAFETY: an unnamed auto-reset event with default security.
     let event = unsafe { CreateEventW(None, false, false, None) }

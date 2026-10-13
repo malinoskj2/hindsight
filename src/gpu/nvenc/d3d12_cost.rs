@@ -286,12 +286,7 @@ trait BenchSession {
     ) -> ffi::Registered;
     fn map(&self, registered: ffi::Registered) -> (ffi::Mapped, u32);
     fn unmap(&self, mapped: ffi::Mapped);
-    fn with_pointer(
-        &self,
-        call: &'static str,
-        entry: Option<ffi::WithPointer>,
-        pointer: *mut c_void,
-    );
+    fn with_pointer(&self, call: &'static str, entry: ffi::WithPointer, pointer: *mut c_void);
 }
 
 impl BenchSession for Session {
@@ -305,10 +300,7 @@ impl BenchSession for Session {
         let mut preset = ffi::PresetConfig::zeroed();
         preset.version = ffi::PRESET_CONFIG_VER;
         preset.config.version = ffi::CONFIG_VER;
-        let get_preset = self
-            .api
-            .get_encode_preset_config_ex
-            .expect("nvEncGetEncodePresetConfigEx");
+        let get_preset = self.api.get_encode_preset_config_ex;
         // SAFETY: a versioned, writable preset structure.
         let status = unsafe {
             get_preset(
@@ -322,11 +314,12 @@ impl BenchSession for Session {
         self.assert_ok("nvEncGetEncodePresetConfigEx", status);
         let mut config = preset.config;
         configure(&mut config, settings);
-        let mut params = initialize_params(settings, &mut config);
+        let mut params = initialize_params(settings);
+        params.encode_config = &raw mut config;
         params.enable_encode_async = u32::from(asynchronous);
         // A Direct3D 12 session must be told the input format up front; others ignore it.
         params.buffer_format = ffi::BUFFER_FORMAT_ARGB;
-        let initialize = self.api.initialize_encoder.expect("nvEncInitializeEncoder");
+        let initialize = self.api.initialize_encoder;
         // SAFETY: `params` and the configuration it points to live across the call.
         let status = unsafe { initialize(self.handle, &raw mut params) };
         self.check("nvEncInitializeEncoder", status)
@@ -348,7 +341,7 @@ impl BenchSession for Session {
         params.resource_to_register = resource;
         params.buffer_format = format;
         params.buffer_usage = usage;
-        let register = self.api.register_resource.expect("nvEncRegisterResource");
+        let register = self.api.register_resource;
         // SAFETY: the resource outlives its registration, which `teardown` undoes.
         let status = unsafe { register(self.handle, &raw mut params) };
         self.assert_ok("nvEncRegisterResource", status);
@@ -359,7 +352,7 @@ impl BenchSession for Session {
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
         map.registered_resource = registered;
-        let map_input = self.api.map_input_resource.expect("nvEncMapInputResource");
+        let map_input = self.api.map_input_resource;
         // SAFETY: a registered resource that is not mapped.
         let status = unsafe { map_input(self.handle, &raw mut map) };
         self.assert_ok("nvEncMapInputResource", status);
@@ -367,22 +360,13 @@ impl BenchSession for Session {
     }
 
     fn unmap(&self, mapped: ffi::Mapped) {
-        let unmap = self
-            .api
-            .unmap_input_resource
-            .expect("nvEncUnmapInputResource");
+        let unmap = self.api.unmap_input_resource;
         // SAFETY: a mapping that has not been undone, of a frame that has completed.
         let status = unsafe { unmap(self.handle, mapped) };
         self.assert_ok("nvEncUnmapInputResource", status);
     }
 
-    fn with_pointer(
-        &self,
-        call: &'static str,
-        entry: Option<ffi::WithPointer>,
-        pointer: *mut c_void,
-    ) {
-        let entry = entry.expect("an entry the driver provides");
+    fn with_pointer(&self, call: &'static str, entry: ffi::WithPointer, pointer: *mut c_void) {
         // SAFETY: `pointer` is the kind of handle the entry takes, still live.
         let status = unsafe { entry(self.handle, pointer) };
         self.assert_ok(call, status);
@@ -550,7 +534,7 @@ impl Bench {
             };
             (session, backend)
         };
-        session.initialize(settings, case.asynchronous)?;
+        BenchSession::initialize(&session, settings, case.asynchronous)?;
         let mut bench = Self {
             session,
             case,
@@ -594,11 +578,7 @@ impl Bench {
             let mut params = ffi::EventParams::zeroed();
             params.version = ffi::EVENT_PARAMS_VER;
             params.completion_event = event.0;
-            let register = self
-                .session
-                .api
-                .register_async_event
-                .expect("nvEncRegisterAsyncEvent");
+            let register = self.session.api.register_async_event;
             // SAFETY: the event stays open until the session is destroyed.
             let status = unsafe { register(self.session.handle, &raw mut params) };
             self.session.assert_ok("nvEncRegisterAsyncEvent", status);
@@ -607,11 +587,7 @@ impl Bench {
             Backend::D3d11 { .. } | Backend::D3d9 { .. } => {
                 let mut buffer = ffi::CreateBitstreamBuffer::zeroed();
                 buffer.version = ffi::CREATE_BITSTREAM_BUFFER_VER;
-                let create = self
-                    .session
-                    .api
-                    .create_bitstream_buffer
-                    .expect("nvEncCreateBitstreamBuffer");
+                let create = self.session.api.create_bitstream_buffer;
                 // SAFETY: a versioned structure for an initialized session.
                 let status = unsafe { create(self.session.handle, &raw mut buffer) };
                 self.session.assert_ok("nvEncCreateBitstreamBuffer", status);
@@ -760,7 +736,7 @@ impl Bench {
                 picture.output_bitstream = (&raw mut **output).cast();
             }
         }
-        let encode = self.session.api.encode_picture.expect("nvEncEncodePicture");
+        let encode = self.session.api.encode_picture;
         // SAFETY: input mapped, output idle, and every pointed-to structure lives until collected.
         let status = timed(costs, ENCODE, || unsafe {
             encode(self.session.handle, &raw mut picture)
@@ -811,7 +787,7 @@ impl Bench {
         } else {
             0
         };
-        let lock_bitstream = self.session.api.lock_bitstream.expect("nvEncLockBitstream");
+        let lock_bitstream = self.session.api.lock_bitstream;
         let copy = &mut self.copy;
         let session = &self.session;
         let bytes = timed(costs, LOCK, || {

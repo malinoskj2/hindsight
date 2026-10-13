@@ -74,6 +74,7 @@ struct VramPage {
     context: ID3D11DeviceContext,
 }
 
+#[expect(unsafe_code)]
 impl VramPage {
     fn create(device: &Device) -> Result<Self, VramError> {
         let description = D3D11_BUFFER_DESC {
@@ -108,6 +109,7 @@ impl VramPage {
     }
 }
 
+#[expect(unsafe_code)]
 impl Page for VramPage {
     fn read(
         &self,
@@ -158,6 +160,7 @@ impl Page for VramPage {
     }
 }
 
+#[expect(unsafe_code)]
 /// Polls with `DO_NOT_WAIT`: a waiting `Map` would hold the device lock against the capture thread's uploads.
 fn map_when_ready(
     context: &ID3D11DeviceContext,
@@ -183,6 +186,7 @@ fn map_when_ready(
     }
 }
 
+#[expect(unsafe_code)]
 fn create_buffer(
     device: &ID3D11Device,
     description: &D3D11_BUFFER_DESC,

@@ -111,6 +111,7 @@ pub(super) struct ToneMapper {
     readable: Option<ID3D11Texture2D>,
 }
 
+#[expect(unsafe_code)]
 impl ToneMapper {
     pub(super) fn new(device: &Device, curve: Curve) -> windows::core::Result<Self> {
         let vertex_code = compile(s!("fullscreen"), s!("vs_5_0"))?;
@@ -253,6 +254,7 @@ impl<V: Clone> Views<V> {
     }
 }
 
+#[expect(unsafe_code)]
 fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
     let mut code = None;
     let mut errors = None;
@@ -285,6 +287,7 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
     created(code)
 }
 
+#[expect(unsafe_code)]
 fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
     // SAFETY: reads the address of a live blob's buffer.
     let data = unsafe { blob.GetBufferPointer() }.cast::<u8>();
@@ -303,6 +306,7 @@ const fn bind_flag(flag: i32) -> u32 {
     flag.cast_unsigned()
 }
 
+#[expect(unsafe_code)]
 fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Result<ID3D11Buffer> {
     let constants = curve.constants();
     let description = D3D11_BUFFER_DESC {
@@ -327,6 +331,7 @@ fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Resul
     created(buffer)
 }
 
+#[expect(unsafe_code)]
 fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     let mut description = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: writes the description of a live texture into a live structure.
@@ -334,6 +339,7 @@ fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     description
 }
 
+#[expect(unsafe_code)]
 fn readable_texture(
     device: &ID3D11Device,
     source: &D3D11_TEXTURE2D_DESC,
@@ -358,6 +364,7 @@ fn readable_texture(
     created(texture)
 }
 
+#[expect(unsafe_code)]
 fn shader_resource_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -368,6 +375,7 @@ fn shader_resource_view(
     created(view)
 }
 
+#[expect(unsafe_code)]
 fn render_target_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -379,6 +387,7 @@ fn render_target_view(
 }
 
 #[cfg(test)]
+#[expect(unsafe_code)]
 mod tests {
     use super::*;
     use windows::Win32::{

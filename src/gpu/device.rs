@@ -41,6 +41,7 @@ pub(super) struct Device {
     pub(super) adapter: String,
 }
 
+#[expect(unsafe_code)]
 impl Device {
     pub(super) fn create() -> Result<Self, DeviceError> {
         let (adapter, name) = nvidia_adapter()?;
@@ -127,6 +128,7 @@ pub(super) fn null_output() -> windows::core::Error {
 /// Holds the device's lock against its other threads until dropped.
 pub(super) struct Locked<'a>(&'a ID3D11Multithread);
 
+#[expect(unsafe_code)]
 impl<'a> Locked<'a> {
     pub(super) fn new(lock: &'a ID3D11Multithread) -> Self {
         // SAFETY: a re-entrant lock on a live device, released in `Drop`.
@@ -135,6 +137,7 @@ impl<'a> Locked<'a> {
     }
 }
 
+#[expect(unsafe_code)]
 impl Drop for Locked<'_> {
     fn drop(&mut self) {
         // SAFETY: releases the `Enter` in `new`.
@@ -142,6 +145,7 @@ impl Drop for Locked<'_> {
     }
 }
 
+#[expect(unsafe_code)]
 fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     // SAFETY: creates a factory; no other preconditions.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(DeviceError::Enumerate)?;
@@ -170,6 +174,7 @@ fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
     utf16_until_nul(&description.Description)
 }
 
+#[expect(unsafe_code)]
 /// BGRA support is required by Windows Graphics Capture.
 fn create_device(
     adapter: &IDXGIAdapter1,
@@ -196,6 +201,7 @@ fn create_device(
     }
 }
 
+#[expect(unsafe_code)]
 fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result<()> {
     let multithread: ID3D11Multithread = context.cast()?;
     // SAFETY: switches on the device's internal locking; returns the previous setting.

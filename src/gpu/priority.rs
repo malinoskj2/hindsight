@@ -24,6 +24,7 @@ type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTST
 
 pub(super) struct MultimediaThread(HANDLE);
 
+#[expect(unsafe_code)]
 impl Drop for MultimediaThread {
     fn drop(&mut self) {
         // SAFETY: reverts the registration this handle stands for.
@@ -31,6 +32,7 @@ impl Drop for MultimediaThread {
     }
 }
 
+#[expect(unsafe_code)]
 pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread> {
     let mut index = 0;
     // SAFETY: built-in task name; `index` is written on success.
@@ -41,6 +43,7 @@ pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread>
     Ok(joined)
 }
 
+#[expect(unsafe_code)]
 pub(super) fn raise_thread() -> windows::core::Result<()> {
     // SAFETY: returns a pseudo-handle that needs no closing.
     let thread = unsafe { GetCurrentThread() };
@@ -48,6 +51,7 @@ pub(super) fn raise_thread() -> windows::core::Result<()> {
     unsafe { SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST) }
 }
 
+#[expect(unsafe_code)]
 pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -69,6 +73,7 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
     }
 }
 
+#[expect(unsafe_code)]
 /// High, not realtime: realtime would starve the game and the compositor of the GPU.
 pub(super) fn raise_gpu_class() -> windows::core::Result<()> {
     let gdi = Library::load(w!("gdi32.dll"))?;

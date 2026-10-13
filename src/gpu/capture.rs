@@ -1,9 +1,12 @@
 //! Capture of a monitor or a window into the encoder's input, by one of several backends.
 
 mod display;
+#[expect(unsafe_code)]
 mod dxgi_dd;
+#[expect(unsafe_code)]
 mod nvfbc;
 mod tonemap;
+#[expect(unsafe_code)]
 mod wgc;
 
 use crate::{
@@ -271,6 +274,7 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     }
 }
 
+#[expect(unsafe_code)]
 fn monitor(handle: isize) -> HMONITOR {
     if handle == 0 {
         // SAFETY: (0, 0) always lies on the primary monitor.
@@ -280,6 +284,7 @@ fn monitor(handle: isize) -> HMONITOR {
     }
 }
 
+#[expect(unsafe_code)]
 fn is_window_closed(window: Option<HWND>) -> bool {
     // SAFETY: IsWindow accepts any handle, live or not.
     window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())
