@@ -42,7 +42,9 @@ pub(super) use ffi::Status;
 /// Two suffice while the GPU keeps up; the third absorbs a frame NVENC finishes late.
 const SLOTS: usize = 3;
 const ENCODE_TIMEOUT_MS: u32 = 2000;
-const GOP_FRAMES: u32 = 30;
+/// Two keyframes a second: a clip starts within half a second of where it is asked to, and
+/// the rest of the bitrate goes to the P-frames. At 60 fps that is Instant Replay's 30 frames.
+const KEYFRAMES_PER_SECOND: u32 = 2;
 /// Bitstream bytes read back with a frame's header, enough to tell a keyframe.
 const HEAD_BYTES: usize = 16 << 10;
 
@@ -1089,19 +1091,26 @@ const fn profile_guid(codec: Codec) -> GUID {
 
 fn configure(config: &mut ffi::Config, settings: Settings) {
     let matrix = u32::from(settings.matrix.code());
+    let gop = gop_frames(settings.frame_rate);
     config.profile_guid = profile_guid(settings.codec);
-    config.gop_length = GOP_FRAMES;
+    config.gop_length = gop;
     // No B-frames.
     config.frame_interval_p = 1;
     configure_rate_control(&mut config.rc, settings.bitrate);
     match settings.codec {
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }, matrix),
+        Codec::H264 => configure_h264(unsafe { &mut config.codec.h264 }, gop, matrix),
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::Hevc => configure_hevc(unsafe { &mut config.codec.hevc }, matrix),
+        Codec::Hevc => configure_hevc(unsafe { &mut config.codec.hevc }, gop, matrix),
         // SAFETY: the preset filled the union member for the configured codec.
-        Codec::Av1 => configure_av1(unsafe { &mut config.codec.av1 }, matrix),
+        Codec::Av1 => configure_av1(unsafe { &mut config.codec.av1 }, gop, matrix),
     }
+}
+
+/// Frames between keyframes, never fewer than one.
+const fn gop_frames(frame_rate: u32) -> u32 {
+    let frames = frame_rate / KEYFRAMES_PER_SECOND;
+    if frames == 0 { 1 } else { frames }
 }
 
 /// Single-pass VBR with no lookahead or adaptive quantization: nothing runs on the shader cores.
@@ -1114,26 +1123,26 @@ fn configure_rate_control(rc: &mut ffi::RcParams, bitrate: u32) {
     rc.multi_pass = ffi::MULTI_PASS_DISABLED;
 }
 
-fn configure_h264(h264: &mut ffi::H264Config, matrix: u32) {
+fn configure_h264(h264: &mut ffi::H264Config, gop: u32, matrix: u32) {
     h264.flags |= ffi::H264_REPEAT_SPS_PPS;
-    h264.idr_period = GOP_FRAMES;
+    h264.idr_period = gop;
     h264.chroma_format_idc = ffi::CHROMA_FORMAT_420;
     h264.vui.signal_colour(matrix);
 }
 
 /// Coding units held to 16×16–32×32 for speed.
-fn configure_hevc(hevc: &mut ffi::HevcConfig, matrix: u32) {
+fn configure_hevc(hevc: &mut ffi::HevcConfig, gop: u32, matrix: u32) {
     hevc.flags &= !(ffi::HEVC_CHROMA_FORMAT_MASK | ffi::HEVC_BIT_DEPTH_MASK);
     hevc.flags |=
         ffi::HEVC_REPEAT_SPS_PPS | (ffi::CHROMA_FORMAT_420 << ffi::HEVC_CHROMA_FORMAT_SHIFT);
-    hevc.idr_period = GOP_FRAMES;
+    hevc.idr_period = gop;
     hevc.min_cu_size = ffi::HEVC_CU_SIZE_16;
     hevc.max_cu_size = ffi::HEVC_CU_SIZE_32;
     hevc.vui.signal_colour(matrix);
 }
 
 /// Partitions held to 16×16–32×32 for speed; plain OBUs without Annex B framing.
-fn configure_av1(av1: &mut ffi::Av1Config, matrix: u32) {
+fn configure_av1(av1: &mut ffi::Av1Config, gop: u32, matrix: u32) {
     av1.flags &= !(ffi::AV1_ANNEX_B
         | ffi::AV1_TIMING_INFO
         | ffi::AV1_DECODER_MODEL_INFO
@@ -1143,7 +1152,7 @@ fn configure_av1(av1: &mut ffi::Av1Config, matrix: u32) {
         | ffi::AV1_BIT_DEPTH_MASK);
     av1.flags |=
         ffi::AV1_REPEAT_SEQUENCE_HEADER | (ffi::CHROMA_FORMAT_420 << ffi::AV1_CHROMA_FORMAT_SHIFT);
-    av1.idr_period = GOP_FRAMES;
+    av1.idr_period = gop;
     av1.min_part_size = ffi::AV1_PART_SIZE_16;
     av1.max_part_size = ffi::AV1_PART_SIZE_32;
     av1.signal_colour(matrix);
@@ -1231,6 +1240,14 @@ fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_come_twice_a_second_whatever_the_frame_rate() {
+        assert_eq!(gop_frames(60), 30);
+        assert_eq!(gop_frames(240), 120);
+        assert_eq!(gop_frames(25), 12);
+        assert_eq!(gop_frames(1), 1);
+    }
 
     #[test]
     fn only_the_codecs_the_driver_lists_are_offered_in_the_usual_order() {
