@@ -2,11 +2,12 @@
 //! `hvcC`.
 
 use super::{
-    annexb::{nal_units, unescape},
+    annexb::{find_units, nal_units, unescape, units_except},
     mp4::{self, NAL_LENGTH_BYTES},
 };
+use bitstream_io::{BigEndian, BitRead, BitReader};
 use mp4_atom::{HvcCArray, Hvcc};
-use std::ops::{Range, RangeInclusive};
+use std::{io, ops::RangeInclusive};
 
 const NAL_TYPE_MASK: u8 = 0x3F;
 const NAL_HEADER_BYTES: usize = 2;
@@ -16,15 +17,10 @@ const NAL_PPS: u8 = 34;
 pub(super) const NAL_AUD: u8 = 35;
 /// Intra random access points: BLA, IDR and CRA pictures.
 const IRAP: RangeInclusive<u8> = 16..=21;
+/// Parameter sets live in `hvcC`, and delimiters nowhere; the rest of a unit is its sample.
+const NOT_IN_SAMPLES: [u8; 4] = [NAL_VPS, NAL_SPS, NAL_PPS, NAL_AUD];
 /// Bytes of an SPS up to and including `general_level_idc`, after emulation prevention.
 const SPS_PROFILE_BYTES: usize = 15;
-/// VPS id, sub-layer count and temporal id nesting flag.
-const SPS_LAYERS: usize = 2;
-/// `profile_tier_level`: profile space/tier/profile, compatibility flags, constraint flags, level.
-const SPS_PROFILE: usize = 3;
-const SPS_COMPATIBILITY_FLAGS: Range<usize> = 4..8;
-const SPS_CONSTRAINT_FLAGS: Range<usize> = 8..14;
-const SPS_LEVEL: usize = 14;
 const CHROMA_420: u8 = 1;
 
 pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
@@ -33,11 +29,10 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
 
 /// The `hvcC` record, when the access unit carries a VPS, SPS and PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
-    let units: Vec<&[u8]> = nal_units(access_unit).collect();
-    let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
-    let (vps, sps, pps) = (of_type(NAL_VPS)?, of_type(NAL_SPS)?, of_type(NAL_PPS)?);
-    let mut record = record_fields(sps)?;
-    record.arrays = [vps, sps, pps]
+    let parameter_sets = find_units(access_unit, nal_type, [NAL_VPS, NAL_SPS, NAL_PPS])?;
+    let [_, sps, _] = parameter_sets;
+    let mut record = record_fields(sps).ok()?;
+    record.arrays = parameter_sets
         .into_iter()
         .map(|unit| HvcCArray {
             completeness: true,
@@ -48,33 +43,40 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     mp4::record(&record)
 }
 
-/// The `hvcC` fields copied from the SPS; the rest stay unknown or zero.
-fn record_fields(sps: &[u8]) -> Option<Hvcc> {
+/// The `hvcC` fields copied from the SPS (7.3.2.2 through `profile_tier_level`); the rest stay
+/// unknown or zero.
+fn record_fields(sps: &[u8]) -> io::Result<Hvcc> {
     let header = unescape(sps, SPS_PROFILE_BYTES);
-    if header.len() < SPS_PROFILE_BYTES {
-        return None;
-    }
-    Some(Hvcc {
-        general_profile_space: header[SPS_PROFILE] >> 6,
-        general_tier_flag: header[SPS_PROFILE] & 0x20 != 0,
-        general_profile_idc: header[SPS_PROFILE] & 0x1F,
-        general_profile_compatibility_flags: header[SPS_COMPATIBILITY_FLAGS].try_into().ok()?,
-        general_constraint_indicator_flags: header[SPS_CONSTRAINT_FLAGS].try_into().ok()?,
-        general_level_idc: header[SPS_LEVEL],
+    let mut bits = BitReader::<_, BigEndian>::new(&header[..]);
+    let _nal_header = bits.read::<16, u16>()?;
+    let _video_parameter_set_id = bits.read::<4, u8>()?;
+    let max_sub_layers_minus1 = bits.read::<3, u8>()?;
+    let temporal_id_nested = bits.read_bit()?;
+    let general_profile_space = bits.read::<2, u8>()?;
+    let general_tier_flag = bits.read_bit()?;
+    let general_profile_idc = bits.read::<5, u8>()?;
+    let general_profile_compatibility_flags = bits.read::<32, u32>()?.to_be_bytes();
+    let [_, _, general_constraint_indicator_flags @ ..] = bits.read::<48, u64>()?.to_be_bytes();
+    let general_level_idc = bits.read::<8, u8>()?;
+    Ok(Hvcc {
+        general_profile_space,
+        general_tier_flag,
+        general_profile_idc,
+        general_profile_compatibility_flags,
+        general_constraint_indicator_flags,
+        general_level_idc,
         // 8-bit luma and chroma: the bit depths minus 8 stay 0.
         chroma_format_idc: CHROMA_420,
-        num_temporal_layers: ((header[SPS_LAYERS] >> 1) & 0b111) + 1,
-        temporal_id_nested: header[SPS_LAYERS] & 1 != 0,
+        num_temporal_layers: max_sub_layers_minus1 + 1,
+        temporal_id_nested,
         length_size_minus_one: NAL_LENGTH_BYTES - 1,
         ..Hvcc::new()
     })
 }
 
-/// The sample's NAL units without parameter sets (those live in `hvcC`) or delimiters.
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
-    nal_units(access_unit)
+    units_except(access_unit, nal_type, &NOT_IN_SAMPLES)
         .filter(|unit| unit.len() >= NAL_HEADER_BYTES)
-        .filter(|unit| !matches!(nal_type(unit), NAL_VPS | NAL_SPS | NAL_PPS | NAL_AUD))
         .collect()
 }
 

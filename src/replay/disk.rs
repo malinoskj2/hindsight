@@ -162,7 +162,7 @@ impl Store for DiskStore {
             Ok(page)
         })?;
         shared.stage(page.base + offset as u64, data)?;
-        Ok(Pages::slot(page, offset, data.len()))
+        Ok(Slot::new(page, offset, data.len()))
     }
 }
 
@@ -203,9 +203,10 @@ struct Staging {
     queue: VecDeque<Arc<Block>>,
     queued_bytes: usize,
     spare: Vec<Aligned>,
-    failed: Option<String>,
+    failed: Option<Arc<io::Error>>,
     closing: bool,
-    /// Test hook: holds the writer back.
+    /// Holds the writer back.
+    #[cfg(test)]
     held: bool,
 }
 
@@ -253,8 +254,8 @@ impl Shared {
 
     fn stage(&self, mut position: u64, mut data: &[u8]) -> Result<(), StoreError> {
         let mut staging = self.staging();
-        if let Some(failure) = &staging.failed {
-            return Err(refused(failure.clone()));
+        if let Some(error) = &staging.failed {
+            return Err(StoreError::call("write the buffer file")(Arc::clone(error)));
         }
         let queued = staging.queue.len();
         while !data.is_empty() {
@@ -280,7 +281,7 @@ impl Shared {
             let written = write_at(&self.file, block.sectors(), block.position);
             let mut staging = self.staging();
             if let Err(error) = written {
-                staging.failed = Some(format!("write the buffer file: {error}"));
+                staging.failed = Some(Arc::new(error));
                 return;
             }
             staging.queue.pop_front();
@@ -296,9 +297,7 @@ impl Shared {
     fn next_block(&self) -> Option<Arc<Block>> {
         let mut staging = self.staging();
         loop {
-            if !staging.held
-                && let Some(block) = staging.queue.front()
-            {
+            if let Some(block) = staging.ready() {
                 return Some(Arc::clone(block));
             }
             if staging.closing {
@@ -379,6 +378,15 @@ impl Shared {
 }
 
 impl Staging {
+    /// The oldest queued block, unless a test holds the writer back.
+    fn ready(&self) -> Option<&Arc<Block>> {
+        #[cfg(test)]
+        if self.held {
+            return None;
+        }
+        self.queue.front()
+    }
+
     /// A page's packets are contiguous, so a new block starts only where a page does.
     fn block_at(&mut self, position: u64, layout: &Layout) -> Result<&mut Block, StoreError> {
         let follows = self
@@ -411,7 +419,7 @@ impl Staging {
         };
         if self.queued_bytes + block.memory.len() > layout.max_queued {
             self.filling = Some(block);
-            return Err(refused(format!(
+            return Err(StoreError::Refused(format!(
                 "the drive fell {} MiB behind the buffer",
                 self.queued_bytes / MEBIBYTE
             )));
@@ -444,10 +452,6 @@ impl Staged {
 
 fn distance(from: u64, to: u64) -> usize {
     usize::try_from(to - from).expect("a block or a piece fits in memory")
-}
-
-fn refused(reason: String) -> StoreError {
-    StoreError::call("stage the packet")(io::Error::other(reason))
 }
 
 /// Sector-aligned memory: a vector with a sector to spare, used from its first boundary on.
@@ -593,7 +597,7 @@ fn write_once(file: &File, bytes: &[u8], position: u64) -> io::Result<usize> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        super::store::{Entry, fetch},
+        super::store::{Data, Entry, fetch},
         *,
     };
     use std::{assert_matches, time::Duration};
@@ -651,22 +655,22 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn put(store: &mut DiskStore, index: u64, data: &[u8]) -> Entry {
-        Entry::Stored {
+    fn put(store: &mut DiskStore, index: u64, data: &[u8]) -> Arc<Entry> {
+        Arc::new(Entry {
             index,
             keyframe: index == 0,
-            slot: store.put(data).unwrap(),
-        }
+            data: Data::Stored(store.put(data).unwrap()),
+        })
     }
 
-    fn put_all(store: &mut DiskStore, packets: &[Vec<u8>]) -> Vec<Entry> {
+    fn put_all(store: &mut DiskStore, packets: &[Vec<u8>]) -> Vec<Arc<Entry>> {
         (0..)
             .zip(packets)
             .map(|(index, data)| put(store, index, data))
             .collect()
     }
 
-    fn read_back(entries: &[Entry]) -> Vec<Vec<u8>> {
+    fn read_back(entries: &[Arc<Entry>]) -> Vec<Vec<u8>> {
         fetch(entries)
             .unwrap()
             .iter()
@@ -707,7 +711,7 @@ pub(crate) mod tests {
         let (second, third) = (packet(2, 100), packet(3, 2 * SECTOR_BYTES));
         entries.push(put(&mut store, 1, &second));
         entries.push(put(&mut store, 2, &third));
-        assert_matches!(&entries[2], Entry::Stored { slot, .. } if slot.offset == 0);
+        assert_matches!(&entries[2].data, Data::Stored(slot) if slot.offset() == 0);
         assert_eq!(read_back(&entries), [first, second, third]);
     }
 
@@ -756,7 +760,7 @@ pub(crate) mod tests {
         let kept = put(&mut store, 0, &packet(0, 2 * SECTOR_BYTES));
         assert_matches!(
             store.put(&packet(1, 2 * SECTOR_BYTES)),
-            Err(StoreError::Call { .. })
+            Err(StoreError::Refused(_))
         );
         assert_eq!(read_back(&[kept]), [packet(0, 2 * SECTOR_BYTES)]);
     }

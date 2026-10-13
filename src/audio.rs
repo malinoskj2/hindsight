@@ -10,6 +10,8 @@ mod loopback;
 mod pcm;
 #[cfg(windows)]
 mod recorder;
+#[cfg(test)]
+pub(crate) mod testing;
 mod timeline;
 
 #[cfg(windows)]
@@ -25,8 +27,8 @@ const CHANNELS: u16 = 2;
 #[derive(Debug, Error)]
 pub(crate) enum EncodeError {
     #[cfg(windows)]
-    #[error("the AAC encoder failed ({0})")]
-    Windows(#[from] windows::core::Error),
+    #[error("{0}: {1}")]
+    Windows(&'static str, #[source] windows::core::Error),
     #[cfg(windows)]
     #[error("the AAC encoder made {made} of the clip's {needed} frames")]
     Short { made: usize, needed: usize },

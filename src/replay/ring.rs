@@ -1,14 +1,11 @@
 //! The rolling packet buffer, trimmed a whole group of pictures at a time so a save starts on
 //! a keyframe.
 
-use super::{
-    Packet,
-    store::{Entry, Store, StoreError},
-};
+use super::store::{Data, Entry, Store, StoreError};
 use std::{collections::VecDeque, sync::Arc};
 
-pub(crate) struct Ring {
-    packets: VecDeque<Entry>,
+pub(super) struct Ring {
+    packets: VecDeque<Arc<Entry>>,
     keyframes: VecDeque<u64>,
     /// Frames of history to keep.
     span: u64,
@@ -17,7 +14,7 @@ pub(crate) struct Ring {
 }
 
 impl Ring {
-    pub(crate) fn new(span: u64) -> Self {
+    pub(super) fn new(span: u64) -> Self {
         Self {
             packets: VecDeque::new(),
             keyframes: VecDeque::new(),
@@ -27,49 +24,39 @@ impl Ring {
         }
     }
 
-    pub(crate) fn set_store(&mut self, store: Box<dyn Store>) {
+    pub(super) fn set_store(&mut self, store: Box<dyn Store>) {
         self.store = Some(store);
     }
 
     /// An error means the store refused the packet; it and every later one stay in memory.
-    pub(crate) fn push(&mut self, packet: Packet) -> Result<(), StoreError> {
-        if self.packets.is_empty() && !packet.keyframe {
+    pub(super) fn push(&mut self, mut entry: Entry) -> Result<(), StoreError> {
+        if self.packets.is_empty() && !entry.keyframe {
             return Ok(());
         }
-        let (entry, refused) = self.place(packet);
-        self.push_entry(entry);
+        let refused = self.place(&mut entry);
+        if entry.keyframe {
+            self.keyframes.push_back(entry.index);
+        }
+        self.bytes += entry.length();
+        let latest = entry.index;
+        self.packets.push_back(Arc::new(entry));
+        self.drop_covered_groups(latest);
         refused.map_or(Ok(()), Err)
     }
 
-    pub(crate) fn push_entry(&mut self, entry: Entry) {
-        if self.packets.is_empty() && !entry.keyframe() {
-            return;
-        }
-        if entry.keyframe() {
-            self.keyframes.push_back(entry.index());
-        }
-        self.bytes += entry.length();
-        let latest = entry.index();
-        self.packets.push_back(entry);
-        self.drop_covered_groups(latest);
-    }
-
-    fn place(&mut self, packet: Packet) -> (Entry, Option<StoreError>) {
-        let Some(store) = self.store.as_mut() else {
-            return (Entry::Memory(Arc::new(packet)), None);
+    fn place(&mut self, entry: &mut Entry) -> Option<StoreError> {
+        let store = self.store.as_mut()?;
+        let Data::Memory(data) = &entry.data else {
+            return None;
         };
-        match store.put(&packet.data) {
-            Ok(slot) => (
-                Entry::Stored {
-                    index: packet.index,
-                    keyframe: packet.keyframe,
-                    slot,
-                },
-                None,
-            ),
+        match store.put(data) {
+            Ok(slot) => {
+                entry.data = Data::Stored(slot);
+                None
+            }
             Err(error) => {
                 self.store = None;
-                (Entry::Memory(Arc::new(packet)), Some(error))
+                Some(error)
             }
         }
     }
@@ -78,31 +65,31 @@ impl Ring {
         while let Some(&next) = self.keyframes.get(1)
             && latest - next + 1 >= self.span
         {
-            while let Some(dropped) = self.packets.pop_front_if(|entry| entry.index() < next) {
+            while let Some(dropped) = self.packets.pop_front_if(|entry| entry.index < next) {
                 self.bytes -= dropped.length();
             }
             self.keyframes.pop_front();
         }
     }
 
-    pub(crate) fn first_index(&self) -> Option<u64> {
-        self.packets.front().map(Entry::index)
+    pub(super) fn first_index(&self) -> Option<u64> {
+        self.packets.front().map(|entry| entry.index)
     }
 
-    pub(crate) fn snapshot(&self) -> Vec<Entry> {
+    pub(super) fn snapshot(&self) -> Vec<Arc<Entry>> {
         self.packets.iter().cloned().collect()
     }
 
     #[cfg(test)]
-    pub(crate) fn frames(&self) -> u64 {
+    pub(super) fn frames(&self) -> u64 {
         match (self.packets.front(), self.packets.back()) {
-            (Some(first), Some(last)) => last.index() - first.index() + 1,
+            (Some(first), Some(last)) => last.index - first.index + 1,
             _ => 0,
         }
     }
 
     #[cfg(test)]
-    pub(crate) const fn bytes(&self) -> usize {
+    pub(super) const fn bytes(&self) -> usize {
         self.bytes
     }
 }
@@ -110,14 +97,15 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::{super::store::tests::MemoryStore, *};
-    use crate::replay::store::fetch;
+    use crate::replay::{Packet, store::fetch};
 
-    fn packet(index: u64, gop: u64) -> Packet {
+    fn packet(index: u64, gop: u64) -> Entry {
         Packet {
             index,
             keyframe: index.is_multiple_of(gop),
             data: vec![0; 10].into(),
         }
+        .into()
     }
 
     #[test]
@@ -126,12 +114,12 @@ mod tests {
         for index in 0..100 {
             ring.push(packet(index, 4)).unwrap();
             let snapshot = ring.snapshot();
-            assert!(snapshot[0].keyframe());
+            assert!(snapshot[0].keyframe);
             assert!(ring.frames() >= (index + 1).min(10));
             assert!(ring.frames() < 10 + 4);
             assert_eq!(ring.bytes(), snapshot.len() * 10);
         }
-        assert_eq!(ring.snapshot().last().unwrap().index(), 99);
+        assert_eq!(ring.snapshot().last().unwrap().index, 99);
     }
 
     #[test]
@@ -144,7 +132,7 @@ mod tests {
         ring.push(packet(4, 4)).unwrap();
         ring.push(packet(5, 4)).unwrap();
         assert_eq!(ring.frames(), 2);
-        assert_eq!(ring.snapshot()[0].index(), 4);
+        assert_eq!(ring.snapshot()[0].index, 4);
     }
 
     #[test]
@@ -153,11 +141,11 @@ mod tests {
         for index in [0, 1, 2, 3, 20, 21, 22, 23, 24] {
             ring.push(packet(index, 4)).unwrap();
         }
-        assert_eq!(ring.snapshot()[0].index(), 0);
+        assert_eq!(ring.snapshot()[0].index, 0);
 
         ring.push(packet(28, 4)).unwrap();
         ring.push(packet(29, 4)).unwrap();
-        assert_eq!(ring.snapshot()[0].index(), 20);
+        assert_eq!(ring.snapshot()[0].index, 20);
     }
 
     #[test]
@@ -166,14 +154,14 @@ mod tests {
         ring.set_store(Box::new(MemoryStore::new(25, 7)));
         for index in 0..40 {
             let mut packet = packet(index, 4);
-            packet.data = vec![u8::try_from(index).unwrap(); 10].into();
+            packet.data = Data::Memory(vec![u8::try_from(index).unwrap(); 10].into());
             ring.push(packet).unwrap();
         }
         let snapshot = ring.snapshot();
         assert!(
             snapshot
                 .iter()
-                .all(|entry| matches!(entry, Entry::Stored { .. }))
+                .all(|entry| matches!(entry.data, Data::Stored(_)))
         );
         assert_eq!(ring.bytes(), snapshot.len() * 10);
 
@@ -198,9 +186,9 @@ mod tests {
         ring.push(packet(3, 4)).unwrap();
 
         let snapshot = ring.snapshot();
-        assert!(matches!(snapshot[1], Entry::Stored { .. }));
-        assert!(matches!(snapshot[2], Entry::Memory(_)));
-        assert!(matches!(snapshot[3], Entry::Memory(_)));
+        assert!(matches!(snapshot[1].data, Data::Stored(_)));
+        assert!(matches!(snapshot[2].data, Data::Memory(_)));
+        assert!(matches!(snapshot[3].data, Data::Memory(_)));
         assert_eq!(fetch(&snapshot).unwrap().len(), 4);
         assert!(ring.store.is_none());
     }

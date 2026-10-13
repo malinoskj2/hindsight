@@ -1,13 +1,13 @@
 //! Keeps the run of samples on the clock the video uses, checked against WASAPI's packet stamps.
 
-use crate::replay::CLOCK_RATE;
+use crate::replay::{CLOCK_RATE, samples_of, ticks_of};
 
 /// Drift allowed before the run is corrected: 4 ms.
-pub(crate) const TOLERANCE: i64 = CLOCK_RATE / 250;
+const TOLERANCE: i64 = CLOCK_RATE / 250;
 /// A packet stamped this far ahead has a broken timestamp; `catch_up` fills a real gap first.
 const IMPLAUSIBLE_GAP: i64 = 5 * CLOCK_RATE;
 
-pub(crate) struct Timeline {
+pub(super) struct Timeline {
     rate: u32,
     /// Clock time of the first sample.
     anchor: i64,
@@ -16,14 +16,14 @@ pub(crate) struct Timeline {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(crate) silence: u64,
+pub(super) struct Placement {
+    pub(super) silence: u64,
     /// Leading samples that overlap ones already placed.
-    pub(crate) skip: u32,
+    pub(super) skip: u32,
 }
 
 impl Timeline {
-    pub(crate) const fn new(rate: u32, anchor: i64) -> Self {
+    pub(super) const fn new(rate: u32, anchor: i64) -> Self {
         Self {
             rate,
             anchor,
@@ -31,13 +31,11 @@ impl Timeline {
         }
     }
 
-    pub(crate) fn next_time(&self) -> i64 {
-        let offset = i128::from(self.placed) * i128::from(CLOCK_RATE) / i128::from(self.rate);
-        self.anchor
-            .saturating_add(i64::try_from(offset).unwrap_or(i64::MAX))
+    fn next_time(&self) -> i64 {
+        self.anchor.saturating_add(ticks_of(self.placed, self.rate))
     }
 
-    pub(crate) fn place(&mut self, time: Option<i64>, frames: u32) -> Placement {
+    pub(super) fn place(&mut self, time: Option<i64>, frames: u32) -> Placement {
         let offset = time.map_or(0, |time| time.saturating_sub(self.next_time()));
         let placement = if offset > TOLERANCE && offset < IMPLAUSIBLE_GAP {
             Placement {
@@ -60,7 +58,7 @@ impl Timeline {
         placement
     }
 
-    pub(crate) fn catch_up(&mut self, time: i64) -> u64 {
+    pub(super) fn catch_up(&mut self, time: i64) -> u64 {
         let behind = time.saturating_sub(self.next_time());
         if behind <= 0 {
             return 0;
@@ -71,8 +69,7 @@ impl Timeline {
     }
 
     fn samples_in(&self, ticks: i64) -> u64 {
-        let samples = i128::from(ticks) * i128::from(self.rate) / i128::from(CLOCK_RATE);
-        u64::try_from(samples).unwrap_or(0)
+        u64::try_from(samples_of(ticks, self.rate)).unwrap_or(0)
     }
 }
 

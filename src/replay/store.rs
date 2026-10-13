@@ -2,7 +2,7 @@
 //! alive.
 
 use super::Packet;
-use std::{collections::VecDeque, error::Error, fmt, ptr, sync::Arc};
+use std::{collections::VecDeque, error::Error, fmt, iter::Peekable, ptr, sync::Arc};
 use thiserror::Error;
 
 pub(crate) const PAGE_BYTES: usize = 64 << 20;
@@ -22,6 +22,9 @@ pub(crate) fn reserved_pages(bytes: u64) -> usize {
 pub(crate) enum StoreError {
     #[error("a {0} byte packet is larger than a page of the store")]
     TooLarge(usize),
+    /// The store has no room for the packet right now; the reason is for the log.
+    #[error("{0}")]
+    Refused(String),
     #[error("{step}: {source}")]
     Call {
         step: &'static str,
@@ -54,9 +57,9 @@ pub(crate) trait Page: Send + Sync {
 /// A range of a page; a clone keeps the page alive.
 #[derive(Clone)]
 pub(crate) struct Slot {
-    pub(crate) page: Arc<dyn Page>,
-    pub(crate) offset: usize,
-    pub(crate) length: usize,
+    page: Arc<dyn Page>,
+    offset: usize,
+    length: usize,
 }
 
 impl fmt::Debug for Slot {
@@ -71,6 +74,19 @@ impl fmt::Debug for Slot {
 }
 
 impl Slot {
+    pub(crate) fn new(page: Arc<dyn Page>, offset: usize, length: usize) -> Self {
+        Self {
+            page,
+            offset,
+            length,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn offset(&self) -> usize {
+        self.offset
+    }
+
     fn shares_page(&self, other: &Self) -> bool {
         ptr::addr_eq(Arc::as_ptr(&self.page), Arc::as_ptr(&other.page))
     }
@@ -126,11 +142,7 @@ impl<P: Page + 'static> Pages<P> {
     }
 
     pub(crate) fn slot(page: Arc<P>, offset: usize, length: usize) -> Slot {
-        Slot {
-            page: page as Arc<dyn Page>,
-            offset,
-            length,
-        }
+        Slot::new(page, offset, length)
     }
 
     /// Frees unheld pages from the front; the page being filled stays in use even when empty.
@@ -148,59 +160,63 @@ impl<P: Page + 'static> Pages<P> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum Entry {
-    Memory(Arc<Packet>),
-    Stored {
-        index: u64,
-        keyframe: bool,
-        slot: Slot,
-    },
+/// A buffered packet: its bytes in memory, or the slot of a store holding them.
+#[derive(Debug)]
+pub(crate) struct Entry {
+    pub(crate) index: u64,
+    pub(crate) keyframe: bool,
+    pub(crate) data: Data,
+}
+
+#[derive(Debug)]
+pub(crate) enum Data {
+    Memory(Box<[u8]>),
+    Stored(Slot),
 }
 
 impl Entry {
-    pub(crate) fn index(&self) -> u64 {
-        match self {
-            Self::Memory(packet) => packet.index,
-            Self::Stored { index, .. } => *index,
-        }
-    }
-
-    pub(crate) fn keyframe(&self) -> bool {
-        match self {
-            Self::Memory(packet) => packet.keyframe,
-            Self::Stored { keyframe, .. } => *keyframe,
-        }
-    }
-
     pub(crate) fn length(&self) -> usize {
-        match self {
-            Self::Memory(packet) => packet.data.len(),
-            Self::Stored { slot, .. } => slot.length,
+        match &self.data {
+            Data::Memory(data) => data.len(),
+            Data::Stored(slot) => slot.length,
         }
     }
 }
 
-pub(crate) type Visit<'a, E> = dyn FnMut(&Entry, &[u8]) -> Result<(), E> + 'a;
+impl From<Packet> for Entry {
+    fn from(packet: Packet) -> Self {
+        Self {
+            index: packet.index,
+            keyframe: packet.keyframe,
+            data: Data::Memory(packet.data),
+        }
+    }
+}
+
+type Visit<'a, E> = dyn FnMut(&Entry, &[u8]) -> Result<(), E> + 'a;
 
 /// Visits each entry with its bytes, reading each run of neighbours in one page in a single
 /// read.
 pub(crate) fn each<E: From<StoreError>>(
-    entries: &[Entry],
+    entries: &[Arc<Entry>],
     visit: &mut Visit<'_, E>,
 ) -> Result<(), E> {
-    let mut straddling = Vec::new();
     let mut rest = entries;
     while let Some((first, _)) = rest.split_first() {
-        match first {
-            Entry::Memory(packet) => {
-                visit(first, &packet.data)?;
+        match &first.data {
+            Data::Memory(data) => {
+                visit(first, data)?;
                 rest = &rest[1..];
             }
-            Entry::Stored { slot, .. } => {
-                let run = run_length(rest, slot);
-                visit_run(&rest[..run], &mut straddling, visit)?;
-                rest = &rest[run..];
+            Data::Stored(slot) => {
+                let (count, end) = extent(rest, slot);
+                let reader = RunReader {
+                    run: run(rest, slot).peekable(),
+                    start: slot.offset,
+                    straddling: Vec::new(),
+                };
+                reader.read(&*slot.page, end - slot.offset, visit)?;
+                rest = &rest[count..];
             }
         }
     }
@@ -208,120 +224,121 @@ pub(crate) fn each<E: From<StoreError>>(
 }
 
 #[cfg(test)]
-pub(crate) fn fetch(entries: &[Entry]) -> Result<Vec<Arc<Packet>>, StoreError> {
+pub(crate) fn fetch(entries: &[Arc<Entry>]) -> Result<Vec<Arc<Packet>>, StoreError> {
     let mut packets = Vec::with_capacity(entries.len());
     each(entries, &mut |entry, data| {
-        packets.push(match entry {
-            Entry::Memory(packet) => Arc::clone(packet),
-            Entry::Stored {
-                index, keyframe, ..
-            } => Arc::new(Packet {
-                index: *index,
-                keyframe: *keyframe,
-                data: data.into(),
-            }),
-        });
+        packets.push(Arc::new(Packet {
+            index: entry.index,
+            keyframe: entry.keyframe,
+            data: data.into(),
+        }));
         Ok::<_, StoreError>(())
     })?;
     Ok(packets)
 }
 
-/// Leading entries of `rest` in the page of `first` at rising, non-overlapping offsets.
-fn run_length(rest: &[Entry], first: &Slot) -> usize {
+/// Leading entries of `rest` in the page of `first` at rising, non-overlapping offsets, each
+/// with its slot.
+fn run<'a>(rest: &'a [Arc<Entry>], first: &'a Slot) -> impl Iterator<Item = (&'a Entry, &'a Slot)> {
     let mut end = first.offset;
-    rest.iter()
-        .take_while(|entry| match entry {
-            Entry::Stored { slot, .. } if slot.shares_page(first) && slot.offset >= end => {
-                end = slot.offset + slot.length;
-                true
-            }
-            _ => false,
-        })
-        .count()
-}
-
-fn slot_of(entry: &Entry) -> &Slot {
-    match entry {
-        Entry::Stored { slot, .. } => slot,
-        Entry::Memory(_) => unreachable!("a run holds stored packets only"),
-    }
-}
-
-fn visit_run<E: From<StoreError>>(
-    run: &[Entry],
-    straddling: &mut Vec<u8>,
-    visit: &mut Visit<'_, E>,
-) -> Result<(), E> {
-    let (Some(first), Some(last)) = (run.first().map(slot_of), run.last().map(slot_of)) else {
-        return Ok(());
-    };
-    let start = first.offset;
-    let span = last.offset + last.length - start;
-
-    // The sink cannot fail, so a `visit` error is parked and the rest of the read skipped.
-    let mut failed = None;
-    let mut next = 0;
-    first.page.read(start, span, &mut |at, piece| {
-        if failed.is_some() {
-            return;
+    rest.iter().map_while(move |entry| match &entry.data {
+        Data::Stored(slot) if slot.shares_page(first) && slot.offset >= end => {
+            end = slot.offset + slot.length;
+            Some((&**entry, slot))
         }
-        if let Err(error) = spread(run, start, at, piece, &mut next, straddling, visit) {
-            failed = Some(error);
-        }
-    })?;
-    if let Some(error) = failed {
-        return Err(error);
-    }
-    // Empty packets at the end of the span lie in no piece.
-    for entry in &run[next..] {
-        visit(entry, &[])?;
-    }
-    Ok(())
+        _ => None,
+    })
 }
 
-fn spread<E>(
-    run: &[Entry],
+/// How many entries the run starting at `first` has, and the page offset it ends at.
+fn extent(rest: &[Arc<Entry>], first: &Slot) -> (usize, usize) {
+    run(rest, first).fold((0, first.offset), |(count, _), (_, last)| {
+        (count + 1, last.offset + last.length)
+    })
+}
+
+/// Lays the pieces of one page read over the run's entries in order.
+struct RunReader<I: Iterator> {
+    run: Peekable<I>,
+    /// Offset in the page the read starts at.
     start: usize,
-    at: usize,
-    piece: &[u8],
-    next: &mut usize,
-    straddling: &mut Vec<u8>,
-    visit: &mut Visit<'_, E>,
-) -> Result<(), E> {
-    let piece_end = at + piece.len();
-    while let Some(entry) = run.get(*next) {
-        let slot = slot_of(entry);
-        let (slot_start, slot_end) = (slot.offset - start, slot.offset - start + slot.length);
-        if slot_start >= piece_end {
-            break;
-        }
-        let (from, to) = (slot_start.max(at), slot_end.min(piece_end));
-        let bytes = &piece[from - at..to - at];
-        if from == slot_start && to == slot_end {
-            visit(entry, bytes)?;
-        } else {
-            if from == slot_start {
-                straddling.clear();
+    /// A packet split across two pieces, gathered until it is whole.
+    straddling: Vec<u8>,
+}
+
+impl<'a, I: Iterator<Item = (&'a Entry, &'a Slot)>> RunReader<I> {
+    fn read<E: From<StoreError>>(
+        mut self,
+        page: &dyn Page,
+        span: usize,
+        visit: &mut Visit<'_, E>,
+    ) -> Result<(), E> {
+        // The sink returns nothing, so a `visit` error is parked; reading a chunk per call lets
+        // the read stop there.
+        let mut failed = None;
+        for at in (0..span).step_by(CHUNK_BYTES) {
+            let length = CHUNK_BYTES.min(span - at);
+            page.read(self.start + at, length, &mut |offset, piece| {
+                if failed.is_none()
+                    && let Err(error) = self.piece(at + offset, piece, visit)
+                {
+                    failed = Some(error);
+                }
+            })?;
+            if let Some(error) = failed {
+                return Err(error);
             }
-            straddling.extend_from_slice(bytes);
-            if to < slot_end {
+        }
+        // Empty packets at the end of the span lie in no piece.
+        for (entry, _) in self.run {
+            visit(entry, &[])?;
+        }
+        Ok(())
+    }
+
+    fn piece<E>(&mut self, at: usize, piece: &[u8], visit: &mut Visit<'_, E>) -> Result<(), E> {
+        let piece_end = at + piece.len();
+        while let Some(&(entry, slot)) = self.run.peek() {
+            let slot_start = slot.offset - self.start;
+            let slot_end = slot_start + slot.length;
+            if slot_start >= piece_end {
                 break;
             }
-            visit(entry, straddling)?;
+            let (from, to) = (slot_start.max(at), slot_end.min(piece_end));
+            let bytes = &piece[from - at..to - at];
+            if from == slot_start && to == slot_end {
+                visit(entry, bytes)?;
+            } else {
+                if from == slot_start {
+                    self.straddling.clear();
+                }
+                self.straddling.extend_from_slice(bytes);
+                if to < slot_end {
+                    break;
+                }
+                visit(entry, &self.straddling)?;
+            }
+            self.run.next();
         }
-        *next += 1;
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::{assert_matches, sync::Mutex};
+    use std::{
+        assert_matches,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     pub(crate) struct MemoryPage {
         bytes: Mutex<Vec<u8>>,
         piece: usize,
+        reads: Arc<AtomicUsize>,
     }
 
     impl Page for MemoryPage {
@@ -331,6 +348,7 @@ pub(crate) mod tests {
             length: usize,
             sink: &mut dyn FnMut(usize, &[u8]),
         ) -> Result<(), StoreError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
             let bytes = self.bytes.lock().unwrap();
             for (at, piece) in bytes[offset..offset + length]
                 .chunks(self.piece)
@@ -349,6 +367,7 @@ pub(crate) mod tests {
         piece: usize,
         pub(crate) fail_after: usize,
         put: usize,
+        reads: Arc<AtomicUsize>,
     }
 
     impl MemoryStore {
@@ -359,54 +378,60 @@ pub(crate) mod tests {
                 piece,
                 fail_after: usize::MAX,
                 put: 0,
+                reads: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         pub(crate) fn pages(&self) -> usize {
             self.pages.count()
         }
+
+        /// Calls to `Page::read` on any of the pages.
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::Relaxed)
+        }
     }
 
     impl Store for MemoryStore {
         fn put(&mut self, data: &[u8]) -> Result<Slot, StoreError> {
             if self.put >= self.fail_after {
-                return Err(StoreError::call("store the packet")(std::io::Error::other(
-                    "the store is full",
-                )));
+                return Err(StoreError::Refused("the store is full".to_owned()));
             }
             let (page_bytes, piece) = (self.page_bytes, self.piece);
+            let reads = Arc::clone(&self.reads);
             let (page, offset) = self.pages.place(data.len(), || {
                 Ok(MemoryPage {
                     bytes: Mutex::new(vec![0; page_bytes]),
                     piece,
+                    reads,
                 })
             })?;
             page.bytes.lock().unwrap()[offset..offset + data.len()].copy_from_slice(data);
             self.put += 1;
-            Ok(Pages::slot(page, offset, data.len()))
+            Ok(Slot::new(page, offset, data.len()))
         }
     }
 
-    fn stored(store: &mut MemoryStore, index: u64, data: &[u8]) -> Entry {
-        Entry::Stored {
+    fn stored(store: &mut MemoryStore, index: u64, data: &[u8]) -> Arc<Entry> {
+        Arc::new(Entry {
             index,
             keyframe: index == 0,
-            slot: store.put(data).unwrap(),
-        }
+            data: Data::Stored(store.put(data).unwrap()),
+        })
     }
 
     #[test]
-    fn packets_come_back_from_pages_in_pieces_and_from_memory_as_they_are() {
+    fn packets_come_back_from_pages_in_pieces_and_from_memory() {
         let mut store = MemoryStore::new(10, 3);
-        let in_memory = Arc::new(Packet {
+        let in_memory = Arc::new(Entry {
             index: 2,
             keyframe: false,
-            data: vec![9; 4].into(),
+            data: Data::Memory(vec![9; 4].into()),
         });
         let entries = [
             stored(&mut store, 0, &[1, 2, 3, 4]),
             stored(&mut store, 1, &[5, 6, 7, 8, 9]),
-            Entry::Memory(Arc::clone(&in_memory)),
+            in_memory,
             stored(&mut store, 3, &[10, 11]),
             stored(&mut store, 4, &[12]),
         ];
@@ -424,7 +449,6 @@ pub(crate) mod tests {
                 &[12]
             ]
         );
-        assert!(Arc::ptr_eq(&packets[2], &in_memory));
         assert_eq!(
             packets
                 .iter()
@@ -437,14 +461,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_run_ends_where_the_offsets_stop_rising() {
-        let page: Arc<MemoryPage> = Arc::new(MemoryPage {
+        let page: Arc<dyn Page> = Arc::new(MemoryPage {
             bytes: Mutex::new((0..10).collect()),
             piece: 10,
+            reads: Arc::default(),
         });
-        let entry = |index, offset, length| Entry::Stored {
-            index,
-            keyframe: false,
-            slot: Pages::slot(Arc::clone(&page), offset, length),
+        let entry = |index, offset, length| {
+            Arc::new(Entry {
+                index,
+                keyframe: false,
+                data: Data::Stored(Slot::new(Arc::clone(&page), offset, length)),
+            })
         };
         let entries = [
             entry(0, 6, 2),
@@ -457,10 +484,27 @@ pub(crate) mod tests {
         let data: Vec<&[u8]> = packets.iter().map(|packet| &packet.data[..]).collect();
         assert_eq!(data, [&[6, 7][..], &[2, 3, 4], &[4, 5], &[6]]);
         assert_eq!(
-            run_length(&entries, &Pages::slot(Arc::clone(&page), 6, 2)),
+            run(&entries, &Slot::new(Arc::clone(&page), 6, 2)).count(),
             1
         );
-        assert_eq!(run_length(&entries[1..], &Pages::slot(page, 2, 3)), 1);
+        assert_eq!(run(&entries[1..], &Slot::new(page, 2, 3)).count(), 1);
+    }
+
+    #[test]
+    fn a_run_is_read_a_chunk_at_a_time_and_no_further_than_a_failed_visit() {
+        let mut store = MemoryStore::new(2 * CHUNK_BYTES, CHUNK_BYTES);
+        let entries = [
+            stored(&mut store, 0, &vec![1; CHUNK_BYTES]),
+            stored(&mut store, 1, &[2]),
+        ];
+        assert_eq!(fetch(&entries).unwrap().len(), 2);
+        assert_eq!(store.reads(), 2);
+
+        let refused = each(&entries, &mut |_, _| {
+            Err(StoreError::Refused("the file is full".to_owned()))
+        });
+        assert_matches!(refused, Err(StoreError::Refused(_)));
+        assert_eq!(store.reads(), 3);
     }
 
     #[test]
@@ -498,6 +542,6 @@ pub(crate) mod tests {
         let mut store = MemoryStore::new(4, 2);
         assert_matches!(store.put(&[0; 5]), Err(StoreError::TooLarge(5)));
         store.fail_after = 0;
-        assert_matches!(store.put(&[0; 1]), Err(StoreError::Call { .. }));
+        assert_matches!(store.put(&[0; 1]), Err(StoreError::Refused(_)));
     }
 }

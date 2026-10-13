@@ -19,6 +19,28 @@ pub(super) fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
+/// The first unit of each of the `kinds`, when the stream carries them all.
+pub(super) fn find_units<const N: usize>(
+    stream: &[u8],
+    nal_type: fn(&[u8]) -> u8,
+    kinds: [u8; N],
+) -> Option<[&[u8]; N]> {
+    let units: Vec<&[u8]> = nal_units(stream).collect();
+    let mut found: [&[u8]; N] = [&[]; N];
+    for (slot, kind) in found.iter_mut().zip(kinds) {
+        *slot = units.iter().copied().find(|unit| nal_type(unit) == kind)?;
+    }
+    Some(found)
+}
+
+pub(super) fn units_except<'a>(
+    stream: &'a [u8],
+    nal_type: fn(&[u8]) -> u8,
+    kinds: &'a [u8],
+) -> impl Iterator<Item = &'a [u8]> {
+    nal_units(stream).filter(move |unit| !kinds.contains(&nal_type(unit)))
+}
+
 fn start_code(data: &[u8]) -> Option<usize> {
     data.windows(START_CODE.len())
         .position(|window| window == START_CODE)

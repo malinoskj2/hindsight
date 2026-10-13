@@ -8,11 +8,25 @@ pub(crate) const CLOCK_RATE: i64 = 10_000_000;
 pub(crate) const FRAME_SAMPLES: u32 = 1024;
 const SECONDS_BEFORE_VIDEO: u64 = 10;
 
-pub(crate) fn tick_time(origin: i64, frame_rate: u32, index: u64) -> i64 {
-    let offset = i128::from(index) * i128::from(CLOCK_RATE) / i128::from(frame_rate.max(1));
-    origin.saturating_add(i64::try_from(offset).unwrap_or(i64::MAX))
+/// Clock ticks in `samples` at `rate` a second, saturating.
+pub(crate) fn ticks_of(samples: impl Into<i128>, rate: u32) -> i64 {
+    saturate(samples.into() * i128::from(CLOCK_RATE) / i128::from(rate))
 }
 
+/// Samples at `rate` a second in `ticks`, rounded down, saturating.
+pub(crate) fn samples_of(ticks: i64, rate: u32) -> i64 {
+    saturate((i128::from(ticks) * i128::from(rate)).div_euclid(i128::from(CLOCK_RATE)))
+}
+
+fn saturate(value: i128) -> i64 {
+    i64::try_from(value).unwrap_or(if value < 0 { i64::MIN } else { i64::MAX })
+}
+
+pub(crate) fn tick_time(origin: i64, frame_rate: u32, index: u64) -> i64 {
+    origin.saturating_add(ticks_of(index, frame_rate))
+}
+
+/// Never a zero rate or channel count: `Live::set_audio` raises those to one.
 #[derive(Debug)]
 pub(crate) struct AudioFormat {
     pub(crate) sample_rate: u32,
@@ -26,19 +40,15 @@ pub(crate) struct AudioFormat {
 impl AudioFormat {
     /// Encoder output sample playing at `time`; negative before the stream began.
     fn sample_at(&self, time: i64) -> i64 {
-        let elapsed = i128::from(time) - i128::from(self.anchor);
-        let input = (elapsed * i128::from(self.sample_rate)).div_euclid(i128::from(CLOCK_RATE));
-        i64::try_from(input)
-            .unwrap_or(if input < 0 { i64::MIN } else { i64::MAX })
+        samples_of(time.saturating_sub(self.anchor), self.sample_rate)
             .saturating_add(i64::from(self.priming))
     }
 
     #[cfg(test)]
     pub(crate) fn frame_time(&self, number: u64) -> i64 {
         let input = i128::from(number) * i128::from(FRAME_SAMPLES) - i128::from(self.priming);
-        let offset = input * i128::from(CLOCK_RATE) / i128::from(self.sample_rate.max(1));
         self.anchor
-            .saturating_add(i64::try_from(offset).unwrap_or(i64::MAX))
+            .saturating_add(ticks_of(input, self.sample_rate))
     }
 
     /// The frame before the one playing at `start`; the decoder needs it to rebuild that one.
@@ -50,6 +60,10 @@ impl AudioFormat {
 
     fn frame_input(first: i64) -> i64 {
         first.saturating_mul(i64::from(FRAME_SAMPLES))
+    }
+
+    fn channels(&self) -> usize {
+        usize::from(self.channels)
     }
 }
 
@@ -79,30 +93,28 @@ impl Chunk {
 #[derive(Default)]
 pub(crate) struct AudioRing {
     chunks: VecDeque<Chunk>,
-    channels: usize,
 }
 
 impl AudioRing {
     pub(crate) fn push(&mut self, format: &AudioFormat, start: u64, data: Arc<[i16]>) {
-        self.channels = usize::from(format.channels.max(1));
+        let channels = format.channels();
         let mut chunk = Chunk {
             start,
             data,
             offset: 0,
         };
-        let end = self.end();
+        let end = self.end(channels);
         if end > chunk.start {
             let overlap = usize::try_from(end - chunk.start).unwrap_or(usize::MAX);
-            chunk.offset = overlap.saturating_mul(self.channels).min(chunk.data.len());
+            chunk.offset = overlap.saturating_mul(channels).min(chunk.data.len());
             chunk.start = end;
         }
-        if chunk.length(self.channels) > 0 {
+        if chunk.length(channels) > 0 {
             self.chunks.push_back(chunk);
         }
     }
 
-    pub(crate) fn drop_before(&mut self, sample: u64) {
-        let channels = self.channels.max(1);
+    fn drop_before(&mut self, channels: usize, sample: u64) {
         while let Some(oldest) = self.chunks.front_mut() {
             if oldest.end(channels) <= sample {
                 self.chunks.pop_front();
@@ -118,25 +130,24 @@ impl AudioRing {
     }
 
     pub(crate) fn trim(&mut self, format: &AudioFormat, start: Option<i64>) {
+        let channels = format.channels();
         let keep_from = match start {
             Some(start) => {
                 u64::try_from(AudioFormat::frame_input(format.first_frame(start))).unwrap_or(0)
             }
             None => self
-                .end()
+                .end(channels)
                 .saturating_sub(SECONDS_BEFORE_VIDEO * u64::from(format.sample_rate)),
         };
-        self.drop_before(keep_from);
+        self.drop_before(channels, keep_from);
     }
 
-    fn end(&self) -> u64 {
-        self.chunks
-            .back()
-            .map_or(0, |newest| newest.end(self.channels.max(1)))
+    fn end(&self, channels: usize) -> u64 {
+        self.chunks.back().map_or(0, |newest| newest.end(channels))
     }
 
-    fn since(&self, sample: i64) -> Vec<Chunk> {
-        let channels = self.channels.max(1);
+    fn since(&self, format: &AudioFormat, sample: i64) -> Vec<Chunk> {
+        let channels = format.channels();
         let from = u64::try_from(sample).unwrap_or(0);
         let first = self
             .chunks
@@ -153,8 +164,8 @@ impl AudioRing {
     }
 
     #[cfg(test)]
-    pub(crate) fn runs(&self) -> Vec<(u64, u64)> {
-        let channels = self.channels.max(1);
+    pub(crate) fn runs(&self, format: &AudioFormat) -> Vec<(u64, u64)> {
+        let channels = format.channels();
         self.chunks
             .iter()
             .map(|chunk| (chunk.start, chunk.length(channels)))
@@ -176,7 +187,7 @@ pub(crate) struct PcmClip {
 impl PcmClip {
     pub(crate) fn read(&self, from: i64, output: &mut [i16]) {
         output.fill(0);
-        let channels = usize::from(self.format.channels.max(1));
+        let channels = self.format.channels();
         let to = from.saturating_add(i64::try_from(output.len() / channels).unwrap_or(i64::MAX));
         let end_of = |chunk: &Chunk| i64::try_from(chunk.end(channels)).unwrap_or(i64::MAX);
         let first = self.chunks.partition_point(|chunk| end_of(chunk) <= from);
@@ -216,7 +227,7 @@ pub(crate) fn cut(ring: &AudioRing, format: &Arc<AudioFormat>, start: i64, end: 
         start: input,
         frames: usize::try_from(end_frame - first).unwrap_or(0),
         lead: u32::try_from(first_sample - first * samples).unwrap_or(0),
-        chunks: ring.since(input),
+        chunks: ring.since(format, input),
     }
 }
 
@@ -244,21 +255,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn encoded_fixture() -> Vec<Arc<[u8]>> {
-        let mut rest: &[u8] = include_bytes!("../../tests/fixtures/aac.adts");
-        let mut frames = Vec::new();
-        while !rest.is_empty() {
-            assert_eq!(
-                &rest[..2],
-                &[0xFF, 0xF1],
-                "an ADTS header without a checksum"
-            );
-            let length = (usize::from(rest[3] & 0x03) << 11)
-                | (usize::from(rest[4]) << 3)
-                | usize::from(rest[5] >> 5);
-            frames.push(Arc::from(&rest[7..length]));
-            rest = &rest[length..];
-        }
-        frames
+        crate::audio::testing::frames(include_bytes!("../../tests/fixtures/aac.adts"))
     }
 
     pub(crate) fn numbered(start: u64, length: u64) -> Arc<[i16]> {
@@ -302,16 +299,16 @@ pub(crate) mod tests {
             ring.push(&format, chunk * 1000, numbered(chunk * 1000, 1000));
         }
         ring.trim(&format, Some(time_of(10 * 1024 + 100) - time_of(1024)));
-        let runs = ring.runs();
+        let runs = ring.runs(&format);
         assert_eq!(runs[0], (9216, 784));
         assert_eq!(runs[1], (10_000, 1000));
         assert_eq!(runs.len(), 11);
         assert_eq!(ring.bytes(), (20_000 - 9216) * 4);
 
         ring.push(&format, 19_500, numbered(19_500, 1000));
-        assert_eq!(ring.runs().last(), Some(&(20_000, 500)));
+        assert_eq!(ring.runs(&format).last(), Some(&(20_000, 500)));
         ring.push(&format, 19_000, numbered(19_000, 100));
-        assert_eq!(ring.runs().len(), 12);
+        assert_eq!(ring.runs(&format).len(), 12);
     }
 
     #[test]
@@ -323,7 +320,7 @@ pub(crate) mod tests {
             ring.push(&format, chunk * second, numbered(chunk * second, second));
             ring.trim(&format, None);
         }
-        let runs = ring.runs();
+        let runs = ring.runs(&format);
         assert_eq!(runs.len(), usize::try_from(SECONDS_BEFORE_VIDEO).unwrap());
         assert_eq!(runs[0].0, 2 * second);
     }

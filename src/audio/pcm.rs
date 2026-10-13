@@ -1,7 +1,7 @@
 //! Converts WASAPI's float or 16-bit samples to the interleaved 16-bit stereo the encoder takes.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Sample {
+pub(super) enum Sample {
     Float,
     Int16,
 }
@@ -16,20 +16,20 @@ impl Sample {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Layout {
-    pub(crate) sample: Sample,
-    pub(crate) channels: u16,
+pub(super) struct Layout {
+    pub(super) sample: Sample,
+    pub(super) channels: u16,
 }
 
 impl Layout {
-    pub(crate) const fn frame_bytes(self) -> usize {
+    pub(super) const fn frame_bytes(self) -> usize {
         self.sample.bytes() * self.channels as usize
     }
 }
 
 /// Mono is doubled; channels past the first two are dropped.
-pub(crate) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
-    let channels = usize::from(layout.channels.max(1));
+pub(super) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
+    let channels = usize::from(layout.channels);
     let width = layout.sample.bytes();
     for frame in data.chunks_exact(width * channels) {
         let left = read(&frame[..width], layout.sample);

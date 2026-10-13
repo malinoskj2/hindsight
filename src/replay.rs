@@ -23,7 +23,9 @@ mod mp4;
 mod ring;
 mod store;
 
-pub(crate) use audio::{AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip};
+pub(crate) use audio::{
+    AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, samples_of, ticks_of,
+};
 use audio::{AudioRing, tick_time};
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
@@ -81,16 +83,42 @@ impl Matrix {
 pub(crate) struct Live {
     ring: Mutex<Ring>,
     stream: OnceLock<Stream>,
+    counters: Counters,
+    on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    origin: OnceLock<i64>,
+    audio: OnceLock<Arc<AudioFormat>>,
+    sound: Mutex<AudioRing>,
+}
+
+/// Tallies of the frames pushed, read without the ring's lock.
+struct Counters {
     encoded: AtomicU64,
     /// Frames that brought new screen content.
     fresh: AtomicU64,
     bytes: AtomicU64,
-    on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
-    origin: OnceLock<i64>,
     /// Index of the oldest buffered packet, or `u64::MAX`; the sound is trimmed to it.
     oldest: AtomicU64,
-    audio: OnceLock<Arc<AudioFormat>>,
-    sound: Mutex<AudioRing>,
+}
+
+impl Counters {
+    fn new() -> Self {
+        Self {
+            encoded: AtomicU64::new(0),
+            fresh: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            oldest: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    fn frame(&self, bytes: usize, oldest: Option<u64>, fresh: bool) {
+        self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.oldest
+            .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.encoded.fetch_add(1, Ordering::Relaxed);
+        if fresh {
+            self.fresh.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Live {
@@ -98,12 +126,9 @@ impl Live {
         Self {
             ring: Mutex::new(Ring::new(span)),
             stream: OnceLock::new(),
-            encoded: AtomicU64::new(0),
-            fresh: AtomicU64::new(0),
-            bytes: AtomicU64::new(0),
+            counters: Counters::new(),
             on_stream: OnceLock::new(),
             origin: OnceLock::new(),
-            oldest: AtomicU64::new(u64::MAX),
             audio: OnceLock::new(),
             sound: Mutex::new(AudioRing::default()),
         }
@@ -115,6 +140,10 @@ impl Live {
     }
 
     pub(crate) fn set_stream(&self, stream: Stream) {
+        let stream = Stream {
+            frame_rate: stream.frame_rate.max(1),
+            ..stream
+        };
         if self.stream.set(stream).is_ok()
             && let Some(callback) = self.on_stream.get()
         {
@@ -136,11 +165,26 @@ impl Live {
     }
 
     pub(crate) fn push(&self, packet: Packet, fresh: bool) {
-        self.bytes
-            .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
+        self.push_entry(packet.into(), fresh);
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, fresh: bool) {
+        self.push_entry(
+            Entry {
+                index,
+                keyframe,
+                data: store::Data::Stored(slot),
+            },
+            fresh,
+        );
+    }
+
+    fn push_entry(&self, entry: Entry, fresh: bool) {
+        let bytes = entry.length();
         let (oldest, refused) = {
             let mut ring = self.ring();
-            let refused = ring.push(packet).err();
+            let refused = ring.push(entry).err();
             (ring.first_index(), refused)
         };
         if let Some(error) = refused {
@@ -148,34 +192,12 @@ impl Live {
                 "The replay buffer could no longer be kept outside RAM ({error}); it continues in RAM"
             ));
         }
-        self.count_frame(oldest, fresh);
+        self.counters.frame(bytes, oldest, fresh);
     }
 
-    #[cfg(windows)]
-    pub(crate) fn push_stored(&self, index: u64, keyframe: bool, slot: Slot, fresh: bool) {
-        self.bytes.fetch_add(slot.length as u64, Ordering::Relaxed);
-        let oldest = {
-            let mut ring = self.ring();
-            ring.push_entry(Entry::Stored {
-                index,
-                keyframe,
-                slot,
-            });
-            ring.first_index()
-        };
-        self.count_frame(oldest, fresh);
-    }
-
-    fn count_frame(&self, oldest: Option<u64>, fresh: bool) {
-        self.oldest
-            .store(oldest.unwrap_or(u64::MAX), Ordering::Relaxed);
-        self.encoded.fetch_add(1, Ordering::Relaxed);
-        if fresh {
-            self.fresh.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    pub(crate) fn set_audio(&self, format: AudioFormat) {
+    pub(crate) fn set_audio(&self, mut format: AudioFormat) {
+        format.sample_rate = format.sample_rate.max(1);
+        format.channels = format.channels.max(1);
         let _ = self.audio.set(Arc::new(format));
     }
 
@@ -183,7 +205,7 @@ impl Live {
         let Some(format) = self.audio.get() else {
             return;
         };
-        let video_start = self.video_time(self.oldest.load(Ordering::Relaxed));
+        let video_start = self.video_time(self.counters.oldest.load(Ordering::Relaxed));
         let mut sound = self.sound();
         sound.push(format, start, data);
         sound.trim(format, video_start);
@@ -196,13 +218,14 @@ impl Live {
     }
 
     pub(crate) fn bytes(&self) -> u64 {
-        self.bytes.load(Ordering::Relaxed)
+        self.counters.bytes.load(Ordering::Relaxed)
     }
 
+    /// Frames encoded, and how many of them were fresh.
     pub(crate) fn counters(&self) -> (u64, u64) {
         (
-            self.encoded.load(Ordering::Relaxed),
-            self.fresh.load(Ordering::Relaxed),
+            self.counters.encoded.load(Ordering::Relaxed),
+            self.counters.fresh.load(Ordering::Relaxed),
         )
     }
 
@@ -216,7 +239,7 @@ impl Live {
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
         let entries = self.ring().snapshot();
-        let (first, last) = (entries.first()?.index(), entries.last()?.index());
+        let (first, last) = (entries.first()?.index, entries.last()?.index);
         let audio = self.audio_between(first, last + 1);
         Some(Snapshot {
             stream,
@@ -247,15 +270,15 @@ impl Live {
 
 pub(crate) struct Snapshot {
     stream: Stream,
-    entries: Vec<Entry>,
+    entries: Vec<Arc<Entry>>,
     audio: Option<PcmClip>,
 }
 
 impl Snapshot {
     pub(crate) fn seconds(&self) -> f64 {
         seconds(
-            self.entries.first().map(Entry::index),
-            self.entries.last().map(Entry::index),
+            self.entries.first().map(|entry| entry.index),
+            self.entries.last().map(|entry| entry.index),
             self.stream.frame_rate,
         )
     }
@@ -271,10 +294,10 @@ impl Snapshot {
 }
 
 /// Stored packets are read back a run at a time on each pass, never all at once.
-impl mp4::Packets for [Entry] {
+impl mp4::Packets for [Arc<Entry>] {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
         store::each(self, &mut |entry, data| {
-            each(entry.index(), entry.keyframe(), data)
+            each(entry.index, entry.keyframe, data)
         })
     }
 }
@@ -414,8 +437,8 @@ fn unused_path(directory: &Path, stamp: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use h264::tests::{inter_frame, keyframe};
     use std::assert_matches;
+    use store::Data;
 
     const STREAM: Stream = Stream {
         codec: Codec::H264,
@@ -425,22 +448,35 @@ mod tests {
         matrix: Matrix::Bt709,
     };
 
+    /// The real encoder output in `tests/fixtures` is 128×72.
+    fn fixture_stream(codec: Codec) -> Stream {
+        Stream {
+            codec,
+            width: 128,
+            height: 72,
+            ..STREAM
+        }
+    }
+
+    /// An H.264 packet of at least `bytes`, a keyframe every 30 frames.
+    fn h264_packet(index: u64, bytes: usize) -> Packet {
+        let keyframe = index.is_multiple_of(30);
+        let mut data = if keyframe {
+            h264::tests::keyframe()
+        } else {
+            h264::tests::inter_frame()
+        };
+        data.resize(data.len().max(bytes), 0xAB);
+        Packet {
+            index,
+            keyframe,
+            data: data.into(),
+        }
+    }
+
     fn push_frames(live: &Live, frames: u64) {
         for index in 0..frames {
-            let keyframe_packet = index % 30 == 0;
-            let data = if keyframe_packet {
-                keyframe()
-            } else {
-                inter_frame()
-            };
-            live.push(
-                Packet {
-                    index,
-                    keyframe: keyframe_packet,
-                    data: data.into(),
-                },
-                index % 2 == 0,
-            );
+            live.push(h264_packet(index, 0), index % 2 == 0);
         }
     }
 
@@ -483,7 +519,7 @@ mod tests {
             let kinds: Vec<bool> = snapshot
                 .entries
                 .iter()
-                .map(|entry| matches!(entry, Entry::Memory(_)))
+                .map(|entry| matches!(entry.data, Data::Memory(_)))
                 .collect();
             assert_eq!(kinds.contains(&true), fail_after != usize::MAX);
             assert!(!kinds[0], "the oldest packets are in the store");
@@ -506,14 +542,8 @@ mod tests {
     fn a_buffer_on_disk_saves_the_same_clip() {
         let push = |live: &Live| {
             for index in 0..100 {
-                let keyframe_packet = index % 30 == 0;
-                let data = large_frame(keyframe_packet, 200 + 5 * usize::try_from(index).unwrap());
-                let packet = Packet {
-                    index,
-                    keyframe: keyframe_packet,
-                    data,
-                };
-                live.push(packet, true);
+                let bytes = 200 + 5 * usize::try_from(index).unwrap();
+                live.push(h264_packet(index, bytes), true);
             }
         };
         let in_memory = Live::new(60);
@@ -536,7 +566,7 @@ mod tests {
             snapshot
                 .entries
                 .iter()
-                .all(|entry| matches!(entry, Entry::Stored { .. }))
+                .all(|entry| matches!(entry.data, Data::Stored(_)))
         );
         assert!(control.queued() > 0);
 
@@ -551,16 +581,6 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), expected, "from the file");
     }
 
-    fn large_frame(keyframe_frame: bool, bytes: usize) -> Box<[u8]> {
-        let mut data = if keyframe_frame {
-            keyframe()
-        } else {
-            inter_frame()
-        };
-        data.resize(bytes, 0xAB);
-        data.into()
-    }
-
     #[test]
     fn a_save_from_a_store_holds_a_few_packets_not_the_clip() {
         const FRAMES: usize = 120;
@@ -569,14 +589,7 @@ mod tests {
         live.set_stream(STREAM);
         live.set_store(Box::new(store::tests::MemoryStore::new(4 << 20, 1 << 20)));
         for (index, extra) in (0..).zip(0..FRAMES) {
-            let keyframe_packet = index % 30 == 0;
-            let data = large_frame(keyframe_packet, FRAME_BYTES + extra);
-            let packet = Packet {
-                index,
-                keyframe: keyframe_packet,
-                data,
-            };
-            live.push(packet, true);
+            live.push(h264_packet(index, FRAME_BYTES + extra), true);
         }
         let snapshot = live.snapshot().unwrap();
         let clip_bytes = FRAMES * FRAME_BYTES;
@@ -648,16 +661,10 @@ mod tests {
 
             let mut ring = Ring::new(40);
             for packet in packets {
-                ring.push(packet).unwrap();
+                ring.push(packet.into()).unwrap();
             }
             let clip = Clip {
-                stream: Stream {
-                    codec,
-                    width: 128,
-                    height: 72,
-                    frame_rate: 30,
-                    matrix: Matrix::Bt709,
-                },
+                stream: fixture_stream(codec),
                 packets: store::fetch(&ring.snapshot()).unwrap(),
                 audio: None,
             };
@@ -732,13 +739,7 @@ mod tests {
     #[test]
     fn real_encoder_output_muxes_with_sound() {
         let live = Live::new(40);
-        live.set_stream(Stream {
-            codec: Codec::H264,
-            width: 128,
-            height: 72,
-            frame_rate: 30,
-            matrix: Matrix::Bt709,
-        });
+        live.set_stream(fixture_stream(Codec::H264));
         live.set_origin(0);
         let frames = audio::tests::encoded_fixture();
         assert_eq!(frames.len(), 119);
@@ -841,16 +842,7 @@ mod tests {
         let read: u64 = 2880;
         let mut next_sample: u64 = 0;
         for index in 0..150 {
-            let key = index % 30 == 0;
-            let data = if key { keyframe() } else { inter_frame() };
-            live.push(
-                Packet {
-                    index,
-                    keyframe: key,
-                    data: data.into(),
-                },
-                true,
-            );
+            live.push(h264_packet(index, 0), true);
             let now = tick_time(0, 30, index);
             while i64::try_from((next_sample + read) * 10_000_000 / 48_000).unwrap() <= now {
                 live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
@@ -871,7 +863,8 @@ mod tests {
         assert_eq!(samples, [0; 4]);
 
         live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
-        assert_eq!(live.sound().runs()[0].0, 139 * 1024);
+        let format = live.audio.get().unwrap();
+        assert_eq!(live.sound().runs(format)[0].0, 139 * 1024);
     }
 
     #[cfg(windows)]
@@ -964,25 +957,8 @@ mod tests {
         let snapshot = snapshot_with_sound(&live).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let clip = save(&snapshot, directory.path()).unwrap();
-        let raw = directory.path().join("sound.raw");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-i"])
-            .arg(&clip)
-            .args(["-map", "0:a", "-f", "s16le", "-ac", "1"])
-            .arg(&raw)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let decoded: Vec<i16> = fs::read(&raw)
-            .unwrap()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| i16::from_le_bytes(*pair))
-            .collect();
-        let peak = (0..decoded.len())
-            .max_by_key(|&index| decoded[index].unsigned_abs())
-            .unwrap();
+        let decoded = crate::audio::testing::decode_mono(&clip);
+        let peak = crate::audio::testing::peak(&decoded);
         println!(
             "{} samples decoded for 2 s of video, the click at {peak}",
             decoded.len()
@@ -1071,11 +1047,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let snapshot = Snapshot {
             stream: STREAM,
-            entries: vec![Entry::Memory(Arc::new(Packet {
-                index: 0,
-                keyframe: false,
-                data: inter_frame().into(),
-            }))],
+            entries: vec![Arc::new(h264_packet(1, 0).into())],
             audio: None,
         };
 

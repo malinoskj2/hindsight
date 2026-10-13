@@ -1,7 +1,9 @@
 //! A minimal MP4 writer: one H.264, HEVC or AV1 video track and optionally one AAC track, with
 //! `moov` ahead of `mdat`, so the packets are passed over twice.
 
-use super::{AudioClip, FRAME_SAMPLES, Packet, StoreError, Stream, configuration, sample_parts};
+#[cfg(test)]
+use super::Packet;
+use super::{AudioClip, FRAME_SAMPLES, StoreError, Stream, configuration, sample_parts};
 use crate::config::Codec;
 use mp4_atom::{
     Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Decode, Dinf, Dref, Edts,
@@ -11,13 +13,15 @@ use mp4_atom::{
     esds::{DecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
     u24,
 };
-use std::{io, slice, sync::Arc};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{io, slice};
 use thiserror::Error;
 
 /// Media ticks per frame; the track time scale is the frame rate times this.
 const TICKS_PER_FRAME: u32 = 1000;
 const MOVIE_TIMESCALE: u32 = 1000;
-const TRACK_ID: u32 = 1;
+const VIDEO_TRACK_ID: u32 = 1;
 const AUDIO_TRACK_ID: u32 = 2;
 const CHUNK_SECONDS: u64 = 1;
 /// `esds` object and stream types for AAC (ISO/IEC 14496-1).
@@ -103,7 +107,7 @@ impl<'a> Sound<'a> {
         let frames_per_second = (self.clip.sample_rate / FRAME_SAMPLES).max(1) as usize;
         let bits = |sizes: &[u32]| sizes.iter().map(|&size| u64::from(size) * 8).sum::<u64>();
         let seconds = (self.sizes.len() as u64 * u64::from(FRAME_SAMPLES))
-            .div_ceil(u64::from(self.clip.sample_rate.max(1)))
+            .div_ceil(u64::from(self.clip.sample_rate))
             .max(1);
         let average = bits(&self.sizes) / seconds;
         let peak = self
@@ -152,7 +156,7 @@ impl Layout {
             };
         };
         let first_index = track.samples.first().map_or(0, |sample| sample.index);
-        let frame_rate = u64::from(track.stream.frame_rate.max(1));
+        let frame_rate = u64::from(track.stream.frame_rate);
         let video = runs(
             Kind::Video,
             track.samples.iter().map(|sample| {
@@ -160,7 +164,7 @@ impl Layout {
                 (window, u64::from(sample.size))
             }),
         );
-        let rate = u64::from(sound.clip.sample_rate.max(1));
+        let rate = u64::from(sound.clip.sample_rate);
         let lead = u64::from(sound.clip.lead);
         let audio = runs(
             Kind::Audio,
@@ -251,7 +255,7 @@ pub(crate) enum MuxError {
     Index(#[from] mp4_atom::Error),
     #[error("write the clip: {0}")]
     Io(#[from] io::Error),
-    #[error("read the buffer back from GPU memory: {0}")]
+    #[error("read the buffer back: {0}")]
     Read(#[from] StoreError),
 }
 
@@ -262,6 +266,7 @@ pub(crate) trait Packets {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError>;
 }
 
+#[cfg(test)]
 impl Packets for [Arc<Packet>] {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
         self.iter()
@@ -541,11 +546,7 @@ fn movie(
             layout.placement(Kind::Audio, media_offset)?,
         )?);
     }
-    let next_track_id = if sound.is_some() {
-        AUDIO_TRACK_ID
-    } else {
-        TRACK_ID
-    } + 1;
+    let next_track_id = fit::<u32, _>(tracks.len())? + 1;
     Ok(Moov {
         mvhd: Mvhd {
             timescale: MOVIE_TIMESCALE,
@@ -573,7 +574,7 @@ fn video_track(
         .collect();
     Ok(Trak {
         tkhd: Tkhd {
-            track_id: TRACK_ID,
+            track_id: VIDEO_TRACK_ID,
             duration: durations.movie.into(),
             enabled: true,
             in_movie: true,
@@ -618,7 +619,7 @@ fn media_header(timescale: u32, duration: u32) -> Mdhd {
 
 fn handler(kind: [u8; 4], name: &str) -> Hdlr {
     Hdlr {
-        handler: FourCC::from(kind),
+        handler: FourCC::new(&kind),
         name: name.to_owned(),
     }
 }

@@ -2,7 +2,7 @@
 //! `avcC`.
 
 use super::{
-    annexb::nal_units,
+    annexb::{find_units, nal_units, units_except},
     mp4::{self, NAL_LENGTH_BYTES},
 };
 use mp4_atom::{Avcc, AvccExt};
@@ -12,6 +12,8 @@ const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 pub(super) const NAL_AUD: u8 = 9;
+/// Parameter sets live in `avcC`, and delimiters nowhere; the rest of a unit is its sample.
+const NOT_IN_SAMPLES: [u8; 3] = [NAL_SPS, NAL_PPS, NAL_AUD];
 /// Profiles whose `avcC` record also carries the chroma format and bit depths.
 const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
 const CHROMA_420: u8 = 1;
@@ -22,9 +24,8 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
 
 /// The `avcC` record, when the access unit carries both an SPS and a PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
-    let units: Vec<&[u8]> = nal_units(access_unit).collect();
-    let of_type = |kind| units.iter().copied().find(|unit| nal_type(unit) == kind);
-    let mut record = Avcc::new(of_type(NAL_SPS)?, of_type(NAL_PPS)?).ok()?;
+    let [sps, pps] = find_units(access_unit, nal_type, [NAL_SPS, NAL_PPS])?;
+    let mut record = Avcc::new(sps, pps).ok()?;
     record.length_size = NAL_LENGTH_BYTES;
     // 8-bit luma and chroma, with no SPS extensions.
     if HIGH_PROFILES.contains(&record.avc_profile_indication) {
@@ -36,11 +37,8 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
     mp4::record(&record)
 }
 
-/// The sample's NAL units without parameter sets (those live in `avcC`) or delimiters.
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
-    nal_units(access_unit)
-        .filter(|unit| !matches!(nal_type(unit), NAL_SPS | NAL_PPS | NAL_AUD))
-        .collect()
+    units_except(access_unit, nal_type, &NOT_IN_SAMPLES).collect()
 }
 
 pub(super) fn nal_type(unit: &[u8]) -> u8 {

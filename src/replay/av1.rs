@@ -16,15 +16,15 @@ const OBU_TYPE_MASK: u8 = 0x0F;
 const OBU_EXTENSION_FLAG: u8 = 0x04;
 const OBU_HAS_SIZE_FIELD: u8 = 0x02;
 const MAX_LEB128_BYTES: usize = 8;
-const KEY_FRAME: u32 = 0;
-const PROFILE_MAIN: u32 = 0;
-const PROFILE_HIGH: u32 = 1;
-const PROFILE_PROFESSIONAL: u32 = 2;
+const KEY_FRAME: u8 = 0;
+const PROFILE_MAIN: u8 = 0;
+const PROFILE_HIGH: u8 = 1;
+const PROFILE_PROFESSIONAL: u8 = 2;
 /// Levels above 3.3 signal a tier.
-const MAX_LEVEL_WITHOUT_TIER: u32 = 7;
+const MAX_LEVEL_WITHOUT_TIER: u8 = 7;
 /// sRGB, which the sequence header codes without chroma subsampling.
-const SRGB: (u32, u32, u32) = (1, 13, 0);
-const UNSPECIFIED_COLOUR: (u32, u32, u32) = (2, 2, 2);
+const SRGB: (u8, u8, u8) = (1, 13, 0);
+const UNSPECIFIED_COLOUR: (u8, u8, u8) = (2, 2, 2);
 
 type Bits<'a> = BitReader<&'a [u8], BigEndian>;
 
@@ -34,7 +34,7 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
         .and_then(|obu| {
             let mut bits = Bits::new(obu.payload);
             let show_existing_frame = bits.read_bit().ok()?;
-            let frame_type = bits.read::<2, u32>().ok()?;
+            let frame_type = bits.read::<2, u8>().ok()?;
             Some(!show_existing_frame && frame_type == KEY_FRAME)
         })
         .unwrap_or(false)
@@ -43,7 +43,7 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
 pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
     let obu = obus(temporal_unit).find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload).ok()?;
-    let mut record = sequence.record()?;
+    let mut record = sequence.record();
     write_sized_obu(&mut record.config_obus, &obu);
     mp4::record(&record)
 }
@@ -146,8 +146,8 @@ fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
 
 #[derive(Debug, PartialEq, Eq)]
 struct SequenceHeader {
-    profile: u32,
-    level: u32,
+    profile: u8,
+    level: u8,
     tier: bool,
     colour: ColourConfig,
 }
@@ -156,12 +156,12 @@ impl SequenceHeader {
     /// `sequence_header_obu()` (spec 5.5) through `color_config()`.
     fn parse(payload: &[u8]) -> io::Result<Self> {
         let mut bits = Bits::new(payload);
-        let profile = bits.read::<3, u32>()?;
+        let profile = bits.read::<3, u8>()?;
         let _still_picture = bits.read_bit()?;
         let reduced_still_picture_header = bits.read_bit()?;
 
         let (level, tier) = if reduced_still_picture_header {
-            (bits.read::<5, u32>()?, false)
+            (bits.read::<5, u8>()?, false)
         } else {
             Self::first_operating_point(&mut bits)?
         };
@@ -175,24 +175,24 @@ impl SequenceHeader {
         })
     }
 
-    fn record(&self) -> Option<Av1c> {
+    fn record(&self) -> Av1c {
         let colour = &self.colour;
-        Some(Av1c {
-            seq_profile: u8::try_from(self.profile).ok()?,
-            seq_level_idx_0: u8::try_from(self.level).ok()?,
+        Av1c {
+            seq_profile: self.profile,
+            seq_level_idx_0: self.level,
             seq_tier_0: self.tier,
             high_bitdepth: colour.high_bitdepth,
             twelve_bit: colour.twelve_bit,
             monochrome: colour.monochrome,
             chroma_subsampling_x: colour.subsampling_x,
             chroma_subsampling_y: colour.subsampling_y,
-            chroma_sample_position: u8::try_from(colour.chroma_sample_position).ok()?,
+            chroma_sample_position: colour.chroma_sample_position,
             initial_presentation_delay: None,
             config_obus: Vec::new(),
-        })
+        }
     }
 
-    fn first_operating_point(bits: &mut Bits<'_>) -> io::Result<(u32, bool)> {
+    fn first_operating_point(bits: &mut Bits<'_>) -> io::Result<(u8, bool)> {
         let timing_info_present = bits.read_bit()?;
         if timing_info_present {
             Self::skip_timing_info(bits)?;
@@ -207,7 +207,7 @@ impl SequenceHeader {
         let mut first = None;
         for _ in 0..operating_points {
             let _idc = bits.read::<12, u32>()?;
-            let point_level = bits.read::<5, u32>()?;
+            let point_level = bits.read::<5, u8>()?;
             let point_tier = point_level > MAX_LEVEL_WITHOUT_TIER && bits.read_bit()?;
             if let Some(buffer_delay_length) = buffer_delay_length
                 && bits.read_bit()?
@@ -287,20 +287,20 @@ struct ColourConfig {
     monochrome: bool,
     subsampling_x: bool,
     subsampling_y: bool,
-    chroma_sample_position: u32,
+    chroma_sample_position: u8,
 }
 
 impl ColourConfig {
     /// `color_config()` (spec 5.5.2).
-    fn parse(bits: &mut Bits<'_>, profile: u32) -> io::Result<Self> {
+    fn parse(bits: &mut Bits<'_>, profile: u8) -> io::Result<Self> {
         let high_bitdepth = bits.read_bit()?;
         let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.read_bit()?;
         let monochrome = profile != PROFILE_HIGH && bits.read_bit()?;
         let colours = if bits.read_bit()? {
             (
-                bits.read::<8, u32>()?,
-                bits.read::<8, u32>()?,
-                bits.read::<8, u32>()?,
+                bits.read::<8, u8>()?,
+                bits.read::<8, u8>()?,
+                bits.read::<8, u8>()?,
             )
         } else {
             UNSPECIFIED_COLOUR
@@ -322,11 +322,7 @@ impl ColourConfig {
         })
     }
 
-    fn chroma(
-        bits: &mut Bits<'_>,
-        profile: u32,
-        twelve_bit: bool,
-    ) -> io::Result<(bool, bool, u32)> {
+    fn chroma(bits: &mut Bits<'_>, profile: u8, twelve_bit: bool) -> io::Result<(bool, bool, u8)> {
         let _color_range = bits.read_bit()?;
         let (subsampling_x, subsampling_y) = match profile {
             PROFILE_MAIN => (true, true),
@@ -338,7 +334,7 @@ impl ColourConfig {
             _ => (true, false),
         };
         let chroma_sample_position = if subsampling_x && subsampling_y {
-            bits.read::<2, u32>()?
+            bits.read::<2, u8>()?
         } else {
             0
         };

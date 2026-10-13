@@ -1,7 +1,7 @@
 //! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over a clip's PCM.
 
 use super::{EncodeError, loopback::Com};
-use crate::replay::{AudioClip, CLOCK_RATE, FRAME_SAMPLES, PcmClip};
+use crate::replay::{AudioClip, FRAME_SAMPLES, PcmClip, ticks_of};
 use std::{mem::ManuallyDrop, sync::Arc};
 use windows::{
     Win32::{
@@ -29,15 +29,19 @@ const PCM_BITS: u32 = 16;
 /// `HEAACWAVEINFO` precedes the `AudioSpecificConfig` in the output type's user data.
 const WAVE_INFO_BYTES: usize = 12;
 /// Samples the encoder prepends to its input; Microsoft's prepends none (see `encoder_delay`).
-pub(crate) const PRIMING: u32 = 0;
+pub(super) const PRIMING: u32 = 0;
 /// Most input the encoder holds back before finishing a frame: lookahead plus a partial frame.
 const HELD_BACK: u32 = 4 * FRAME_SAMPLES;
+/// 6144 bits per channel, two channels.
+const FRAME_BYTES_MAX: u32 = 2 * 6144 / 8;
+/// Samples fed to the encoder at a time.
+const CLIP_BLOCK: u32 = 8 * FRAME_SAMPLES;
 
-pub(crate) struct MediaFoundation(());
+struct MediaFoundation(());
 
 impl MediaFoundation {
     /// COM must be initialised on the calling thread.
-    pub(crate) fn start() -> Result<Self> {
+    fn start() -> Result<Self> {
         // SAFETY: paired with the shutdown in `drop`.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) }?;
         Ok(Self(()))
@@ -51,7 +55,7 @@ impl Drop for MediaFoundation {
     }
 }
 
-pub(crate) struct Encoder {
+struct Encoder {
     transform: IMFTransform,
     rate: u32,
     channels: u16,
@@ -62,7 +66,7 @@ pub(crate) struct Encoder {
 }
 
 impl Encoder {
-    pub(crate) fn open(rate: u32, channels: u16) -> Result<Self> {
+    fn open(rate: u32, channels: u16) -> Result<Self> {
         // SAFETY: COM is initialised on this thread.
         let transform: IMFTransform =
             unsafe { CoCreateInstance(&AACMFTEncoder, None, CLSCTX_INPROC_SERVER) }?;
@@ -80,15 +84,15 @@ impl Encoder {
     }
 
     /// The `AudioSpecificConfig` of the stream, for the MP4 file's `esds` box.
-    pub(crate) fn config(&self) -> Box<[u8]> {
+    fn config(&self) -> Box<[u8]> {
         self.config.clone()
     }
 
-    pub(crate) fn encode(&mut self, pcm: &[i16], mut frame: impl FnMut(Arc<[u8]>)) -> Result<()> {
+    fn encode(&mut self, pcm: &[i16], mut frame: impl FnMut(Arc<[u8]>)) -> Result<()> {
         if pcm.is_empty() {
             return Ok(());
         }
-        let frames = (pcm.len() / usize::from(self.channels.max(1))) as u64;
+        let frames = (pcm.len() / usize::from(self.channels)) as u64;
         let input = self.input_sample(pcm, frames)?;
         self.fed += frames;
         // SAFETY: the encoder takes its own reference to the sample.
@@ -101,10 +105,7 @@ impl Encoder {
 
     fn input_sample(&self, pcm: &[i16], frames: u64) -> Result<IMFSample> {
         let length = u32::try_from(size_of_val(pcm)).unwrap_or(u32::MAX);
-        let time = |samples: u64| {
-            i64::try_from(i128::from(samples) * i128::from(CLOCK_RATE) / i128::from(self.rate))
-                .unwrap_or(i64::MAX)
-        };
+        let time = |samples: u64| ticks_of(samples, self.rate);
         // SAFETY: the buffer has room for `length` bytes and is unlocked before the sample gets it.
         unsafe {
             let buffer = MFCreateMemoryBuffer(length)?;
@@ -149,9 +150,6 @@ impl Encoder {
         }
     }
 }
-
-/// 6144 bits per channel, two channels.
-const FRAME_BYTES_MAX: u32 = 2 * 6144 / 8;
 
 /// The encoder wants its output type set before its input type.
 fn set_types(transform: &IMFTransform, rate: u32, channels: u16) -> Result<()> {
@@ -227,17 +225,20 @@ fn contents(sample: &IMFSample) -> Result<Arc<[u8]>> {
     }
 }
 
-const CLIP_BLOCK: u32 = 8 * FRAME_SAMPLES;
+fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> EncodeError {
+    move |error| EncodeError::Windows(step, error)
+}
 
 /// A fresh encoder started at the clip's first sample keeps its frames in step with the video;
 /// the input runs `HELD_BACK` past the clip's end so the encoder finishes the last frame.
-pub(crate) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
-    let _com = Com::start()?;
-    let _media = MediaFoundation::start()?;
+pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
+    let _com = Com::start().map_err(failed("initialise COM"))?;
+    let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;
     let format = &clip.format;
-    let mut encoder = Encoder::open(format.sample_rate, format.channels)?;
+    let mut encoder = Encoder::open(format.sample_rate, format.channels)
+        .map_err(failed("open the AAC encoder"))?;
     let mut frames = Vec::with_capacity(clip.frames);
-    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels.max(1))];
+    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels)];
     let input = i64::try_from(clip.frames)
         .unwrap_or(i64::MAX)
         .saturating_mul(i64::from(FRAME_SAMPLES))
@@ -246,7 +247,9 @@ pub(crate) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
     let mut next = clip.start;
     while frames.len() < clip.frames && next < end {
         clip.read(next, &mut pcm);
-        encoder.encode(&pcm, |frame| frames.push(frame))?;
+        encoder
+            .encode(&pcm, |frame| frames.push(frame))
+            .map_err(failed("encode the sound"))?;
         next += i64::from(CLIP_BLOCK);
     }
     if frames.len() < clip.frames {
@@ -267,7 +270,7 @@ pub(crate) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::testing, *};
 
     fn encoder() -> Option<(Com, MediaFoundation, Encoder)> {
         let com = Com::start().unwrap();
@@ -310,62 +313,26 @@ mod tests {
 
     #[test]
     #[ignore = "needs ffmpeg"]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "ADTS length fields and sample positions are small"
-    )]
     fn encoder_delay() {
         let (_com, _media, mut encoder) = encoder().unwrap();
         let mut pcm = vec![0_i16; 48_000 * 2];
         pcm[20_000] = 30_000;
         pcm[20_001] = 30_000;
-        let mut adts = Vec::new();
+        let mut frames = Vec::new();
         for chunk in pcm.chunks(960) {
-            encoder
-                .encode(chunk, |frame| {
-                    let length = frame.len() + 7;
-                    adts.extend([
-                        0xFF,
-                        0xF1,
-                        0x4C,
-                        0x80 | ((length >> 11) & 0x03) as u8,
-                        ((length >> 3) & 0xFF) as u8,
-                        (((length & 0x07) << 5) | 0x1F) as u8,
-                        0xFC,
-                    ]);
-                    adts.extend_from_slice(&frame);
-                })
-                .unwrap();
+            encoder.encode(chunk, |frame| frames.push(frame)).unwrap();
         }
+        let adts = testing::adts(&frames);
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("click.aac");
-        let output = directory.path().join("click.raw");
         std::fs::write(&input, &adts).unwrap();
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-i"])
-            .arg(&input)
-            .args(["-f", "s16le", "-ac", "1"])
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let decoded: Vec<i16> = std::fs::read(&output)
-            .unwrap()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| i16::from_le_bytes(*pair))
-            .collect();
-        let peak = (0..decoded.len())
-            .max_by_key(|&index| decoded[index].unsigned_abs())
-            .unwrap();
+        let decoded = testing::decode_mono(&input);
+        let delay = i64::try_from(testing::peak(&decoded)).unwrap() - 10_000;
         println!(
-            "click at 10000, decoded peak at {peak}: delay {}; {} bytes of ADTS, {} samples decoded",
-            peak as i64 - 10_000,
+            "click at 10000, decoded with a delay of {delay}; {} bytes of ADTS, {} samples decoded",
             adts.len(),
             decoded.len()
         );
-        assert_eq!(peak as i64 - 10_000, i64::from(PRIMING));
+        assert_eq!(delay, i64::from(PRIMING));
     }
 }

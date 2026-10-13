@@ -350,22 +350,7 @@ mod tests {
         );
         assert!((469..=471).contains(&audio.frames.len()));
         if let Some(path) = std::env::var_os("HINDSIGHT_AUDIO_OUTPUT") {
-            let mut adts = Vec::new();
-            for frame in &audio.frames {
-                let length = frame.len() + 7;
-                let [_, _, middle, low] = u32::try_from(length).unwrap().to_be_bytes();
-                adts.extend([
-                    0xFF,
-                    0xF1,
-                    0x4C,
-                    0x80 | (middle >> 3),
-                    (middle << 5) | (low >> 3),
-                    ((low & 0x07) << 5) | 0x1F,
-                    0xFC,
-                ]);
-                adts.extend_from_slice(frame);
-            }
-            std::fs::write(path, adts).unwrap();
+            std::fs::write(path, crate::audio::testing::adts(&audio.frames)).unwrap();
         }
     }
 }

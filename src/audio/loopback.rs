@@ -1,7 +1,8 @@
 //! WASAPI loopback capture of the default output device, read on a timer a few packets at a time.
 
 use super::pcm::{Layout, Sample};
-use std::{ffi::c_void, sync::Arc, time::Duration};
+use listener::Listener;
+use std::{ffi::c_void, fmt, sync::Arc, time::Duration};
 use windows::{
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
@@ -40,10 +41,10 @@ const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
 const BUFFER_DURATION: i64 = 2_000_000;
 const FLOAT_BITS: u16 = 32;
 
-pub(crate) struct Com(());
+pub(super) struct Com(());
 
 impl Com {
-    pub(crate) fn start() -> windows::core::Result<Self> {
+    pub(super) fn start() -> windows::core::Result<Self> {
         // SAFETY: paired with the uninitialise in `drop`, including for "already initialised".
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
         Ok(Self(()))
@@ -57,7 +58,7 @@ impl Drop for Com {
     }
 }
 
-pub(crate) struct Signal(Owned<HANDLE>);
+pub(super) struct Signal(Owned<HANDLE>);
 
 // SAFETY: event handles may be set and waited on from any thread; closed only by the last owner.
 unsafe impl Send for Signal {}
@@ -65,14 +66,14 @@ unsafe impl Send for Signal {}
 unsafe impl Sync for Signal {}
 
 impl Signal {
-    pub(crate) fn new() -> windows::core::Result<Self> {
+    pub(super) fn new() -> windows::core::Result<Self> {
         // SAFETY: an unnamed manual-reset event, initially clear, with default security.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }?;
         // SAFETY: the event was just created, and only this `Owned` closes it.
         Ok(Self(unsafe { Owned::new(event) }))
     }
 
-    pub(crate) fn set(&self) {
+    pub(super) fn set(&self) {
         // SAFETY: the event is open.
         let _ = unsafe { SetEvent(*self.0) };
     }
@@ -88,12 +89,12 @@ impl Signal {
     }
 }
 
-pub(crate) enum Wake {
+pub(super) enum Wake {
     Stop,
     Read,
 }
 
-pub(crate) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wake {
+pub(super) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wake {
     let handles = [*stop.0, wake.unwrap_or_default()];
     let handles = &handles[..=usize::from(wake.is_some())];
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
@@ -107,21 +108,21 @@ pub(crate) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wa
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum OpenError {
+pub(super) enum OpenError {
     #[error("there is no audio output device")]
     NoDevice,
     #[error("{0}: {1}")]
-    Windows(&'static str, windows::core::Error),
+    Windows(&'static str, #[source] windows::core::Error),
 }
 
 fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> OpenError {
     move |error| OpenError::Windows(step, error)
 }
 
-pub(crate) struct Devices(IMMDeviceEnumerator);
+pub(super) struct Devices(IMMDeviceEnumerator);
 
 impl Devices {
-    pub(crate) fn new() -> windows::core::Result<Self> {
+    pub(super) fn new() -> windows::core::Result<Self> {
         // SAFETY: creates the in-process device enumerator; COM is initialised on this thread.
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map(Self)
     }
@@ -132,11 +133,11 @@ impl Devices {
             .map_err(|_| OpenError::NoDevice)
     }
 
-    pub(crate) fn default_id(&self) -> Option<String> {
+    pub(super) fn default_id(&self) -> Option<String> {
         self.default_output().ok().and_then(|device| id(&device))
     }
 
-    pub(crate) fn open(&self) -> Result<Loopback, OpenError> {
+    pub(super) fn open(&self) -> Result<Loopback, OpenError> {
         let device = self.default_output()?;
         // SAFETY: activates an audio client on the live device.
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
@@ -159,7 +160,7 @@ impl Devices {
         })
     }
 
-    pub(crate) fn watch(&self) -> windows::core::Result<Watch> {
+    pub(super) fn watch(&self) -> windows::core::Result<Watch> {
         let changed = Arc::new(Signal::new()?);
         let listener: IMMNotificationClient = Listener(Arc::clone(&changed)).into();
         // SAFETY: `Watch` unregisters the listener before either is released.
@@ -172,18 +173,18 @@ impl Devices {
     }
 }
 
-pub(crate) struct Watch {
+pub(super) struct Watch {
     devices: IMMDeviceEnumerator,
     listener: IMMNotificationClient,
     changed: Arc<Signal>,
 }
 
 impl Watch {
-    pub(crate) fn event(&self) -> HANDLE {
+    pub(super) fn event(&self) -> HANDLE {
         *self.changed.0
     }
 
-    pub(crate) fn changed(&self) -> bool {
+    pub(super) fn changed(&self) -> bool {
         self.changed.take()
     }
 }
@@ -197,8 +198,6 @@ impl Drop for Watch {
         };
     }
 }
-
-use listener::Listener;
 
 /// A module of its own so the `implement` macro's glue can be exempted from two pedantic lints.
 mod listener {
@@ -253,19 +252,32 @@ mod listener {
     }
 }
 
+/// Memory a COM call allocated for the caller to free.
+struct CoTaskMem<T>(*mut T);
+
+impl<T> Drop for CoTaskMem<T> {
+    fn drop(&mut self) {
+        // SAFETY: the pointer is the one the COM call handed over, freed once.
+        unsafe { CoTaskMemFree(Some(self.0.cast_const().cast::<c_void>())) };
+    }
+}
+
+impl fmt::Display for CoTaskMem<u16> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SAFETY: the memory holds a null-terminated string.
+        let text = unsafe { PWSTR(self.0).to_string() }.unwrap_or_default();
+        formatter.write_str(&text)
+    }
+}
+
 fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
     let flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
-    // SAFETY: the mix format is allocated by COM, read while it lives, and freed below.
-    let mix = unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?;
-    let direct = mix_layout(mix);
-    // SAFETY: frees the format GetMixFormat allocated, after `initialize_as` has used it.
-    let free = || unsafe { CoTaskMemFree(Some(mix.cast_const().cast::<c_void>())) };
-    if let Some(layout) = direct {
-        let result = initialize_as(client, mix, flags);
-        free();
-        return result.map(|()| layout);
+    // SAFETY: a query of the live client; the format it allocates is freed with `mix`.
+    let mix = CoTaskMem(unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?);
+    if let Some(layout) = mix_layout(mix.0) {
+        initialize_as(client, mix.0, flags)?;
+        return Ok(layout);
     }
-    free();
     let converted = float_stereo();
     initialize_as(
         client,
@@ -342,43 +354,33 @@ fn float_stereo() -> WAVEFORMATEX {
 }
 
 fn id(device: &IMMDevice) -> Option<String> {
-    // SAFETY: the id is allocated by COM, copied, and freed.
-    unsafe {
-        let id = device.GetId().ok()?;
-        Some(take_string(id))
-    }
+    // SAFETY: a query of the live device; the id it allocates is freed with `CoTaskMem`.
+    let id = unsafe { device.GetId() }.ok()?;
+    Some(CoTaskMem(id.0).to_string())
 }
 
 fn friendly_name(device: &IMMDevice) -> Option<String> {
-    // SAFETY: the value is converted into a COM string that is copied and freed, then cleared.
-    unsafe {
+    // SAFETY: the value is read from the live device's store and cleared once converted into a
+    // string, which is freed with `CoTaskMem`.
+    let name = unsafe {
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
         let mut value = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
         let name = PropVariantToStringAlloc(&raw const value).ok();
         let _ = PropVariantClear(&raw mut value);
-        name.map(|name| take_string(name))
-    }
+        name
+    }?;
+    Some(CoTaskMem(name.0).to_string())
 }
 
-/// `text` must be a valid `CoTaskMemAlloc` string; it is freed here and must not be used again.
-unsafe fn take_string(text: PWSTR) -> String {
-    // SAFETY: the caller hands over a valid string, freed here once copied.
-    unsafe {
-        let copied = text.to_string().unwrap_or_default();
-        CoTaskMemFree(Some(text.0.cast_const().cast::<c_void>()));
-        copied
-    }
-}
-
-pub(crate) struct Packet<'a> {
+pub(super) struct Packet<'a> {
     /// `None` for a silent packet.
-    pub(crate) data: Option<&'a [u8]>,
-    pub(crate) frames: u32,
+    pub(super) data: Option<&'a [u8]>,
+    pub(super) frames: u32,
     /// Performance-counter time of the first sample, when stamped.
-    pub(crate) time: Option<i64>,
+    pub(super) time: Option<i64>,
 }
 
-pub(crate) struct Loopback {
+pub(super) struct Loopback {
     client: IAudioClient,
     capture: IAudioCaptureClient,
     layout: Layout,
@@ -387,50 +389,54 @@ pub(crate) struct Loopback {
 }
 
 impl Loopback {
-    pub(crate) const fn layout(&self) -> Layout {
+    pub(super) const fn layout(&self) -> Layout {
         self.layout
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub(super) fn id(&self) -> &str {
         &self.id
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub(super) fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) fn read<E: From<windows::core::Error>>(
+    pub(super) fn read(
         &mut self,
-        mut each: impl FnMut(&Packet<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
+        mut each: impl FnMut(&Packet<'_>) -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
         let frame_bytes = self.layout.frame_bytes();
-        // SAFETY: each packet is released after `each` sees it; the slice does not outlive that.
-        unsafe {
-            while self.capture.GetNextPacketSize()? > 0 {
-                let mut data = std::ptr::null_mut();
-                let mut frames = 0;
-                let mut flags = 0;
-                let mut time = 0;
+        // SAFETY: a query of the running capture client.
+        while unsafe { self.capture.GetNextPacketSize() }? > 0 {
+            let mut data = std::ptr::null_mut();
+            let mut frames = 0;
+            let mut flags = 0;
+            let mut time = 0;
+            // SAFETY: the out-pointers are to locals; the buffer stays valid until released below.
+            unsafe {
                 self.capture.GetBuffer(
                     &raw mut data,
                     &raw mut frames,
                     &raw mut flags,
                     None,
                     Some(&raw mut time),
-                )?;
-                let silent =
-                    flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0 || data.is_null();
-                let stamped = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() == 0;
-                let packet = Packet {
-                    data: (!silent)
-                        .then(|| std::slice::from_raw_parts(data, frames as usize * frame_bytes)),
-                    frames,
-                    time: stamped.then(|| i64::try_from(time).unwrap_or(i64::MAX)),
-                };
-                let handled = each(&packet);
-                self.capture.ReleaseBuffer(frames)?;
-                handled?;
-            }
+                )
+            }?;
+            let silent =
+                flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0 || data.is_null();
+            let stamped = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() == 0;
+            let packet = Packet {
+                // SAFETY: the buffer holds `frames` frames of `frame_bytes`, live until released.
+                data: (!silent).then(|| unsafe {
+                    std::slice::from_raw_parts(data, frames as usize * frame_bytes)
+                }),
+                frames,
+                time: stamped.then(|| i64::try_from(time).unwrap_or(i64::MAX)),
+            };
+            let handled = each(&packet);
+            // SAFETY: releases the buffer taken above, once `packet` no longer refers to it.
+            unsafe { self.capture.ReleaseBuffer(frames) }?;
+            handled?;
         }
         Ok(())
     }
