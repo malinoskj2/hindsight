@@ -12,7 +12,12 @@ use windows::{
     core::{Owned, PCWSTR},
 };
 
-pub(super) const HUNDRED_NANOSECONDS: u128 = 100;
+const HUNDRED_NANOSECONDS: u128 = 100;
+
+/// A duration in the 100 ns units of `FILETIME` and `TimeSpan`.
+pub(super) fn filetime_units(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX)
+}
 
 pub(super) struct Timer(Owned<HANDLE>);
 
@@ -32,9 +37,8 @@ impl Timer {
     }
 
     pub(super) fn sleep(&self, duration: Duration) -> windows::core::Result<()> {
-        // Relative due times are negative, in 100 ns units.
-        let relative =
-            -i64::try_from(duration.as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX);
+        // Relative due times are negative.
+        let relative = -filetime_units(duration);
         // SAFETY: open timer; one-shot, no completion routine; `relative` outlives the call.
         unsafe { SetWaitableTimer(*self.0, &raw const relative, 0, None, None, false) }?;
         // SAFETY: waits on the open timer.

@@ -1,9 +1,9 @@
 //! The parts of `nvEncodeAPI.h` (Video Codec SDK API 12.1, drivers 531 and newer) this program uses;
 //! every layout is checked at compile time against the 64-bit Windows header.
 
+use crate::gpu::ffi::{Zeroed, raw_status};
 use std::{
     ffi::{c_char, c_void},
-    fmt,
     mem::{offset_of, size_of},
 };
 use windows::core::GUID;
@@ -101,7 +101,6 @@ pub(super) const MULTI_PASS_DISABLED: u32 = 0;
 pub(super) const TUNING_HIGH_QUALITY: u32 = 1;
 pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
 pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
-pub(super) const BUFFER_FORMAT_NV12: u32 = 0x1;
 /// Blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
 pub(super) const BUFFER_FORMAT_U8: u32 = 0x4000_0000;
@@ -110,12 +109,14 @@ pub(super) const OUTPUT_BITSTREAM: u32 = 2;
 /// `enableOutputInVidmem`: bit 9 of the bit field after `enablePTD` (nv-codec-headers n12.1.14.0).
 pub(super) const INITIALIZE_OUTPUT_IN_VIDMEM: u32 = 1 << 9;
 /// `sizeof(NV_ENC_ENCODE_OUT_PARAMS)`, written ahead of the bitstream in a video-memory output buffer.
-pub(in crate::gpu) const ENCODE_OUT_PARAMS_BYTES: usize = 256;
+pub(super) const ENCODE_OUT_PARAMS_BYTES: usize = 256;
 /// `bitstreamSizeInBytes` in `NV_ENC_ENCODE_OUT_PARAMS`.
-pub(in crate::gpu) const ENCODE_OUT_PARAMS_SIZE_OFFSET: usize = 4;
+pub(super) const ENCODE_OUT_PARAMS_SIZE_OFFSET: usize = 4;
 pub(super) const PIC_FLAG_EOS: u32 = 0x8;
 pub(super) const PIC_STRUCT_FRAME: u32 = 1;
 pub(super) const PIC_TYPE_IDR: u32 = 3;
+/// `NV_ENC_LOCK_BITSTREAM::doNotWait`.
+pub(super) const LOCK_DO_NOT_WAIT: u32 = 1;
 
 const VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
 const BT709: u32 = 1;
@@ -144,66 +145,44 @@ pub(super) const AV1_BIT_DEPTH_MASK: u32 = 0b11_1111 << 12;
 pub(super) const AV1_PART_SIZE_16: u32 = 3;
 pub(super) const AV1_PART_SIZE_32: u32 = 4;
 
-/// `NVENCSTATUS`, kept raw: a driver may return codes this program does not know.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gpu) struct Status(pub(super) i32);
+raw_status! {
+    /// `NVENCSTATUS`.
+    pub(in crate::gpu) struct Status, "unknown NVENC status" {
+        0 => "NV_ENC_SUCCESS",
+        1 => "NV_ENC_ERR_NO_ENCODE_DEVICE",
+        2 => "NV_ENC_ERR_UNSUPPORTED_DEVICE",
+        3 => "NV_ENC_ERR_INVALID_ENCODERDEVICE",
+        4 => "NV_ENC_ERR_INVALID_DEVICE",
+        5 => "NV_ENC_ERR_DEVICE_NOT_EXIST",
+        6 => "NV_ENC_ERR_INVALID_PTR",
+        7 => "NV_ENC_ERR_INVALID_EVENT",
+        8 => "NV_ENC_ERR_INVALID_PARAM",
+        9 => "NV_ENC_ERR_INVALID_CALL",
+        10 => "NV_ENC_ERR_OUT_OF_MEMORY",
+        11 => "NV_ENC_ERR_ENCODER_NOT_INITIALIZED",
+        12 => "NV_ENC_ERR_UNSUPPORTED_PARAM",
+        13 => "NV_ENC_ERR_LOCK_BUSY",
+        14 => "NV_ENC_ERR_NOT_ENOUGH_BUFFER",
+        15 => "NV_ENC_ERR_INVALID_VERSION",
+        16 => "NV_ENC_ERR_MAP_FAILED",
+        17 => "NV_ENC_ERR_NEED_MORE_INPUT",
+        18 => "NV_ENC_ERR_ENCODER_BUSY",
+        19 => "NV_ENC_ERR_EVENT_NOT_REGISTERD",
+        20 => "NV_ENC_ERR_GENERIC",
+        21 => "NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY",
+        22 => "NV_ENC_ERR_UNIMPLEMENTED",
+        23 => "NV_ENC_ERR_RESOURCE_REGISTER_FAILED",
+        24 => "NV_ENC_ERR_RESOURCE_NOT_REGISTERED",
+        25 => "NV_ENC_ERR_RESOURCE_NOT_MAPPED",
+        26 => "NV_ENC_ERR_NEED_MORE_OUTPUT",
+    }
+}
 
 impl Status {
-    pub(super) const SUCCESS: Self = Self(0);
     pub(super) const INVALID_VERSION: Self = Self(15);
-
-    const fn name(self) -> &'static str {
-        match self.0 {
-            0 => "NV_ENC_SUCCESS",
-            1 => "NV_ENC_ERR_NO_ENCODE_DEVICE",
-            2 => "NV_ENC_ERR_UNSUPPORTED_DEVICE",
-            3 => "NV_ENC_ERR_INVALID_ENCODERDEVICE",
-            4 => "NV_ENC_ERR_INVALID_DEVICE",
-            5 => "NV_ENC_ERR_DEVICE_NOT_EXIST",
-            6 => "NV_ENC_ERR_INVALID_PTR",
-            7 => "NV_ENC_ERR_INVALID_EVENT",
-            8 => "NV_ENC_ERR_INVALID_PARAM",
-            9 => "NV_ENC_ERR_INVALID_CALL",
-            10 => "NV_ENC_ERR_OUT_OF_MEMORY",
-            11 => "NV_ENC_ERR_ENCODER_NOT_INITIALIZED",
-            12 => "NV_ENC_ERR_UNSUPPORTED_PARAM",
-            13 => "NV_ENC_ERR_LOCK_BUSY",
-            14 => "NV_ENC_ERR_NOT_ENOUGH_BUFFER",
-            15 => "NV_ENC_ERR_INVALID_VERSION",
-            16 => "NV_ENC_ERR_MAP_FAILED",
-            17 => "NV_ENC_ERR_NEED_MORE_INPUT",
-            18 => "NV_ENC_ERR_ENCODER_BUSY",
-            19 => "NV_ENC_ERR_EVENT_NOT_REGISTERD",
-            20 => "NV_ENC_ERR_GENERIC",
-            21 => "NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY",
-            22 => "NV_ENC_ERR_UNIMPLEMENTED",
-            23 => "NV_ENC_ERR_RESOURCE_REGISTER_FAILED",
-            24 => "NV_ENC_ERR_RESOURCE_NOT_REGISTERED",
-            25 => "NV_ENC_ERR_RESOURCE_NOT_MAPPED",
-            26 => "NV_ENC_ERR_NEED_MORE_OUTPUT",
-            _ => "unknown NVENC status",
-        }
-    }
 }
 
-impl fmt::Display for Status {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{} ({})", self.name(), self.0)
-    }
-}
-
-/// All-zero is a valid value.
-/// # Safety
-/// Implementors contain only integers, GUIDs, raw pointers, optional function pointers and unions or arrays of those.
-pub(super) unsafe trait Zeroed: Sized {
-    fn zeroed() -> Self {
-        // SAFETY: guaranteed by the trait's contract.
-        unsafe { std::mem::zeroed() }
-    }
-}
-
-pub(super) type Session = *mut c_void;
+pub(super) type Handle = *mut c_void;
 /// `NV_ENC_REGISTERED_PTR`.
 pub(super) type Registered = *mut c_void;
 /// `NV_ENC_INPUT_PTR`.
@@ -215,29 +194,29 @@ type Entry = *const c_void;
 pub(super) type GetMaxSupportedVersion = unsafe extern "system" fn(*mut u32) -> Status;
 pub(super) type CreateInstance = unsafe extern "system" fn(*mut FunctionList) -> Status;
 
-pub(super) type GetEncodeGuidCount = unsafe extern "system" fn(Session, *mut u32) -> Status;
+pub(super) type GetEncodeGuidCount = unsafe extern "system" fn(Handle, *mut u32) -> Status;
 pub(super) type GetEncodeGuids =
-    unsafe extern "system" fn(Session, *mut GUID, u32, *mut u32) -> Status;
+    unsafe extern "system" fn(Handle, *mut GUID, u32, *mut u32) -> Status;
 pub(super) type GetEncodeCaps =
-    unsafe extern "system" fn(Session, GUID, *mut CapsParam, *mut i32) -> Status;
+    unsafe extern "system" fn(Handle, GUID, *mut CapsParam, *mut i32) -> Status;
 pub(super) type InitializeEncoder =
-    unsafe extern "system" fn(Session, *mut InitializeParams) -> Status;
+    unsafe extern "system" fn(Handle, *mut InitializeParams) -> Status;
 pub(super) type CreateBitstreamBufferFn =
-    unsafe extern "system" fn(Session, *mut CreateBitstreamBuffer) -> Status;
-pub(super) type WithPointer = unsafe extern "system" fn(Session, *mut c_void) -> Status;
-pub(super) type EncodePicture = unsafe extern "system" fn(Session, *mut PicParams) -> Status;
-pub(super) type LockBitstreamFn = unsafe extern "system" fn(Session, *mut LockBitstream) -> Status;
-pub(super) type EventFn = unsafe extern "system" fn(Session, *mut EventParams) -> Status;
+    unsafe extern "system" fn(Handle, *mut CreateBitstreamBuffer) -> Status;
+pub(super) type WithPointer = unsafe extern "system" fn(Handle, *mut c_void) -> Status;
+pub(super) type EncodePicture = unsafe extern "system" fn(Handle, *mut PicParams) -> Status;
+pub(super) type LockBitstreamFn = unsafe extern "system" fn(Handle, *mut LockBitstream) -> Status;
+pub(super) type EventFn = unsafe extern "system" fn(Handle, *mut EventParams) -> Status;
 pub(super) type MapInputResourceFn =
-    unsafe extern "system" fn(Session, *mut MapInputResource) -> Status;
-pub(super) type DestroyEncoder = unsafe extern "system" fn(Session) -> Status;
+    unsafe extern "system" fn(Handle, *mut MapInputResource) -> Status;
+pub(super) type DestroyEncoder = unsafe extern "system" fn(Handle) -> Status;
 pub(super) type OpenEncodeSessionEx =
-    unsafe extern "system" fn(*mut OpenEncodeSessionExParams, *mut Session) -> Status;
+    unsafe extern "system" fn(*mut OpenEncodeSessionExParams, *mut Handle) -> Status;
 pub(super) type RegisterResourceFn =
-    unsafe extern "system" fn(Session, *mut RegisterResource) -> Status;
-pub(super) type GetLastErrorString = unsafe extern "system" fn(Session) -> *const c_char;
+    unsafe extern "system" fn(Handle, *mut RegisterResource) -> Status;
+pub(super) type GetLastErrorString = unsafe extern "system" fn(Handle) -> *const c_char;
 pub(super) type GetEncodePresetConfigEx =
-    unsafe extern "system" fn(Session, GUID, GUID, u32, *mut PresetConfig) -> Status;
+    unsafe extern "system" fn(Handle, GUID, GUID, u32, *mut PresetConfig) -> Status;
 
 /// `NV_ENCODE_API_FUNCTION_LIST`, filled in by `NvEncodeAPICreateInstance`.
 #[repr(C)]
@@ -650,9 +629,6 @@ const _: () = assert!(offset_of!(PicParams, input_time_stamp) == 24);
 const _: () = assert!(offset_of!(PicParams, input_buffer) == 40);
 const _: () = assert!(offset_of!(PicParams, completion_event) == 56);
 const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
-
-/// `NV_ENC_LOCK_BITSTREAM::doNotWait`.
-pub(super) const LOCK_DO_NOT_WAIT: u32 = 1;
 
 /// `NV_ENC_LOCK_BITSTREAM`.
 #[repr(C)]

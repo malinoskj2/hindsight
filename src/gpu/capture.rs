@@ -6,11 +6,16 @@ mod nvfbc;
 mod tonemap;
 mod wgc;
 
-use super::{
-    cuda::{Context, CudaError},
-    device::Device,
+use crate::{
+    config::Backend,
+    gpu::{
+        cuda::{Context, CudaError, DevicePointer},
+        device::Device,
+    },
+    log,
+    replay::Matrix,
+    service::Target,
 };
-use crate::{config::Backend, log, replay::Matrix, service::Target};
 use std::{
     ffi::c_void,
     sync::atomic::{AtomicBool, Ordering},
@@ -30,7 +35,7 @@ use windows::Win32::{
 const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error)]
-pub(crate) enum CaptureError {
+pub(super) enum CaptureError {
     #[error("{0}")]
     Unsupported(String),
     #[error("the captured display or window went away")]
@@ -51,14 +56,11 @@ pub(super) enum Surface {
     Texture(ID3D11Texture2D),
     /// BGRA rows `pitch` bytes apart in the source's CUDA context.
     CudaBuffer {
-        pointer: u64,
+        pointer: DevicePointer,
         pitch: u32,
     },
-    /// On the source's Direct3D 9Ex device; NV12 when `nv12`, else BGRA.
-    Direct3D9 {
-        surface: IDirect3DSurface9,
-        nv12: bool,
-    },
+    /// BGRA on the source's Direct3D 9Ex device.
+    Direct3D9(IDirect3DSurface9),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,21 +85,24 @@ pub(super) enum Frame {
     Resized,
 }
 
+/// Where a source that copies frames puts them: the top-left `width` × `height` of `texture`.
+#[derive(Clone, Copy)]
+pub(super) struct CopyTarget<'a> {
+    pub(super) device: &'a Device,
+    pub(super) texture: &'a ID3D11Texture2D,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
 pub(super) trait Source {
     fn size(&self) -> (u32, u32);
 
     /// A window capture may never deliver a frame: exclusive full screen is not composed.
     fn captures_window(&self) -> bool;
 
-    /// Copies the newest frame into the top-left `width` × `height` of `target`; there is no
-    /// target when the encoder runs on CUDA.
-    fn take(
-        &mut self,
-        device: &Device,
-        target: Option<&ID3D11Texture2D>,
-        width: u32,
-        height: u32,
-    ) -> Result<Frame, CaptureError>;
+    /// Copies the newest frame into `target`; there is none when the encoder runs on CUDA or
+    /// reads the source's surfaces in place.
+    fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError>;
 
     fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Direct3D
@@ -228,8 +233,27 @@ fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
     move |error| CaptureError::Windows(step, error)
 }
 
-fn target_of(target: Option<&ID3D11Texture2D>) -> &ID3D11Texture2D {
+fn target_of(target: Option<CopyTarget<'_>>) -> CopyTarget<'_> {
     target.expect("a source that copies frames runs with an encoder on the Direct3D device")
+}
+
+/// Puts `source` into `target`, through the tone-map pass when there is one.
+fn deliver(
+    tone_map: Option<&mut tonemap::ToneMapper>,
+    source: &ID3D11Texture2D,
+    target: CopyTarget<'_>,
+) -> windows::core::Result<()> {
+    let CopyTarget {
+        device,
+        texture,
+        width,
+        height,
+    } = target;
+    if let Some(mapper) = tone_map {
+        return mapper.convert(device, source, texture, width, height);
+    }
+    device.copy_region(texture, source, width, height);
+    Ok(())
 }
 
 /// The monitor to record, and the window it stands in for when the target is one.

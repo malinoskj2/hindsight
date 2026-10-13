@@ -1,11 +1,11 @@
 //! The replay buffer in GPU memory, on a Direct3D device of its own so saves never queue behind capture.
 
-use super::{
-    CHUNK_BYTES, MEBIBYTE, PAGE_BYTES,
-    device::{Device, DeviceError},
-    reserved_pages,
+use crate::{
+    gpu::device::{Device, DeviceError},
+    replay::{
+        CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, Store, StoreError, reserved_pages,
+    },
 };
-use crate::replay::{Page, Pages, Slot, Store, StoreError};
 use std::{thread, time::Duration};
 use thiserror::Error;
 use windows::Win32::Graphics::{
@@ -20,7 +20,7 @@ use windows::Win32::Graphics::{
 const POLL: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Error)]
-pub(crate) enum VramError {
+pub(super) enum VramError {
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error("read the adapter's memory size: {0}")]
@@ -31,14 +31,14 @@ pub(crate) enum VramError {
     Page(windows::core::Error),
 }
 
-pub(crate) struct VideoMemory {
+pub(super) struct VideoMemory {
     device: Device,
     pages: Pages<VramPage>,
     reserved: usize,
 }
 
 impl VideoMemory {
-    pub(crate) fn create(bytes: u64) -> Result<Self, VramError> {
+    pub(super) fn create(bytes: u64) -> Result<Self, VramError> {
         let device = Device::create()?;
         let pages = reserved_pages(bytes);
         let needed = pages.saturating_mul(PAGE_BYTES);
@@ -58,7 +58,7 @@ impl VideoMemory {
         })
     }
 
-    pub(crate) fn description(&self) -> String {
+    pub(super) fn description(&self) -> String {
         format!(
             "Replay buffer in GPU memory: {} MiB reserved in {} MiB pages on {}",
             self.reserved * PAGE_BYTES / MEBIBYTE,
@@ -75,7 +75,7 @@ impl Store for VideoMemory {
             VramPage::create(device).map_err(StoreError::call("reserve a page"))
         })?;
         page.write(offset, data);
-        Ok(Pages::slot(page, offset, data.len()))
+        Ok(Slot::new(page, offset, data.len()))
     }
 }
 

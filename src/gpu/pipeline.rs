@@ -1,15 +1,15 @@
 //! One capture session: a frame per tick of the clock, from the capture through NVENC into the replay buffer.
 
-use super::{
-    capture::{self, CaptureError, EncoderDevice, Frame, Surface},
-    cuda_output::CudaRing,
-    device::{Device, DeviceError},
-    nvenc::{Encoded, Encoder, NvencError, Output, Payload, Settings},
-    pacer::Pacer,
-    priority, vram,
-};
 use crate::{
     config::{Codec, Config, Memory},
+    gpu::{
+        capture::{self, CaptureError, CopyTarget, EncoderDevice, Frame, Surface},
+        cuda_output::CudaRing,
+        device::{Device, DeviceError},
+        nvenc::{self, Encoded, Encoder, NvencError, Output, Payload, Picture, Settings},
+        pacer::Pacer,
+        priority, vram,
+    },
     log,
     replay::{self, DiskStore, Live, Packet, Stream},
     service::{Ended, Target},
@@ -50,10 +50,11 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
             "Windows power throttling could not be turned off: {error}"
         ));
     }
-    if priority::raise_gpu_class() {
-        log::info("GPU scheduling priority: high");
-    } else {
-        log::warning("The GPU scheduling priority could not be raised");
+    match priority::raise_gpu_class() {
+        Ok(()) => log::info("GPU scheduling priority: high"),
+        Err(error) => log::warning(format!(
+            "The GPU scheduling priority could not be raised: {error}"
+        )),
     }
     multimedia
 }
@@ -122,8 +123,16 @@ struct Session {
     encoder: Encoder,
     capture: Box<dyn capture::Source>,
     device: Device,
-    copy_surfaces: bool,
+    surfaces: SurfaceDelivery,
     first_frame_deadline: Option<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SurfaceDelivery {
+    /// NVENC reads the capture's surfaces where they are.
+    InPlace,
+    /// Each frame is copied into the encoder's own input first.
+    Copied,
 }
 
 impl Session {
@@ -162,32 +171,29 @@ impl Session {
             encoder,
             capture,
             device,
-            copy_surfaces: false,
+            surfaces: SurfaceDelivery::InPlace,
             first_frame_deadline,
         })
     }
 
     fn tick(&mut self, index: u64, output: &mut impl FnMut(Encoded)) -> Result<Option<Ended>> {
-        let Self {
-            encoder,
-            capture,
-            device,
-            copy_surfaces,
-            first_frame_deadline,
-        } = self;
-        encoder.collect(output)?;
-        encoder.reserve(output)?;
-        if let Some(surface) = capture.next_surface() {
-            encoder.release_surface(surface, output)?;
+        self.encoder.collect(output)?;
+        self.encoder.reserve(output)?;
+        if let Some(surface) = self.capture.next_surface() {
+            self.encoder.release_surface(surface, output)?;
         }
-        capture.release_surfaces(&|surface| encoder.holds_surface(surface));
-        match fill_input(device, &mut **capture, encoder)? {
-            Input::Ready => encoder.submit(index, true)?,
-            Input::Repeat => repeat_latest(device, encoder, index, output)?,
-            Input::InSurface(surface) => {
-                submit_surface(device, &**capture, encoder, index, surface, copy_surfaces)?;
-            }
-            Input::Empty if first_frame_deadline.is_some_and(|deadline| index >= deadline) => {
+        let encoder = &self.encoder;
+        self.capture
+            .release_surfaces(&|surface| encoder.holds_surface(surface));
+        match fill_input(&self.device, &mut *self.capture, &self.encoder)? {
+            Input::Ready => self.encoder.submit(index, Picture::Fresh)?,
+            Input::Repeat => repeat_latest(&self.device, &mut self.encoder, index, output)?,
+            Input::InSurface(surface) => self.submit_surface(index, surface)?,
+            Input::Empty
+                if self
+                    .first_frame_deadline
+                    .is_some_and(|deadline| index >= deadline) =>
+            {
                 return Ok(Some(Ended::NoFrames));
             }
             Input::Empty => {}
@@ -195,37 +201,33 @@ impl Session {
         }
         Ok(None)
     }
-}
 
-fn submit_surface(
-    device: &Device,
-    capture: &dyn capture::Source,
-    encoder: &mut Encoder,
-    index: u64,
-    surface: usize,
-    copy_instead: &mut bool,
-) -> Result<(), NvencError> {
-    let handle = capture
-        .surface(surface)
-        .expect("a capture reports only surfaces of its own");
-    if !*copy_instead
-        && !encoder.has_surface(surface)
-        && let Err(error) = encoder.register_surface(surface, &handle)
-    {
-        if !matches!(handle, Surface::Texture(_)) || encoder.input().is_none() {
-            return Err(error);
+    fn submit_surface(&mut self, index: u64, surface: usize) -> Result<(), NvencError> {
+        let handle = self
+            .capture
+            .surface(surface)
+            .expect("a capture reports only surfaces of its own");
+        if self.surfaces == SurfaceDelivery::InPlace
+            && !self.encoder.has_surface(surface)
+            && let Err(error) = self.encoder.register_surface(surface, &handle)
+        {
+            if !matches!(handle, Surface::Texture(_)) || self.encoder.input().is_none() {
+                return Err(error);
+            }
+            log::warning(format!(
+                "NVENC could not read the captured surfaces directly ({error}); copying each frame instead"
+            ));
+            self.surfaces = SurfaceDelivery::Copied;
         }
-        log::warning(format!(
-            "NVENC could not read the captured surfaces directly ({error}); copying each frame instead"
-        ));
-        *copy_instead = true;
+        if self.surfaces == SurfaceDelivery::Copied
+            && let (Surface::Texture(texture), Some(input)) = (&handle, self.encoder.input())
+        {
+            let Settings { width, height, .. } = self.encoder.settings();
+            self.device.copy_region(input, texture, width, height);
+            return self.encoder.submit(index, Picture::Fresh);
+        }
+        self.encoder.submit_surface(index, surface)
     }
-    if *copy_instead && let (Surface::Texture(texture), Some(input)) = (&handle, encoder.input()) {
-        let Settings { width, height, .. } = encoder.settings();
-        device.copy_region(input, texture, width, height);
-        return encoder.submit(index, true);
-    }
-    encoder.submit_surface(index, surface)
 }
 
 fn repeat_latest(
@@ -240,7 +242,7 @@ fn repeat_latest(
     match (encoder.input(), encoder.latest_texture()) {
         (Some(input), Some(latest)) => {
             device.copy(input, latest);
-            encoder.submit(index, false)
+            encoder.submit(index, Picture::Repeated)
         }
         _ => encoder.repeat_once_free(index, output),
     }
@@ -261,7 +263,7 @@ fn choose_output(config: &Config, on: &EncoderDevice, live: &Live) -> Output {
         ..
     } = *on
     {
-        match CudaRing::create(device, bytes) {
+        match CudaRing::create(device, bytes, nvenc::STAGING_LAYOUT) {
             Ok(ring) => {
                 log::info(ring.description());
                 return Output::VideoMemory(ring);
@@ -349,7 +351,13 @@ fn fill_input(
     encoder: &Encoder,
 ) -> Result<Input, CaptureError> {
     let Settings { width, height, .. } = encoder.settings();
-    let frame = match capture.take(device, encoder.input(), width, height) {
+    let target = encoder.input().map(|texture| CopyTarget {
+        device,
+        texture,
+        width,
+        height,
+    });
+    let frame = match capture.take(target) {
         Ok(frame) => frame,
         Err(CaptureError::Closed) => return Ok(Input::Ended(Ended::Closed)),
         Err(error) => return Err(error),

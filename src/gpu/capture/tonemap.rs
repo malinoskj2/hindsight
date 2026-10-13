@@ -1,7 +1,7 @@
 //! The pixel-shader pass that tone-maps a display's FP16 scRGB picture to the encoder's 8-bit
 //! sRGB: SDR white to 1.0, a Reinhard roll-off above a knee, the display's peak landing on 1.0.
 
-use crate::gpu::device::Device;
+use crate::gpu::device::{Device, Locked};
 use std::ffi::c_void;
 use windows::{
     Win32::Graphics::{
@@ -160,24 +160,23 @@ impl ToneMapper {
             MaxDepth: 1.0,
         };
         let context = &device.context;
-        // SAFETY: every bound object belongs to this device and outlives the queued draw;
-        // nothing in between can fail, so the lock is left on every path.
+        let _locked = Locked::new(&self.lock);
+        // SAFETY, for each call below: every bound object belongs to this device and outlives
+        // the queued draw.
+        unsafe { context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST) };
+        unsafe { context.IASetInputLayout(None::<&ID3D11InputLayout>) };
+        unsafe { context.VSSetShader(&self.vertex, None) };
+        unsafe { context.PSSetShader(&self.pixel, None) };
+        unsafe { context.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())])) };
+        unsafe { context.PSSetShaderResources(0, Some(&[Some(input)])) };
+        unsafe { context.RSSetViewports(Some(&[viewport])) };
         unsafe {
-            self.lock.Enter();
-            context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            context.IASetInputLayout(None::<&ID3D11InputLayout>);
-            context.VSSetShader(&self.vertex, None);
-            context.PSSetShader(&self.pixel, None);
-            context.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
-            context.PSSetShaderResources(0, Some(&[Some(input)]));
-            context.RSSetViewports(Some(&[viewport]));
             context.OMSetRenderTargets(Some(&[Some(output)]), None::<&ID3D11DepthStencilView>);
-            context.Draw(3, 0);
-            // Unbind so the encoder and the capture may use both textures.
-            context.PSSetShaderResources(0, Some(&[None]));
-            context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
-            self.lock.Leave();
         }
+        unsafe { context.Draw(3, 0) };
+        // Unbind so the encoder and the capture may use both textures.
+        unsafe { context.PSSetShaderResources(0, Some(&[None])) };
+        unsafe { context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>) };
         Ok(())
     }
 
@@ -288,7 +287,7 @@ const fn bind_flag(flag: i32) -> u32 {
 fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Result<ID3D11Buffer> {
     let constants = curve.constants();
     let description = D3D11_BUFFER_DESC {
-        ByteWidth: u32::try_from(size_of_val(&constants)).unwrap_or(16),
+        ByteWidth: u32::try_from(size_of_val(&constants)).expect("the constants are 16 bytes"),
         Usage: D3D11_USAGE_IMMUTABLE,
         BindFlags: bind_flag(D3D11_BIND_CONSTANT_BUFFER.0),
         ..Default::default()

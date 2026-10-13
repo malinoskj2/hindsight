@@ -1,6 +1,6 @@
 //! How a monitor is driven: HDR, colour space, luminance range and SDR white level.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 use windows::{
     Win32::{
         Devices::Display::{
@@ -34,12 +34,12 @@ pub(super) const SCRGB_NITS: f32 = 80.0;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Display {
     /// GDI device name, such as `\\.\DISPLAY1`.
-    pub(super) name: String,
-    pub(super) color_space: DXGI_COLOR_SPACE_TYPE,
-    pub(super) bits_per_color: u32,
-    pub(super) min_nits: f32,
+    name: String,
+    color_space: DXGI_COLOR_SPACE_TYPE,
+    bits_per_color: u32,
+    min_nits: f32,
     pub(super) max_nits: f32,
-    pub(super) max_full_frame_nits: f32,
+    max_full_frame_nits: f32,
     pub(super) sdr_white_nits: Option<f32>,
 }
 
@@ -75,12 +75,12 @@ pub(super) fn is_hdr(color_space: DXGI_COLOR_SPACE_TYPE) -> bool {
     color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
 }
 
-fn color_space_name(color_space: DXGI_COLOR_SPACE_TYPE) -> String {
+fn color_space_name(color_space: DXGI_COLOR_SPACE_TYPE) -> Cow<'static, str> {
     match color_space {
-        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 => "SDR (sRGB, BT.709)".to_owned(),
-        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 => "HDR (PQ, BT.2020)".to_owned(),
-        DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 => "scRGB (linear, BT.709)".to_owned(),
-        other => format!("colour space {}", other.0),
+        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 => "SDR (sRGB, BT.709)".into(),
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 => "HDR (PQ, BT.2020)".into(),
+        DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 => "scRGB (linear, BT.709)".into(),
+        other => format!("colour space {}", other.0).into(),
     }
 }
 
@@ -96,11 +96,6 @@ pub(super) fn describe(monitor: HMONITOR) -> Option<Display> {
 /// keep reporting the colour space they had then.
 pub(super) fn is_in_hdr(monitor: HMONITOR) -> Option<bool> {
     output_of(monitor).map(|description| is_hdr(description.ColorSpace))
-}
-
-#[cfg(test)]
-fn all() -> windows::core::Result<Vec<Display>> {
-    Ok(outputs()?.iter().map(from_description).collect())
 }
 
 fn output_of(monitor: HMONITOR) -> Option<DXGI_OUTPUT_DESC1> {
@@ -263,8 +258,8 @@ mod tests {
     #[test]
     #[ignore = "prints this machine's displays"]
     fn print_displays() {
-        for display in all().expect("list the displays") {
-            println!("{display}");
+        for description in outputs().expect("list the displays") {
+            println!("{}", from_description(&description));
         }
     }
 }

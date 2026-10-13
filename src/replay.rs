@@ -66,8 +66,6 @@ pub(crate) enum Matrix {
     /// What NVENC converts BGRA input with.
     #[default]
     Bt709,
-    /// SMPTE 170M; what NvFBC converts with when it grabs NV12.
-    Bt601,
 }
 
 impl Matrix {
@@ -75,7 +73,6 @@ impl Matrix {
     pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Bt709 => 1,
-            Self::Bt601 => 6,
         }
     }
 }

@@ -25,7 +25,7 @@ const NVIDIA_VENDOR_ID: u32 = 0x10DE;
 const GPU_THREAD_PRIORITY: i32 = 7;
 
 #[derive(Debug, Error)]
-pub(crate) enum DeviceError {
+pub(super) enum DeviceError {
     #[error("no NVIDIA GPU was found; NVENC needs one")]
     NoNvidiaAdapter,
     #[error("list the graphics adapters: {0}")]
@@ -112,6 +112,24 @@ impl Device {
         let device = self.dxgi()?;
         // SAFETY: a plain setter on a live device.
         unsafe { device.SetGPUThreadPriority(GPU_THREAD_PRIORITY) }
+    }
+}
+
+/// Holds the device's lock against its other threads until dropped.
+pub(super) struct Locked<'a>(&'a ID3D11Multithread);
+
+impl<'a> Locked<'a> {
+    pub(super) fn new(lock: &'a ID3D11Multithread) -> Self {
+        // SAFETY: a re-entrant lock on a live device, released in `Drop`.
+        unsafe { lock.Enter() };
+        Self(lock)
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        // SAFETY: releases the `Enter` in `new`.
+        unsafe { self.0.Leave() };
     }
 }
 

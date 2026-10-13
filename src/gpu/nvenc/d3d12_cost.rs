@@ -2,19 +2,23 @@
 //! 11, 12 and 9Ex sessions: `cargo test --release d3d12_encode_cost -- --ignored --nocapture`.
 
 use super::{
-    Settings, configure, create_input_texture,
-    ffi::{self, Status, Zeroed},
-    initialize_params, load_library, resolve_exports,
+    Session, Settings, configure, create_input_texture,
+    ffi::{self, Status},
+    initialize_params,
 };
-use crate::{config::Codec, gpu::device::Device, replay::Matrix};
+use crate::{
+    config::Codec,
+    gpu::{device::Device, ffi::Zeroed},
+    replay::Matrix,
+};
 use std::{
-    ffi::{CStr, c_void},
+    ffi::c_void,
     ptr,
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HMODULE, HWND, LUID, WAIT_OBJECT_0},
+        Foundation::{HANDLE, HWND, LUID, WAIT_OBJECT_0},
         Graphics::{
             Direct3D::D3D_FEATURE_LEVEL_11_0,
             Direct3D9::{
@@ -264,66 +268,32 @@ fn timed<T>(costs: &mut Costs, call: usize, body: impl FnOnce() -> T) -> T {
     result
 }
 
-struct Session {
-    api: Box<ffi::FunctionList>,
-    handle: ffi::Session,
-    _library: Owned<HMODULE>,
+/// What the bench asks of a session that the encoder does not.
+trait BenchSession {
+    fn assert_ok(&self, call: &'static str, status: Status);
+    fn initialize(&self, settings: Settings, asynchronous: bool) -> Result<(), String>;
+    fn register(
+        &self,
+        resource: *mut c_void,
+        size: (u32, u32),
+        format: u32,
+        usage: u32,
+    ) -> ffi::Registered;
+    fn map(&self, registered: ffi::Registered) -> (ffi::Mapped, u32);
+    fn unmap(&self, mapped: ffi::Mapped);
+    fn with_pointer(
+        &self,
+        call: &'static str,
+        entry: Option<ffi::WithPointer>,
+        pointer: *mut c_void,
+    );
 }
 
-impl Session {
-    fn open(device_type: u32, device: *mut c_void) -> Result<Self, String> {
-        let library = load_library().map_err(|error| error.to_string())?;
-        let (_, create_instance) = resolve_exports(*library).map_err(|error| error.to_string())?;
-        let mut api = Box::new(ffi::FunctionList::zeroed());
-        api.version = ffi::FUNCTION_LIST_VER;
-        // SAFETY: a versioned, writable function list.
-        let status = unsafe { create_instance(&raw mut *api) };
-        if status != Status::SUCCESS {
-            return Err(format!("NvEncodeAPICreateInstance: {status}"));
+impl BenchSession for Session {
+    fn assert_ok(&self, call: &'static str, status: Status) {
+        if let Err(error) = self.check(call, status) {
+            panic!("{error}");
         }
-        let mut params = ffi::OpenEncodeSessionExParams::zeroed();
-        params.version = ffi::OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-        params.device_type = device_type;
-        params.device = device;
-        params.api_version = ffi::API_VERSION;
-        let mut handle = ptr::null_mut();
-        let open = api
-            .open_encode_session_ex
-            .expect("nvEncOpenEncodeSessionEx");
-        // SAFETY: the device outlives the session, which `Bench` drops first.
-        let status = unsafe { open(&raw mut params, &raw mut handle) };
-        if status != Status::SUCCESS {
-            return Err(format!("nvEncOpenEncodeSessionEx: {status}"));
-        }
-        Ok(Self {
-            api,
-            handle,
-            _library: library,
-        })
-    }
-
-    fn check(&self, call: &str, status: Status) {
-        assert!(
-            status == Status::SUCCESS,
-            "{call} failed with {status}: {}",
-            self.last_error()
-        );
-    }
-
-    fn last_error(&self) -> String {
-        self.api
-            .get_last_error_string
-            .map_or(String::new(), |last| {
-                // SAFETY: the session is open; the string lives until its next call.
-                let text = unsafe { last(self.handle) };
-                if text.is_null() {
-                    return String::new();
-                }
-                // SAFETY: a null-terminated string from the driver, not null.
-                unsafe { CStr::from_ptr(text) }
-                    .to_string_lossy()
-                    .into_owned()
-            })
     }
 
     fn initialize(&self, settings: Settings, asynchronous: bool) -> Result<(), String> {
@@ -344,7 +314,7 @@ impl Session {
                 &raw mut preset,
             )
         };
-        self.check("nvEncGetEncodePresetConfigEx", status);
+        self.assert_ok("nvEncGetEncodePresetConfigEx", status);
         let mut config = preset.config;
         configure(&mut config, settings);
         let mut params = initialize_params(settings, &mut config);
@@ -354,14 +324,8 @@ impl Session {
         let initialize = self.api.initialize_encoder.expect("nvEncInitializeEncoder");
         // SAFETY: `params` and the configuration it points to live across the call.
         let status = unsafe { initialize(self.handle, &raw mut params) };
-        if status == Status::SUCCESS {
-            Ok(())
-        } else {
-            Err(format!(
-                "nvEncInitializeEncoder: {status}: {}",
-                self.last_error()
-            ))
-        }
+        self.check("nvEncInitializeEncoder", status)
+            .map_err(|error| error.to_string())
     }
 
     fn register(
@@ -382,7 +346,7 @@ impl Session {
         let register = self.api.register_resource.expect("nvEncRegisterResource");
         // SAFETY: the resource outlives its registration, which `teardown` undoes.
         let status = unsafe { register(self.handle, &raw mut params) };
-        self.check("nvEncRegisterResource", status);
+        self.assert_ok("nvEncRegisterResource", status);
         params.registered_resource
     }
 
@@ -393,7 +357,7 @@ impl Session {
         let map_input = self.api.map_input_resource.expect("nvEncMapInputResource");
         // SAFETY: a registered resource that is not mapped.
         let status = unsafe { map_input(self.handle, &raw mut map) };
-        self.check("nvEncMapInputResource", status);
+        self.assert_ok("nvEncMapInputResource", status);
         (map.mapped_resource, map.mapped_buffer_format)
     }
 
@@ -404,23 +368,19 @@ impl Session {
             .expect("nvEncUnmapInputResource");
         // SAFETY: a mapping that has not been undone, of a frame that has completed.
         let status = unsafe { unmap(self.handle, mapped) };
-        self.check("nvEncUnmapInputResource", status);
+        self.assert_ok("nvEncUnmapInputResource", status);
     }
 
-    fn with_pointer(&self, call: &str, entry: Option<ffi::WithPointer>, pointer: *mut c_void) {
+    fn with_pointer(
+        &self,
+        call: &'static str,
+        entry: Option<ffi::WithPointer>,
+        pointer: *mut c_void,
+    ) {
         let entry = entry.expect("an entry the driver provides");
         // SAFETY: `pointer` is the kind of handle the entry takes, still live.
         let status = unsafe { entry(self.handle, pointer) };
-        self.check(call, status);
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        if let Some(destroy) = self.api.destroy_encoder {
-            // SAFETY: the session is open and nothing uses it after this.
-            let _ = unsafe { destroy(self.handle) };
-        }
+        self.assert_ok(call, status);
     }
 }
 
@@ -560,7 +520,8 @@ impl Bench {
                 unreachable!("open_d3d9 opens Direct3D 9")
             };
             (
-                Session::open(ffi::DEVICE_TYPE_DIRECTX, d3d9.as_raw())?,
+                Session::open_on(ffi::DEVICE_TYPE_DIRECTX, d3d9.as_raw())
+                    .map_err(|error| error.to_string())?,
                 backend,
             )
         } else if case.d3d12 {
@@ -569,13 +530,15 @@ impl Bench {
                 unreachable!("open_d3d12 opens Direct3D 12")
             };
             (
-                Session::open(ffi::DEVICE_TYPE_DIRECTX, d3d12.as_raw())?,
+                Session::open_on(ffi::DEVICE_TYPE_DIRECTX, d3d12.as_raw())
+                    .map_err(|error| error.to_string())?,
                 backend,
             )
         } else {
             let texture =
                 create_input_texture(&device.d3d, settings).map_err(|error| error.to_string())?;
-            let session = Session::open(ffi::DEVICE_TYPE_DIRECTX, device.d3d.as_raw())?;
+            let session = Session::open_on(ffi::DEVICE_TYPE_DIRECTX, device.d3d.as_raw())
+                .map_err(|error| error.to_string())?;
             let backend = Backend::D3d11 {
                 _device: device,
                 texture,
@@ -633,7 +596,7 @@ impl Bench {
                 .expect("nvEncRegisterAsyncEvent");
             // SAFETY: the event stays open until the session is destroyed.
             let status = unsafe { register(self.session.handle, &raw mut params) };
-            self.session.check("nvEncRegisterAsyncEvent", status);
+            self.session.assert_ok("nvEncRegisterAsyncEvent", status);
         }
         let output = match &self.backend {
             Backend::D3d11 { .. } | Backend::D3d9 { .. } => {
@@ -646,7 +609,7 @@ impl Bench {
                     .expect("nvEncCreateBitstreamBuffer");
                 // SAFETY: a versioned structure for an initialized session.
                 let status = unsafe { create(self.session.handle, &raw mut buffer) };
-                self.session.check("nvEncCreateBitstreamBuffer", status);
+                self.session.assert_ok("nvEncCreateBitstreamBuffer", status);
                 Output::Bitstream(buffer.bitstream_buffer)
             }
             Backend::D3d12 { device, .. } => self.create_readback(device),
@@ -797,7 +760,7 @@ impl Bench {
         let status = timed(costs, ENCODE, || unsafe {
             encode(self.session.handle, &raw mut picture)
         });
-        self.session.check("nvEncEncodePicture", status);
+        self.session.assert_ok("nvEncEncodePicture", status);
         self.slots[slot].in_flight = Some(InFlight {
             input: own_input.then_some(input),
             output: own_output,
@@ -849,7 +812,7 @@ impl Bench {
         let bytes = timed(costs, LOCK, || {
             // SAFETY: the frame is done or the lock waits for it; unlocked right after the copy.
             let status = unsafe { lock_bitstream(session.handle, &raw mut lock) };
-            session.check("nvEncLockBitstream", status);
+            session.assert_ok("nvEncLockBitstream", status);
             copy.clear();
             if !lock.bitstream_buffer_ptr.is_null() {
                 // SAFETY: while locked, `bitstream_size_in_bytes` bytes are readable there.

@@ -4,34 +4,25 @@
 mod ffi;
 
 use super::{
-    Library, display_size, ffi as nvfbc_ffi, find_adapter, is_attached, key_size, nvfbc_failed,
-    prepare, require_even, saved_key,
+    Grabbed, KEY_BYTES, Key, Library, Object, Prepared, SLOT_COUNT, SLOTS, classify_grab,
+    ffi as nvfbc_ffi, note_reopened, nvfbc_failed, prepare_capture, reopen_due,
 };
 use crate::{
     gpu::{
         capture::{
-            CaptureError, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
-            is_window_closed, monitor_of,
+            CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface,
+            failed, is_window_closed,
         },
         cuda::{Context, CudaError, Device as CudaDevice, DevicePointer, Driver},
         device::Device,
+        ffi::Zeroed,
     },
     log,
     service::Target,
 };
-use nvfbc_ffi::{Status, Zeroed};
-use std::ptr::{self, NonNull};
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::{
-        Direct3D9::{D3D_SDK_VERSION, Direct3DCreate9Ex},
-        Direct3D11::ID3D11Texture2D,
-        Gdi::HMONITOR,
-    },
-};
+use nvfbc_ffi::Status;
+use windows::Win32::{Foundation::HWND, Graphics::Gdi::HMONITOR};
 
-const SLOT_COUNT: u32 = 3;
-const SLOTS: usize = SLOT_COUNT as usize;
 const BYTES_PER_PIXEL: u32 = 4;
 const MEBIBYTE: u32 = 1024 * 1024;
 
@@ -39,7 +30,7 @@ pub(in crate::gpu::capture) struct Capture {
     /// Must outlive the session.
     _library: Library,
     create: nvfbc_ffi::CreateEx,
-    key: Vec<u8>,
+    key: Key,
     /// Direct3D 9 adapter ordinal; the driver counts by it.
     adapter: u32,
     cuda: Driver,
@@ -75,35 +66,23 @@ impl SessionContext {
     }
 }
 
-enum Grab {
-    Done(usize),
-    /// Protected video is on screen.
-    Withheld,
-    /// The size or the row pitch changed.
-    Resized,
-    Lost,
-}
-
 impl Capture {
     pub(in crate::gpu::capture) fn start(
         device: &Device,
         target: &Target,
         cursor: bool,
     ) -> Result<Self, CaptureError> {
-        let (monitor, window) = monitor_of(target);
-        let key = saved_key();
-
-        // Only to count adapters the way the driver does.
-        // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
-        let d3d9 = unsafe { Direct3DCreate9Ex(D3D_SDK_VERSION) }
-            .map_err(failed("start Direct3D 9 to find the monitor for NvFBC"))?;
-        let adapter = find_adapter(&d3d9, device, monitor)?;
-        let size = display_size(&d3d9, adapter)?;
-        drop(d3d9);
-        require_even(size, "NVIDIA NvFBC to CUDA")?;
-
-        let library = Library::load()?;
-        let create = prepare(&library, &key, adapter)?;
+        // Direct3D 9 is opened only to count adapters the way the driver does.
+        let Prepared {
+            library,
+            create,
+            key,
+            adapter,
+            d3d9: _,
+            size,
+            monitor,
+            window,
+        } = prepare_capture(device, target, "NVIDIA NvFBC to CUDA")?;
         let (cuda, cuda_device, context) = open_primary_context(device)?;
 
         let mut capture = Self {
@@ -154,16 +133,16 @@ impl Capture {
 
     /// No device or context is passed: the header ties the context parameter to a Direct3D 9
     /// device.
-    fn create_object(&self) -> Result<NonNull<ffi::ToCuda>, Status> {
+    fn create_object(&self) -> Result<Object<ffi::ToCudaVtable>, Status> {
         let mut params = nvfbc_ffi::CreateParams::zeroed();
         params.version = nvfbc_ffi::CREATE_PARAMS_VER;
         params.interface_type = ffi::SHARED_CUDA;
         params.adapter_index = self.adapter;
         params.private_data = self.key.as_ptr().cast();
-        params.private_data_size = key_size(&self.key);
+        params.private_data_size = KEY_BYTES;
         // SAFETY: the parameters are complete and the key outlives the call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
-        NonNull::new(params.nvfbc.cast::<ffi::ToCuda>()).ok_or(Status::UNSUPPORTED)
+        Object::new(params.nvfbc).ok_or(Status::UNSUPPORTED)
     }
 
     /// Adopts a context of the driver's own the first time; after that the context must be the
@@ -218,47 +197,39 @@ impl Capture {
     }
 
     fn reopen(&mut self) -> Result<Frame, CaptureError> {
-        let Some(now) = self.reopen.attempt() else {
-            return Ok(Frame::Unchanged);
-        };
-        if !is_attached(self.monitor) {
-            return Err(CaptureError::Closed);
-        }
-        match self.open_session() {
-            Ok(session) => {
+        if let Some(now) = reopen_due(&self.reopen, self.monitor)? {
+            let opened = self.open_session();
+            if let Some(session) = note_reopened(&mut self.reopen, now, opened)? {
                 self.session = Some(session);
-                self.reopen.succeeded();
             }
-            Err(CaptureError::Nvfbc(..)) => self.reopen.refused(now),
-            Err(error) => return Err(error),
         }
         Ok(Frame::Unchanged)
     }
 
-    fn grab(&mut self) -> Result<Grab, CaptureError> {
+    /// Resized also when the row pitch changed.
+    fn grab(&mut self, slot: usize) -> Result<Grabbed, CaptureError> {
         let Some(session) = &self.session else {
-            return Ok(Grab::Lost);
+            return Ok(Grabbed::Lost);
         };
-        let slot = self.next as usize;
         let (status, info) = session.grab_frame(self.buffers[slot], self.cursor);
-        match status {
-            Status::SUCCESS if info.must_recreate != 0 => Ok(Grab::Lost),
-            Status::SUCCESS if (info.width, info.height) != self.size => Ok(Grab::Resized),
-            Status::SUCCESS => {
-                if !self.note_pitch(&info) {
-                    return Ok(Grab::Resized);
-                }
-                // The grab only queues the copy; NVENC must not read the buffer before it lands.
-                self.cuda
-                    .synchronize_context()
-                    .map_err(cuda_failed("wait for an NvFBC grab to land"))?;
-                self.next = (self.next + 1) % SLOT_COUNT;
-                Ok(Grab::Done(slot))
-            }
-            Status::INVALIDATED_SESSION => Ok(Grab::Lost),
-            Status::PROTECTED_CONTENT => Ok(Grab::Withheld),
-            status => Err(nvfbc_failed("grab the display with NvFBC into CUDA memory")(status)),
+        let grabbed = classify_grab(
+            status,
+            &info,
+            self.size,
+            "grab the display with NvFBC into CUDA memory",
+        )?;
+        if grabbed != Grabbed::Frame {
+            return Ok(grabbed);
         }
+        if !self.note_pitch(&info) {
+            return Ok(Grabbed::Resized);
+        }
+        // The grab only queues the copy; NVENC must not read the buffer before it lands.
+        self.cuda
+            .synchronize_context()
+            .map_err(cuda_failed("wait for an NvFBC grab to land"))?;
+        self.next = (self.next + 1) % SLOT_COUNT;
+        Ok(Grabbed::Frame)
     }
 
     /// False once the pitch changes: the encoder must then start over.
@@ -293,13 +264,7 @@ impl Source for Capture {
         false
     }
 
-    fn take(
-        &mut self,
-        _device: &Device,
-        _target: Option<&ID3D11Texture2D>,
-        _width: u32,
-        _height: u32,
-    ) -> Result<Frame, CaptureError> {
+    fn take(&mut self, _target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
         if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
@@ -312,11 +277,12 @@ impl Source for Capture {
         if self.session.is_none() {
             return self.reopen();
         }
-        match self.grab()? {
-            Grab::Done(index) => Ok(Frame::InSurface(index)),
-            Grab::Withheld => Ok(Frame::Unchanged),
-            Grab::Resized => Ok(Frame::Resized),
-            Grab::Lost => {
+        let slot = self.next as usize;
+        match self.grab(slot)? {
+            Grabbed::Frame => Ok(Frame::InSurface(slot)),
+            Grabbed::Withheld => Ok(Frame::Unchanged),
+            Grabbed::Resized => Ok(Frame::Resized),
+            Grabbed::Lost => {
                 self.session = None;
                 self.reopen()
             }
@@ -369,14 +335,12 @@ impl Drop for Capture {
 }
 
 struct Session {
-    /// Live until `Drop`; its method table lives in the library.
-    object: NonNull<ffi::ToCuda>,
+    object: Object<ffi::ToCudaVtable>,
 }
 
 impl Session {
     fn methods(&self) -> &ffi::ToCudaVtable {
-        // SAFETY: the object is live and the library holding its table is loaded.
-        unsafe { &*(*self.object.as_ptr()).vtable }
+        self.object.methods()
     }
 
     /// For any display mode the adapter may switch to.
@@ -416,22 +380,12 @@ impl Session {
             } else {
                 0
             };
-        // A device address, not a pointer into this process.
-        params.cuda_device_buffer = ptr::without_provenance_mut(
-            usize::try_from(buffer).expect("a device address fits a 64-bit pointer"),
-        );
+        params.cuda_device_buffer = buffer.as_api_pointer();
         params.grab_info = &raw mut info;
         // SAFETY: a live, set-up object; the buffer is the driver's maximum size and `info`
         // outlives the call.
         let status = unsafe { (self.methods().grab_frame)(self.object.as_ptr(), &raw mut params) };
         (status, info)
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards.
-        let _ = unsafe { (self.methods().release)(self.object.as_ptr()) };
     }
 }
 

@@ -141,10 +141,6 @@ impl<P: Page + 'static> Pages<P> {
         Ok((page, offset))
     }
 
-    pub(crate) fn slot(page: Arc<P>, offset: usize, length: usize) -> Slot {
-        Slot::new(page, offset, length)
-    }
-
     /// Frees unheld pages from the front; the page being filled stays in use even when empty.
     fn reclaim(&mut self) {
         while self.used.len() > 1

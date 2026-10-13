@@ -981,27 +981,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn signals_the_matrix_the_stream_was_converted_with() {
-        let stream = Stream {
-            matrix: Matrix::Bt601,
-            ..stream(Codec::H264)
-        };
-        let record = h264::configuration(&h264::tests::keyframe()).unwrap();
-        let SampleEntry::Avc1(entry) = visual_entry(&stream, &record).unwrap() else {
-            panic!("expected an avc1 entry");
-        };
-        assert_eq!(
-            entry.colr,
-            Some(Colr::Nclx {
-                colour_primaries: 1,
-                transfer_characteristics: 1,
-                matrix_coefficients: 6,
-                full_range_flag: false,
-            })
-        );
-    }
-
-    #[test]
     fn describes_the_stream_and_its_decoder_configuration() {
         let file = mux(Codec::H264, &[packet(Codec::H264, 0, true)]);
         let (moov, _) = index(&file);

@@ -1,18 +1,16 @@
 //! Thread, process and GPU scheduling priority for the capture thread.
 
+use crate::gpu::ffi::Library;
 use windows::{
     Win32::{
         Foundation::{HANDLE, NTSTATUS},
-        System::{
-            LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
-            Threading::{
-                AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
-                AvSetMmThreadPriority, GetCurrentProcess, GetCurrentThread,
-                PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-                PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
-                ProcessPowerThrottling, SetProcessInformation, SetThreadPriority,
-                THREAD_PRIORITY_HIGHEST,
-            },
+        System::Threading::{
+            AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+            AvSetMmThreadPriority, GetCurrentProcess, GetCurrentThread,
+            PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+            ProcessPowerThrottling, SetProcessInformation, SetThreadPriority,
+            THREAD_PRIORITY_HIGHEST,
         },
     },
     core::{s, w},
@@ -69,25 +67,13 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
 }
 
 /// High, not realtime: realtime would starve the game and the compositor of the GPU.
-pub(super) fn raise_gpu_class() -> bool {
-    let Some(set_class) = scheduling_class_setter() else {
-        return false;
-    };
-    // SAFETY: changes the scheduling class of the current process only.
-    unsafe { set_class(GetCurrentProcess(), SCHEDULING_HIGH) }.is_ok()
-}
-
-fn scheduling_class_setter() -> Option<SetSchedulingPriorityClass> {
-    // Never freed; `gdi32.dll` is loaded in every GUI process anyway.
-    // SAFETY: loads a system library by name.
-    let gdi =
-        unsafe { LoadLibraryExW(w!("gdi32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
-    // SAFETY: looks a symbol up in the loaded library.
-    let export = unsafe { GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) }?;
+pub(super) fn raise_gpu_class() -> windows::core::Result<()> {
+    let gdi = Library::load(w!("gdi32.dll"))?;
     // SAFETY: the export has this signature since Windows Vista.
-    Some(unsafe {
-        std::mem::transmute::<unsafe extern "system" fn() -> isize, SetSchedulingPriorityClass>(
-            export,
-        )
-    })
+    let set_class = unsafe {
+        gdi.export::<SetSchedulingPriorityClass>(s!("D3DKMTSetProcessSchedulingPriorityClass"))
+    }
+    .ok_or_else(windows::core::Error::from_thread)?;
+    // SAFETY: changes the scheduling class of the current process only.
+    unsafe { set_class(GetCurrentProcess(), SCHEDULING_HIGH) }.ok()
 }

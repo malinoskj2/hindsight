@@ -1,7 +1,10 @@
 //! The parts of NVIDIA Capture SDK 7's `NvFBCCuda.h` this program uses, laid out for 64-bit
 //! Windows from public copies of the header.
 
-use super::super::ffi::{FrameGrabInfo, Status, Zeroed, struct_version};
+use crate::gpu::capture::nvfbc::ffi::{
+    FrameGrabInfo, Interface, Release, Status, Vtable, struct_version,
+};
+use crate::gpu::ffi::Zeroed;
 use std::{
     ffi::c_void,
     mem::{offset_of, size_of},
@@ -63,14 +66,10 @@ const _: () = assert!(offset_of!(GrabFrameParams, _wait_time) == 24);
 const _: () = assert!(offset_of!(GrabFrameParams, _reserved) == 28);
 const _: () = assert!(offset_of!(GrabFrameParams, _reserved_pointers) == 272);
 
-/// `INvFBCCuda_v3`: valid from `NvFBC_CreateEx` until `release`, while the library is loaded;
-/// the method table lives in the library.
-#[repr(C)]
-pub(super) struct ToCuda {
-    pub(super) vtable: *const ToCudaVtable,
-}
+/// `INvFBCCuda_v3`.
+pub(super) type ToCuda = Interface<ToCudaVtable>;
 
-/// In declaration order: the size query first, the release last.
+/// The size query first, the release last.
 #[repr(C)]
 pub(super) struct ToCudaVtable {
     pub(super) get_max_buffer_size: unsafe extern "system" fn(*mut ToCuda, *mut u32) -> Status,
@@ -78,7 +77,13 @@ pub(super) struct ToCudaVtable {
     pub(super) grab_frame: unsafe extern "system" fn(*mut ToCuda, *mut GrabFrameParams) -> Status,
     _gpu_based_cpu_sleep: unsafe extern "system" fn(*mut ToCuda, i64) -> Status,
     _cursor_capture: unsafe extern "system" fn(*mut ToCuda, *mut c_void) -> Status,
-    pub(super) release: unsafe extern "system" fn(*mut ToCuda) -> Status,
+    release: Release<Self>,
 }
 const _: () = assert!(size_of::<ToCudaVtable>() == 6 * size_of::<usize>());
 const _: () = assert!(offset_of!(ToCudaVtable, release) == 5 * size_of::<usize>());
+
+impl Vtable for ToCudaVtable {
+    fn release(&self) -> Release<Self> {
+        self.release
+    }
+}

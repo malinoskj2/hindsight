@@ -2,10 +2,11 @@
 //! buffers in place, and a display in HDR is tone-mapped from FP16 instead.
 
 use super::{
-    CaptureError, Frame, Source, Surface, display, failed, monitor, monitor_of, tonemap::ToneMapper,
+    CaptureError, CopyTarget, Frame, Source, Surface, deliver, display, failed, monitor,
+    monitor_of, tonemap::ToneMapper,
 };
 use crate::{
-    gpu::{device::Device, pacer::HUNDRED_NANOSECONDS},
+    gpu::{device::Device, pacer::filetime_units},
     log,
     service::Target,
 };
@@ -117,13 +118,7 @@ impl Source for Capture {
         self.captures_window
     }
 
-    fn take(
-        &mut self,
-        device: &Device,
-        target: Option<&ID3D11Texture2D>,
-        width: u32,
-        height: u32,
-    ) -> Result<Frame, CaptureError> {
+    fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(CaptureError::Closed);
         }
@@ -153,16 +148,11 @@ impl Source for Capture {
             return Ok(Frame::InSurface(index));
         }
         // Not handed over (always so in HDR), or the pool replaced its buffers.
-        let copied = if let Some(mapper) = &mut self.tone_map {
-            mapper
-                .convert(device, &texture, target, width, height)
-                .map_err(failed("tone-map the HDR frame"))
-        } else {
-            device.copy_region(target, &texture, width, height);
-            Ok(())
-        };
+        let copied = deliver(self.tone_map.as_mut(), &texture, target);
         let _ = frame.Close();
-        copied.map(|()| Frame::Fresh)
+        copied
+            .map(|()| Frame::Fresh)
+            .map_err(failed("tone-map the HDR frame"))
     }
 
     fn hand_over_surfaces(&mut self) -> bool {
@@ -187,8 +177,7 @@ impl Source for Capture {
 
     fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
         for (index, held) in self.held.iter_mut().enumerate() {
-            if held.is_some()
-                && !in_use(index)
+            if !in_use(index)
                 && let Some(frame) = held.take()
             {
                 let _ = frame.Close();
@@ -303,7 +292,7 @@ fn start_session(
     let _ = session.SetIsCursorCaptureEnabled(cursor);
     let _ = session.SetIsBorderRequired(false);
     let _ = session.SetMinUpdateInterval(TimeSpan {
-        Duration: i64::try_from((period / 2).as_nanos() / HUNDRED_NANOSECONDS).unwrap_or(i64::MAX),
+        Duration: filetime_units(period / 2),
     });
     session.StartCapture().map_err(failed("start capturing"))?;
     Ok(session)

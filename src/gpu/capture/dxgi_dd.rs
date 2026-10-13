@@ -2,8 +2,8 @@
 //! window target is recorded through the monitor it fills.
 
 use super::{
-    CaptureError, Frame, ReopenThrottle, Source, failed, is_window_closed, monitor_of,
-    tonemap::ToneMapper,
+    CaptureError, CopyTarget, Frame, ReopenThrottle, Source, deliver, failed, is_window_closed,
+    monitor_of, tonemap::ToneMapper,
 };
 use crate::{gpu::device::Device, log, service::Target};
 use std::time::Instant;
@@ -68,8 +68,8 @@ impl Capture {
     ) -> Result<Self, CaptureError> {
         let (monitor, window) = monitor_of(target);
         let output = find_output(device, monitor)?;
-        let (duplication, description) =
-            duplicate(&output, device, tone_map.is_some()).map_err(first_duplication_failed)?;
+        let (duplication, description) = duplicate(&output, device, formats(tone_map.as_ref()))
+            .map_err(first_duplication_failed)?;
         if is_rotated(&description) {
             return Err(CaptureError::Unsupported(
                 "the monitor is rotated, which Desktop Duplication does not undo; choose Windows Graphics Capture"
@@ -94,7 +94,7 @@ impl Capture {
             return Ok(Frame::Unchanged);
         };
         let (duplication, description) =
-            match duplicate(&self.output, device, self.tone_map.is_some()) {
+            match duplicate(&self.output, device, formats(self.tone_map.as_ref())) {
                 Ok(opened) => opened,
                 Err(error) if PASSING_REFUSALS.contains(&error.code()) => {
                     return self.retry_later(now);
@@ -136,20 +136,14 @@ impl Source for Capture {
         false
     }
 
-    fn take(
-        &mut self,
-        device: &Device,
-        target: Option<&ID3D11Texture2D>,
-        width: u32,
-        height: u32,
-    ) -> Result<Frame, CaptureError> {
+    fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
         if is_window_closed(self.window) {
             return Err(CaptureError::Closed);
         }
         let target = super::target_of(target);
 
         let Some(duplication) = &self.duplication else {
-            return self.reopen(device);
+            return self.reopen(target.device);
         };
 
         let (info, resource) = match acquire(duplication)? {
@@ -157,25 +151,18 @@ impl Source for Capture {
             Acquired::Nothing => return Ok(Frame::Unchanged),
             Acquired::Lost => {
                 self.duplication = None;
-                return self.reopen(device);
+                return self.reopen(target.device);
             }
         };
 
         // A frame that only moved the cursor keeps the previous picture.
         let frame = if info.LastPresentTime != 0 || !self.primed {
             let scrgb = self.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            let tone_map = self.tone_map.as_mut().filter(|_| scrgb);
             let delivered = resource
                 .ok_or_else(windows::core::Error::empty)
                 .and_then(|resource| resource.cast::<ID3D11Texture2D>())
-                .and_then(|texture| match &mut self.tone_map {
-                    Some(mapper) if scrgb => {
-                        mapper.convert(device, &texture, target, width, height)
-                    }
-                    _ => {
-                        device.copy_region(target, &texture, width, height);
-                        Ok(())
-                    }
-                });
+                .and_then(|texture| deliver(tone_map, &texture, target));
             self.primed |= delivered.is_ok();
             delivered
                 .map(|()| Frame::Fresh)
@@ -216,40 +203,48 @@ fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, Captu
     )))
 }
 
+/// The formats to ask for, when tone-mapping wants the HDR desktop as scRGB.
+fn formats(tone_map: Option<&ToneMapper>) -> Option<&'static [DXGI_FORMAT]> {
+    tone_map.map(|_| SCRGB_FORMATS.as_slice())
+}
+
 fn duplicate(
     output: &IDXGIOutput1,
     device: &Device,
-    scrgb: bool,
+    formats: Option<&[DXGI_FORMAT]>,
 ) -> windows::core::Result<(IDXGIOutputDuplication, DXGI_OUTDUPL_DESC)> {
-    let duplication = match scrgb.then(|| duplicate_scrgb(output, device)) {
-        Some(Ok(duplication)) => duplication,
-        Some(Err(error)) if PASSING_REFUSALS.contains(&error.code()) => return Err(error),
-        fallback => {
-            if let Some(Err(error)) = fallback {
-                log::warning(format!(
-                    "Desktop Duplication could not deliver the HDR desktop as scRGB ({error}); highlights are clipped"
-                ));
-            }
-            // SAFETY: duplicates a live output for a live device on the output's adapter.
-            unsafe { output.DuplicateOutput(&device.d3d) }?
+    if let Some(formats) = formats {
+        match duplicate_in(output, device, formats) {
+            Ok(duplication) => return Ok(described(duplication)),
+            Err(error) if PASSING_REFUSALS.contains(&error.code()) => return Err(error),
+            Err(error) => log::warning(format!(
+                "Desktop Duplication could not deliver the HDR desktop as scRGB ({error}); highlights are clipped"
+            )),
         }
-    };
+    }
+    // SAFETY: duplicates a live output for a live device on the output's adapter.
+    let duplication = unsafe { output.DuplicateOutput(&device.d3d) }?;
+    Ok(described(duplication))
+}
+
+fn described(duplication: IDXGIOutputDuplication) -> (IDXGIOutputDuplication, DXGI_OUTDUPL_DESC) {
     // SAFETY: describes a live duplication.
     let description = unsafe { duplication.GetDesc() };
-    Ok((duplication, description))
+    (duplication, description)
 }
 
 /// `DuplicateOutput1` refuses a thread that is not per-monitor DPI aware.
-fn duplicate_scrgb(
+fn duplicate_in(
     output: &IDXGIOutput1,
     device: &Device,
+    formats: &[DXGI_FORMAT],
 ) -> windows::core::Result<IDXGIOutputDuplication> {
     let output: IDXGIOutput5 = output.cast()?;
     // SAFETY: changes the calling thread's DPI awareness only, and is undone below.
     let previous =
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     // SAFETY: live output and device on its adapter; the format list outlives the call.
-    let duplication = unsafe { output.DuplicateOutput1(&device.d3d, 0, &SCRGB_FORMATS) };
+    let duplication = unsafe { output.DuplicateOutput1(&device.d3d, 0, formats) };
     if !previous.is_invalid() {
         // SAFETY: puts back the thread's awareness from before.
         unsafe { SetThreadDpiAwarenessContext(previous) };
