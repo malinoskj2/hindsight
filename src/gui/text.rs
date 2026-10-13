@@ -19,6 +19,16 @@ pub(super) const TAB_LOGS: &str = "Logs";
 
 pub(super) const GROUP_RECORDING: &str = "Recording";
 pub(super) const GROUP_STATS: &str = "Stats";
+pub(super) const GROUP_BUFFER: &str = "Buffer";
+pub(super) const BUFFER_HELD: &str = "Held";
+pub(super) const BUFFER_PLACE: &str = "Kept in";
+pub(super) const GROUP_CONTROLS: &str = "Controls";
+pub(super) const CONTROL_SAVE: &str = "Save";
+pub(super) const CONTROL_PAUSE: &str = "Pause";
+pub(super) const CONTROL_RESUME: &str = "Resume";
+pub(super) const CONTROL_RESTART: &str = "Restart";
+pub(super) const CONTROL_OPEN_CLIP: &str = "Open clip";
+pub(super) const CONTROL_OPEN_FOLDER: &str = "Open folder";
 pub(super) const GROUP_GENERAL: &str = "General";
 
 pub(super) const SOURCE: &str = "Source";
@@ -118,6 +128,7 @@ pub(super) fn status(state: DisplayStatus) -> String {
         DisplayStatus::Starting => "Starting capture…",
         DisplayStatus::Waiting => "Waiting for a full-screen app",
         DisplayStatus::Recording => "Recording to the replay buffer",
+        DisplayStatus::Paused => "Paused · the buffer stays saveable",
         DisplayStatus::Retrying => "Capture stopped · retrying shortly",
         DisplayStatus::Unsupported => "Cannot record with these settings",
     };
@@ -150,6 +161,38 @@ pub(super) fn rates(status: &Status) -> String {
     status
         .encode_rate
         .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
+}
+
+/// "27 s of 30 s · 312 MB": the span the next save would cover and what it takes.
+pub(super) fn buffer_held(status: &Status) -> String {
+    let Some(stream) = status.stream else {
+        return NO_VALUE.to_owned();
+    };
+    let held = status.buffer_held;
+    let seconds = held.frames as f64 / f64::from(stream.frame_rate.max(1));
+    format!(
+        "{seconds:.0} s of {} s · {}",
+        status.buffer_seconds,
+        megabytes(held.bytes)
+    )
+}
+
+/// "GPU memory (VRAM) · about 3,648 MB": where the buffer is kept and what it reserves.
+pub(super) fn buffer_place(status: &Status) -> String {
+    status.buffer_memory.map_or_else(
+        || NO_VALUE.to_owned(),
+        |memory| {
+            format!(
+                "{} · about {}",
+                memory.name(),
+                megabytes(status.buffer_capacity_bytes)
+            )
+        },
+    )
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.0} MB", bytes as f64 / MEGABYTE)
 }
 
 pub(super) fn session_written(status: &Status) -> String {
@@ -255,6 +298,31 @@ mod tests {
             "boss.mp4 148\u{a0}MB"
         );
         assert_eq!(clip_caption("boss.mp4", 1_572_864), "boss.mp4 2\u{a0}MB");
+    }
+
+    #[test]
+    fn the_buffer_rows_show_the_span_held_and_where_it_is_kept() {
+        use crate::replay::{Held, Matrix, Stream};
+        let mut status = Status::default();
+        assert_eq!(buffer_held(&status), "—");
+        assert_eq!(buffer_place(&status), "—");
+        status.stream = Some(Stream {
+            codec: Codec::H264,
+            width: 1920,
+            height: 1080,
+            frame_rate: 60,
+            matrix: Matrix::Bt709,
+        });
+        status.buffer_seconds = 30;
+        status.buffer_held = Held {
+            frames: 1620,
+            bytes: 327_155_712,
+            stored: true,
+        };
+        status.buffer_memory = Some(Memory::Vram);
+        status.buffer_capacity_bytes = 3_825_205_248;
+        assert_eq!(buffer_held(&status), "27 s of 30 s · 312 MB");
+        assert_eq!(buffer_place(&status), "GPU memory (VRAM) · about 3648 MB");
     }
 
     #[test]

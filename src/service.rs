@@ -2,9 +2,9 @@
 
 use crate::{
     audio,
-    config::{Backend, Config, Mode, Theme},
+    config::{Backend, Config, Memory, Mode, Theme},
     log,
-    replay::{self, Live, SaveError, Snapshot, Stream},
+    replay::{self, Held, Live, SaveError, Snapshot, Stream},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -117,6 +117,8 @@ pub(crate) enum DisplayStatus {
     Starting,
     Waiting,
     Recording,
+    /// Capture stopped on request; what was buffered stays saveable until it resumes.
+    Paused,
     Retrying,
     Unsupported,
 }
@@ -129,6 +131,11 @@ pub(crate) struct Status {
     pub(crate) backend: Option<Backend>,
     pub(crate) stream: Option<Stream>,
     pub(crate) bitrate_mbps: u32,
+    /// What the buffer holds now, and where it is kept while a session has one.
+    pub(crate) buffer_held: Held,
+    pub(crate) buffer_memory: Option<Memory>,
+    pub(crate) buffer_seconds: u32,
+    pub(crate) buffer_capacity_bytes: u64,
     pub(crate) saved_bytes: Option<u64>,
     pub(crate) buffered_lifetime_bytes: Option<u64>,
     pub(crate) encode_rate: Option<f64>,
@@ -145,6 +152,9 @@ enum Command {
     Start(Config),
     Target(Target),
     Save,
+    Pause,
+    Resume,
+    Restart,
     Theme(Theme),
     Wake,
     Exit,
@@ -197,6 +207,18 @@ impl Worker {
 
     pub(crate) fn save(&self) {
         self.request(Command::Save);
+    }
+
+    pub(crate) fn pause(&self) {
+        self.request(Command::Pause);
+    }
+
+    pub(crate) fn resume(&self) {
+        self.request(Command::Resume);
+    }
+
+    pub(crate) fn restart(&self) {
+        self.request(Command::Restart);
     }
 
     pub(crate) fn set_theme(&self, theme: Theme) {
@@ -259,6 +281,7 @@ struct Reading {
     running: bool,
     stream: Option<Stream>,
     live_bytes: u64,
+    held: Option<Held>,
     sample: Sample,
 }
 
@@ -332,6 +355,7 @@ struct Machine {
     session: Option<Session>,
     target: Option<Target>,
     live: Option<Arc<Live>>,
+    paused: bool,
     retry_at: Option<Instant>,
     saving: Option<Saving>,
     sample: Option<Sample>,
@@ -355,6 +379,7 @@ impl Machine {
             session: None,
             target: None,
             live: None,
+            paused: false,
             retry_at: None,
             saving: None,
             sample: None,
@@ -370,6 +395,9 @@ impl Machine {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
+                Ok(Command::Pause) => self.pause(),
+                Ok(Command::Resume) => self.resume(),
+                Ok(Command::Restart) => self.restart(),
                 Ok(Command::Theme(theme)) => self.remember_theme(theme),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -403,12 +431,44 @@ impl Machine {
         }
         log::info(text::settings_applied(&config));
         self.config = config;
+        self.paused = false;
         self.stop_session();
         self.begin();
     }
 
+    /// Stops capturing but keeps the buffer, so a clip can still be saved from before the pause.
+    fn pause(&mut self) {
+        if self.paused {
+            return;
+        }
+        log::info(text::PAUSED);
+        self.paused = true;
+        self.retry_at = None;
+        self.stop_session();
+        self.status.state = DisplayStatus::Paused;
+        self.status.error = None;
+    }
+
+    fn resume(&mut self) {
+        if !self.paused {
+            return;
+        }
+        log::info(text::RESUMED);
+        self.paused = false;
+        self.begin();
+    }
+
+    /// Tears the session down and builds it again with the same target.
+    fn restart(&mut self) {
+        log::info(text::RESTARTING);
+        self.paused = false;
+        self.stop_session();
+        self.restart_session();
+    }
+
     fn offer(&mut self, target: Target) {
         if self.config.mode != Mode::Fullscreen
+            || self.paused
             || self.retry_at.is_some()
             || self.status.state == DisplayStatus::Unsupported
         {
@@ -727,6 +787,7 @@ impl Machine {
             running,
             stream,
             live_bytes,
+            held: live.map(Live::held),
             sample: Sample {
                 at: Instant::now(),
                 encoded,
@@ -750,6 +811,17 @@ impl Machine {
         self.status.backend = reading.running.then_some(self.config.backend);
         self.status.stream = reading.stream;
         self.status.bitrate_mbps = self.config.bitrate_mbps;
+        self.status.buffer_held = reading.held.unwrap_or_default();
+        self.status.buffer_memory = reading.held.map(|held| {
+            // Nothing placed yet, or placed where asked: the setting; refused: RAM.
+            if held.frames == 0 || held.stored {
+                self.config.buffer_memory
+            } else {
+                Memory::Ram
+            }
+        });
+        self.status.buffer_seconds = self.config.buffer_seconds;
+        self.status.buffer_capacity_bytes = self.config.estimated_buffer_bytes();
     }
 
     fn count_bytes(&mut self, live_bytes: u64) {
@@ -989,6 +1061,30 @@ mod tests {
         let status = wait_for(&worker, |status| status.saved_bytes.is_some());
         assert_eq!(status.saved_bytes, Some(clip_bytes));
         assert!(status.buffered_lifetime_bytes.unwrap() >= buffered);
+    }
+
+    #[test]
+    fn pausing_keeps_the_buffer_saveable_and_resuming_records_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
+        wait_for(&worker, |status| {
+            status.state == DisplayStatus::Recording && status.session_written_bytes > 0
+        });
+
+        worker.pause();
+        let status = wait_for(&worker, |status| status.state == DisplayStatus::Paused);
+        assert!(!status.recording);
+        worker.save();
+        let status = wait_for(&worker, |status| status.last_clip.is_some());
+        assert_eq!(status.state, DisplayStatus::Paused);
+
+        worker.resume();
+        wait_for(&worker, |status| status.state == DisplayStatus::Recording);
+        let before = worker.status().session_written_bytes;
+        worker.restart();
+        wait_for(&worker, |status| {
+            status.state == DisplayStatus::Recording && status.session_written_bytes > before
+        });
     }
 
     #[test]

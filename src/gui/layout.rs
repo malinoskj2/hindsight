@@ -170,8 +170,35 @@ pub(super) struct ExpandableGroup {
     frame: usize,
     message: gui::Label,
     extra: i32,
-    controls_below: Vec<gui::Label>,
+    controls_below: Vec<Movable>,
     shown: Cell<i32>,
+}
+
+/// A control under an expandable group, moved down when the group grows.
+pub(super) enum Movable {
+    Label(gui::Label),
+    Button(gui::Button),
+}
+
+impl Movable {
+    fn hwnd(&self) -> &w::HWND {
+        match self {
+            Self::Label(label) => label.hwnd(),
+            Self::Button(button) => button.hwnd(),
+        }
+    }
+}
+
+impl From<gui::Label> for Movable {
+    fn from(label: gui::Label) -> Self {
+        Self::Label(label)
+    }
+}
+
+impl From<gui::Button> for Movable {
+    fn from(button: gui::Button) -> Self {
+        Self::Button(button)
+    }
 }
 
 impl ExpandableGroup {
@@ -185,8 +212,9 @@ impl ExpandableGroup {
         }
     }
 
-    pub(super) fn moving(mut self, controls: impl IntoIterator<Item = gui::Label>) -> Self {
-        self.controls_below.extend(controls);
+    pub(super) fn moving(mut self, controls: impl IntoIterator<Item = impl Into<Movable>>) -> Self {
+        self.controls_below
+            .extend(controls.into_iter().map(Into::into));
         self
     }
 

@@ -86,6 +86,14 @@ impl Matrix {
     }
 }
 
+/// The frames and bytes the buffer holds, and whether they sit in the store outside RAM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub(crate) frames: u64,
+    pub(crate) bytes: u64,
+    pub(crate) stored: bool,
+}
+
 pub(crate) struct Live {
     ring: Mutex<Ring>,
     stream: OnceLock<Stream>,
@@ -248,10 +256,14 @@ impl Live {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn buffered(&self) -> (u64, usize) {
+    /// What the buffer holds right now.
+    pub(crate) fn held(&self) -> Held {
         let ring = self.ring();
-        (ring.frames(), ring.bytes())
+        Held {
+            frames: ring.frames(),
+            bytes: ring.bytes() as u64,
+            stored: ring.stored(),
+        }
     }
 
     /// Cheap: stored packets are read back, and the sound encoded, only as a save writes them.
@@ -518,7 +530,7 @@ mod tests {
         let live = live_with(100);
 
         assert_eq!(live.counters(), (100, 50));
-        let (frames, bytes) = live.buffered();
+        let Held { frames, bytes, .. } = live.held();
         assert_eq!(frames, 70);
         assert!(bytes > 0);
 

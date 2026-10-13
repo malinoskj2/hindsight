@@ -80,7 +80,6 @@ impl Ring {
         self.packets.iter().cloned().collect()
     }
 
-    #[cfg(test)]
     pub(super) fn frames(&self) -> u64 {
         match (self.packets.front(), self.packets.back()) {
             (Some(first), Some(last)) => last.index - first.index + 1,
@@ -88,9 +87,15 @@ impl Ring {
         }
     }
 
-    #[cfg(test)]
     pub(super) const fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Whether the newest packet went to the store outside RAM.
+    pub(super) fn stored(&self) -> bool {
+        self.packets
+            .back()
+            .is_some_and(|entry| matches!(entry.data, Data::Stored(_)))
     }
 }
 

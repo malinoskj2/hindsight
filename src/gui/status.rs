@@ -2,22 +2,26 @@
 
 use super::{
     layout::{
-        self, AMBER, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, Painted, RED,
-        TintedLabel, VALUE_WIDTH, VALUE_X, hidden_label, label, path_label,
+        self, AMBER, BUTTON_HEIGHT, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X,
+        LINE, Painted, RED, TintedLabel, VALUE_WIDTH, VALUE_X, button, hidden_label, label,
+        path_label, saturating_i32, skin_button,
     },
     text,
     theme::{Skin, Surface},
 };
-use crate::service::Status;
+use crate::service::{DisplayStatus, Status};
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
 const NOTICE_EXTRA: i32 = 2 * LINE + 4;
 const FIRST_ROW: i32 = 20;
 const ROW_PITCH: i32 = 20;
+const CONTROL_COUNT: i32 = 5;
+const CONTROL_GAP: i32 = 6;
+const CONTROL_WIDTH: i32 = (INNER_WIDTH - (CONTROL_COUNT - 1) * CONTROL_GAP) / CONTROL_COUNT;
 
 mod rows {
-    use super::{FIRST_ROW, LINE, ROW_PITCH};
+    use super::{BUTTON_HEIGHT, FIRST_ROW, LINE, ROW_PITCH};
 
     pub(super) const RECORDING_FRAME: i32 = 6;
     pub(super) const STATE: i32 = RECORDING_FRAME + FIRST_ROW;
@@ -33,6 +37,24 @@ mod rows {
     pub(super) const LIFETIME_WRITTEN: i32 = SESSION_SAVED + ROW_PITCH;
     pub(super) const LIFETIME_SAVED: i32 = LIFETIME_WRITTEN + ROW_PITCH;
     pub(super) const STATS_HEIGHT: i32 = LIFETIME_SAVED + LINE + 2 - STATS_FRAME;
+    pub(super) const BUFFER_FRAME: i32 = STATS_FRAME + STATS_HEIGHT + 6;
+    pub(super) const HELD: i32 = BUFFER_FRAME + FIRST_ROW;
+    pub(super) const PLACE: i32 = HELD + ROW_PITCH;
+    pub(super) const BUFFER_HEIGHT: i32 = PLACE + LINE + 2 - BUFFER_FRAME;
+    pub(super) const CONTROLS_FRAME: i32 = BUFFER_FRAME + BUFFER_HEIGHT + 6;
+    pub(super) const CONTROLS: i32 = CONTROLS_FRAME + FIRST_ROW - 2;
+    pub(super) const CONTROLS_HEIGHT: i32 = CONTROLS + BUTTON_HEIGHT + 8 - CONTROLS_FRAME;
+}
+
+/// What the Controls group's buttons ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Control {
+    Save,
+    /// Pause while recording, resume while paused.
+    PauseOrResume,
+    Restart,
+    OpenClip,
+    OpenFolder,
 }
 
 #[derive(Clone)]
@@ -44,6 +66,8 @@ struct Inner {
     recording_group: ExpandableGroup,
     recording: RecordingLabels,
     stats: StatsLabels,
+    buffer: BufferLabels,
+    controls: ControlButtons,
 }
 
 impl Painted for Inner {
@@ -73,16 +97,34 @@ impl StatusPage {
             rows::STATS_HEIGHT,
         );
         let stats = StatsLabels::new(&page);
-        let frames = vec![recording_frame, stats_frame];
+        let buffer_frame = Frame::new(
+            &page,
+            text::GROUP_BUFFER,
+            rows::BUFFER_FRAME,
+            rows::BUFFER_HEIGHT,
+        );
+        let buffer = BufferLabels::new(&page);
+        let controls_frame = Frame::new(
+            &page,
+            text::GROUP_CONTROLS,
+            rows::CONTROLS_FRAME,
+            rows::CONTROLS_HEIGHT,
+        );
+        let controls = ControlButtons::new(&page, skin);
+        let frames = vec![recording_frame, stats_frame, buffer_frame, controls_frame];
         let recording_group =
             ExpandableGroup::new(0, recording.notice.label().clone(), NOTICE_EXTRA)
-                .moving(stats.labels());
+                .moving(stats.labels())
+                .moving(buffer.labels())
+                .moving(controls.buttons());
         let inner = Rc::new(Inner {
             page,
             frames,
             recording_group,
             recording,
             stats,
+            buffer,
+            controls,
         });
         layout::draw(
             &inner.page,
@@ -115,7 +157,18 @@ impl StatusPage {
     pub(super) fn update(&self, status: &Status, window_notices: [Option<&str>; 2]) -> bool {
         self.show_state(status);
         self.show_figures(status);
+        self.0.controls.show(status);
         self.show_notices(status, window_notices)
+    }
+
+    pub(super) fn on_control(&self, handle: impl Fn(Control) + Clone + 'static) {
+        for (button, control) in self.0.controls.each() {
+            let handle = handle.clone();
+            button.on().bn_clicked(move || {
+                handle(control);
+                Ok(())
+            });
+        }
     }
 
     fn show_state(&self, status: &Status) {
@@ -131,8 +184,10 @@ impl StatusPage {
         layout::set_text(&recording.backend, &text::backend(status));
         layout::set_text(&recording.encoder, &text::encoder(status));
         layout::set_text(&recording.rates, &text::rates(status));
-        for (row, figure) in self.0.stats.figures(status) {
-            layout::set_text(&row.value, &figure);
+        let figures = self.0.stats.figures(status);
+        let buffer = self.0.buffer.figures(status);
+        for (row, figure) in figures.iter().chain(&buffer) {
+            layout::set_text(&row.value, figure);
         }
     }
 
@@ -212,6 +267,99 @@ impl StatsLabels {
     }
 }
 
+struct BufferLabels {
+    held: Row,
+    place: Row,
+}
+
+impl BufferLabels {
+    fn new(page: &gui::TabPage) -> Self {
+        Self {
+            held: Row::text(page, text::BUFFER_HELD, rows::HELD),
+            place: Row::text(page, text::BUFFER_PLACE, rows::PLACE),
+        }
+    }
+
+    fn figures(&self, status: &Status) -> [(&Row, String); 2] {
+        [
+            (&self.held, text::buffer_held(status)),
+            (&self.place, text::buffer_place(status)),
+        ]
+    }
+
+    fn labels(&self) -> impl Iterator<Item = gui::Label> {
+        [&self.held, &self.place].into_iter().flat_map(Row::labels)
+    }
+}
+
+struct ControlButtons {
+    save: gui::Button,
+    pause: gui::Button,
+    restart: gui::Button,
+    open_clip: gui::Button,
+    open_folder: gui::Button,
+}
+
+impl ControlButtons {
+    fn new(page: &gui::TabPage, skin: &Skin) -> Self {
+        let mut captions = [
+            text::CONTROL_SAVE,
+            text::CONTROL_PAUSE,
+            text::CONTROL_RESTART,
+            text::CONTROL_OPEN_CLIP,
+            text::CONTROL_OPEN_FOLDER,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, caption)| {
+            let x = INNER_X + saturating_i32(index) * (CONTROL_WIDTH + CONTROL_GAP);
+            let button = button(page, caption, x, rows::CONTROLS, CONTROL_WIDTH);
+            skin_button(&button, skin);
+            button
+        });
+        let mut next = || captions.next().expect("five captions");
+        Self {
+            save: next(),
+            pause: next(),
+            restart: next(),
+            open_clip: next(),
+            open_folder: next(),
+        }
+    }
+
+    fn each(&self) -> [(&gui::Button, Control); 5] {
+        [
+            (&self.save, Control::Save),
+            (&self.pause, Control::PauseOrResume),
+            (&self.restart, Control::Restart),
+            (&self.open_clip, Control::OpenClip),
+            (&self.open_folder, Control::OpenFolder),
+        ]
+    }
+
+    fn buttons(&self) -> impl Iterator<Item = gui::Button> {
+        self.each().into_iter().map(|(button, _)| button.clone())
+    }
+
+    fn show(&self, status: &Status) {
+        let paused = status.state == DisplayStatus::Paused;
+        layout::set_text(
+            &self.pause,
+            if paused {
+                text::CONTROL_RESUME
+            } else {
+                text::CONTROL_PAUSE
+            },
+        );
+        self.pause
+            .hwnd()
+            .EnableWindow(status.state != DisplayStatus::Unsupported);
+        self.open_clip
+            .hwnd()
+            .EnableWindow(status.last_clip.is_some());
+    }
+}
+
 struct Row {
     caption: gui::Label,
     value: gui::Label,
@@ -272,6 +420,20 @@ mod tests {
         );
         assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 126));
         assert_eq!((rows::STATS_FRAME, rows::STATS_HEIGHT), (138, 100));
+        assert_eq!(
+            (
+                rows::BUFFER_FRAME,
+                rows::HELD,
+                rows::PLACE,
+                rows::BUFFER_HEIGHT
+            ),
+            (244, 264, 284, 60)
+        );
+        assert_eq!(
+            (rows::CONTROLS_FRAME, rows::CONTROLS, rows::CONTROLS_HEIGHT),
+            (310, 328, 50)
+        );
+        assert_eq!(CONTROL_WIDTH, 76);
         assert_eq!(
             [
                 rows::SESSION_WRITTEN,

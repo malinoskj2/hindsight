@@ -5,17 +5,17 @@ use self::{
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
     settings::SettingsPage,
-    status::StatusPage,
+    status::{Control, StatusPage},
     theme::{Skin, Surface},
 };
 use crate::{
     config::{Codec, Config, Mode, Theme},
     gpu, log,
-    service::Worker,
+    service::{DisplayStatus, Worker},
     sys::{
         foreground::{self, ForegroundHook},
         hotkey::{self, Hotkey},
-        icon, instance, startup,
+        icon, instance, shell, startup,
         tray::{Tray, TrayAction},
         window,
     },
@@ -23,6 +23,8 @@ use crate::{
 use anyhow::Result;
 use std::{
     cell::{Cell, OnceCell, RefCell},
+    fs,
+    path::Path,
     rc::Rc,
 };
 use winsafe::{self as w, co, gui, prelude::*};
@@ -79,6 +81,7 @@ impl Main {
         let main = Self::create(worker, config, start_hidden);
         main.draw();
         main.window_events();
+        main.status_events();
         main.settings_events();
         main.run(start_hidden)
     }
@@ -198,6 +201,44 @@ impl Main {
             this.on_destroy();
             Ok(())
         });
+    }
+
+    fn status_events(&self) {
+        let this = self.clone();
+        self.0
+            .status
+            .on_control(move |control| this.on_control(control));
+    }
+
+    fn on_control(&self, control: Control) {
+        match control {
+            Control::Save => self.save(),
+            Control::PauseOrResume => {
+                if self.0.worker.status().state == DisplayStatus::Paused {
+                    self.0.worker.resume();
+                    self.watch_foreground();
+                } else {
+                    self.0.worker.pause();
+                }
+            }
+            Control::Restart => {
+                self.0.worker.restart();
+                self.watch_foreground();
+            }
+            Control::OpenClip => {
+                if let Some(clip) = self.0.worker.status().last_clip {
+                    open(&clip);
+                }
+            }
+            Control::OpenFolder => {
+                let folder = self.0.config.borrow().clip_directory();
+                if let Err(error) = fs::create_dir_all(&folder) {
+                    log::warning(text::clip_open_failed(&folder, error));
+                    return;
+                }
+                open(&folder);
+            }
+        }
     }
 
     fn settings_events(&self) {
@@ -525,6 +566,12 @@ fn application_window(width: i32, start_hidden: bool) -> gui::WindowMain {
             | visibility,
         ..layout::window_opts(width, WINDOW_HEIGHT, ICON_RESOURCE)
     })
+}
+
+fn open(path: &Path) {
+    if let Err(error) = shell::open(path) {
+        log::warning(text::clip_open_failed(path, error));
+    }
 }
 
 /// The codecs the Settings tab offers: those the GPU encodes, or all of them when it cannot say.
