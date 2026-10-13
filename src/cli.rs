@@ -20,8 +20,9 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write the application icon as a Windows .ico file.
-    Icon { path: PathBuf },
+    /// Write the application icons as Windows .ico files, one per theme, from the logos under
+    /// `<assets>/logo` into `<assets>`.
+    Icon { assets: PathBuf },
 }
 
 pub(crate) enum Launch {
@@ -32,9 +33,9 @@ pub(crate) enum Launch {
 pub(crate) fn dispatch() -> Result<Launch> {
     let arguments = Arguments::parse();
     match arguments.command {
-        Some(Command::Icon { path }) => {
-            std::fs::write(&path, icon::ico())
-                .with_context(|| format!("write {}", path.display()))?;
+        Some(Command::Icon { assets }) => {
+            icon::write_all(&assets)
+                .with_context(|| format!("write the icons under {}", assets.display()))?;
             Ok(Launch::Handled)
         }
         None => Ok(Launch::Window {

@@ -7,6 +7,7 @@ pub(crate) mod clock;
 #[expect(unsafe_code)]
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
+#[cfg(windows)]
 pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod instance;
@@ -24,4 +25,5 @@ pub(crate) mod tray;
 #[expect(unsafe_code)]
 pub(crate) mod volume;
 #[cfg(windows)]
+#[expect(unsafe_code)]
 pub(crate) mod window;

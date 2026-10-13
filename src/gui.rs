@@ -11,12 +11,12 @@ use self::{
 };
 use crate::{
     APP_NAME,
-    config::{Codec, Config, Mode},
+    config::{Codec, Config, Mode, Theme},
     gpu, log,
     service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
-        hotkey, instance, startup,
+        hotkey, icon, instance, startup,
         tray::{Tray, TrayAction},
         window,
     },
@@ -36,8 +36,8 @@ mod status;
 mod text;
 mod theme;
 
-/// Resource id of the icon embedded by `build.rs`.
-const ICON_RESOURCE: u16 = 1;
+/// The Classic icon: the window class and the error window; themed windows set their own.
+const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
@@ -263,7 +263,7 @@ impl Main {
 
     fn add_tray_icon(&self) {
         let me = self.clone();
-        match Tray::new(move |action| me.on_tray(action)) {
+        match Tray::new(self.skin.theme(), move |action| me.on_tray(action)) {
             Ok(tray) => self.shared.borrow_mut().tray = Some(tray),
             Err(error) => {
                 let message = text::tray_unavailable(error);
@@ -397,6 +397,7 @@ impl Main {
     }
 
     fn apply_look(&self) {
+        self.apply_icon();
         match self.skin.title_bar_colours() {
             Some((caption, text)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
             None => window::match_dialog_title_bar(self.wnd.hwnd()),
@@ -407,6 +408,16 @@ impl Main {
         }
         self.clips.apply_look(&self.skin);
         self.redraw();
+    }
+
+    fn apply_icon(&self) {
+        let theme = self.skin.theme();
+        window::set_icon(self.wnd.hwnd(), icon::resource(theme));
+        if let Some(tray) = &self.shared.borrow().tray
+            && let Err(error) = tray.set_theme(theme)
+        {
+            log::warning(text::tray_unavailable(error));
+        }
     }
 
     fn widen(&self, delta: i32) {

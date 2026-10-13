@@ -15,3 +15,27 @@ pub(crate) fn paint_title_bar(window: &w::HWND, caption: w::COLORREF, text: w::C
     let _ = window.DwmSetWindowAttribute(w::DwmAttr::CaptionColor(caption));
     let _ = window.DwmSetWindowAttribute(w::DwmAttr::TextColor(text));
 }
+
+/// Shows the embedded icon `resource` in the title bar and the taskbar.
+pub(crate) fn set_icon(window: &w::HWND, resource: u16) {
+    let Ok(instance) = w::HINSTANCE::GetModuleHandle(None) else {
+        return;
+    };
+    for (size, metric) in [
+        (co::ICON_SZ::SMALL, co::SM::CXSMICON),
+        (co::ICON_SZ::BIG, co::SM::CXICON),
+    ] {
+        let pixels = w::GetSystemMetrics(metric);
+        let Ok(mut icon) = instance.LoadImageIcon(
+            w::IdOicStr::Id(resource),
+            w::SIZE::with(pixels, pixels),
+            co::LR::DEFAULTCOLOR | co::LR::SHARED,
+        ) else {
+            continue;
+        };
+        // A shared resource icon is released by the system, not by `DestroyIcon`.
+        let hicon = icon.leak();
+        // SAFETY: `WM_SETICON` takes an icon handle the system owns.
+        unsafe { window.SendMessage(w::msg::WmSetIcon { hicon, size }) };
+    }
+}

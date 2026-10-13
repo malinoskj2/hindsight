@@ -4,6 +4,10 @@
 ![NVIDIA NVENC](https://img.shields.io/badge/NVIDIA-NVENC-76B900)
 ![BSD-2-Clause license](https://img.shields.io/badge/license-BSD--2--Clause-555555)
 
+<p align="center">
+  <img src="assets/logo/monochrome-with-text.png" alt="hindsight" width="520">
+</p>
+
 **Instant replay for Windows, captured and encoded on the GPU.**  
 hindsight keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. What it costs, measured with cs2 running CPU-bound at about 690 fps on a Ryzen 9 9950X3D and an RTX 5090: recording at the defaults (H.264, 60 fps) takes about 2.5% of one CPU core and 0.7% of the game's frame rate; at AV1, 240 fps and 100 Mb/s with NVIDIA NvFBC about 5.5% of a core and 2.3% of the frame rate, where Instant Replay at the same settings takes 8.5% and 3.2%. Nothing is spent while no full-screen app is running. Of the backends, NvFBC costs the game least, then Windows Graphics Capture, then DXGI Desktop Duplication.
 

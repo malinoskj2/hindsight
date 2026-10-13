@@ -1,6 +1,7 @@
 //! The notification-area icon and its menu; callbacks arrive on the window's own thread.
 
-use crate::APP_NAME;
+use super::icon;
+use crate::{APP_NAME, config::Theme};
 use std::{cell::RefCell, rc::Rc};
 use thiserror::Error;
 use tray_icon::{
@@ -34,11 +35,14 @@ pub(crate) enum TrayAction {
 }
 
 pub(crate) struct Tray {
-    _icon: TrayIcon,
+    icon: TrayIcon,
 }
 
 impl Tray {
-    pub(crate) fn new(on_action: impl Fn(TrayAction) + 'static) -> Result<Self, TrayError> {
+    pub(crate) fn new(
+        theme: Theme,
+        on_action: impl Fn(TrayAction) + 'static,
+    ) -> Result<Self, TrayError> {
         let menu = Menu::new();
         let show = MenuItem::new(format!("Show {APP_NAME}"), true, None);
         let save = MenuItem::new("Save replay", true, None);
@@ -46,7 +50,7 @@ impl Tray {
         menu.append_items(&[&show, &save, &quit])?;
 
         let icon = TrayIconBuilder::new()
-            .with_icon(app_icon()?)
+            .with_icon(app_icon(theme)?)
             .with_tooltip(format!("{APP_NAME} · click to open"))
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -59,7 +63,12 @@ impl Tray {
             (save.id().clone(), TrayAction::Save),
             (quit.id().clone(), TrayAction::Quit),
         ]);
-        Ok(Self { _icon: icon })
+        Ok(Self { icon })
+    }
+
+    pub(crate) fn set_theme(&self, theme: Theme) -> Result<(), TrayError> {
+        self.icon.set_icon(Some(app_icon(theme)?))?;
+        Ok(())
     }
 }
 
@@ -71,8 +80,8 @@ impl Drop for Tray {
     }
 }
 
-fn app_icon() -> Result<Icon, tray_icon::BadIcon> {
-    Icon::from_rgba(super::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
+fn app_icon(theme: Theme) -> Result<Icon, tray_icon::BadIcon> {
+    Icon::from_resource(icon::resource(theme), Some((ICON_SIZE, ICON_SIZE)))
 }
 
 fn route_events(actions: [(MenuId, TrayAction); 3]) {

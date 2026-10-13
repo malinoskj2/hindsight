@@ -1,121 +1,135 @@
-//! The application icon: one description renders the tray, the window and `assets/hindsight.ico`.
+//! The application icons: the owl logos resampled into the `.ico` files `build.rs` embeds.
 
-// Geometry is in fractions of the tile.
-const BACKGROUND: [u8; 3] = [0x25, 0x63, 0xEB];
-const CORNER_RADIUS: f32 = 0.22;
-const GLYPH: [u8; 3] = [0xFF, 0xFF, 0xFF];
-const TRIANGLE: [(f32, f32); 3] = [(0.37, 0.27), (0.37, 0.73), (0.76, 0.50)];
-const DOT: [u8; 3] = [0xEF, 0x44, 0x44];
-const DOT_CENTRE: (f32, f32) = (0.76, 0.24);
-const DOT_RADIUS: f32 = 0.11;
-const SUPERSAMPLE: u32 = 4;
+use crate::config::Theme;
+use std::{fs, io, path::Path};
 
-#[cfg(windows)]
 const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
 
-/// Subsample counts of one pixel.
-struct Coverage {
-    tile: f32,
-    glyph: f32,
-    dot: f32,
+/// Resource id of the embedded icon for `theme`; must match `build.rs`.
+pub(crate) const fn resource(theme: Theme) -> u16 {
+    match theme {
+        Theme::Classic => 1,
+        Theme::Ember => 2,
+        Theme::Selene => 3,
+        Theme::Nova => 4,
+    }
 }
 
-impl Coverage {
-    fn of(x: u32, y: u32, size: u32) -> Self {
-        let subsamples = (0..SUPERSAMPLE).flat_map(|sy| (0..SUPERSAMPLE).map(move |sx| (sx, sy)));
-        let mut coverage = Self {
-            tile: 0.0,
-            glyph: 0.0,
-            dot: 0.0,
-        };
-        for (sx, sy) in subsamples {
-            let px = (x as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-            let py = (y as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
-            if !inside_tile(px, py) {
-                continue;
-            }
-            coverage.tile += 1.0;
-            if inside_triangle(px, py) {
-                coverage.glyph += 1.0;
-            } else if inside_dot(px, py) {
-                coverage.dot += 1.0;
+/// The logo under `assets` each theme's icon is made from, and the `.ico` written there.
+const fn files(theme: Theme) -> (&'static str, &'static str) {
+    match theme {
+        Theme::Classic => ("logo/monochrome-owl.png", "hindsight.ico"),
+        Theme::Ember => ("logo/ember-owl.png", "hindsight-ember.ico"),
+        Theme::Selene => ("logo/selene-owl.png", "hindsight-selene.ico"),
+        Theme::Nova => ("logo/nova-owl.png", "hindsight-nova.ico"),
+    }
+}
+
+/// Writes every theme's `.ico` under `assets` from the logos under `assets/logo`.
+pub(crate) fn write_all(assets: &Path) -> io::Result<()> {
+    for theme in Theme::ALL {
+        let (logo, ico) = files(theme);
+        let picture = Picture::decode(&fs::read(assets.join(logo))?)?;
+        fs::write(assets.join(ico), picture.ico())?;
+    }
+    Ok(())
+}
+
+/// Straight-alpha RGBA rows from the top-left.
+struct Picture {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+impl Picture {
+    fn decode(png_bytes: &[u8]) -> io::Result<Self> {
+        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
+        let mut decoder = png::Decoder::new(io::Cursor::new(png_bytes));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().map_err(io::Error::other)?;
+        let mut rgba = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .ok_or_else(|| bad("empty PNG"))?
+        ];
+        let info = reader.next_frame(&mut rgba).map_err(io::Error::other)?;
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            return Err(bad("the logo must be an 8-bit RGBA PNG"));
+        }
+        rgba.truncate(info.buffer_size());
+        Ok(Self {
+            width: info.width,
+            height: info.height,
+            rgba,
+        })
+    }
+
+    /// BMP entries rather than PNG, even at 256 pixels, so every icon reader understands them.
+    fn ico(&self) -> Vec<u8> {
+        let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
+        for size in ICO_SIZES {
+            let image = ico::IconImage::from_rgba_data(size, size, self.resampled(size));
+            let entry =
+                ico::IconDirEntry::encode_as_bmp(&image).expect("the icon encodes as a BMP");
+            directory.add_entry(entry);
+        }
+        let mut bytes = Vec::new();
+        directory
+            .write(&mut bytes)
+            .expect("writing to memory cannot fail");
+        bytes
+    }
+
+    /// Area-averaged in premultiplied colour, so transparent surround never bleeds in.
+    fn resampled(&self, size: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            let (top, bottom) = span(y, size, self.height);
+            for x in 0..size {
+                let (left, right) = span(x, size, self.width);
+                let mut sum = [0.0f64; 4];
+                let mut count = 0.0f64;
+                for sy in top..bottom {
+                    for sx in left..right {
+                        let at = ((sy * self.width + sx) * 4) as usize;
+                        let alpha = f64::from(self.rgba[at + 3]) / 255.0;
+                        for (channel, total) in sum.iter_mut().take(3).enumerate() {
+                            *total += f64::from(self.rgba[at + channel]) * alpha;
+                        }
+                        sum[3] += alpha;
+                        count += 1.0;
+                    }
+                }
+                let colour = |channel: usize| {
+                    if sum[3] > 0.0 {
+                        to_byte(sum[channel] / sum[3])
+                    } else {
+                        0
+                    }
+                };
+                out.extend([
+                    colour(0),
+                    colour(1),
+                    colour(2),
+                    to_byte(sum[3] / count * 255.0),
+                ]);
             }
         }
-        coverage
+        out
     }
 }
 
-/// RGBA pixels, row-major from the top-left, with straight (unmultiplied) alpha.
-pub(crate) fn rgba(size: u32) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            pixels.extend_from_slice(&shade(&Coverage::of(x, y, size)));
-        }
-    }
-    pixels
-}
-
-/// BMP rather than PNG entries, even at 256 pixels, so every icon reader understands them.
-#[cfg(windows)]
-pub(crate) fn ico() -> Vec<u8> {
-    let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
-    for size in ICO_SIZES {
-        let image = ico::IconImage::from_rgba_data(size, size, rgba(size));
-        let entry = ico::IconDirEntry::encode_as_bmp(&image).expect("the icon encodes as a BMP");
-        directory.add_entry(entry);
-    }
-    let mut bytes = Vec::new();
-    directory
-        .write(&mut bytes)
-        .expect("writing to memory cannot fail");
-    bytes
-}
-
-fn shade(coverage: &Coverage) -> [u8; 4] {
-    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
-    let alpha = coverage.tile / samples;
-    let (glyph_share, dot_share) = if coverage.tile > 0.0 {
-        (coverage.glyph / coverage.tile, coverage.dot / coverage.tile)
-    } else {
-        (0.0, 0.0)
-    };
-    let mix = |channel: usize| {
-        to_byte(
-            f32::from(BACKGROUND[channel]) * (1.0 - glyph_share - dot_share)
-                + f32::from(GLYPH[channel]) * glyph_share
-                + f32::from(DOT[channel]) * dot_share,
-        )
-    };
-    [mix(0), mix(1), mix(2), to_byte(alpha * 255.0)]
-}
-
-fn inside_tile(x: f32, y: f32) -> bool {
-    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-        return false;
-    }
-
-    let dx = (x - 0.5).abs() - (0.5 - CORNER_RADIUS);
-    let dy = (y - 0.5).abs() - (0.5 - CORNER_RADIUS);
-    dx <= 0.0 || dy <= 0.0 || dx * dx + dy * dy <= CORNER_RADIUS * CORNER_RADIUS
-}
-
-fn inside_triangle(x: f32, y: f32) -> bool {
-    let [first, second, third] = TRIANGLE;
-    let side = |from: (f32, f32), to: (f32, f32)| {
-        (to.0 - from.0) * (y - from.1) - (to.1 - from.1) * (x - from.0)
-    };
-    let sides = [side(first, second), side(second, third), side(third, first)];
-    sides.iter().all(|value| *value >= 0.0) || sides.iter().all(|value| *value <= 0.0)
-}
-
-fn inside_dot(x: f32, y: f32) -> bool {
-    let (dx, dy) = (x - DOT_CENTRE.0, y - DOT_CENTRE.1);
-    dx * dx + dy * dy <= DOT_RADIUS * DOT_RADIUS
+/// The source rows or columns that make up destination `index` of `size`.
+fn span(index: u32, size: u32, source: u32) -> (u32, u32) {
+    let start = index * source / size;
+    let end = ((index + 1) * source / size).max(start + 1).min(source);
+    (start, end)
 }
 
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn to_byte(value: f32) -> u8 {
+fn to_byte(value: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
@@ -123,33 +137,64 @@ fn to_byte(value: f32) -> u8 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn corners_are_transparent_and_the_centre_is_the_glyph() {
-        let size = 64;
-        let pixels = rgba(size);
-        assert_eq!(pixels.len(), (size * size * 4) as usize);
-
-        let at = |x: u32, y: u32| {
-            let index = ((y * size + x) * 4) as usize;
-            [
-                pixels[index],
-                pixels[index + 1],
-                pixels[index + 2],
-                pixels[index + 3],
-            ]
-        };
-        assert_eq!(at(0, 0)[3], 0);
-        assert_eq!(at(size - 1, size - 1)[3], 0);
-        assert_eq!(at(size / 2, size / 2), [0xFF, 0xFF, 0xFF, 0xFF]);
-        assert_eq!(at(size / 8, size / 2), [0x25, 0x63, 0xEB, 0xFF]);
-        assert_eq!(at(48, 15), [0xEF, 0x44, 0x44, 0xFF]);
+    fn picture(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Picture {
+        let mut rgba = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend(pixel(x, y));
+            }
+        }
+        Picture {
+            width,
+            height,
+            rgba,
+        }
     }
 
-    #[cfg(windows)]
     #[test]
-    fn the_ico_holds_every_size_as_a_32_bit_bmp_of_the_rendered_pixels() {
-        let directory = ico::IconDir::read(std::io::Cursor::new(ico())).unwrap();
+    fn resampling_averages_boxes_and_ignores_transparent_colour() {
+        let source = picture(4, 4, |x, y| {
+            if x < 2 && y < 2 {
+                [255, 0, 0, 255]
+            } else if x >= 2 && y < 2 {
+                [0, 0, 255, 255]
+            } else {
+                [0, 255, 0, 0]
+            }
+        });
+        let small = source.resampled(2);
+        assert_eq!(&small[0..4], [255, 0, 0, 255]);
+        assert_eq!(&small[4..8], [0, 0, 255, 255]);
+        assert_eq!(small[11], 0);
+        assert_eq!(small[15], 0);
 
+        let mixed = picture(2, 1, |x, _| {
+            if x == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 255, 0, 0]
+            }
+        });
+        assert_eq!(mixed.resampled(1), [255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn spans_cover_the_source_exactly_once() {
+        let covered: Vec<u32> = (0..3)
+            .flat_map(|i| span(i, 3, 10).0..span(i, 3, 10).1)
+            .collect();
+        assert_eq!(covered, (0..10).collect::<Vec<_>>());
+        assert_eq!(span(0, 4, 2), (0, 1));
+        assert_eq!(span(3, 4, 2), (1, 2));
+    }
+
+    #[test]
+    fn the_ico_holds_every_size_as_a_32_bit_bmp() {
+        let source = picture(8, 8, |x, y| {
+            let byte = |value: u32| u8::try_from(value).unwrap();
+            [byte(x * 30), byte(y * 30), 0, 255 - byte(x * 7)]
+        });
+        let directory = ico::IconDir::read(io::Cursor::new(source.ico())).unwrap();
         let sizes: Vec<u32> = directory
             .entries()
             .iter()
@@ -160,17 +205,38 @@ mod tests {
             assert!(!entry.is_png());
             assert_eq!(entry.bits_per_pixel(), 32);
             let image = entry.decode().unwrap();
-            assert_eq!(image.rgba_data(), rgba(entry.width()).as_slice());
+            assert_eq!(
+                image.rgba_data(),
+                source.resampled(entry.width()).as_slice()
+            );
         }
     }
 
-    #[cfg(windows)]
     #[test]
-    fn the_committed_ico_matches_the_renderer() {
-        let committed: &[u8] = include_bytes!("../../assets/hindsight.ico");
-        assert!(
-            committed == ico().as_slice(),
-            "regenerate assets/hindsight.ico with `hindsight icon assets/hindsight.ico`"
-        );
+    fn the_committed_icons_match_the_logos() {
+        let committed: [(&[u8], &[u8]); 4] = [
+            (
+                include_bytes!("../../assets/logo/monochrome-owl.png"),
+                include_bytes!("../../assets/hindsight.ico"),
+            ),
+            (
+                include_bytes!("../../assets/logo/ember-owl.png"),
+                include_bytes!("../../assets/hindsight-ember.ico"),
+            ),
+            (
+                include_bytes!("../../assets/logo/selene-owl.png"),
+                include_bytes!("../../assets/hindsight-selene.ico"),
+            ),
+            (
+                include_bytes!("../../assets/logo/nova-owl.png"),
+                include_bytes!("../../assets/hindsight-nova.ico"),
+            ),
+        ];
+        for (logo, ico) in committed {
+            assert!(
+                Picture::decode(logo).unwrap().ico() == ico,
+                "regenerate the icons with `hindsight icon assets`"
+            );
+        }
     }
 }

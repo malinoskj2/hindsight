@@ -1,9 +1,12 @@
 //! Embeds the Windows icon and manifest.
 
-/// Written by `hindsight icon assets/hindsight.ico`.
-const ICON: &str = "assets/hindsight.ico";
-/// Must match `gui::ICON_RESOURCE`.
-const ICON_ID: &str = "1";
+/// Written by `hindsight icon assets`, one per theme; the ids must match `sys::icon::resource`.
+const ICONS: [(&str, &str); 4] = [
+    ("assets/hindsight.ico", "1"),
+    ("assets/hindsight-ember.ico", "2"),
+    ("assets/hindsight-selene.ico", "3"),
+    ("assets/hindsight-nova.ico", "4"),
+];
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
@@ -19,19 +22,24 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>"#;
 
 fn main() {
-    println!("cargo:rerun-if-changed={ICON}");
+    for (icon, _) in ICONS {
+        println!("cargo:rerun-if-changed={icon}");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    winresource::WindowsResource::new()
+    let mut resource = winresource::WindowsResource::new();
+    resource
         .set_manifest(MANIFEST)
         .set("ProductName", env!("CARGO_PKG_NAME"))
         .set(
             "FileDescription",
             "Instant replay, captured and encoded on the GPU",
         )
-        .set_icon_with_id(ICON, ICON_ID)
-        .compile()
-        .expect("embed the Windows resources");
+        .set("ProductVersion", env!("CARGO_PKG_VERSION"));
+    for (icon, id) in ICONS {
+        resource.set_icon_with_id(icon, id);
+    }
+    resource.compile().expect("embed the Windows resources");
 }
