@@ -6,7 +6,9 @@ use std::{ffi::c_void, fmt, sync::Arc, time::Duration};
 use windows::{
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-        Foundation::{HANDLE, PROPERTYKEY, WAIT_OBJECT_0},
+        Foundation::{
+            E_UNEXPECTED, HANDLE, PROPERTYKEY, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        },
         Media::{
             Audio::{
                 AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
@@ -24,9 +26,7 @@ use windows::{
                 CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ,
                 StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             },
-            Threading::{
-                CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
-            },
+            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
         },
     },
     core::{Owned, PCWSTR, PWSTR, implement},
@@ -48,44 +48,64 @@ unsafe impl Send for Signal {}
 unsafe impl Sync for Signal {}
 
 impl Signal {
-    pub(super) fn new() -> windows::core::Result<Self> {
-        // SAFETY: an unnamed manual-reset event, initially clear, with default security.
-        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }?;
+    /// An event that stays set once set, so every wait after a stop request sees it.
+    pub(super) fn latch() -> windows::core::Result<Self> {
+        Self::new(true)
+    }
+
+    /// An event the wait it wakes clears, so each set is seen once.
+    fn pulse() -> windows::core::Result<Self> {
+        Self::new(false)
+    }
+
+    fn new(manual_reset: bool) -> windows::core::Result<Self> {
+        // SAFETY: no name and no security attributes are passed, so nothing is read through a
+        // pointer; the call only creates an event, initially clear.
+        let event = unsafe { CreateEventW(None, manual_reset, false, PCWSTR::null()) }?;
         // SAFETY: the event was just created, and only this `Owned` closes it.
         Ok(Self(unsafe { Owned::new(event) }))
     }
 
     pub(super) fn set(&self) {
-        // SAFETY: the event is open.
+        // SAFETY: the event is open: `self` owns it and closes it only on drop.
         let _ = unsafe { SetEvent(*self.0) };
-    }
-
-    fn take(&self) -> bool {
-        // SAFETY: the event is open; a zero timeout only looks at its state.
-        let set = unsafe { WaitForSingleObject(*self.0, 0) } == WAIT_OBJECT_0;
-        if set {
-            // SAFETY: the event is open.
-            let _ = unsafe { ResetEvent(*self.0) };
-        }
-        set
     }
 }
 
 pub(super) enum Wake {
     Stop,
+    /// The default output device changed.
+    Changed,
+    /// The timeout passed: time to read.
     Read,
 }
 
-pub(super) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wake {
-    let handles = [*stop.0, wake.unwrap_or_default()];
-    let handles = &handles[..=usize::from(wake.is_some())];
+/// The second handle `wait` waits on.
+const CHANGED: WAIT_EVENT = WAIT_EVENT(WAIT_OBJECT_0.0 + 1);
+
+/// Waits for `stop`, the device-change event `changed` or the timeout. A device change is
+/// reported once: its event clears as the wait returns. An error means waiting itself failed.
+pub(super) fn wait(
+    stop: &Signal,
+    changed: Option<HANDLE>,
+    timeout: Duration,
+) -> windows::core::Result<Wake> {
+    let handles = [*stop.0, changed.unwrap_or_default()];
+    let handles = &handles[..=usize::from(changed.is_some())];
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-    // SAFETY: the handles waited on are open events for the length of the call.
+    // SAFETY: both handles are open events for the length of the call: `stop` is borrowed and
+    // `changed` belongs to a `Watch` the caller holds.
     let woken = unsafe { WaitForMultipleObjects(handles, false, milliseconds) };
-    if woken == WAIT_OBJECT_0 {
-        Wake::Stop
-    } else {
-        Wake::Read
+    match woken {
+        WAIT_OBJECT_0 => Ok(Wake::Stop),
+        CHANGED => Ok(Wake::Changed),
+        WAIT_TIMEOUT => Ok(Wake::Read),
+        WAIT_FAILED => Err(windows::core::Error::from_thread()),
+        // Events are never abandoned and only two handles are waited on.
+        WAIT_EVENT(other) => Err(windows::core::Error::new(
+            E_UNEXPECTED,
+            format!("unexpected wait result {other:#X}"),
+        )),
     }
 }
 
@@ -93,7 +113,7 @@ pub(super) fn wait(stop: &Signal, wake: Option<HANDLE>, timeout: Duration) -> Wa
 pub(super) enum OpenError {
     #[error("there is no audio output device")]
     NoDevice,
-    #[error("{0}: {1}")]
+    #[error("could not {0}")]
     Windows(&'static str, #[source] windows::core::Error),
 }
 
@@ -143,7 +163,7 @@ impl Devices {
     }
 
     pub(super) fn watch(&self) -> windows::core::Result<Watch> {
-        let changed = Arc::new(Signal::new()?);
+        let changed = Arc::new(Signal::pulse()?);
         let listener: IMMNotificationClient = Listener(Arc::clone(&changed)).into();
         // SAFETY: `Watch` unregisters the listener before either is released.
         unsafe { self.0.RegisterEndpointNotificationCallback(&listener) }?;
@@ -162,12 +182,9 @@ pub(super) struct Watch {
 }
 
 impl Watch {
+    /// Set when the default output changes; `wait` reports it as `Wake::Changed`.
     pub(super) fn event(&self) -> HANDLE {
         *self.changed.0
-    }
-
-    pub(super) fn changed(&self) -> bool {
-        self.changed.take()
     }
 }
 

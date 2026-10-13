@@ -13,6 +13,7 @@ use crate::{
     sys::{self, clock, com::Apartment},
 };
 use std::{
+    any::Any,
     sync::Arc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -35,14 +36,28 @@ pub(crate) struct Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.set();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        if let Some(join) = self.join.take()
+            && let Err(payload) = join.join()
+        {
+            log::error(format!(
+                "The audio thread panicked: {}",
+                panic_message(&*payload)
+            ));
         }
     }
 }
 
+/// The text a panic was raised with, when it was a string.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
 pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
-    let stop = match Signal::new() {
+    let stop = match Signal::latch() {
         Ok(signal) => Arc::new(signal),
         Err(error) => {
             log::warning(format!("Sound is not recorded: {error}"));
@@ -73,15 +88,23 @@ fn record(live: &Live, stop: &Signal) {
     };
     let mut device = Device::new(watch_default(&pipeline.devices));
     let mut placed = false;
+    let mut changed = false;
     loop {
         if !placed && let Some(capture) = live.capture_processor() {
             sys::thread::keep_off(capture);
             placed = true;
         }
-        device.update(&pipeline.devices);
-        if let Wake::Stop = loopback::wait(stop, device.wake(), device.interval()) {
-            break;
-        }
+        device.update(&pipeline.devices, changed);
+        // A failed wait would fail again at once; stopping beats spinning on it.
+        let wake = match loopback::wait(stop, device.wake(), device.interval()) {
+            Ok(Wake::Stop) => break,
+            Ok(wake) => wake,
+            Err(error) => {
+                log::error(format!("The audio thread could not wait ({error})"));
+                break;
+            }
+        };
+        changed = matches!(wake, Wake::Changed);
         if let Err(error) = device.read(&mut pipeline.track) {
             device.lost(&error);
         }
@@ -160,9 +183,10 @@ impl Device {
         self.watch.as_ref().map(Watch::event)
     }
 
-    fn update(&mut self, devices: &Devices) {
+    /// `changed` is true when the watch reported a new default output since the last update.
+    fn update(&mut self, devices: &Devices, changed: bool) {
         let now = Instant::now();
-        if self.watch.as_ref().is_some_and(Watch::changed) {
+        if changed {
             self.switch(devices, now);
             return;
         }
@@ -202,12 +226,12 @@ impl Device {
             }
             Err(error) => {
                 if !self.reported {
-                    match error {
+                    match &error {
                         OpenError::NoDevice => log::info(
                             "No audio output device; clips get silence until one is connected",
                         ),
-                        OpenError::Windows(..) => log::warning(format!(
-                            "The audio output could not be captured ({error}); trying again every second"
+                        OpenError::Windows(_, cause) => log::warning(format!(
+                            "The audio output could not be captured ({error}: {cause}); trying again every second"
                         )),
                     }
                     self.reported = true;

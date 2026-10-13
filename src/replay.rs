@@ -479,7 +479,8 @@ fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
 
 fn encode_sound(pcm: &PcmClip) -> Option<AudioClip> {
     crate::audio::encode(pcm)
-        .inspect_err(|error| log::warning(format!("The clip is saved without sound: {error}")))
+        .map_err(anyhow::Error::from)
+        .inspect_err(|error| log::warning(format!("The clip is saved without sound: {error:#}")))
         .ok()
 }
 

@@ -29,7 +29,7 @@ const CHANNELS: u16 = 2;
 #[derive(Debug, Error)]
 pub(crate) enum EncodeError {
     #[cfg(windows)]
-    #[error("{0}: {1}")]
+    #[error("could not {0}")]
     Windows(&'static str, #[source] windows::core::Error),
     #[cfg(windows)]
     #[error("the AAC encoder made {made} of the clip's {needed} frames")]
