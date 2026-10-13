@@ -8,10 +8,7 @@ use crate::gpu::{
 use std::ffi::c_void;
 use windows::{
     Win32::Graphics::{
-        Direct3D::{
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Fxc::D3DCOMPILE_ENABLE_STRICTNESS,
-            Fxc::D3DCOMPILE_OPTIMIZATION_LEVEL3, Fxc::D3DCompile, ID3DBlob,
-        },
+        Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
         Direct3D11::{
             D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
             D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -20,10 +17,13 @@ use windows::{
             ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
         },
     },
-    core::{Interface, PCSTR, s},
+    core::Interface,
 };
 
-const SHADER: &str = include_str!("tonemap.hlsl");
+/// `tonemap.hlsl`, compiled by `build.rs` with the Windows SDK's `fxc.exe`, so no shader
+/// compiler (`d3dcompiler_47.dll`) is loaded at run time.
+const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.vs.cso"));
+const PIXEL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.ps.cso"));
 /// In units of SDR white; below it the picture is kept exactly.
 const KNEE: f32 = 0.8;
 const DEFAULT_WHITE_NITS: f32 = 200.0;
@@ -114,21 +114,19 @@ pub(super) struct ToneMapper {
 #[expect(unsafe_code)]
 impl ToneMapper {
     pub(super) fn new(device: &Device, curve: Curve) -> windows::core::Result<Self> {
-        let vertex_code = compile(s!("fullscreen"), s!("vs_5_0"))?;
-        let pixel_code = compile(s!("tonemap"), s!("ps_5_0"))?;
         let mut vertex = None;
         let mut pixel = None;
         // SAFETY: the bytecode was compiled for the vertex stage and `vertex` outlives the call.
         unsafe {
             device
                 .d3d
-                .CreateVertexShader(blob_bytes(&vertex_code), None, Some(&raw mut vertex))?;
+                .CreateVertexShader(VERTEX_SHADER, None, Some(&raw mut vertex))?;
         }
         // SAFETY: the bytecode was compiled for the pixel stage and `pixel` outlives the call.
         unsafe {
             device
                 .d3d
-                .CreatePixelShader(blob_bytes(&pixel_code), None, Some(&raw mut pixel))?;
+                .CreatePixelShader(PIXEL_SHADER, None, Some(&raw mut pixel))?;
         }
         Ok(Self {
             vertex: created(vertex)?,
@@ -252,50 +250,6 @@ impl<V: Clone> Views<V> {
         self.entries.push((texture.clone(), view.clone()));
         Ok(view)
     }
-}
-
-#[expect(unsafe_code)]
-fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
-    let mut code = None;
-    let mut errors = None;
-    // SAFETY: the source is a live string of the length given; the out-parameters are live.
-    let compiled = unsafe {
-        D3DCompile(
-            SHADER.as_ptr().cast::<c_void>(),
-            SHADER.len(),
-            s!("tonemap.hlsl"),
-            None,
-            None,
-            entry,
-            target,
-            D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_ENABLE_STRICTNESS,
-            0,
-            &raw mut code,
-            Some(&raw mut errors),
-        )
-    };
-    if let Err(error) = compiled {
-        let message = errors
-            .as_ref()
-            .map(|errors| String::from_utf8_lossy(blob_bytes(errors)).into_owned())
-            .unwrap_or_default();
-        return Err(windows::core::Error::new(
-            error.code(),
-            format!("compile the HDR tone-map shader: {message}"),
-        ));
-    }
-    created(code)
-}
-
-#[expect(unsafe_code)]
-fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
-    // SAFETY: reads the address of a live blob's buffer.
-    let data = unsafe { blob.GetBufferPointer() }.cast::<u8>();
-    // SAFETY: reads the size of the same buffer.
-    let size = unsafe { blob.GetBufferSize() };
-    // SAFETY: the blob owns `size` initialized bytes at `data` and never changes them; the
-    // slice borrows the blob, so the buffer outlives it.
-    unsafe { std::slice::from_raw_parts(data, size) }
 }
 
 fn created<T>(object: Option<T>) -> windows::core::Result<T> {

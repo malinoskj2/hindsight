@@ -33,7 +33,6 @@ windows = { version = "0.62", features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D9",
     "Win32_Graphics_Dxgi",

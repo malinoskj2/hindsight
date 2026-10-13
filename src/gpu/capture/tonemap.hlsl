@@ -1,6 +1,6 @@
 // Tone-maps the scRGB picture of a display in HDR to 8-bit sRGB for the encoder: one triangle
-// covering the target, one texel read per pixel. Compiled when a session starts, with
-// D3DCompile from d3dcompiler_47.dll (`fullscreen` as vs_5_0, `tonemap` as ps_5_0); the
+// covering the target, one texel read per pixel. Compiled by build.rs with the Windows SDK's
+// fxc.exe (`fullscreen` as vs_5_0, `tonemap` as ps_5_0) and included in the program; the
 // maths is the same as `Curve::apply` in tonemap.rs, which the unit tests compare it with.
 
 Texture2D<float4> scrgb : register(t0);
