@@ -4,7 +4,7 @@ use crate::{
     audio,
     config::{Backend, Config, Memory, Mode, Theme},
     log,
-    replay::{self, Held, Live, SaveError, Snapshot, Stream},
+    replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -142,7 +142,7 @@ pub(crate) enum Ended {
 
 type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 type Audio = fn(&Arc<Live>) -> Option<audio::Capture>;
-type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
+type Writer = fn(&Snapshot, &Path) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
 /// The worker's sense of time: retries and save ticks fall due by it.
 type Clock = Box<dyn Fn() -> Instant + Send>;
@@ -270,6 +270,8 @@ pub(crate) struct Status {
     pub(crate) buffer_capacity_bytes: u64,
     pub(crate) bytes: Bytes,
     pub(crate) last_clip: Option<PathBuf>,
+    /// The last clip was saved without the sound that was buffered for it.
+    pub(crate) clip_without_sound: bool,
     pub(crate) error: Option<String>,
     /// A save was asked for before the buffer held anything.
     pub(crate) nothing_to_save: bool,
@@ -388,7 +390,7 @@ struct Session {
 struct Saving {
     seconds: f64,
     done: Arc<AtomicBool>,
-    join: JoinHandle<Result<PathBuf, SaveError>>,
+    join: JoinHandle<Result<Saved, SaveError>>,
     next_tick: Instant,
 }
 
@@ -491,6 +493,7 @@ struct Machine {
     /// A save was asked for before the buffer held anything; cleared when one starts.
     nothing_to_save: bool,
     last_clip: Option<PathBuf>,
+    clip_without_sound: bool,
     encode_rate: Option<f64>,
     session: Option<Session>,
     target: Option<Target>,
@@ -519,6 +522,7 @@ impl Machine {
             error: None,
             nothing_to_save: false,
             last_clip: None,
+            clip_without_sound: false,
             encode_rate: None,
             session: None,
             target: None,
@@ -864,7 +868,7 @@ impl Machine {
         &self,
         snapshot: Snapshot,
         ending: Ending,
-    ) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
+    ) -> io::Result<JoinHandle<Result<Saved, SaveError>>> {
         let directory = self.config.clip_directory();
         let write = self.services.write;
         thread::Builder::new()
@@ -894,7 +898,7 @@ impl Machine {
 
     fn finish_save(&mut self, saving: Saving) {
         match saving.join.join() {
-            Ok(Ok(path)) => self.clip_saved(saving.seconds, path),
+            Ok(Ok(saved)) => self.clip_saved(saving.seconds, saved),
             Ok(Err(error)) => self.report_failed_save(text::save_failed(log::chain(&error))),
             Err(payload) => self.report_failed_save(text::save_failed(text::save_panicked(
                 panic_message(&*payload),
@@ -902,10 +906,14 @@ impl Machine {
         }
     }
 
-    fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
-        log::info(text::clip_saved(seconds, &path));
-        self.ledger.add_saved(&path);
-        self.last_clip = Some(path);
+    fn clip_saved(&mut self, seconds: f64, saved: Saved) {
+        log::info(text::clip_saved(seconds, &saved.path));
+        if let Some(error) = &saved.sound_error {
+            log::warning(text::saved_without_sound(log::chain(error)));
+        }
+        self.clip_without_sound = saved.sound_error.is_some();
+        self.ledger.add_saved(&saved.path);
+        self.last_clip = Some(saved.path);
         self.error = None;
         (self.services.chime)(Tone::Saved);
     }
@@ -977,6 +985,7 @@ impl Machine {
             buffer_capacity_bytes: self.config.estimated_buffer_bytes(),
             bytes: self.count_bytes(reading.live_bytes),
             last_clip: self.last_clip.clone(),
+            clip_without_sound: self.clip_without_sound,
             error: self.error.clone(),
             nothing_to_save: self.nothing_to_save,
         }

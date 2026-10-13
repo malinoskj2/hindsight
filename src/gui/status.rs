@@ -400,6 +400,9 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
         .chain([
             status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
             (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
+            status
+                .clip_without_sound
+                .then_some(text::CLIP_WITHOUT_SOUND),
             status.error.as_deref(),
         ])
         .flatten()
@@ -463,12 +466,14 @@ mod tests {
         assert_eq!(notice_text(&status, [None, None]), "capture failed");
         status.nothing_to_save = true;
         status.sound = Some(Sound::Failed);
+        status.clip_without_sound = true;
         assert_eq!(
             notice_text(&status, [Some("hotkey taken"), Some("no tray")]),
             format!(
-                "hotkey taken\r\nno tray\r\n{}\r\n{}\r\ncapture failed",
+                "hotkey taken\r\nno tray\r\n{}\r\n{}\r\n{}\r\ncapture failed",
                 text::NOTHING_TO_SAVE,
                 text::SOUND_FAILED,
+                text::CLIP_WITHOUT_SOUND,
             )
         );
     }

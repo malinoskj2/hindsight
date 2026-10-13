@@ -117,6 +117,10 @@ pub(super) fn clip_saved(seconds: f64, path: &Path) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Saved a {seconds:.1} s clip to {}", path.display()))
 }
 
+pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "The clip is saved without sound: {error}"))
+}
+
 pub(super) fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Could not save the clip: {error}"))
 }

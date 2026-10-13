@@ -1,7 +1,10 @@
 //! The worker's tests, driving it through stand-in services.
 
 use super::*;
-use crate::replay::{Matrix, Packet, Picture};
+use crate::{
+    audio::EncodeError,
+    replay::{Matrix, Packet, Picture},
+};
 use std::sync::atomic::AtomicUsize;
 
 #[expect(
@@ -488,12 +491,24 @@ fn assert_silent_after(worker: &Worker, clock: &ManualClock, heard: &Heard) {
     assert_eq!(tones(heard).len(), before, "{:?}", tones(heard));
 }
 
-fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
+fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
     hold_until(&SLOW_WRITE_ENDS, &AtomicBool::new(false));
     replay::save(snapshot, directory)
 }
 
-fn failing_write(_: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
+/// Saves the video as `replay::save` does, but as if the buffered sound could not be encoded.
+fn silent_write(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
+    #[cfg(windows)]
+    let error = EncodeError::Short { made: 0, needed: 1 };
+    #[cfg(not(windows))]
+    let error = EncodeError::Unsupported;
+    Ok(Saved {
+        sound_error: Some(error),
+        ..replay::save(snapshot, directory)?
+    })
+}
+
+fn failing_write(_: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
     hold_until(&FAILING_WRITE_ENDS, &AtomicBool::new(false));
     Err(SaveError::Io {
         step: "create",
@@ -514,7 +529,8 @@ fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
     assert_eq!(tones(&heard), [Tone::Progress], "the first blip is at once");
     tick(&worker, &clock, &heard, 3);
     SLOW_WRITE_ENDS.store(true, Ordering::Relaxed);
-    wait_for(&worker, |status| status.last_clip.is_some());
+    let status = wait_for(&worker, |status| status.last_clip.is_some());
+    assert!(!status.clip_without_sound);
     assert_eq!(
         tones(&heard),
         [Tone::Progress, Tone::Progress, Tone::Progress, Tone::Saved]
@@ -619,4 +635,19 @@ fn a_target_is_known_by_its_handles_not_its_name() {
     assert_ne!(window(1).monitor(), Target::primary_monitor());
     assert_eq!(MonitorHandle::new(7).map(MonitorHandle::get), Some(7));
     assert_eq!(MonitorHandle::new(0), None);
+}
+
+#[test]
+fn a_clip_saved_without_its_sound_says_so_on_the_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) =
+        spawn_listening(steady, &clock, silent_write, config_in(directory.path()));
+    wait_for(&worker, |status| status.bytes.session_written > 0);
+
+    worker.save();
+    let status = wait_for(&worker, |status| status.last_clip.is_some());
+    assert!(status.clip_without_sound);
+    assert!(status.error.is_none(), "{:?}", status.error);
+    assert_eq!(tones(&heard).last(), Some(&Tone::Saved));
 }

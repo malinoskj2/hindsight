@@ -10,6 +10,8 @@ use std::{fmt::Display, path::Path};
 pub(super) use crate::service::text::NOTHING_TO_SAVE;
 
 pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab says why.";
+pub(super) const CLIP_WITHOUT_SOUND: &str =
+    "The last clip was saved without sound; the Logs tab says why.";
 
 const NO_VALUE: &str = "—";
 // Decimal units, as the bitrate's megabits are.

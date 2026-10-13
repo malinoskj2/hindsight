@@ -1,7 +1,7 @@
 //! The rolling buffers of encoded video and captured sound a recording session shares with
 //! the rest of the application, and saving them to an MP4 file.
 
-use crate::{config::Codec, log};
+use crate::{audio::EncodeError, config::Codec, log};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter},
@@ -431,16 +431,26 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
     }
 }
 
+/// A clip written to disk.
+#[derive(Debug)]
+pub(crate) struct Saved {
+    pub(crate) path: PathBuf,
+    /// Why the buffered sound is not in the clip; `None` when it is, or none was buffered.
+    pub(crate) sound_error: Option<EncodeError>,
+}
+
 /// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`; it is written under a
-/// `.partial` name and takes its final one only once complete.
-pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
+/// `.partial` name and takes its final one only once complete. Sound that cannot be encoded is
+/// left out rather than failing the save.
+pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let name = ClipName::now();
     let partial = directory
         .join(name.file_name())
         .with_extension(PARTIAL_EXTENSION);
-    let result =
-        write_file(snapshot, &partial).and_then(|()| claim_name(directory, name, &partial));
+    let result = write_file(snapshot, &partial).and_then(|sound_error| {
+        claim_name(directory, name, &partial).map(|path| Saved { path, sound_error })
+    });
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
@@ -476,8 +486,13 @@ fn claim_name(directory: &Path, name: ClipName, partial: &Path) -> Result<PathBu
     ))
 }
 
-fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
-    let audio = snapshot.audio.as_ref().and_then(encode_sound);
+/// Returns why the buffered sound was left out, if it was.
+fn write_file(snapshot: &Snapshot, path: &Path) -> Result<Option<EncodeError>, SaveError> {
+    let (audio, sound_error) = match snapshot.audio.as_ref().map(crate::audio::encode) {
+        Some(Ok(audio)) => (Some(audio), None),
+        Some(Err(error)) => (None, Some(error)),
+        None => (None, None),
+    };
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     mp4::write_from(
@@ -486,14 +501,8 @@ fn write_file(snapshot: &Snapshot, path: &Path) -> Result<(), SaveError> {
         &snapshot.entries[..],
         audio.as_ref(),
     )?;
-    sync(output).map_err(SaveError::io("finish", path))
-}
-
-fn encode_sound(pcm: &PcmClip) -> Option<AudioClip> {
-    crate::audio::encode(pcm)
-        .map_err(anyhow::Error::from)
-        .inspect_err(|error| log::warning(format!("The clip is saved without sound: {error:#}")))
-        .ok()
+    sync(output).map_err(SaveError::io("finish", path))?;
+    Ok(sound_error)
 }
 
 fn sync(output: BufWriter<File>) -> io::Result<()> {

@@ -121,7 +121,7 @@ fn a_buffer_in_a_store_saves_the_same_clip() {
         assert!(!kinds[0], "the oldest packets are in the store");
 
         let directory = tempfile::tempdir().unwrap();
-        let path = save(&snapshot, directory.path()).unwrap();
+        let path = save(&snapshot, directory.path()).unwrap().path;
         assert_eq!(fs::read(path).unwrap(), expected, "pieces of {piece}");
 
         let from_store = snapshot.clip().unwrap();
@@ -167,13 +167,13 @@ fn a_buffer_on_disk_saves_the_same_clip() {
     assert!(control.queued() > 0);
 
     let clips = tempfile::tempdir().unwrap();
-    let path = save(&snapshot, clips.path()).unwrap();
+    let path = save(&snapshot, clips.path()).unwrap().path;
     assert_eq!(fs::read(&path).unwrap(), expected, "from staging");
     fs::remove_file(path).unwrap();
 
     control.hold(false);
     control.settle();
-    let path = save(&snapshot, clips.path()).unwrap();
+    let path = save(&snapshot, clips.path()).unwrap().path;
     assert_eq!(fs::read(path).unwrap(), expected, "from the file");
 }
 
@@ -523,7 +523,7 @@ fn a_saved_clip_encodes_its_sound_in_line_with_the_video() {
     );
 
     let directory = tempfile::tempdir().unwrap();
-    let file = fs::read(save(&snapshot, directory.path()).unwrap()).unwrap();
+    let file = fs::read(save(&snapshot, directory.path()).unwrap().path).unwrap();
     let (moov, _) = mp4::tests::index(&file);
     let [_, sound] = &moov.trak[..] else {
         panic!("expected two tracks");
@@ -554,7 +554,7 @@ fn the_click_plays_in_time_with_the_video() {
     let live = live_with_a_click();
     let snapshot = snapshot_with_sound(&live).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let clip = save(&snapshot, directory.path()).unwrap();
+    let clip = save(&snapshot, directory.path()).unwrap().path;
     let decoded = crate::audio::testing::decode_mono(&clip);
     let peak = crate::audio::testing::peak(&decoded);
     println!(
@@ -622,8 +622,8 @@ fn saves_complete_files_under_unique_names() {
     let snapshot = live_with(40).snapshot().unwrap();
     let target = directory.path().join("clips");
 
-    let first = save(&snapshot, &target).unwrap();
-    let second = save(&snapshot, &target).unwrap();
+    let first = save(&snapshot, &target).unwrap().path;
+    let second = save(&snapshot, &target).unwrap().path;
 
     assert_ne!(first, second);
     assert!(
