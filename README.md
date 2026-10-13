@@ -11,9 +11,13 @@
 **The lowest-overhead instant replay for Windows: captured and encoded on the GPU, no overlay, no launcher, no bloat.**
 
 - **A tray icon and one small window.** No overlay, no account, no launcher.
-- **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game; see [the performance guide](docs/performance.md) for the numbers.
+- **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game.
 - **Buffer in RAM, VRAM or on disk**, your choice.
 - **H.264, HEVC or AV1** at up to 240 fps, with system sound as AAC.
+
+<p align="center">
+  <img src="assets/screenshots/status.png" alt="hindsight's Status tab while recording cs2 at 240 fps" width="470">
+</p>
 
 You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with a current driver (531 or newer).
 
@@ -21,7 +25,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 
 1. Download **`hindsight-setup-x64.exe`** from the Releases page and run it.
 2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
-3. Press **Alt+F10** (or the hotkey you set) to save the last 30 seconds. Clips go to `Videos\hindsight` as `hindsight_<date>_<time>.mp4`.
+3. Press **Alt+F10** (or the hotkey you set) to save a clip.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
 ## How it stays light
