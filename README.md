@@ -64,4 +64,4 @@ The capture and encoding code is Windows-only; everything else (the replay buffe
 
 ## License
 
-[BSD 2-Clause](LICENSE).
+[BSD 2-Clause](LICENSE). [NOTICE](NOTICE) credits the NVIDIA SDK headers the FFI code follows.

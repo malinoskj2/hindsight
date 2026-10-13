@@ -50,6 +50,16 @@ jobs:
           build_sha=$(jq -r '.head_sha' run.json)
           [[ "$build_sha" =~ ^[0-9a-f]{40}$ ]]
 
+          # The tag must name the version the build commit's Cargo.toml declares.
+          cargo_version=$(gh api "repos/$GH_REPO/contents/Cargo.toml?ref=$build_sha" \
+            -H "Accept: application/vnd.github.raw" \
+            | awk '{ sub(/\r$/, "") } /^\[/ { in_package = ($0 == "[package]") } in_package && /^version *=/ { gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit }')
+          [[ -n "$cargo_version" ]] || { echo "Could not read the version from Cargo.toml at $build_sha" >&2; exit 1; }
+          [[ "${RELEASE_TAG#v}" == "$cargo_version" ]] || {
+            echo "Tag $RELEASE_TAG does not match version $cargo_version in Cargo.toml at $build_sha" >&2
+            exit 1
+          }
+
           gh run download "$BUILD_RUN_ID" --name hindsight-windows-x64 --dir release
           for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt; do
             gh attestation verify "release/$asset" --repo "$GH_REPO" \

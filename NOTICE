@@ -1,0 +1,14 @@
+hindsight
+Copyright (c) 2026, Jesse Malinosky. Licensed under the BSD 2-Clause License; see LICENSE.
+
+The FFI modules transcribe structure layouts, constants and function signatures from
+NVIDIA headers, so the program can call NVIDIA's driver libraries:
+
+- src/gpu/nvenc/ffi.rs: nvEncodeAPI.h from the NVIDIA Video Codec SDK (API 12.1).
+- src/gpu/capture/nvfbc/ffi.rs: NvFBC.h and NvFBCToDx9Vid.h from the NVIDIA Capture SDK 7.
+
+Those headers are the work of NVIDIA Corporation and remain under NVIDIA's own terms. No
+NVIDIA header or library is included in this repository or in the release downloads. NVIDIA,
+NVENC and NvFBC are trademarks of NVIDIA Corporation.
+
+The Rust code in this repository, including those modules, is under the BSD 2-Clause License.
