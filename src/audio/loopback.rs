@@ -2,7 +2,8 @@
 
 use super::pcm::{Layout, Sample};
 use listener::Listener;
-use std::{ffi::c_void, fmt, sync::Arc, time::Duration};
+use std::{ptr, sync::Arc, time::Duration};
+use task_mem::CoTaskMem;
 use windows::{
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
@@ -23,13 +24,13 @@ use windows::{
         },
         System::{
             Com::{
-                CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ,
+                CLSCTX_ALL, CoCreateInstance, STGM_READ,
                 StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             },
             Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
         },
     },
-    core::{Owned, PCWSTR, PWSTR, implement},
+    core::{GUID, Owned, PCWSTR, implement},
 };
 
 /// Format tags the audio headers put in modules this one does not otherwise need.
@@ -145,14 +146,12 @@ impl Devices {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(failed("activate the audio client"))?;
         let layout = initialize(&client)?;
-        // SAFETY: calls on the initialised client.
-        let capture = unsafe {
-            let capture: IAudioCaptureClient = client
-                .GetService()
-                .map_err(failed("get the capture client"))?;
-            client.Start().map_err(failed("start the audio capture"))?;
-            capture
-        };
+        // SAFETY: the client is initialised, as a capture service needs; the call returns a new
+        // reference.
+        let capture: IAudioCaptureClient =
+            unsafe { client.GetService() }.map_err(failed("get the capture client"))?;
+        // SAFETY: the client is initialised, as starting needs.
+        unsafe { client.Start() }.map_err(failed("start the audio capture"))?;
         Ok(Loopback {
             client,
             capture,
@@ -212,6 +211,13 @@ mod listener {
     #[implement(IMMNotificationClient)]
     pub(super) struct Listener(pub(super) Arc<Signal>);
 
+    /// Windows calls the listener on threads of its own.
+    const _: () = {
+        const fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<Listener>();
+        send_and_sync::<Listener_Impl>();
+    };
+
     impl IMMNotificationClient_Impl for Listener_Impl {
         fn OnDeviceStateChanged(
             &self,
@@ -251,36 +257,92 @@ mod listener {
     }
 }
 
-/// Memory a COM call allocated for the caller to free.
-struct CoTaskMem<T>(*mut T);
+/// A module of its own so the pointer can only be wrapped through `from_raw`.
+mod task_mem {
+    use super::{EXTENSIBLE_EXTRA_BYTES, WAVE_FORMAT_EXTENSIBLE, WaveFormat};
+    use std::ffi::c_void;
+    use windows::{
+        Win32::{
+            Media::Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE},
+            System::Com::CoTaskMemFree,
+        },
+        core::PWSTR,
+    };
 
-impl<T> Drop for CoTaskMem<T> {
-    fn drop(&mut self) {
-        // SAFETY: the pointer is the one the COM call handed over, freed once.
-        unsafe { CoTaskMemFree(Some(self.0.cast_const().cast::<c_void>())) };
+    /// Memory a COM call allocated for the caller to free.
+    pub(super) struct CoTaskMem<T>(*mut T);
+
+    impl<T> CoTaskMem<T> {
+        /// # Safety
+        ///
+        /// `pointer` is null, or was allocated with `CoTaskMemAlloc`, is freed by nothing else,
+        /// and points at a valid `T` for as long as the result lives. A wave format is followed
+        /// by the `cbSize` bytes it declares; a string is null-terminated.
+        pub(super) const unsafe fn from_raw(pointer: *mut T) -> Self {
+            Self(pointer)
+        }
     }
-}
 
-impl fmt::Display for CoTaskMem<u16> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: the memory holds a null-terminated string.
-        let text = unsafe { PWSTR(self.0).to_string() }.unwrap_or_default();
-        formatter.write_str(&text)
+    impl<T> Drop for CoTaskMem<T> {
+        fn drop(&mut self) {
+            // SAFETY: by `from_raw`'s contract the pointer is null, which is ignored, or memory
+            // from `CoTaskMemAlloc` that only `self` frees.
+            unsafe { CoTaskMemFree(Some(self.0.cast_const().cast::<c_void>())) };
+        }
+    }
+
+    impl CoTaskMem<u16> {
+        /// The string held, invalid UTF-16 replaced with U+FFFD; `None` when the pointer is null.
+        pub(super) fn to_string_lossy(&self) -> Option<String> {
+            if self.0.is_null() {
+                return None;
+            }
+            let text = PWSTR(self.0);
+            // SAFETY: by `from_raw`'s contract the non-null pointer is a null-terminated string,
+            // alive and unchanged while `self` is borrowed.
+            Some(String::from_utf16_lossy(unsafe { text.as_wide() }))
+        }
+    }
+
+    impl CoTaskMem<WAVEFORMATEX> {
+        /// A copy of the format held; `None` when the pointer is null.
+        pub(super) fn to_wave_format(&self) -> Option<WaveFormat> {
+            let format = self.0.cast_const();
+            if format.is_null() {
+                return None;
+            }
+            // SAFETY: by `from_raw`'s contract the non-null pointer is a valid wave format; the
+            // structure is packed, so it is read unaligned.
+            let basic = unsafe { format.read_unaligned() };
+            if basic.wFormatTag != WAVE_FORMAT_EXTENSIBLE || basic.cbSize < EXTENSIBLE_EXTRA_BYTES {
+                return Some(WaveFormat::plain(basic));
+            }
+            let extensible = format.cast::<WAVEFORMATEXTENSIBLE>();
+            // SAFETY: `cbSize` declares the extensible fields, which by `from_raw`'s contract
+            // follow the basic ones in the same allocation; packed, so read unaligned.
+            Some(WaveFormat::extensible(unsafe {
+                extensible.read_unaligned()
+            }))
+        }
     }
 }
 
 fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
     let flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
-    // SAFETY: a query of the live client; the format it allocates is freed with `mix`.
-    let mix = CoTaskMem(unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?);
-    if let Some(layout) = mix_layout(mix.0) {
-        initialize_as(client, mix.0, flags)?;
+    // SAFETY: a query of the live client.
+    let mix = unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?;
+    // SAFETY: GetMixFormat allocates the format with `CoTaskMemAlloc` for the caller to free,
+    // followed by the extra bytes its `cbSize` declares.
+    let mix = unsafe { CoTaskMem::from_raw(mix) }.to_wave_format();
+    if let Some(mix) = mix
+        && let Some(layout) = mix.layout()
+    {
+        initialize_as(client, &mix, flags)?;
         return Ok(layout);
     }
-    let converted = float_stereo();
     initialize_as(
         client,
-        &raw const converted,
+        &WaveFormat::float_stereo(),
         flags | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
     )?;
     Ok(Layout {
@@ -289,86 +351,118 @@ fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
     })
 }
 
-fn initialize_as(
-    client: &IAudioClient,
-    format: *const WAVEFORMATEX,
-    flags: u32,
-) -> Result<(), OpenError> {
-    // SAFETY: `format` points at a complete wave format for the length of the call.
+fn initialize_as(client: &IAudioClient, format: &WaveFormat, flags: u32) -> Result<(), OpenError> {
+    // SAFETY: `format` is borrowed for the call and is a whole wave format: its `cbSize` is the
+    // size of the fields its variant holds, so the client reads nothing past it.
     unsafe {
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             flags,
             BUFFER_DURATION,
             0,
-            format,
+            format.as_ptr(),
             None,
         )
     }
     .map_err(failed("open the audio capture"))
 }
 
-fn mix_layout(mix: *const WAVEFORMATEX) -> Option<Layout> {
-    // SAFETY: GetMixFormat returned a valid format, extended by the fields `cbSize` declares when
-    // extensible; both structures are packed, so they are read unaligned.
-    let (basic, sub_format) = unsafe {
-        let basic = mix.read_unaligned();
-        let sub_format = (basic.wFormatTag == WAVE_FORMAT_EXTENSIBLE
-            && basic.cbSize >= EXTENSIBLE_EXTRA_BYTES)
-            .then(|| {
-                mix.cast::<WAVEFORMATEXTENSIBLE>()
-                    .read_unaligned()
-                    .SubFormat
-            });
-        (basic, sub_format)
-    };
-    let float = match (basic.wFormatTag, sub_format) {
-        (WAVE_FORMAT_IEEE_FLOAT, _) => true,
-        (tag, _) if u32::from(tag) == WAVE_FORMAT_PCM => false,
-        (WAVE_FORMAT_EXTENSIBLE, Some(format)) if format == MFAudioFormat_Float => true,
-        (WAVE_FORMAT_EXTENSIBLE, Some(format)) if format == MFAudioFormat_PCM => false,
-        _ => return None,
-    };
-    let sample = match (float, basic.wBitsPerSample) {
-        (true, FLOAT_BITS) => Sample::Float,
-        (false, 16) => Sample::Int16,
-        _ => return None,
-    };
-    let channels = basic.nChannels;
-    (basic.nSamplesPerSec == super::SAMPLE_RATE && (1..=2).contains(&channels))
-        .then_some(Layout { sample, channels })
+/// A wave format owned here, copied out of the memory a COM call returned. Its `cbSize` always
+/// matches the variant, so a pointer to it is a complete format.
+#[derive(Clone, Copy)]
+enum WaveFormat {
+    Plain(WAVEFORMATEX),
+    Extensible(WAVEFORMATEXTENSIBLE),
 }
 
-fn float_stereo() -> WAVEFORMATEX {
-    let block = super::CHANNELS * FLOAT_BITS / 8;
-    WAVEFORMATEX {
-        wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
-        nChannels: super::CHANNELS,
-        nSamplesPerSec: super::SAMPLE_RATE,
-        nAvgBytesPerSec: super::SAMPLE_RATE * u32::from(block),
-        nBlockAlign: block,
-        wBitsPerSample: FLOAT_BITS,
-        cbSize: 0,
+impl WaveFormat {
+    /// Any extra bytes `format` declares are dropped.
+    const fn plain(mut format: WAVEFORMATEX) -> Self {
+        format.cbSize = 0;
+        Self::Plain(format)
+    }
+
+    /// Any bytes past the extensible fields are dropped.
+    const fn extensible(mut format: WAVEFORMATEXTENSIBLE) -> Self {
+        format.Format.cbSize = EXTENSIBLE_EXTRA_BYTES;
+        Self::Extensible(format)
+    }
+
+    fn float_stereo() -> Self {
+        let block = super::CHANNELS * FLOAT_BITS / 8;
+        Self::plain(WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
+            nChannels: super::CHANNELS,
+            nSamplesPerSec: super::SAMPLE_RATE,
+            nAvgBytesPerSec: super::SAMPLE_RATE * u32::from(block),
+            nBlockAlign: block,
+            wBitsPerSample: FLOAT_BITS,
+            cbSize: 0,
+        })
+    }
+
+    const fn basic(&self) -> WAVEFORMATEX {
+        match self {
+            Self::Plain(format) => *format,
+            Self::Extensible(format) => format.Format,
+        }
+    }
+
+    const fn sub_format(&self) -> Option<GUID> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Extensible(format) => Some(format.SubFormat),
+        }
+    }
+
+    fn as_ptr(&self) -> *const WAVEFORMATEX {
+        match self {
+            Self::Plain(format) => ptr::from_ref(format),
+            Self::Extensible(format) => ptr::from_ref(format).cast(),
+        }
+    }
+
+    /// How captured packets in this format are laid out, if the capture can take it as it is.
+    fn layout(&self) -> Option<Layout> {
+        let basic = self.basic();
+        let float = match (basic.wFormatTag, self.sub_format()) {
+            (WAVE_FORMAT_IEEE_FLOAT, _) => true,
+            (tag, _) if u32::from(tag) == WAVE_FORMAT_PCM => false,
+            (WAVE_FORMAT_EXTENSIBLE, Some(format)) if format == MFAudioFormat_Float => true,
+            (WAVE_FORMAT_EXTENSIBLE, Some(format)) if format == MFAudioFormat_PCM => false,
+            _ => return None,
+        };
+        let sample = match (float, basic.wBitsPerSample) {
+            (true, FLOAT_BITS) => Sample::Float,
+            (false, 16) => Sample::Int16,
+            _ => return None,
+        };
+        let channels = basic.nChannels;
+        (basic.nSamplesPerSec == super::SAMPLE_RATE && (1..=2).contains(&channels))
+            .then_some(Layout { sample, channels })
     }
 }
 
 fn id(device: &IMMDevice) -> Option<String> {
-    // SAFETY: a query of the live device; the id it allocates is freed with `CoTaskMem`.
+    // SAFETY: a query of a live device the caller holds.
     let id = unsafe { device.GetId() }.ok()?;
-    Some(CoTaskMem(id.0).to_string())
+    // SAFETY: GetId allocates a null-terminated string with `CoTaskMemAlloc` for the caller.
+    unsafe { CoTaskMem::from_raw(id.0) }.to_string_lossy()
 }
 
 fn friendly_name(device: &IMMDevice) -> Option<String> {
-    // SAFETY: the value is read from the live device's store and cleared once converted into a
-    // string, which is freed with `CoTaskMem`.
-    let name = unsafe {
-        let store = device.OpenPropertyStore(STGM_READ).ok()?;
-        let mut value = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
-        let name = PropVariantToStringAlloc(&raw const value).ok();
-        let _ = PropVariantClear(&raw mut value);
-        name
-    }?;
-    Some(CoTaskMem(name.0).to_string())
+    // SAFETY: a query of a live device the caller holds; the call returns a new reference.
+    let store = unsafe { device.OpenPropertyStore(STGM_READ) }.ok()?;
+    // SAFETY: the key is borrowed for the call; the value returned is owned here.
+    let mut value = unsafe { store.GetValue(&PKEY_Device_FriendlyName) }.ok()?;
+    // SAFETY: `value` is an initialised PROPVARIANT, borrowed for the call.
+    let name = unsafe { PropVariantToStringAlloc(&raw const value) }.ok();
+    // SAFETY: `value` is initialised and cleared once, after its last read above.
+    let _ = unsafe { PropVariantClear(&raw mut value) };
+    let name = name?;
+    // SAFETY: PropVariantToStringAlloc allocates a null-terminated string with
+    // `CoTaskMemAlloc` for the caller.
+    unsafe { CoTaskMem::from_raw(name.0) }.to_string_lossy()
 }
 
 pub(super) struct Packet<'a> {
