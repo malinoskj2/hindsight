@@ -1,8 +1,8 @@
 //! The user's settings, stored as JSON and validated before use.
 
-use crate::sys::hotkey::Hotkey;
-use serde::{Deserialize, Deserializer, Serialize};
-use std::{fmt, path::PathBuf};
+use crate::{log, sys::hotkey::Hotkey};
+use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
 pub(crate) const MIN_BUFFER_SECONDS: u32 = 5;
@@ -13,8 +13,6 @@ pub(crate) const MIN_BITRATE_MBPS: u32 = 5;
 pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
 const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
-const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
-const VIDEOS_DIRECTORY: &str = "Videos";
 const CLIP_DIRECTORY: &str = "hindsight";
 
 macro_rules! display_by_name {
@@ -167,8 +165,10 @@ impl Theme {
 
 display_by_name!(Mode, Backend, Codec, Memory, Theme);
 
+/// Built only from settings that passed [`Config::validate`] when read from disk; the Settings
+/// tab validates what it builds from the form the same way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "RawConfig")]
 pub(crate) struct Config {
     pub(crate) mode: Mode,
     pub(crate) backend: Backend,
@@ -177,14 +177,116 @@ pub(crate) struct Config {
     pub(crate) frame_rate: u32,
     pub(crate) bitrate_mbps: u32,
     pub(crate) hotkey: Hotkey,
-    /// `None` for the default folder; older files wrote it as an empty string.
-    #[serde(deserialize_with = "folder_or_none")]
-    pub(crate) clip_directory: Option<String>,
+    /// `None` for the default folder.
+    pub(crate) clip_directory: Option<PathBuf>,
     pub(crate) theme: Theme,
     pub(crate) audio: bool,
     /// Drawn where the backend can; Desktop Duplication never draws it.
     pub(crate) cursor: bool,
     pub(crate) buffer_memory: Memory,
+}
+
+/// The settings as stored, before validation; missing ones take their defaults.
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawConfig {
+    mode: Mode,
+    backend: Backend,
+    codec: Codec,
+    buffer_seconds: u32,
+    frame_rate: u32,
+    bitrate_mbps: u32,
+    hotkey: Hotkey,
+    /// Older files wrote the default folder as an empty string.
+    #[serde(deserialize_with = "folder_or_none")]
+    clip_directory: Option<PathBuf>,
+    theme: Theme,
+    audio: bool,
+    cursor: bool,
+    buffer_memory: Memory,
+    /// Settings a newer version wrote; kept out of the way so a downgrade still starts.
+    #[serde(flatten)]
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "flatten collects into a map; only the keys are kept"
+    )]
+    unknown: BTreeMap<String, IgnoredAny>,
+}
+
+impl Default for RawConfig {
+    fn default() -> Self {
+        let Config {
+            mode,
+            backend,
+            codec,
+            buffer_seconds,
+            frame_rate,
+            bitrate_mbps,
+            hotkey,
+            clip_directory,
+            theme,
+            audio,
+            cursor,
+            buffer_memory,
+        } = Config::default();
+        Self {
+            mode,
+            backend,
+            codec,
+            buffer_seconds,
+            frame_rate,
+            bitrate_mbps,
+            hotkey,
+            clip_directory,
+            theme,
+            audio,
+            cursor,
+            buffer_memory,
+            unknown: BTreeMap::new(),
+        }
+    }
+}
+
+impl TryFrom<RawConfig> for Config {
+    type Error = ConfigError;
+
+    fn try_from(raw: RawConfig) -> Result<Self, ConfigError> {
+        let RawConfig {
+            mode,
+            backend,
+            codec,
+            buffer_seconds,
+            frame_rate,
+            bitrate_mbps,
+            hotkey,
+            clip_directory,
+            theme,
+            audio,
+            cursor,
+            buffer_memory,
+            unknown,
+        } = raw;
+        if !unknown.is_empty() {
+            let keys: Vec<&str> = unknown.keys().map(String::as_str).collect();
+            log::warning(format!("Unknown settings are ignored: {}", keys.join(", ")));
+        }
+        let config = Self {
+            mode,
+            backend,
+            codec,
+            buffer_seconds,
+            frame_rate,
+            bitrate_mbps,
+            hotkey,
+            clip_directory,
+            theme,
+            audio,
+            cursor,
+            buffer_memory,
+        };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 impl Default for Config {
@@ -218,7 +320,7 @@ impl Config {
             return Err(ConfigError::Bitrate);
         }
         if let Some(folder) = &self.clip_directory
-            && !is_absolute_directory(folder)
+            && !folder.is_absolute()
         {
             return Err(ConfigError::ClipDirectory);
         }
@@ -237,7 +339,7 @@ impl Config {
     pub(crate) fn clip_directory(&self) -> PathBuf {
         self.clip_directory
             .as_ref()
-            .map_or_else(default_clip_directory, PathBuf::from)
+            .map_or_else(default_clip_directory, PathBuf::clone)
     }
 
     pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
@@ -269,28 +371,27 @@ pub(crate) enum ConfigError {
     ClipDirectory,
 }
 
-fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    Ok(Option::<String>::deserialize(deserializer)?.filter(|folder| !folder.is_empty()))
+fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
+    Ok(Option::<PathBuf>::deserialize(deserializer)?
+        .filter(|folder| !folder.as_os_str().is_empty()))
 }
 
+/// A folder in the user's Videos library, or in the temporary directory without one.
 pub(crate) fn default_clip_directory() -> PathBuf {
-    std::env::var_os(CLIP_DIRECTORY_ENV)
-        .map_or_else(std::env::temp_dir, |profile| {
-            PathBuf::from(profile).join(VIDEOS_DIRECTORY)
-        })
+    videos_directory()
+        .unwrap_or_else(std::env::temp_dir)
         .join(CLIP_DIRECTORY)
 }
 
-/// A drive-rooted Windows path (`C:\Clips`) or a UNC share (`\\server\share\Clips`).
-fn is_absolute_directory(value: &str) -> bool {
-    let mut chars = value.chars();
-    let on_drive = matches!(
-        (chars.next(), chars.next(), chars.next()),
-        (Some(letter), Some(':'), Some('\\')) if letter.is_ascii_alphabetic()
-    );
-    let on_share = value.starts_with(r"\\") && value.len() > 2;
+/// The Videos library from the shell, which follows it when it is moved or redirected.
+#[cfg(windows)]
+fn videos_directory() -> Option<PathBuf> {
+    crate::sys::com::known_folder(&windows::Win32::UI::Shell::FOLDERID_Videos)
+}
 
-    (on_drive || on_share) && !value.contains('/')
+#[cfg(not(windows))]
+fn videos_directory() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("Videos"))
 }
 
 #[cfg(test)]
@@ -299,7 +400,7 @@ mod tests {
     use std::assert_matches;
 
     #[test]
-    fn defaults_fill_missing_settings_without_accepting_unknown_ones() {
+    fn defaults_fill_missing_settings_and_unknown_ones_are_ignored() {
         let parse = |json: &str| serde_json::from_str::<Config>(json);
 
         let config = parse(r#"{"buffer_seconds":120,"codec":"av1"}"#).unwrap();
@@ -346,7 +447,13 @@ mod tests {
         assert!(parse(r#"{"backend":"gdi"}"#).is_err());
         assert!(parse(r#"{"codec":"vp9"}"#).is_err());
         assert!(parse(r#"{"theme":"neon"}"#).is_err());
-        assert!(parse(r#"{"buffer_secs":120}"#).is_err());
+        assert_eq!(
+            parse(r#"{"buffer_secs":120,"frame_rate":30}"#).unwrap(),
+            Config {
+                frame_rate: 30,
+                ..Config::default()
+            }
+        );
     }
 
     #[test]
@@ -369,10 +476,30 @@ mod tests {
             parse(r#"{"clip_directory":null}"#).unwrap().clip_directory,
             None
         );
-        let config = parse(r#"{"clip_directory":"D:\\Clips"}"#).unwrap();
-        assert_eq!(config.clip_directory.as_deref(), Some(r"D:\Clips"));
+        let folder = absolute_folder();
+        let config = parse(&format!(r#"{{"clip_directory":{}}}"#, json_string(&folder))).unwrap();
+        assert_eq!(config.clip_directory, Some(folder));
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn settings_out_of_range_are_refused_when_read() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        for json in [
+            r#"{"buffer_seconds":601}"#,
+            r#"{"frame_rate":23}"#,
+            r#"{"bitrate_mbps":0}"#,
+            r#"{"clip_directory":"Clips"}"#,
+        ] {
+            assert!(parse(json).is_err(), "{json}");
+        }
+        let error = parse(r#"{"frame_rate":241}"#).unwrap_err().to_string();
+        assert!(
+            error.starts_with(&ConfigError::FrameRate.to_string()),
+            "{error}"
+        );
     }
 
     #[test]
@@ -436,24 +563,34 @@ mod tests {
         assert_matches!(config.validate(), Err(ConfigError::Bitrate));
         config.bitrate_mbps = 50;
 
-        config.clip_directory = Some(r"Clips\here".to_owned());
+        config.clip_directory = Some(PathBuf::from(r"Clips\here"));
         assert_matches!(config.validate(), Err(ConfigError::ClipDirectory));
-        config.clip_directory = Some(r"D:\Clips".to_owned());
+        config.clip_directory = Some(absolute_folder());
         assert!(config.validate().is_ok());
     }
 
+    #[cfg(windows)]
     #[test]
     fn clip_folders_are_drive_rooted_or_shares() {
+        let valid = |path: &str| {
+            Config {
+                clip_directory: Some(PathBuf::from(path)),
+                ..Config::default()
+            }
+            .validate()
+            .is_ok()
+        };
         for path in [
             r"C:\Clips",
             r"d:\Videos\Replays",
             r"\\nas\clips",
             r"C:\影像",
+            "C:/Clips",
         ] {
-            assert!(is_absolute_directory(path), "{path}");
+            assert!(valid(path), "{path}");
         }
-        for path in ["", "C:", r"C:Clips", "C:/Clips", r"\Clips", r"\\", "Clips"] {
-            assert!(!is_absolute_directory(path), "{path}");
+        for path in ["C:", r"C:Clips", r"\Clips", "Clips"] {
+            assert!(!valid(path), "{path}");
         }
     }
 
@@ -467,12 +604,21 @@ mod tests {
         assert!(config.clip_directory().ends_with(CLIP_DIRECTORY));
         assert_eq!(
             Config {
-                clip_directory: Some(r"D:\Clips".to_owned()),
+                clip_directory: Some(absolute_folder()),
                 ..Config::default()
             }
             .clip_directory(),
-            PathBuf::from(r"D:\Clips")
+            absolute_folder()
         );
+    }
+
+    /// An absolute folder on the platform the tests run on.
+    fn absolute_folder() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"D:\Clips" } else { "/clips" })
+    }
+
+    fn json_string(path: &std::path::Path) -> String {
+        serde_json::to_string(path).unwrap()
     }
 
     #[test]

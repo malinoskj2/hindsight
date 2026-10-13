@@ -988,7 +988,7 @@ mod tests {
 
     fn config_in(directory: &Path) -> Config {
         Config {
-            clip_directory: Some(directory.display().to_string()),
+            clip_directory: Some(directory.to_path_buf()),
             ..desktop()
         }
     }

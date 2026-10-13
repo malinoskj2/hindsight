@@ -80,7 +80,6 @@ fn startup() -> Result<(service::Worker, config::Config)> {
     let store = storage::Store::open().context("open application state")?;
     mirror_log();
     let config = store.load_config().context("load configuration")?;
-    config.validate().context("check configuration")?;
     let worker =
         service::Worker::spawn(store, config.clone()).context("start the recording worker")?;
     Ok((worker, config))

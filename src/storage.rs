@@ -10,7 +10,6 @@ use std::{
 use thiserror::Error;
 
 const MAX_STATE_BYTES: usize = 64 * 1024;
-const STATE_DIRECTORY_ENV: &str = "LOCALAPPDATA";
 const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
@@ -20,7 +19,7 @@ const PENDING_EXTENSION: &str = "pending";
 
 /// Lifetime totals, kept across runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct Totals {
     pub(crate) buffered_bytes: u64,
     #[serde(alias = "written_bytes")]
@@ -35,10 +34,8 @@ pub(crate) struct Store {
 
 impl Store {
     pub(crate) fn open() -> Result<Self, StorageError> {
-        if std::env::var_os(STATE_DIRECTORY_ENV).is_none() {
-            return Err(StorageError::NoDirectory);
-        }
-        Self::at(state_directory())
+        let base = local_app_data().ok_or(StorageError::NoDirectory)?;
+        Self::at(base.join(STATE_DIRECTORY))
     }
 
     pub(crate) fn at(root: PathBuf) -> Result<Self, StorageError> {
@@ -82,21 +79,33 @@ impl Store {
 pub(crate) enum StorageError {
     #[error("the application state could not be read or written")]
     Io(#[from] io::Error),
-    #[error("the application state is not valid JSON")]
+    #[error("the application state is invalid")]
     Json(#[from] serde_json::Error),
     #[error("application state is larger than {} KB", MAX_STATE_BYTES / 1024)]
     Oversized,
     #[error("another hindsight instance is running")]
     Locked,
-    #[error("{} is unavailable", STATE_DIRECTORY_ENV)]
+    #[error("the local application data folder is unavailable")]
     NoDirectory,
 }
 
-/// Without `LOCALAPPDATA` paths fall back to the temporary directory; [`Store::open`] refuses.
+/// Without the local application data folder paths fall back to the temporary directory;
+/// [`Store::open`] refuses.
 pub(crate) fn state_directory() -> PathBuf {
-    std::env::var_os(STATE_DIRECTORY_ENV)
-        .map_or_else(std::env::temp_dir, PathBuf::from)
+    local_app_data()
+        .unwrap_or_else(std::env::temp_dir)
         .join(STATE_DIRECTORY)
+}
+
+/// `%LOCALAPPDATA%`, from the shell rather than the environment, which can be stale.
+#[cfg(windows)]
+fn local_app_data() -> Option<PathBuf> {
+    crate::sys::com::known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)
+}
+
+#[cfg(not(windows))]
+fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
 }
 
 pub(crate) fn buffer_file() -> PathBuf {
@@ -214,6 +223,20 @@ mod tests {
         let store = Store::at(directory.path().to_owned()).unwrap();
         fs::write(directory.path().join(CONFIG_FILE), b"broken").unwrap();
         assert_matches!(store.load_config(), Err(StorageError::Json(_)));
+    }
+
+    #[test]
+    fn totals_read_older_and_newer_files() {
+        let parse = |json: &str| serde_json::from_str::<Totals>(json).unwrap();
+        let totals = Totals {
+            buffered_bytes: 5,
+            saved_bytes: 7,
+        };
+        assert_eq!(parse(r#"{"buffered_bytes":5,"written_bytes":7}"#), totals);
+        assert_eq!(
+            parse(r#"{"buffered_bytes":5,"saved_bytes":7,"from_the_future":1}"#),
+            totals
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::{
     log,
     sys::startup,
 };
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 use winsafe::{co, gui, prelude::*};
 
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
@@ -578,8 +578,9 @@ fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
 }
 
 /// `None` for the default folder, so a moved default is followed.
-fn stored_folder(entered: &str) -> Option<String> {
-    (entered != config::default_clip_directory().display().to_string()).then(|| entered.to_owned())
+fn stored_folder(entered: &str) -> Option<PathBuf> {
+    (entered != config::default_clip_directory().display().to_string())
+        .then(|| PathBuf::from(entered))
 }
 
 /// `None` outside the limits Apply enforces, where the configuration's arithmetic overflows.
@@ -626,7 +627,7 @@ mod tests {
     fn the_default_clip_folder_is_stored_as_none_and_any_other_as_entered() {
         let default = config::default_clip_directory().display().to_string();
         assert_eq!(stored_folder(&default), None);
-        assert_eq!(stored_folder(r"D:\Clips").as_deref(), Some(r"D:\Clips"));
+        assert_eq!(stored_folder(r"D:\Clips"), Some(PathBuf::from(r"D:\Clips")));
     }
 
     #[test]
