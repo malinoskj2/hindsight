@@ -13,6 +13,7 @@ use std::{
     any::Any,
     fmt::Display,
     io,
+    num::NonZeroIsize,
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
@@ -31,22 +32,78 @@ const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Handles are the OS's, carried as integers so the worker stays portable.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A monitor's OS handle, never null; carried as an integer so the worker stays portable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MonitorHandle(NonZeroIsize);
+
+/// A window's OS handle, never null; carried as an integer so the worker stays portable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowHandle(NonZeroIsize);
+
+impl MonitorHandle {
+    /// `None` for a null handle.
+    pub(crate) fn new(raw: isize) -> Option<Self> {
+        NonZeroIsize::new(raw).map(Self)
+    }
+
+    pub(crate) fn get(self) -> isize {
+        self.0.get()
+    }
+}
+
+impl WindowHandle {
+    /// `None` for a null handle.
+    pub(crate) fn new(raw: isize) -> Option<Self> {
+        NonZeroIsize::new(raw).map(Self)
+    }
+
+    pub(crate) fn get(self) -> isize {
+        self.0.get()
+    }
+}
+
+/// What to capture. Two targets are the same when their handles are; the name only describes.
+#[derive(Clone, Debug)]
 pub(crate) enum Target {
-    /// Handle 0 is the primary monitor.
-    Monitor { handle: isize, name: String },
+    /// `None` is the primary monitor.
+    Monitor {
+        handle: Option<MonitorHandle>,
+        name: String,
+    },
     Window {
-        window: isize,
-        monitor: isize,
+        window: WindowHandle,
+        monitor: MonitorHandle,
         name: String,
     },
 }
 
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Monitor { handle: a, .. }, Self::Monitor { handle: b, .. }) => a == b,
+            (
+                Self::Window {
+                    window: a,
+                    monitor: a_monitor,
+                    ..
+                },
+                Self::Window {
+                    window: b,
+                    monitor: b_monitor,
+                    ..
+                },
+            ) => a == b && a_monitor == b_monitor,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Target {}
+
 impl Target {
     pub(crate) fn primary_monitor() -> Self {
         Self::Monitor {
-            handle: 0,
+            handle: None,
             name: "the primary monitor".to_owned(),
         }
     }
@@ -61,7 +118,7 @@ impl Target {
         match self {
             Self::Monitor { .. } => self.clone(),
             Self::Window { monitor, name, .. } => Self::Monitor {
-                handle: *monitor,
+                handle: Some(*monitor),
                 name: name.clone(),
             },
         }

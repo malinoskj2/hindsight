@@ -257,7 +257,7 @@ fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {
         }
         Target::Window { window, .. } => {
             // SAFETY: as above, for a window handle.
-            unsafe { interop.CreateForWindow(HWND(window as *mut c_void)) }
+            unsafe { interop.CreateForWindow(HWND(window.get() as *mut c_void)) }
                 .map_err(failed("capture the window"))
         }
     }

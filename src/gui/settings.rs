@@ -10,13 +10,17 @@ use super::{
 };
 use crate::{
     config::{
-        self, Backend, Codec, Config, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS, MAX_FRAME_RATE,
-        MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
+        self, Backend, Codec, Config, ConfigError, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS,
+        MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
     },
     log,
-    sys::startup,
+    sys::{
+        hotkey::{self, RegisterError},
+        startup,
+    },
 };
 use std::{path::PathBuf, rc::Rc};
+use thiserror::Error;
 use winsafe::{co, gui, prelude::*};
 
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
@@ -56,6 +60,19 @@ mod rows {
     pub(super) const START_WITH_WINDOWS: i32 = THEME + FIELD_PITCH;
     pub(super) const STARTUP_ERROR: i32 = START_WITH_WINDOWS + CHECK_PITCH;
     pub(super) const GENERAL_HEIGHT: i32 = START_WITH_WINDOWS + LINE + 6 - GENERAL_FRAME;
+}
+
+/// Why the settings entered were not applied; shown beside Apply.
+#[derive(Debug, Error)]
+pub(super) enum SettingsError {
+    #[error("{}", text::NUMBER_REQUIRED)]
+    NumberRequired,
+    #[error(transparent)]
+    Hotkey(#[from] hotkey::ParseError),
+    #[error(transparent)]
+    Invalid(#[from] ConfigError),
+    #[error(transparent)]
+    Register(#[from] RegisterError),
 }
 
 #[derive(Clone)]
@@ -176,14 +193,16 @@ impl SettingsPage {
     }
 
     /// The configuration as entered, validated.
-    pub(super) fn configuration(&self) -> Result<Config, String> {
+    pub(super) fn configuration(&self) -> Result<Config, SettingsError> {
         let config = self.entered()?;
-        config.validate().map_err(|error| error.to_string())?;
+        config.validate()?;
         Ok(config)
     }
 
-    pub(super) fn show_settings_error(&self, message: &str) {
-        self.0.recording.error.set_text(message);
+    /// `None` clears the message.
+    pub(super) fn show_settings_error(&self, error: Option<&SettingsError>) {
+        let message = error.map(ToString::to_string).unwrap_or_default();
+        self.0.recording.error.set_text(&message);
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
@@ -252,9 +271,8 @@ impl SettingsPage {
         }
     }
 
-    fn entered(&self) -> Result<Config, String> {
-        let required =
-            |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
+    fn entered(&self) -> Result<Config, SettingsError> {
+        let required = |field: &gui::Edit| number(field).ok_or(SettingsError::NumberRequired);
         let recording = &self.0.recording;
         let encoding = &recording.encoding;
         let hotkey = recording.hotkey.text().unwrap_or_default();
@@ -266,7 +284,7 @@ impl SettingsPage {
             frame_rate: required(&encoding.frame_rate)?,
             buffer_seconds: required(&encoding.buffer_seconds)?,
             bitrate_mbps: required(&encoding.bitrate)?,
-            hotkey: hotkey.trim().parse().map_err(|error| format!("{error}"))?,
+            hotkey: hotkey.trim().parse()?,
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
             cursor: recording.cursor.is_checked(),
@@ -628,6 +646,21 @@ mod tests {
         let default = config::default_clip_directory().display().to_string();
         assert_eq!(stored_folder(&default), None);
         assert_eq!(stored_folder(r"D:\Clips"), Some(PathBuf::from(r"D:\Clips")));
+    }
+
+    #[test]
+    fn a_settings_error_reads_as_the_message_it_stands_for() {
+        assert_eq!(
+            SettingsError::NumberRequired.to_string(),
+            text::NUMBER_REQUIRED
+        );
+        let parse = "".parse::<hotkey::Hotkey>().unwrap_err();
+        let shown = parse.to_string();
+        assert_eq!(SettingsError::from(parse).to_string(), shown);
+        assert_eq!(
+            SettingsError::from(ConfigError::Buffer).to_string(),
+            ConfigError::Buffer.to_string()
+        );
     }
 
     #[test]

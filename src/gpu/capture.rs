@@ -18,7 +18,7 @@ use crate::{
     },
     log,
     replay::Matrix,
-    service::Target,
+    service::{MonitorHandle, Target},
 };
 use std::{
     ffi::c_void,
@@ -344,17 +344,19 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
             window,
             monitor: handle,
             ..
-        } => (monitor(handle), Some(HWND(window as *mut c_void))),
+        } => (
+            monitor(Some(handle)),
+            Some(HWND(window.get() as *mut c_void)),
+        ),
     }
 }
 
 #[expect(unsafe_code)]
-fn monitor(handle: isize) -> HMONITOR {
-    if handle == 0 {
+fn monitor(handle: Option<MonitorHandle>) -> HMONITOR {
+    match handle {
+        Some(handle) => HMONITOR(handle.get() as *mut c_void),
         // SAFETY: (0, 0) always lies on the primary monitor.
-        unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) }
-    } else {
-        HMONITOR(handle as *mut c_void)
+        None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
     }
 }
 

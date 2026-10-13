@@ -1,7 +1,10 @@
 //! Full-screen apps: windows whose client area covers their monitor, watched through event hooks.
 
 use super::callback::Slot;
-use crate::{APP_NAME, service::Target};
+use crate::{
+    APP_NAME,
+    service::{MonitorHandle, Target, WindowHandle},
+};
 use std::{path::Path, rc::Rc};
 use windows::Win32::{
     Foundation::HWND,
@@ -98,8 +101,8 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
     }
 
     Some(Target::Window {
-        window: window.ptr().addr().cast_signed(),
-        monitor: monitor.ptr().addr().cast_signed(),
+        window: WindowHandle::new(window.ptr().addr().cast_signed())?,
+        monitor: MonitorHandle::new(monitor.ptr().addr().cast_signed())?,
         name: process_name(process),
     })
 }

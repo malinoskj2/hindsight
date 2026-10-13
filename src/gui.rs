@@ -4,7 +4,7 @@ use self::{
     clips::ClipsPage,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
-    settings::SettingsPage,
+    settings::{SettingsError, SettingsPage},
     status::{Control, StatusPage},
     theme::{Skin, Surface},
 };
@@ -14,7 +14,7 @@ use crate::{
     service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
-        hotkey::{self, Hotkey},
+        hotkey::{self, Hotkey, RegisterError},
         icon, instance, shell, startup,
         tray::{Tray, TrayAction},
         window,
@@ -396,15 +396,16 @@ impl Main {
         let config = match self.0.settings.configuration() {
             Ok(entered) => entered,
             Err(error) => {
-                self.0.settings.show_settings_error(&error);
+                self.0.settings.show_settings_error(Some(&error));
                 return;
             }
         };
         if let Err(error) = self.switch_hotkey(config.hotkey) {
-            self.0.settings.show_settings_error(&error);
+            let error = SettingsError::from(error);
+            self.0.settings.show_settings_error(Some(&error));
             return;
         }
-        self.0.settings.show_settings_error("");
+        self.0.settings.show_settings_error(None);
         self.0.settings.show_hotkey(&config.hotkey.to_string());
         *self.0.config.borrow_mut() = config.clone();
         self.0.worker.start(config);
@@ -464,7 +465,7 @@ impl Main {
         resize_width_by(self.0.main_window.hwnd(), delta);
     }
 
-    fn switch_hotkey(&self, hotkey: Hotkey) -> Result<(), String> {
+    fn switch_hotkey(&self, hotkey: Hotkey) -> Result<(), RegisterError> {
         let result = self.register_hotkey(hotkey);
         if result.is_err() {
             self.register_configured_hotkey();
@@ -477,10 +478,9 @@ impl Main {
         let _ = self.register_hotkey(configured);
     }
 
-    fn register_hotkey(&self, hotkey: Hotkey) -> Result<(), String> {
-        let result =
-            hotkey::register(self.0.main_window.hwnd(), hotkey).map_err(|error| error.to_string());
-        self.note_hotkey_error(result.as_ref().err().cloned());
+    fn register_hotkey(&self, hotkey: Hotkey) -> Result<(), RegisterError> {
+        let result = hotkey::register(self.0.main_window.hwnd(), hotkey);
+        self.note_hotkey_error(result.as_ref().err().map(ToString::to_string));
         result
     }
 

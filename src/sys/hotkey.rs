@@ -199,7 +199,7 @@ const fn is_numpad_digit(key: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use native::{SAVE_HOTKEY_ID, register};
+pub(crate) use native::{RegisterError, SAVE_HOTKEY_ID, register};
 
 #[cfg(windows)]
 mod native {

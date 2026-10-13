@@ -80,7 +80,7 @@ fn failing_counted(
 fn scripted(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     SESSIONS.fetch_add(1, Ordering::Relaxed);
     match target {
-        Target::Window { window: 1, .. } => {
+        Target::Window { window, .. } if window.get() == 1 => {
             steady_until_closed(config, live, stop);
             Ok(Ended::Closed)
         }
@@ -181,8 +181,8 @@ fn config_in(directory: &Path) -> Config {
 
 fn window(window: isize) -> Target {
     Target::Window {
-        window,
-        monitor: 7,
+        window: WindowHandle::new(window).unwrap(),
+        monitor: MonitorHandle::new(7).unwrap(),
         name: format!("game{window}.exe"),
     }
 }
@@ -594,4 +594,20 @@ fn sound_that_could_not_start_is_reported_only_when_asked_for() {
         matches!(status.state, State::Recording(_))
     });
     assert_eq!(status.sound, None);
+}
+
+#[test]
+fn a_target_is_known_by_its_handles_not_its_name() {
+    let renamed = Target::Window {
+        window: WindowHandle::new(1).unwrap(),
+        monitor: MonitorHandle::new(7).unwrap(),
+        name: "a full-screen app".to_owned(),
+    };
+    assert_eq!(renamed, window(1));
+    assert_ne!(window(2), window(1));
+    assert_ne!(window(1).monitor(), window(1));
+    assert_eq!(window(1).monitor(), window(2).monitor());
+    assert_ne!(window(1).monitor(), Target::primary_monitor());
+    assert_eq!(MonitorHandle::new(7).map(MonitorHandle::get), Some(7));
+    assert_eq!(MonitorHandle::new(0), None);
 }
