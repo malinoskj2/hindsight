@@ -10,13 +10,15 @@ use crate::{
 };
 use anyhow::Result;
 use std::{
+    any::Any,
     fmt::Display,
     io,
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -116,36 +118,88 @@ impl Services {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub(crate) enum DisplayStatus {
-    #[default]
+/// Where the worker is; what it shows is built from this when it publishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
     Starting,
     Waiting,
     Recording,
-    /// Capture stopped on request; what was buffered stays saveable until it resumes.
     Paused,
     Retrying,
     Unsupported,
 }
 
+/// What the worker is doing, carrying what only that state has.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub(crate) enum State {
+    /// Capture is running and no frame has arrived yet.
+    Starting(Running),
+    Recording(Running),
+    /// Full-screen mode, with no full-screen app to record.
+    Waiting,
+    /// Capture stopped on request; what was buffered stays saveable until it resumes.
+    Paused,
+    /// Capture failed and is tried again shortly.
+    Retrying,
+    /// Capture fails the same way each time with these settings.
+    Unsupported,
+    /// Nothing is captured: before the worker first reports, or once it has shut down.
+    #[default]
+    Idle,
+    /// The worker itself failed; nothing is recorded until the app starts again.
+    Stopped,
+}
+
+impl State {
+    /// The capture session, while one runs.
+    pub(crate) fn running(&self) -> Option<&Running> {
+        match self {
+            Self::Starting(running) | Self::Recording(running) => Some(running),
+            _ => None,
+        }
+    }
+}
+
+/// A capture session that is running.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Running {
+    pub(crate) backend: Backend,
+    /// Frames encoded a second, once measured.
+    pub(crate) encode_rate: Option<f64>,
+}
+
+/// The replay buffer, while there is one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Buffer {
+    /// Known once the first frame arrives.
+    pub(crate) stream: Option<Stream>,
+    /// What the buffer holds now.
+    pub(crate) held: Held,
+    /// Where it is kept.
+    pub(crate) memory: Memory,
+}
+
+/// The bytes buffered and saved, this run and over the app's lifetime.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct Bytes {
+    pub(crate) session_written: u64,
+    pub(crate) session_saved: u64,
+    /// `None` when the lifetime totals could not be read.
+    pub(crate) lifetime_written: Option<u64>,
+    pub(crate) lifetime_saved: Option<u64>,
+}
+
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Status {
-    pub(crate) state: DisplayStatus,
-    pub(crate) recording: bool,
+    pub(crate) state: State,
+    /// The display or app recorded last; kept until another is chosen.
     pub(crate) source: Option<String>,
-    pub(crate) backend: Option<Backend>,
-    pub(crate) stream: Option<Stream>,
+    pub(crate) buffer: Option<Buffer>,
+    /// The settings' bitrate, buffer length and the buffer size they come to.
     pub(crate) bitrate_mbps: u32,
-    /// What the buffer holds now, and where it is kept while a session has one.
-    pub(crate) buffer_held: Held,
-    pub(crate) buffer_memory: Option<Memory>,
     pub(crate) buffer_seconds: u32,
     pub(crate) buffer_capacity_bytes: u64,
-    pub(crate) saved_bytes: Option<u64>,
-    pub(crate) buffered_lifetime_bytes: Option<u64>,
-    pub(crate) encode_rate: Option<f64>,
-    pub(crate) session_written_bytes: u64,
-    pub(crate) session_saved_bytes: u64,
+    pub(crate) bytes: Bytes,
     pub(crate) last_clip: Option<PathBuf>,
     pub(crate) error: Option<String>,
     /// A save was asked for before the buffer held anything.
@@ -157,8 +211,8 @@ enum Command {
     Start(Config),
     Target(Target),
     Save,
-    Pause,
-    Resume,
+    /// Pause while capturing, resume while paused: the worker knows which it is.
+    TogglePause,
     Restart,
     Theme(Theme),
     Wake,
@@ -185,8 +239,8 @@ impl Worker {
         let join = thread::Builder::new()
             .name("recording-worker".to_owned())
             .spawn(move || {
-                let mut machine = Machine::new(services, store, config, output, wake);
-                machine.run(&receiver);
+                let machine = Machine::new(services, store, config, Arc::clone(&output), wake);
+                run_guarded(machine, &receiver, &output);
             })?;
 
         Ok(Self {
@@ -215,12 +269,8 @@ impl Worker {
         self.request(Command::Save);
     }
 
-    pub(crate) fn pause(&self) {
-        self.request(Command::Pause);
-    }
-
-    pub(crate) fn resume(&self) {
-        self.request(Command::Resume);
+    pub(crate) fn toggle_pause(&self) {
+        self.request(Command::TogglePause);
     }
 
     pub(crate) fn restart(&self) {
@@ -236,15 +286,21 @@ impl Worker {
     }
 
     fn request(&self, command: Command) {
-        let _ = self.commands.send(command);
+        if let Err(SendError(command)) = self.commands.send(command)
+            && !matches!(command, Command::Wake | Command::Exit)
+        {
+            log::warning(text::WORKER_GONE);
+        }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         self.request(Command::Exit);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        if let Some(join) = self.join.take()
+            && let Err(payload) = join.join()
+        {
+            log::error(text::worker_panicked(panic_message(&*payload)));
         }
     }
 }
@@ -357,7 +413,12 @@ struct Machine {
     ledger: Ledger,
     config: Config,
     output: Arc<Mutex<Status>>,
-    status: Status,
+    phase: Phase,
+    error: Option<String>,
+    /// A save was asked for before the buffer held anything; cleared when one starts.
+    nothing_to_save: bool,
+    last_clip: Option<PathBuf>,
+    encode_rate: Option<f64>,
     session: Option<Session>,
     target: Option<Target>,
     live: Option<Arc<Live>>,
@@ -381,7 +442,11 @@ impl Machine {
             ledger: Ledger::new(store),
             config,
             output,
-            status: Status::default(),
+            phase: Phase::Starting,
+            error: None,
+            nothing_to_save: false,
+            last_clip: None,
+            encode_rate: None,
             session: None,
             target: None,
             live: None,
@@ -401,8 +466,7 @@ impl Machine {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
-                Ok(Command::Pause) => self.pause(),
-                Ok(Command::Resume) => self.resume(),
+                Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
                 Ok(Command::Theme(theme)) => self.remember_theme(theme),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
@@ -446,23 +510,25 @@ impl Machine {
         self.begin();
     }
 
+    fn toggle_pause(&mut self) {
+        if self.paused {
+            self.resume();
+        } else {
+            self.pause();
+        }
+    }
+
     /// Stops capturing but keeps the buffer, so a clip can still be saved from before the pause.
     fn pause(&mut self) {
-        if self.paused {
-            return;
-        }
         log::info(text::PAUSED);
         self.paused = true;
         self.retry_at = None;
         self.stop_session();
-        self.status.state = DisplayStatus::Paused;
-        self.status.error = None;
+        self.phase = Phase::Paused;
+        self.error = None;
     }
 
     fn resume(&mut self) {
-        if !self.paused {
-            return;
-        }
         log::info(text::RESUMED);
         self.paused = false;
         self.begin();
@@ -480,7 +546,7 @@ impl Machine {
         if self.config.mode != Mode::Fullscreen
             || self.paused
             || self.retry_at.is_some()
-            || self.status.state == DisplayStatus::Unsupported
+            || self.phase == Phase::Unsupported
         {
             return;
         }
@@ -500,7 +566,7 @@ impl Machine {
         }
         let Some(snapshot) = self.live.as_ref().and_then(|live| live.snapshot()) else {
             log::warning(text::NOTHING_TO_SAVE);
-            self.status.nothing_to_save = true;
+            self.nothing_to_save = true;
             (self.services.chime)(Tone::Failed);
             return;
         };
@@ -516,7 +582,7 @@ impl Machine {
                     join,
                     next_tick: self.now() + PROGRESS_INTERVAL,
                 });
-                self.status.nothing_to_save = false;
+                self.nothing_to_save = false;
             }
             Err(error) => self.report_failed_save(text::save_failed(error)),
         }
@@ -545,8 +611,8 @@ impl Machine {
             Mode::Desktop => self.start_session(Target::primary_monitor()),
             Mode::Fullscreen => {
                 self.target = None;
-                self.status.state = DisplayStatus::Waiting;
-                self.status.error = None;
+                self.phase = Phase::Waiting;
+                self.error = None;
             }
         }
     }
@@ -576,8 +642,8 @@ impl Machine {
                     _audio: audio,
                 });
                 self.live = Some(live);
-                self.status.state = DisplayStatus::Starting;
-                self.status.error = None;
+                self.phase = Phase::Starting;
+                self.error = None;
             }
             Err(error) => self.fail(text::capture_thread_failed(error)),
         }
@@ -636,19 +702,21 @@ impl Machine {
         match session.join.join() {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => log::error(text::session_failed(format!("{error:#}"))),
-            Err(_) => log::error(text::session_failed(text::CAPTURE_PANICKED)),
+            Err(payload) => log::error(text::session_failed(text::capture_panicked(
+                panic_message(&*payload),
+            ))),
         }
     }
 
     fn fail(&mut self, error: impl Display) {
         self.report_error(text::session_failed(error));
-        self.status.state = DisplayStatus::Retrying;
+        self.phase = Phase::Retrying;
         self.retry_at = Some(self.now() + self.services.retry_interval);
     }
 
     fn report_error(&mut self, message: String) {
         log::error(&message);
-        self.status.error = Some(message);
+        self.error = Some(message);
     }
 
     fn poll(&mut self) {
@@ -686,15 +754,15 @@ impl Machine {
             Ok(Ok(Ended::Closed)) => {
                 let name = self.target.as_ref().map_or("", Target::name);
                 log::info(text::target_closed(name));
-                self.status.state = DisplayStatus::Waiting;
+                self.phase = Phase::Waiting;
             }
             Ok(Ok(Ended::NoFrames)) => self.fall_back_to_monitor(),
             Ok(Ok(Ended::Unsupported(reason))) => {
                 self.report_error(text::session_failed(reason));
-                self.status.state = DisplayStatus::Unsupported;
+                self.phase = Phase::Unsupported;
             }
             Ok(Err(error)) => self.fail(format!("{error:#}")),
-            Err(_) => self.fail(text::CAPTURE_PANICKED),
+            Err(payload) => self.fail(text::capture_panicked(panic_message(&*payload))),
         }
     }
 
@@ -753,15 +821,17 @@ impl Machine {
         match saving.join.join() {
             Ok(Ok(path)) => self.clip_saved(saving.seconds, path),
             Ok(Err(error)) => self.report_failed_save(text::save_failed(error)),
-            Err(_) => self.report_failed_save(text::save_failed(text::SAVE_PANICKED)),
+            Err(payload) => self.report_failed_save(text::save_failed(text::save_panicked(
+                panic_message(&*payload),
+            ))),
         }
     }
 
     fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
         log::info(text::clip_saved(seconds, &path));
         self.ledger.add_saved(&path);
-        self.status.last_clip = Some(path);
-        self.status.error = None;
+        self.last_clip = Some(path);
+        self.error = None;
         (self.services.chime)(Tone::Saved);
     }
 
@@ -779,10 +849,9 @@ impl Machine {
     fn publish(&mut self) {
         let reading = self.read_live();
         self.mark_recording(&reading);
-        self.describe_session(&reading);
-        self.count_bytes(reading.live_bytes);
         self.measure_rate(reading.running, reading.sample);
-        *self.output.lock().unwrap_or_else(PoisonError::into_inner) = self.status.clone();
+        let status = self.describe(&reading);
+        *self.output.lock().unwrap_or_else(PoisonError::into_inner) = status;
     }
 
     fn read_live(&self) -> Reading {
@@ -806,49 +875,71 @@ impl Machine {
     fn mark_recording(&mut self, reading: &Reading) {
         if let Some(stream) = &reading.stream
             && reading.running
-            && self.status.state == DisplayStatus::Starting
+            && self.phase == Phase::Starting
         {
             log::info(text::recording(stream, &self.config));
-            self.status.state = DisplayStatus::Recording;
+            self.phase = Phase::Recording;
         }
     }
 
-    fn describe_session(&mut self, reading: &Reading) {
-        self.status.recording = reading.running;
-        self.status.source = self.target.as_ref().map(|target| target.name().to_owned());
-        self.status.backend = reading.running.then_some(self.config.backend);
-        self.status.stream = reading.stream;
-        self.status.bitrate_mbps = self.config.bitrate_mbps;
-        self.status.buffer_held = reading.held.unwrap_or_default();
-        self.status.buffer_memory = reading.held.map(|held| {
-            // Nothing placed yet, or placed where asked: the setting; refused: RAM.
-            if held.frames == 0 || held.stored {
-                self.config.buffer_memory
-            } else {
-                Memory::Ram
-            }
-        });
-        self.status.buffer_seconds = self.config.buffer_seconds;
-        self.status.buffer_capacity_bytes = self.config.estimated_buffer_bytes();
+    fn describe(&self, reading: &Reading) -> Status {
+        Status {
+            state: self.state(reading.running),
+            source: self.target.as_ref().map(|target| target.name().to_owned()),
+            buffer: reading.held.map(|held| Buffer {
+                stream: reading.stream,
+                held,
+                // Nothing placed yet, or placed where asked: the setting; refused: RAM.
+                memory: if held.frames == 0 || held.stored {
+                    self.config.buffer_memory
+                } else {
+                    Memory::Ram
+                },
+            }),
+            bitrate_mbps: self.config.bitrate_mbps,
+            buffer_seconds: self.config.buffer_seconds,
+            buffer_capacity_bytes: self.config.estimated_buffer_bytes(),
+            bytes: self.count_bytes(reading.live_bytes),
+            last_clip: self.last_clip.clone(),
+            error: self.error.clone(),
+            nothing_to_save: self.nothing_to_save,
+        }
     }
 
-    fn count_bytes(&mut self, live_bytes: u64) {
+    fn state(&self, running: bool) -> State {
+        let session = running.then_some(Running {
+            backend: self.config.backend,
+            encode_rate: self.encode_rate,
+        });
+        match (self.phase, session) {
+            (Phase::Starting, Some(session)) => State::Starting(session),
+            (Phase::Recording, Some(session)) => State::Recording(session),
+            (Phase::Starting | Phase::Recording, None) => State::Idle,
+            (Phase::Waiting, _) => State::Waiting,
+            (Phase::Paused, _) => State::Paused,
+            (Phase::Retrying, _) => State::Retrying,
+            (Phase::Unsupported, _) => State::Unsupported,
+        }
+    }
+
+    fn count_bytes(&self, live_bytes: u64) -> Bytes {
         let totals = self.ledger.totals();
-        self.status.session_written_bytes = self.ledger.session_buffered.saturating_add(live_bytes);
-        self.status.session_saved_bytes = self.ledger.session_saved;
-        self.status.saved_bytes = totals.map(|totals| totals.saved_bytes);
-        self.status.buffered_lifetime_bytes =
-            totals.map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
+        Bytes {
+            session_written: self.ledger.session_buffered.saturating_add(live_bytes),
+            session_saved: self.ledger.session_saved,
+            lifetime_written: totals.map(|totals| totals.buffered_bytes.saturating_add(live_bytes)),
+            lifetime_saved: totals.map(|totals| totals.saved_bytes),
+        }
     }
 
     fn measure_rate(&mut self, running: bool, current: Sample) {
         let Some(previous) = self.sample.filter(|_| running) else {
-            self.status.encode_rate = None;
+            self.encode_rate = None;
             self.sample = running.then_some(current);
             return;
         };
         let elapsed = current.at.duration_since(previous.at);
-        let span = if self.status.encode_rate.is_some() {
+        let span = if self.encode_rate.is_some() {
             RATE_SPAN
         } else {
             FIRST_RATE_SPAN
@@ -856,10 +947,33 @@ impl Machine {
         if elapsed < span {
             return;
         }
-        self.status.encode_rate =
+        self.encode_rate =
             Some((current.encoded - previous.encoded) as f64 / elapsed.as_secs_f64());
         self.sample = Some(current);
     }
+}
+
+/// Runs the worker; should it panic, says why on the Status tab and stops what it can.
+fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mutex<Status>) {
+    let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| machine.run(commands))) else {
+        return;
+    };
+    let message = text::worker_panicked(panic_message(&*payload));
+    log::error(&message);
+    // Stops capture and finishes a save if it can; a second panic is left at that.
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| machine.shut_down()));
+    let mut status = output.lock().unwrap_or_else(PoisonError::into_inner);
+    status.state = State::Stopped;
+    status.error = Some(message);
+}
+
+/// What a panicking thread said, when it said it with a string.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or(text::NO_PANIC_MESSAGE)
 }
 
 fn load_totals(store: &Store) -> Option<Totals> {

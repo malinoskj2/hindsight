@@ -32,7 +32,16 @@ pub(super) const RESIZED: &str =
     "The display or window changed size; capture restarted and the replay buffer starts over.";
 pub(super) const DISPLAY_GONE: &str = "the display went away";
 pub(super) const NO_FRAMES: &str = "no frames arrived from the display";
-pub(super) const CAPTURE_PANICKED: &str = "the capture thread panicked";
+pub(super) const NO_PANIC_MESSAGE: &str = "it gave no message";
+pub(super) const WORKER_GONE: &str = "The recording worker has stopped, so the request was dropped";
+
+pub(super) fn capture_panicked(message: &str) -> String {
+    format!("the capture thread panicked: {message}")
+}
+
+pub(super) fn worker_panicked(message: &str) -> String {
+    format!("The recording worker panicked and stopped; start hindsight again to record: {message}")
+}
 
 pub(super) fn target_found(name: &str) -> String {
     format!("{name} is full screen; recording it")
@@ -71,7 +80,10 @@ pub(super) fn capture_thread_failed(error: impl Display) -> String {
 pub(crate) const NOTHING_TO_SAVE: &str =
     "Nothing to save yet; the replay buffer fills once capture starts.";
 pub(super) const ALREADY_SAVING: &str = "A clip is already being saved";
-pub(super) const SAVE_PANICKED: &str = "the save thread panicked";
+
+pub(super) fn save_panicked(message: &str) -> String {
+    format!("the save thread panicked: {message}")
+}
 
 pub(super) fn clip_saved(seconds: f64, path: &Path) -> String {
     format!("Saved a {seconds:.1} s clip to {}", path.display())

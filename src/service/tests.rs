@@ -193,11 +193,24 @@ fn desktop_mode_records_and_saves_a_clip() {
     let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
 
     let status = wait_for(&worker, |status| {
-        status.state == DisplayStatus::Recording && status.session_written_bytes > 0
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
     });
-    assert!(status.recording);
-    assert_eq!(status.stream.unwrap().frame_rate, 60);
+    assert!(status.state.running().is_some());
+    assert_eq!(status.buffer.unwrap().stream.unwrap().frame_rate, 60);
     assert_eq!(status.source.as_deref(), Some("the primary monitor"));
+    let config = desktop();
+    assert_eq!(
+        (
+            status.bitrate_mbps,
+            status.buffer_seconds,
+            status.buffer_capacity_bytes
+        ),
+        (
+            config.bitrate_mbps,
+            config.buffer_seconds,
+            config.estimated_buffer_bytes()
+        )
+    );
 
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
@@ -209,12 +222,12 @@ fn desktop_mode_records_and_saves_a_clip() {
 #[test]
 fn a_thread_that_ends_wakes_the_worker_without_a_refresh() {
     let worker = spawn(closing, RETRY_INTERVAL, None, desktop());
-    let status = wait_unprompted(&worker, |status| status.state == DisplayStatus::Retrying);
+    let status = wait_unprompted(&worker, |status| status.state == State::Retrying);
     assert!(status.error.unwrap().contains(text::DISPLAY_GONE));
 
     let directory = tempfile::tempdir().unwrap();
     let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
-    wait_for(&worker, |status| status.session_written_bytes > 0);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
     worker.save();
     wait_unprompted(&worker, |status| status.last_clip.is_some());
 }
@@ -227,24 +240,24 @@ fn the_lifetime_totals_grow_and_survive_a_restart() {
     let config = config_in(&clips);
     let store = Store::at(state.clone()).unwrap();
     let worker = spawn(steady, RETRY_INTERVAL, Some(store), config.clone());
-    let status = wait_for(&worker, |status| status.saved_bytes.is_some());
-    assert_eq!(status.saved_bytes, Some(0));
+    let status = wait_for(&worker, |status| status.bytes.lifetime_saved.is_some());
+    assert_eq!(status.bytes.lifetime_saved, Some(0));
     // A save before the first packet would find nothing to save.
-    wait_for(&worker, |status| status.session_written_bytes > 0);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
 
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
     let clip_bytes = std::fs::metadata(status.last_clip.unwrap()).unwrap().len();
-    assert_eq!(status.saved_bytes, Some(clip_bytes));
-    let buffered = status.buffered_lifetime_bytes.unwrap();
+    assert_eq!(status.bytes.lifetime_saved, Some(clip_bytes));
+    let buffered = status.bytes.lifetime_written.unwrap();
     assert!(buffered > 0, "the recording went into the buffer");
     drop(worker);
 
     let store = Store::at(state).unwrap();
     let worker = spawn(steady, RETRY_INTERVAL, Some(store), config);
-    let status = wait_for(&worker, |status| status.saved_bytes.is_some());
-    assert_eq!(status.saved_bytes, Some(clip_bytes));
-    assert!(status.buffered_lifetime_bytes.unwrap() >= buffered);
+    let status = wait_for(&worker, |status| status.bytes.lifetime_saved.is_some());
+    assert_eq!(status.bytes.lifetime_saved, Some(clip_bytes));
+    assert!(status.bytes.lifetime_written.unwrap() >= buffered);
 }
 
 #[test]
@@ -252,22 +265,24 @@ fn pausing_keeps_the_buffer_saveable_and_resuming_records_again() {
     let directory = tempfile::tempdir().unwrap();
     let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
     wait_for(&worker, |status| {
-        status.state == DisplayStatus::Recording && status.session_written_bytes > 0
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
     });
 
-    worker.pause();
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Paused);
-    assert!(!status.recording);
+    worker.toggle_pause();
+    let status = wait_for(&worker, |status| status.state == State::Paused);
+    assert!(status.state.running().is_none());
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
-    assert_eq!(status.state, DisplayStatus::Paused);
+    assert_eq!(status.state, State::Paused);
 
-    worker.resume();
-    wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-    let before = worker.status().session_written_bytes;
+    worker.toggle_pause();
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    let before = worker.status().bytes.session_written;
     worker.restart();
     wait_for(&worker, |status| {
-        status.state == DisplayStatus::Recording && status.session_written_bytes > before
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > before
     });
 }
 
@@ -275,7 +290,7 @@ fn pausing_keeps_the_buffer_saveable_and_resuming_records_again() {
 fn a_failed_session_is_retried() {
     let worker = spawn(failing, Duration::from_millis(50), None, desktop());
 
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
+    let status = wait_for(&worker, |status| status.state == State::Retrying);
     assert!(status.error.unwrap().contains("no capture device"));
 
     worker.save();
@@ -286,11 +301,11 @@ fn a_failed_session_is_retried() {
 fn an_unsupported_configuration_is_not_retried() {
     let worker = spawn(unsupported, Duration::from_millis(10), None, desktop());
 
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Unsupported);
+    let status = wait_for(&worker, |status| status.state == State::Unsupported);
     assert!(status.error.unwrap().contains("AV1"));
-    assert!(!status.recording);
+    assert!(status.state.running().is_none());
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(worker.status().state, DisplayStatus::Unsupported);
+    assert_eq!(worker.status().state, State::Unsupported);
 }
 
 #[test]
@@ -303,18 +318,18 @@ fn full_screen_mode_waits_for_an_app_and_follows_it() {
     SESSIONS.store(0, Ordering::Relaxed);
     let worker = spawn(scripted, RETRY_INTERVAL, None, config);
 
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
-    assert!(!status.recording);
+    let status = wait_for(&worker, |status| status.state == State::Waiting);
+    assert!(status.state.running().is_none());
     assert!(status.source.is_none());
 
     worker.target(window(1));
     wait_for(&worker, |status| {
-        status.state == DisplayStatus::Recording && status.session_written_bytes > 0
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
     });
     worker.target(window(1));
     worker.target(window(1));
     GAME_CLOSES.store(true, Ordering::Relaxed);
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+    let status = wait_for(&worker, |status| status.state == State::Waiting);
     assert_eq!(SESSIONS.load(Ordering::Relaxed), 1);
     assert_eq!(status.source.as_deref(), Some("game1.exe"));
     worker.save();
@@ -322,7 +337,7 @@ fn full_screen_mode_waits_for_an_app_and_follows_it() {
 
     worker.target(window(2));
     let status = wait_for(&worker, |status| {
-        status.state == DisplayStatus::Recording && status.session_written_bytes > 0
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
     });
     assert_eq!(SESSIONS.load(Ordering::Relaxed), 3);
     assert_eq!(status.source.as_deref(), Some("game2.exe"));
@@ -344,19 +359,19 @@ fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
         config,
     )
     .unwrap();
-    wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+    wait_for(&worker, |status| status.state == State::Waiting);
 
     worker.target(window(1));
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
+    let status = wait_for(&worker, |status| status.state == State::Retrying);
     assert!(status.error.is_some());
     worker.target(window(1));
     // Handled in order, so the save shows the target was seen during the cool-down.
     worker.save();
     let status = wait_for(&worker, |status| status.nothing_to_save);
-    assert_eq!(status.state, DisplayStatus::Retrying);
+    assert_eq!(status.state, State::Retrying);
     assert_eq!(FAILED_SESSIONS.load(Ordering::Relaxed), 1);
     clock.advance(RETRY_INTERVAL);
-    wait_for(&worker, |status| status.state == DisplayStatus::Waiting);
+    wait_for(&worker, |status| status.state == State::Waiting);
 }
 
 #[test]
@@ -369,7 +384,9 @@ fn applying_settings_persists_them_and_restarts() {
         Some(store),
         config_in(directory.path()),
     );
-    wait_for(&worker, |status| status.state == DisplayStatus::Recording);
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
 
     let config = Config {
         frame_rate: 30,
@@ -377,7 +394,10 @@ fn applying_settings_persists_them_and_restarts() {
     };
     worker.start(config.clone());
     wait_for(&worker, |status| {
-        status.stream.is_some_and(|stream| stream.frame_rate == 30)
+        status
+            .buffer
+            .and_then(|buffer| buffer.stream)
+            .is_some_and(|stream| stream.frame_rate == 30)
     });
     drop(worker);
 
@@ -399,11 +419,13 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
         Some(Store::at(state.clone()).unwrap()),
         config.clone(),
     );
-    wait_for(&worker, |status| status.session_written_bytes > 0);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
 
     worker.set_theme(Theme::Nova);
-    let status = wait_for(&worker, |status| status.state == DisplayStatus::Recording);
-    assert!(status.recording, "the session carries on");
+    let status = wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    assert!(status.state.running().is_some(), "the session carries on");
     drop(worker);
 
     let saved = Store::at(state).unwrap().load_config().unwrap();
@@ -476,7 +498,7 @@ fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
     let directory = tempfile::tempdir().unwrap();
     let clock = ManualClock::new();
     let (worker, heard) = spawn_listening(steady, &clock, slow_write, config_in(directory.path()));
-    wait_for(&worker, |status| status.session_written_bytes > 0);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
 
     worker.save();
     wait_for(&worker, |_| !tones(&heard).is_empty());
@@ -497,7 +519,7 @@ fn a_failed_save_sounds_failed_and_stops_ticking() {
     let clock = ManualClock::new();
     let (worker, heard) =
         spawn_listening(steady, &clock, failing_write, config_in(directory.path()));
-    wait_for(&worker, |status| status.session_written_bytes > 0);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
 
     worker.save();
     wait_for(&worker, |_| !tones(&heard).is_empty());
@@ -517,9 +539,36 @@ fn a_failed_save_sounds_failed_and_stops_ticking() {
 fn nothing_to_save_sounds_failed_without_ticking() {
     let clock = ManualClock::new();
     let (worker, heard) = spawn_listening(failing, &clock, slow_write, desktop());
-    wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
+    wait_for(&worker, |status| status.state == State::Retrying);
 
     worker.save();
     wait_for(&worker, |status| status.nothing_to_save);
     assert_eq!(tones(&heard), [Tone::Failed]);
+}
+
+fn panicking(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
+    panic!("the GPU melted")
+}
+
+#[test]
+fn a_capture_panic_is_reported_with_its_message_and_retried() {
+    let worker = spawn(panicking, RETRY_INTERVAL, None, desktop());
+    let status = wait_for(&worker, |status| status.state == State::Retrying);
+    assert!(status.error.unwrap().contains("the GPU melted"));
+}
+
+#[test]
+fn a_worker_that_panics_shows_it_has_stopped() {
+    let services = Services {
+        chime: Box::new(|_| panic!("the speaker caught fire")),
+        ..services(failing, Duration::from_secs(60))
+    };
+    let worker = Worker::spawn_with(services, None, desktop()).unwrap();
+    wait_for(&worker, |status| status.state == State::Retrying);
+
+    worker.save();
+    let status = wait_for(&worker, |status| status.state == State::Stopped);
+    assert!(status.error.unwrap().contains("the speaker caught fire"));
+    worker.save();
+    assert_eq!(worker.status().state, State::Stopped);
 }

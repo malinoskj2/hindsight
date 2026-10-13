@@ -9,7 +9,7 @@ use super::{
     text,
     theme::{Skin, Surface, Tone},
 };
-use crate::service::{DisplayStatus, Status};
+use crate::service::{State, Status};
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
@@ -172,10 +172,10 @@ impl StatusPage {
     }
 
     fn show_state(&self, status: &Status) {
-        let live = status.recording && status.stream.is_some();
+        let live = matches!(status.state, State::Recording(_));
         let state = &self.0.recording.state;
         state.set_tone(if live { Tone::Good } else { Tone::Muted });
-        state.set_text(&text::status(status.state));
+        state.set_text(&text::status(&status.state));
     }
 
     fn show_figures(&self, status: &Status) {
@@ -346,7 +346,7 @@ impl ControlButtons {
     }
 
     fn show(&self, status: &Status) {
-        let paused = status.state == DisplayStatus::Paused;
+        let paused = status.state == State::Paused;
         layout::set_text(
             &self.pause,
             if paused {
@@ -355,9 +355,14 @@ impl ControlButtons {
                 text::CONTROL_PAUSE
             },
         );
+        // A stopped worker takes no more commands.
+        let alive = status.state != State::Stopped;
         self.pause
             .hwnd()
-            .EnableWindow(status.state != DisplayStatus::Unsupported);
+            .EnableWindow(alive && status.state != State::Unsupported);
+        for button in [&self.save, &self.restart] {
+            button.hwnd().EnableWindow(alive);
+        }
         self.open_clip
             .hwnd()
             .EnableWindow(status.last_clip.is_some());

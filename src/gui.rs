@@ -11,7 +11,7 @@ use self::{
 use crate::{
     config::{Codec, Config, Mode, Theme},
     gpu, log,
-    service::{DisplayStatus, Worker},
+    service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
         hotkey::{self, Hotkey},
@@ -216,12 +216,9 @@ impl Main {
         match control {
             Control::Save => self.save(),
             Control::PauseOrResume => {
-                if self.0.worker.status().state == DisplayStatus::Paused {
-                    self.0.worker.resume();
-                    self.watch_foreground();
-                } else {
-                    self.0.worker.pause();
-                }
+                self.0.worker.toggle_pause();
+                // Offered after the toggle, so only a resumed worker takes it.
+                self.watch_foreground();
             }
             Control::Restart => {
                 self.0.worker.restart();

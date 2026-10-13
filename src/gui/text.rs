@@ -2,7 +2,8 @@
 
 use crate::{
     config::{Codec, Memory},
-    service::{DisplayStatus, Status},
+    replay::Stream,
+    service::{State, Status},
 };
 use std::{fmt::Display, path::Path};
 
@@ -123,14 +124,16 @@ pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
     format!("{title} {:.0}\u{a0}MB", bytes as f64 / MEGABYTE)
 }
 
-pub(super) fn status(state: DisplayStatus) -> String {
+pub(super) fn status(state: &State) -> String {
     let message = match state {
-        DisplayStatus::Starting => "Starting capture…",
-        DisplayStatus::Waiting => "Waiting for a full-screen app",
-        DisplayStatus::Recording => "Recording to the replay buffer",
-        DisplayStatus::Paused => "Paused · the buffer stays saveable",
-        DisplayStatus::Retrying => "Capture stopped · retrying shortly",
-        DisplayStatus::Unsupported => "Cannot record with these settings",
+        State::Starting(_) => "Starting capture…",
+        State::Waiting => "Waiting for a full-screen app",
+        State::Recording(_) => "Recording to the replay buffer",
+        State::Paused => "Paused · the buffer stays saveable",
+        State::Retrying => "Capture stopped · retrying shortly",
+        State::Unsupported => "Cannot record with these settings",
+        State::Idle => "Not recording",
+        State::Stopped => "Recording stopped · start hindsight again",
     };
     format!("●  {message}")
 }
@@ -140,13 +143,14 @@ pub(super) fn source(status: &Status) -> String {
 }
 
 pub(super) fn backend(status: &Status) -> String {
-    status
-        .backend
-        .map_or_else(|| NO_VALUE.to_owned(), |backend| backend.to_string())
+    status.state.running().map_or_else(
+        || NO_VALUE.to_owned(),
+        |running| running.backend.to_string(),
+    )
 }
 
 pub(super) fn encoder(status: &Status) -> String {
-    status.stream.map_or_else(
+    stream(status).map_or_else(
         || NO_VALUE.to_owned(),
         |stream| {
             format!(
@@ -159,16 +163,20 @@ pub(super) fn encoder(status: &Status) -> String {
 
 pub(super) fn rates(status: &Status) -> String {
     status
-        .encode_rate
+        .state
+        .running()
+        .and_then(|running| running.encode_rate)
         .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
 }
 
 /// "27 s of 30 s · 312 MB": the span the next save would cover and what it takes.
 pub(super) fn buffer_held(status: &Status) -> String {
-    let Some(stream) = status.stream else {
+    let Some((stream, held)) = status
+        .buffer
+        .and_then(|buffer| Some((buffer.stream?, buffer.held)))
+    else {
         return NO_VALUE.to_owned();
     };
-    let held = status.buffer_held;
     let seconds = held.frames as f64 / f64::from(stream.frame_rate.max(1));
     format!(
         "{seconds:.0} s of {} s · {}",
@@ -179,16 +187,20 @@ pub(super) fn buffer_held(status: &Status) -> String {
 
 /// "GPU memory (VRAM) · about 3,648 MB": where the buffer is kept and what it reserves.
 pub(super) fn buffer_place(status: &Status) -> String {
-    status.buffer_memory.map_or_else(
+    status.buffer.map_or_else(
         || NO_VALUE.to_owned(),
-        |memory| {
+        |buffer| {
             format!(
                 "{} · about {}",
-                memory.name(),
+                buffer.memory.name(),
                 megabytes(status.buffer_capacity_bytes)
             )
         },
     )
+}
+
+fn stream(status: &Status) -> Option<Stream> {
+    status.buffer.and_then(|buffer| buffer.stream)
 }
 
 fn megabytes(bytes: u64) -> String {
@@ -196,19 +208,19 @@ fn megabytes(bytes: u64) -> String {
 }
 
 pub(super) fn session_written(status: &Status) -> String {
-    gigabytes(status.session_written_bytes)
+    gigabytes(status.bytes.session_written)
 }
 
 pub(super) fn session_saved(status: &Status) -> String {
-    gigabytes(status.session_saved_bytes)
+    gigabytes(status.bytes.session_saved)
 }
 
 pub(super) fn lifetime_written(status: &Status) -> String {
-    gigabytes_or_dash(status.buffered_lifetime_bytes)
+    gigabytes_or_dash(status.bytes.lifetime_written)
 }
 
 pub(super) fn lifetime_saved(status: &Status) -> String {
-    gigabytes_or_dash(status.saved_bytes)
+    gigabytes_or_dash(status.bytes.lifetime_saved)
 }
 
 pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
@@ -266,6 +278,7 @@ pub(super) fn codec_unsupported(codec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{config::Backend, service::Running};
 
     #[test]
     fn totals_are_shown_in_gigabytes_to_two_decimals_or_as_a_dash() {
@@ -283,7 +296,10 @@ mod tests {
         };
         assert_eq!(encoder(&status), "—");
         assert_eq!(rates(&status), "—");
-        status.encode_rate = Some(59.6);
+        status.state = State::Recording(Running {
+            backend: Backend::Nvfbc,
+            encode_rate: Some(59.6),
+        });
         assert_eq!(rates(&status), "60 fps");
     }
 
@@ -302,24 +318,29 @@ mod tests {
 
     #[test]
     fn the_buffer_rows_show_the_span_held_and_where_it_is_kept() {
-        use crate::replay::{Held, Matrix, Stream};
+        use crate::{
+            replay::{Held, Matrix},
+            service::Buffer,
+        };
         let mut status = Status::default();
         assert_eq!(buffer_held(&status), "—");
         assert_eq!(buffer_place(&status), "—");
-        status.stream = Some(Stream {
-            codec: Codec::H264,
-            width: 1920,
-            height: 1080,
-            frame_rate: 60,
-            matrix: Matrix::Bt709,
+        status.buffer = Some(Buffer {
+            stream: Some(Stream {
+                codec: Codec::H264,
+                width: 1920,
+                height: 1080,
+                frame_rate: 60,
+                matrix: Matrix::Bt709,
+            }),
+            held: Held {
+                frames: 1620,
+                bytes: 327_155_712,
+                stored: true,
+            },
+            memory: Memory::Vram,
         });
         status.buffer_seconds = 30;
-        status.buffer_held = Held {
-            frames: 1620,
-            bytes: 327_155_712,
-            stored: true,
-        };
-        status.buffer_memory = Some(Memory::Vram);
         status.buffer_capacity_bytes = 3_825_205_248;
         assert_eq!(buffer_held(&status), "27 s of 30 s · 312 MB");
         assert_eq!(buffer_place(&status), "GPU memory (VRAM) · about 3648 MB");
