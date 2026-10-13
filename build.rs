@@ -35,7 +35,7 @@ fn main() {
         .set("ProductName", env!("CARGO_PKG_NAME"))
         .set(
             "FileDescription",
-            "Instant replay, captured and encoded on the GPU",
+            "The lowest-overhead instant replay, captured and encoded on the GPU",
         )
         .set("ProductVersion", env!("CARGO_PKG_VERSION"));
     for (icon, id) in ICONS {

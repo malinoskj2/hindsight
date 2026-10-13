@@ -8,7 +8,7 @@
   <img src="assets/logo/monochrome-with-text.png" alt="hindsight" width="520">
 </p>
 
-**Instant replay for Windows, captured and encoded on the GPU.**  
+**The lowest-overhead instant replay for Windows: captured and encoded on the GPU, no overlay, no launcher, no bloat.**  
 hindsight keeps the last stretch of whatever full-screen app is in front in a rolling buffer and saves it as an MP4 when you press a hotkey, like NVIDIA Instant Replay. With no full-screen app running it does nothing at all. Frames never leave video memory before they are encoded: Windows Graphics Capture hands each frame to NVENC on the GPU, and only the compressed video reaches system memory. What it costs, measured with cs2 running CPU-bound at about 690 fps on a Ryzen 9 9950X3D and an RTX 5090: recording at the defaults (H.264, 60 fps) takes about 2.5% of one CPU core and 0.7% of the game's frame rate; at AV1, 240 fps and 100 Mb/s with NVIDIA NvFBC about 5.5% of a core and 2.3% of the frame rate, where Instant Replay at the same settings takes 8.5% and 3.2%. Nothing is spent while no full-screen app is running. Of the backends, NvFBC costs the game least, then Windows Graphics Capture, then DXGI Desktop Duplication.
 
 You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with a current driver (531 or newer).
@@ -27,15 +27,6 @@ By default hindsight records **full-screen apps**: whatever app is in front with
 The other mode, **Whole desktop, always**, records the primary monitor from the moment hindsight starts, everything on it included.
 
 **Sound** is recorded too: whatever the default output device plays (the game, voice chat, music), as Windows mixes it, captured with WASAPI loopback, kept beside the video and saved as AAC at 192 kb/s, as Instant Replay stores it, starting and ending with the video. If you switch output devices or unplug a headset, recording follows the new default device as soon as Windows reports the change and the gap is silent. The microphone isn't recorded. Turn off **Record system sound** in Settings for silent clips.
-
-## Capture backends
-
-The **Capture** setting chooses how frames are taken. All of them keep every frame on the GPU.
-
-- **NVIDIA NvFBC** (the default) is the frame-buffer capture NVIDIA Instant Replay itself uses: the driver copies the display, cursor included, straight from the GPU. It is only for vendors NVIDIA has licensed: choosing it asks for the key NVIDIA issued you (in hexadecimal), which is saved for your Windows account in `HKEY_CURRENT_USER\Software\hindsight` and never in the settings file. Choosing it again lets you change the key; cancelling keeps the previous capture setting. Like Desktop Duplication it records whole monitors connected to the NVIDIA GPU, and not rotated ones, nor displays of odd width or height. If NvFBC is turned off in the driver, run hindsight once as administrator to turn it on. A mode change or the secure desktop pauses it without dropping the buffer.
-- **NVIDIA NvFBC to CUDA** is the same capture grabbing into CUDA memory instead of Direct3D 9 surfaces, which the encoder reads in place from a CUDA session, so no Direct3D device sits between the frame buffer and NVENC. It has the same limits as NvFBC. It is experimental.
-- **Windows Graphics Capture** can record just the app's window, includes the mouse cursor, and works on laptops whose display is connected to the integrated GPU.
-- **DXGI Desktop Duplication** is the older, lower-level API and does a little less work per frame. It sees whole monitors only, so a full-screen app is recorded through its monitor: anything you alt-tab to while the app is still running shows up in the clip. The cursor isn't drawn. It only works for monitors connected to the NVIDIA GPU, and not for rotated monitors. On either of those it stops with an error that tells you to switch back. A UAC prompt or the lock screen pauses it without dropping the buffer.
 
 ## How it stays light
 
