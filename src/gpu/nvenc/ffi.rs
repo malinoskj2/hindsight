@@ -49,48 +49,13 @@ const _: () = assert!(FUNCTION_LIST_VER == 0x7102_000C);
 const _: () = assert!(CONFIG_VER == 0xF108_000C);
 const _: () = assert!(PIC_PARAMS_VER == 0xF106_000C);
 
-pub(super) const CODEC_H264: GUID = GUID::from_values(
-    0x6bc8_2762,
-    0x4e63,
-    0x4ca4,
-    [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf],
-);
-pub(super) const CODEC_HEVC: GUID = GUID::from_values(
-    0x790c_dc88,
-    0x4522,
-    0x4d7b,
-    [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03],
-);
-pub(super) const CODEC_AV1: GUID = GUID::from_values(
-    0x0a35_2289,
-    0x0aa7,
-    0x4759,
-    [0x86, 0x2d, 0x5d, 0x15, 0xcd, 0x16, 0xd2, 0x54],
-);
-pub(super) const PROFILE_H264_HIGH: GUID = GUID::from_values(
-    0xe7cb_c309,
-    0x4f7a,
-    0x4b89,
-    [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10],
-);
-pub(super) const PROFILE_HEVC_MAIN: GUID = GUID::from_values(
-    0xb514_c39a,
-    0xb55b,
-    0x40fa,
-    [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec],
-);
-pub(super) const PROFILE_AV1_MAIN: GUID = GUID::from_values(
-    0x5f2a_39f5,
-    0xf14e,
-    0x4f95,
-    [0x9a, 0x9e, 0xb7, 0x6d, 0x56, 0x8f, 0xcf, 0x97],
-);
-pub(super) const PRESET_P4: GUID = GUID::from_values(
-    0x90a7_b826,
-    0xdf06,
-    0x4862,
-    [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
-);
+pub(super) const CODEC_H264: GUID = GUID::from_u128(0x6bc82762_4e63_4ca4_aa85_1e50f321f6bf);
+pub(super) const CODEC_HEVC: GUID = GUID::from_u128(0x790cdc88_4522_4d7b_9425_bda9975f7603);
+pub(super) const CODEC_AV1: GUID = GUID::from_u128(0x0a352289_0aa7_4759_862d_5d15cd16d254);
+pub(super) const PROFILE_H264_HIGH: GUID = GUID::from_u128(0xe7cbc309_4f7a_4b89_af2a_d537c92be310);
+pub(super) const PROFILE_HEVC_MAIN: GUID = GUID::from_u128(0xb514c39a_b55b_40fa_878f_f1253b4dfdec);
+pub(super) const PROFILE_AV1_MAIN: GUID = GUID::from_u128(0x5f2a39f5_f14e_4f95_9a9e_b76d568fcf97);
+pub(super) const PRESET_P4: GUID = GUID::from_u128(0x90a7b826_df06_4862_b9d2_cd6d73a08681);
 
 pub(super) const DEVICE_TYPE_DIRECTX: u32 = 0;
 pub(super) const DEVICE_TYPE_CUDA: u32 = 1;

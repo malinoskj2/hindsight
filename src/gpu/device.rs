@@ -1,9 +1,10 @@
 //! The Direct3D 11 device capture and NVENC share, created on the NVIDIA adapter.
 
+use crate::gpu::win32::utf16_until_nul;
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::{HMODULE, LUID},
+        Foundation::{E_POINTER, HMODULE, LUID},
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
@@ -104,8 +105,10 @@ impl Device {
 
     fn adapter_description(&self) -> windows::core::Result<DXGI_ADAPTER_DESC> {
         let device = self.dxgi()?;
-        // SAFETY: reads the adapter of a live device and then its description.
-        unsafe { device.GetAdapter()?.GetDesc() }
+        // SAFETY: reads the adapter of a live device.
+        let adapter = unsafe { device.GetAdapter() }?;
+        // SAFETY: describes a live adapter; the description is returned by value.
+        unsafe { adapter.GetDesc() }
     }
 
     pub(super) fn raise_priority(&self) -> windows::core::Result<()> {
@@ -113,6 +116,12 @@ impl Device {
         // SAFETY: a plain setter on a live device.
         unsafe { device.SetGPUThreadPriority(GPU_THREAD_PRIORITY) }
     }
+}
+
+/// The error for a call that succeeded yet left its out-parameter null: `E_POINTER`, rather
+/// than an empty error that would read "The operation completed successfully".
+pub(super) fn null_output() -> windows::core::Error {
+    E_POINTER.into()
 }
 
 /// Holds the device's lock against its other threads until dropped.
@@ -158,12 +167,7 @@ fn is_nvidia_hardware(description: &DXGI_ADAPTER_DESC1) -> bool {
 }
 
 fn adapter_name(description: &DXGI_ADAPTER_DESC1) -> String {
-    let length = description
-        .Description
-        .iter()
-        .position(|unit| *unit == 0)
-        .unwrap_or(description.Description.len());
-    String::from_utf16_lossy(&description.Description[..length])
+    utf16_until_nul(&description.Description)
 }
 
 /// BGRA support is required by Windows Graphics Capture.
@@ -188,7 +192,7 @@ fn create_device(
     }?;
     match (device, context) {
         (Some(device), Some(context)) => Ok((device, context)),
-        _ => Err(windows::core::Error::empty()),
+        _ => Err(null_output()),
     }
 }
 

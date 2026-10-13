@@ -1,5 +1,6 @@
 //! How a monitor is driven: HDR, colour space, luminance range and SDR white level.
 
+use crate::gpu::win32::{cb_size, utf16_until_nul};
 use std::{borrow::Cow, fmt};
 use windows::{
     Win32::{
@@ -10,7 +11,7 @@ use windows::{
             DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo,
             GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
         },
-        Foundation::ERROR_SUCCESS,
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
         Graphics::{
             Dxgi::{
                 Common::{
@@ -30,6 +31,8 @@ use windows::{
 /// `DISPLAYCONFIG_SDR_WHITE_LEVEL` is in thousandths of 80 nits.
 const WHITE_LEVEL_UNIT: f32 = 1000.0;
 pub(super) const SCRGB_NITS: f32 = 80.0;
+/// `QueryDisplayConfig` attempts while the display topology keeps changing under it.
+const QUERY_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Display {
@@ -134,7 +137,7 @@ fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
 }
 
 fn from_description(description: &DXGI_OUTPUT_DESC1) -> Display {
-    let name = utf16_name(&description.DeviceName);
+    let name = utf16_until_nul(&description.DeviceName);
     Display {
         sdr_white_nits: sdr_white_level(&name),
         name,
@@ -146,14 +149,6 @@ fn from_description(description: &DXGI_OUTPUT_DESC1) -> Display {
     }
 }
 
-fn utf16_name(units: &[u16]) -> String {
-    let length = units
-        .iter()
-        .position(|unit| *unit == 0)
-        .unwrap_or(units.len());
-    String::from_utf16_lossy(&units[..length])
-}
-
 fn sdr_white_level(name: &str) -> Option<f32> {
     active_paths()?
         .iter()
@@ -161,48 +156,51 @@ fn sdr_white_level(name: &str) -> Option<f32> {
         .and_then(white_level)
 }
 
+/// Asks again, a few times, when a display is plugged in between sizing and querying.
 fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
-    let (mut path_count, mut mode_count) = (0, 0);
-    // SAFETY: both out-parameters are live.
-    let sized = unsafe {
-        GetDisplayConfigBufferSizes(
-            QDC_ONLY_ACTIVE_PATHS,
-            &raw mut path_count,
-            &raw mut mode_count,
-        )
-    };
-    if sized != ERROR_SUCCESS {
-        return None;
+    for _ in 0..QUERY_ATTEMPTS {
+        let (mut path_count, mut mode_count) = (0, 0);
+        // SAFETY: both out-parameters are live.
+        let sized = unsafe {
+            GetDisplayConfigBufferSizes(
+                QDC_ONLY_ACTIVE_PATHS,
+                &raw mut path_count,
+                &raw mut mode_count,
+            )
+        };
+        if sized != ERROR_SUCCESS {
+            return None;
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        // SAFETY: each array holds as many elements as the count passed with it.
+        let queried = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &raw mut path_count,
+                paths.as_mut_ptr(),
+                &raw mut mode_count,
+                modes.as_mut_ptr(),
+                None,
+            )
+        };
+        match queried {
+            ERROR_SUCCESS => {
+                paths.truncate(path_count as usize);
+                return Some(paths);
+            }
+            ERROR_INSUFFICIENT_BUFFER => {}
+            _ => return None,
+        }
     }
-    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
-    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
-    // SAFETY: each array holds as many elements as the count passed with it.
-    let queried = unsafe {
-        QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &raw mut path_count,
-            paths.as_mut_ptr(),
-            &raw mut mode_count,
-            modes.as_mut_ptr(),
-            None,
-        )
-    };
-    if queried != ERROR_SUCCESS {
-        return None;
-    }
-    paths.truncate(path_count as usize);
-    Some(paths)
-}
-
-fn request_size<T>() -> u32 {
-    u32::try_from(size_of::<T>()).expect("a display configuration request is a few hundred bytes")
+    None
 }
 
 fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     let mut request = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-            size: request_size::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(),
+            size: cb_size::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(),
             adapterId: path.sourceInfo.adapterId,
             id: path.sourceInfo.id,
         },
@@ -210,14 +208,14 @@ fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     };
     // SAFETY: the header starts a live request of the size it states.
     let status = unsafe { DisplayConfigGetDeviceInfo(&raw mut request.header) };
-    (status == 0).then(|| utf16_name(&request.viewGdiDeviceName))
+    (status == ERROR_SUCCESS.0.cast_signed()).then(|| utf16_until_nul(&request.viewGdiDeviceName))
 }
 
 fn white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<f32> {
     let mut request = DISPLAYCONFIG_SDR_WHITE_LEVEL {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
-            size: request_size::<DISPLAYCONFIG_SDR_WHITE_LEVEL>(),
+            size: cb_size::<DISPLAYCONFIG_SDR_WHITE_LEVEL>(),
             adapterId: path.targetInfo.adapterId,
             id: path.targetInfo.id,
         },
@@ -225,7 +223,8 @@ fn white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<f32> {
     };
     // SAFETY: the header starts a live request of the size it states.
     let status = unsafe { DisplayConfigGetDeviceInfo(&raw mut request.header) };
-    (status == 0 && request.SDRWhiteLevel != 0).then(|| white_level_nits(request.SDRWhiteLevel))
+    (status == ERROR_SUCCESS.0.cast_signed() && request.SDRWhiteLevel != 0)
+        .then(|| white_level_nits(request.SDRWhiteLevel))
 }
 
 #[cfg(test)]
@@ -244,15 +243,6 @@ mod tests {
         assert!((white_level_nits(1000) - 80.0).abs() < 1e-3);
         assert!((white_level_nits(2500) - 200.0).abs() < 1e-3);
         assert!((white_level_nits(3750) - 300.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn device_names_stop_at_the_first_nul() {
-        let mut units = [0u16; 32];
-        for (unit, byte) in units.iter_mut().zip(br"\\.\DISPLAY1") {
-            *unit = u16::from(*byte);
-        }
-        assert_eq!(utf16_name(&units), r"\\.\DISPLAY1");
     }
 
     #[test]

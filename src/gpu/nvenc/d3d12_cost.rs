@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     config::Codec,
-    gpu::{device::Device, ffi::Zeroed},
+    gpu::{
+        device::{Device, null_output},
+        ffi::Zeroed,
+    },
     replay::Matrix,
 };
 use std::{
@@ -247,17 +250,19 @@ fn d3d12_encode_cost() {
 
 fn thread_cycles() -> u64 {
     let mut cycles = 0;
-    // SAFETY: the pseudo-handle of the calling thread and one integer to write.
-    unsafe { QueryThreadCycleTime(GetCurrentThread(), &raw mut cycles) }
-        .expect("query the thread's cycles");
+    // SAFETY: returns a pseudo-handle that needs no closing.
+    let thread = unsafe { GetCurrentThread() };
+    // SAFETY: the calling thread's pseudo-handle and one integer to write.
+    unsafe { QueryThreadCycleTime(thread, &raw mut cycles) }.expect("query the thread's cycles");
     cycles
 }
 
 fn process_cycles() -> u64 {
     let mut cycles = 0;
-    // SAFETY: the pseudo-handle of this process and one integer to write.
-    unsafe { QueryProcessCycleTime(GetCurrentProcess(), &raw mut cycles) }
-        .expect("query the process's cycles");
+    // SAFETY: returns a pseudo-handle that needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: this process's pseudo-handle and one integer to write.
+    unsafe { QueryProcessCycleTime(process, &raw mut cycles) }.expect("query the process's cycles");
     cycles
 }
 
@@ -879,7 +884,7 @@ fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
             // SAFETY: every index below the count names an adapter; written on success.
             unsafe { d3d9.GetAdapterLUID(adapter, &raw mut found) }.is_ok() && found == luid
         })
-        .ok_or_else(windows::core::Error::empty)?;
+        .ok_or_else(null_output)?;
     let mut parameters = D3DPRESENT_PARAMETERS {
         BackBufferWidth: 1,
         BackBufferHeight: 1,
@@ -909,7 +914,7 @@ fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
             &raw mut created,
         )?;
     }
-    let d3d9_device = created.ok_or_else(windows::core::Error::empty)?;
+    let d3d9_device = created.ok_or_else(null_output)?;
     let mut texture = None;
     // SAFETY: a default-pool render target; written on success; no shared handle asked for.
     unsafe {
@@ -924,7 +929,7 @@ fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
             ptr::null_mut(),
         )?;
     }
-    let texture: IDirect3DTexture9 = texture.ok_or_else(windows::core::Error::empty)?;
+    let texture: IDirect3DTexture9 = texture.ok_or_else(null_output)?;
     // SAFETY: the texture has one level.
     let surface = unsafe { texture.GetSurfaceLevel(0)? };
     Ok(Backend::D3d9 {
@@ -967,7 +972,7 @@ fn open_d3d12(device: &Device) -> windows::core::Result<Backend> {
     let mut d3d12: Option<ID3D12Device> = None;
     // SAFETY: a live adapter and an out-parameter written on success.
     unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &raw mut d3d12)? };
-    let d3d12 = d3d12.ok_or_else(windows::core::Error::empty)?;
+    let d3d12 = d3d12.ok_or_else(null_output)?;
     let texture = create_resource(
         &d3d12,
         D3D12_HEAP_TYPE_DEFAULT,
@@ -1043,5 +1048,5 @@ fn create_resource(
             &raw mut resource,
         )?;
     }
-    resource.ok_or_else(windows::core::Error::empty)
+    resource.ok_or_else(null_output)
 }

@@ -6,7 +6,7 @@ use crate::{
         capture::{EncoderDevice, Surface},
         cuda::{DeviceBuffer, DevicePointer},
         cuda_output::{CudaRing, StagingId, StagingLayout},
-        device::Locked,
+        device::{Locked, null_output},
         ffi::{Library, Symbol, Zeroed},
     },
     replay::{Matrix, Picture, Slot as StoreSlot},
@@ -1212,7 +1212,7 @@ fn create_input_texture(
     // SAFETY: a plain texture description without initial data.
     unsafe { device.CreateTexture2D(&raw const description, None, Some(&raw mut texture)) }
         .map_err(texture_failed)?;
-    texture.ok_or_else(|| texture_failed(windows::core::Error::empty()))
+    texture.ok_or_else(|| texture_failed(null_output()))
 }
 
 /// Twice the uncompressed picture, as NVIDIA's sample sizes it, plus the header NVENC writes first.

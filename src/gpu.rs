@@ -18,6 +18,7 @@ mod pipeline;
 mod priority;
 #[expect(unsafe_code)]
 mod vram;
+mod win32;
 
 pub(crate) use pipeline::record;
 

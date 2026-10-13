@@ -1,6 +1,6 @@
 //! Thread, process and GPU scheduling priority for the capture thread.
 
-use crate::gpu::ffi::Library;
+use crate::gpu::{ffi::Library, win32::cb_size};
 use windows::{
     Win32::{
         Foundation::{HANDLE, NTSTATUS},
@@ -42,8 +42,10 @@ pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread>
 }
 
 pub(super) fn raise_thread() -> windows::core::Result<()> {
+    // SAFETY: returns a pseudo-handle that needs no closing.
+    let thread = unsafe { GetCurrentThread() };
     // SAFETY: changes the priority of the calling thread only.
-    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }
+    unsafe { SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST) }
 }
 
 pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
@@ -53,12 +55,13 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
             | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
         StateMask: 0,
     };
-    let size = u32::try_from(size_of::<PROCESS_POWER_THROTTLING_STATE>())
-        .expect("the throttling state is a few bytes");
-    // SAFETY: passes a correctly sized `PROCESS_POWER_THROTTLING_STATE` for the current process.
+    let size = cb_size::<PROCESS_POWER_THROTTLING_STATE>();
+    // SAFETY: returns a pseudo-handle that needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `state` is a `PROCESS_POWER_THROTTLING_STATE` of `size` bytes, live for the call.
     unsafe {
         SetProcessInformation(
-            GetCurrentProcess(),
+            process,
             ProcessPowerThrottling,
             (&raw const state).cast(),
             size,
@@ -74,6 +77,9 @@ pub(super) fn raise_gpu_class() -> windows::core::Result<()> {
         gdi.export::<SetSchedulingPriorityClass>(s!("D3DKMTSetProcessSchedulingPriorityClass"))
     }
     .ok_or_else(windows::core::Error::from_thread)?;
-    // SAFETY: changes the scheduling class of the current process only.
-    unsafe { set_class(GetCurrentProcess(), SCHEDULING_HIGH) }.ok()
+    // SAFETY: returns a pseudo-handle that needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `gdi` stays loaded across the call, which changes the scheduling class of the
+    // current process only.
+    unsafe { set_class(process, SCHEDULING_HIGH) }.ok()
 }

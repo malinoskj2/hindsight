@@ -5,7 +5,11 @@ use super::{
     CaptureError, CopyTarget, Frame, ReopenThrottle, Source, deliver, failed, is_window_closed,
     monitor_of, tonemap::ToneMapper,
 };
-use crate::{gpu::device::Device, log, service::Target};
+use crate::{
+    gpu::device::{Device, null_output},
+    log,
+    service::Target,
+};
 use std::time::Instant;
 use windows::{
     Win32::{
@@ -160,7 +164,7 @@ impl Source for Capture {
             let scrgb = self.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
             let tone_map = self.tone_map.as_mut().filter(|_| scrgb);
             let delivered = resource
-                .ok_or_else(windows::core::Error::empty)
+                .ok_or_else(null_output)
                 .and_then(|resource| resource.cast::<ID3D11Texture2D>())
                 .and_then(|texture| deliver(tone_map, &texture, target));
             self.primed |= delivered.is_ok();

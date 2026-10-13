@@ -1,7 +1,7 @@
 //! The replay buffer in GPU memory, on a Direct3D device of its own so saves never queue behind capture.
 
 use crate::{
-    gpu::device::{Device, DeviceError},
+    gpu::device::{Device, DeviceError, null_output},
     replay::{
         BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, Store, StoreError,
         pages_within, pieces,
@@ -131,7 +131,8 @@ impl Page for VramPage {
             .map_err(StoreError::call("make a staging buffer"))?;
         for (done, piece) in pieces(length, chunk) {
             let region = byte_range(offset + done, piece);
-            // SAFETY: both buffers are live and the ranges lie within them.
+            // SAFETY: both are live buffers of this device; `region` lies within the source,
+            // and `piece` bytes at offset 0 fit the chunk-sized staging buffer.
             unsafe {
                 self.context.CopySubresourceRegion(
                     &staging,
@@ -143,8 +144,9 @@ impl Page for VramPage {
                     0,
                     Some(&raw const region),
                 );
-                self.context.Flush();
             }
+            // SAFETY: submits the queued copy; no preconditions.
+            unsafe { self.context.Flush() };
             let mapped = map_when_ready(&self.context, &staging)?;
             // SAFETY: the mapping is readable for `piece` bytes until it is unmapped below.
             let bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), piece) };
@@ -188,7 +190,7 @@ fn create_buffer(
     let mut buffer = None;
     // SAFETY: a plain buffer description without initial data.
     unsafe { device.CreateBuffer(description, None, Some(&raw mut buffer)) }?;
-    buffer.ok_or_else(windows::core::Error::empty)
+    buffer.ok_or_else(null_output)
 }
 
 fn byte_range(offset: usize, length: usize) -> D3D11_BOX {

@@ -1,7 +1,10 @@
 //! The pixel-shader pass that tone-maps a display's FP16 scRGB picture to the encoder's 8-bit
 //! sRGB: SDR white to 1.0, a Reinhard roll-off above a knee, the display's peak landing on 1.0.
 
-use crate::gpu::device::{Device, Locked};
+use crate::gpu::{
+    device::{Device, Locked, null_output},
+    win32::cb_size,
+};
 use std::ffi::c_void;
 use windows::{
     Win32::Graphics::{
@@ -114,11 +117,14 @@ impl ToneMapper {
         let pixel_code = compile(s!("tonemap"), s!("ps_5_0"))?;
         let mut vertex = None;
         let mut pixel = None;
-        // SAFETY: bytecode compiled for these stages; the out-parameters are live.
+        // SAFETY: the bytecode was compiled for the vertex stage and `vertex` outlives the call.
         unsafe {
             device
                 .d3d
                 .CreateVertexShader(blob_bytes(&vertex_code), None, Some(&raw mut vertex))?;
+        }
+        // SAFETY: the bytecode was compiled for the pixel stage and `pixel` outlives the call.
+        unsafe {
             device
                 .d3d
                 .CreatePixelShader(blob_bytes(&pixel_code), None, Some(&raw mut pixel))?;
@@ -161,21 +167,34 @@ impl ToneMapper {
         };
         let context = &device.context;
         let _locked = Locked::new(&self.lock);
-        // SAFETY, for each call below: every bound object belongs to this device and outlives
-        // the queued draw.
+        // The context is shared with the capture API's threads; `_locked` keeps them out until
+        // the draw is queued and the views are unbound again.
+        // SAFETY: a valid topology for the immediate context of a live device.
         unsafe { context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST) };
+        // SAFETY: no input layout: the vertex shader builds its triangle from the vertex id.
         unsafe { context.IASetInputLayout(None::<&ID3D11InputLayout>) };
+        // SAFETY: a shader created on this device; the context holds its own reference.
         unsafe { context.VSSetShader(&self.vertex, None) };
+        // SAFETY: as above, for the pixel shader.
         unsafe { context.PSSetShader(&self.pixel, None) };
+        // SAFETY: a buffer of this device with constant-buffer binding; the slice outlives the call.
         unsafe { context.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())])) };
+        // SAFETY: a view of this device over a texture with shader-resource binding.
         unsafe { context.PSSetShaderResources(0, Some(&[Some(input)])) };
+        // SAFETY: one viewport within the target, read during the call.
         unsafe { context.RSSetViewports(Some(&[viewport])) };
+        // SAFETY: a render-target view of this device over another texture than the source,
+        // so the draw never reads what it writes.
         unsafe {
             context.OMSetRenderTargets(Some(&[Some(output)]), None::<&ID3D11DepthStencilView>);
         }
+        // SAFETY: shaders, constants, source and target are bound above; three vertices make
+        // the one full-screen triangle the vertex shader expects.
         unsafe { context.Draw(3, 0) };
         // Unbind so the encoder and the capture may use both textures.
+        // SAFETY: clears slot 0; the slice outlives the call.
         unsafe { context.PSSetShaderResources(0, Some(&[None])) };
+        // SAFETY: unbinding every render target has no preconditions.
         unsafe { context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>) };
         Ok(())
     }
@@ -198,10 +217,7 @@ impl ToneMapper {
         if !fits {
             self.readable = Some(readable_texture(&device.d3d, &description, width, height)?);
         }
-        let readable = self
-            .readable
-            .clone()
-            .ok_or_else(windows::core::Error::empty)?;
+        let readable = self.readable.clone().ok_or_else(null_output)?;
         device.copy_region(&readable, source, width, height);
         Ok(readable)
     }
@@ -270,14 +286,17 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
 }
 
 fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
-    // SAFETY: a blob's pointer and size describe its own buffer, which lives as long as it.
-    unsafe {
-        std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
-    }
+    // SAFETY: reads the address of a live blob's buffer.
+    let data = unsafe { blob.GetBufferPointer() }.cast::<u8>();
+    // SAFETY: reads the size of the same buffer.
+    let size = unsafe { blob.GetBufferSize() };
+    // SAFETY: the blob owns `size` initialized bytes at `data` and never changes them; the
+    // slice borrows the blob, so the buffer outlives it.
+    unsafe { std::slice::from_raw_parts(data, size) }
 }
 
 fn created<T>(object: Option<T>) -> windows::core::Result<T> {
-    object.ok_or_else(windows::core::Error::empty)
+    object.ok_or_else(null_output)
 }
 
 const fn bind_flag(flag: i32) -> u32 {
@@ -287,7 +306,7 @@ const fn bind_flag(flag: i32) -> u32 {
 fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Result<ID3D11Buffer> {
     let constants = curve.constants();
     let description = D3D11_BUFFER_DESC {
-        ByteWidth: u32::try_from(size_of_val(&constants)).expect("the constants are 16 bytes"),
+        ByteWidth: cb_size::<[f32; 4]>(),
         Usage: D3D11_USAGE_IMMUTABLE,
         BindFlags: bind_flag(D3D11_BIND_CONSTANT_BUFFER.0),
         ..Default::default()
@@ -553,20 +572,22 @@ mod tests {
         let staging = staging.expect("a staging texture");
         device.copy(&staging, texture);
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: the first row holds Width × 4 bytes, read before it is unmapped.
+        // SAFETY: a staging texture made for CPU reads; `mapped` outlives the call.
         unsafe {
             device
                 .context
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&raw mut mapped))
-                .expect("map the staging texture");
-            let row = std::slice::from_raw_parts(
-                mapped.pData.cast::<u8>(),
-                description.Width as usize * 4,
-            )
-            .to_vec();
-            device.context.Unmap(&staging, 0);
-            row
         }
+        .expect("map the staging texture");
+        // SAFETY: while mapped, the first row holds Width × 4 readable bytes; they are copied
+        // out before the unmap below.
+        let row = unsafe {
+            std::slice::from_raw_parts(mapped.pData.cast::<u8>(), description.Width as usize * 4)
+        }
+        .to_vec();
+        // SAFETY: undoes the map above; nothing points into the mapping any more.
+        unsafe { device.context.Unmap(&staging, 0) };
+        row
     }
 
     fn compare_with_reference(source_bind: i32) {
