@@ -17,12 +17,10 @@ pub(super) const TAB_LOGS: &str = "Logs";
 
 pub(super) const GROUP_RECORDING: &str = "Recording";
 pub(super) const GROUP_STATS: &str = "Stats";
-pub(super) const GROUP_RECORDING_SETTINGS: &str = "Recording";
 pub(super) const GROUP_GENERAL: &str = "General";
 
 pub(super) const SOURCE: &str = "Source";
 pub(super) const ENCODER: &str = "Encoder";
-pub(super) const CAPTURE_RATE: &str = "Frame rate";
 pub(super) const SESSION_WRITTEN: &str = "Session Written";
 pub(super) const SESSION_SAVED: &str = "Session Saved";
 pub(super) const LIFETIME_WRITTEN: &str = "Lifetime Written";
@@ -153,19 +151,19 @@ pub(super) fn rates(status: &Status) -> String {
 }
 
 pub(super) fn session_written(status: &Status) -> String {
-    gigabytes(Some(status.session_written_bytes))
+    gigabytes(status.session_written_bytes)
 }
 
 pub(super) fn session_saved(status: &Status) -> String {
-    gigabytes(Some(status.session_saved_bytes))
+    gigabytes(status.session_saved_bytes)
 }
 
 pub(super) fn lifetime_written(status: &Status) -> String {
-    gigabytes(status.buffered_lifetime_bytes)
+    gigabytes_or_dash(status.buffered_lifetime_bytes)
 }
 
 pub(super) fn lifetime_saved(status: &Status) -> String {
-    gigabytes(status.saved_bytes)
+    gigabytes_or_dash(status.saved_bytes)
 }
 
 pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
@@ -190,11 +188,12 @@ fn gigabytes_an_hour(bitrate_mbps: u32) -> u64 {
     (megabytes + MEGABYTES_PER_GIGABYTE / 2) / MEGABYTES_PER_GIGABYTE
 }
 
-fn gigabytes(bytes: Option<u64>) -> String {
-    bytes.map_or_else(
-        || NO_VALUE.to_owned(),
-        |bytes| format!("{:.2} GB", bytes as f64 / GIGABYTE),
-    )
+fn gigabytes_or_dash(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| NO_VALUE.to_owned(), gigabytes)
+}
+
+fn gigabytes(bytes: u64) -> String {
+    format!("{:.2} GB", bytes as f64 / GIGABYTE)
 }
 
 fn file_name(path: &Path) -> String {
@@ -225,10 +224,10 @@ mod tests {
 
     #[test]
     fn totals_are_shown_in_gigabytes_to_two_decimals_or_as_a_dash() {
-        assert_eq!(gigabytes(None), "—");
-        assert_eq!(gigabytes(Some(0)), "0.00 GB");
-        assert_eq!(gigabytes(Some(1_073_741_824)), "1.00 GB");
-        assert_eq!(gigabytes(Some(1_610_612_736)), "1.50 GB");
+        assert_eq!(gigabytes_or_dash(None), "—");
+        assert_eq!(gigabytes_or_dash(Some(0)), "0.00 GB");
+        assert_eq!(gigabytes(1_073_741_824), "1.00 GB");
+        assert_eq!(gigabytes(1_610_612_736), "1.50 GB");
     }
 
     #[test]

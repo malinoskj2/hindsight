@@ -1,5 +1,6 @@
 //! Theme artwork: PNGs decoded once and scaled into bitmaps GDI can alpha-blend.
 
+use super::layout::saturating_i32;
 use winsafe::{self as w, guard::DeleteObjectGuard};
 
 /// Premultiplied BGRA, as `AlphaBlend` expects.
@@ -53,8 +54,7 @@ impl Image {
     }
 
     pub(super) fn size(&self) -> (i32, i32) {
-        let clamp = |length: usize| i32::try_from(length).unwrap_or(i32::MAX);
-        (clamp(self.width), clamp(self.height))
+        (saturating_i32(self.width), saturating_i32(self.height))
     }
 }
 

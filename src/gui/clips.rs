@@ -2,7 +2,7 @@
 //! on a thread of their own.
 
 use super::{
-    layout::{self, BLACK, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE},
+    layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
     text,
     theme::{Skin, Surface},
 };
@@ -26,7 +26,7 @@ const THUMB_WIDTH: i32 = 128;
 const THUMB_HEIGHT: i32 = 72;
 const CELL_WIDTH: i32 = 134;
 const CELL_HEIGHT: i32 = THUMB_HEIGHT + 2 * LINE + 8;
-const COLUMNS: i32 = 3;
+const COLUMNS: usize = 3;
 const CLIP_PREFIX: &str = "hindsight_";
 const CLIP_EXTENSION: &str = "mp4";
 const STAMP_LENGTH: usize = 19;
@@ -34,15 +34,17 @@ const CARD: w::COLORREF = w::COLORREF::from_rgb(0xE4, 0xE4, 0xE4);
 const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 
 #[derive(Clone)]
-pub(super) struct ClipsPage {
+pub(super) struct ClipsPage(Rc<Inner>);
+
+struct Inner {
     page: gui::TabPage,
     list: gui::ListView,
-    state: Rc<RefCell<State>>,
+    state: RefCell<State>,
 }
 
 impl ClipsPage {
     pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
-        let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
+        let page = layout::page(parent);
         let list = gui::ListView::new(
             &page,
             gui::ListViewOpts {
@@ -56,23 +58,23 @@ impl ClipsPage {
                 ..Default::default()
             },
         );
-        layout::draw(&page, page.on(), Vec::new(), skin, Surface::Page, |_| BLACK);
+        layout::draw(&page, page.on(), skin, Surface::Page, ());
 
-        let me = Self {
+        let page = Self(Rc::new(Inner {
             page,
             list,
-            state: Rc::default(),
-        };
-        me.events();
-        me
+            state: RefCell::default(),
+        }));
+        page.events();
+        page
     }
 
     pub(super) fn page(&self) -> &gui::TabPage {
-        &self.page
+        &self.0.page
     }
 
-    pub(super) fn list(&self) -> &gui::ListView {
-        &self.list
+    pub(super) fn grow(&self, delta: i32) {
+        layout::resize_height_by(self.0.list.hwnd(), delta);
     }
 
     pub(super) fn on_create(&self) {
@@ -96,7 +98,7 @@ impl ClipsPage {
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
         self.receive_thumbnails();
         let rebuild = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.0.state.borrow_mut();
             if state.folder.as_deref() != Some(folder) || state.last_clip != status.last_clip {
                 state.folder = Some(folder.to_owned());
                 state.last_clip = status.last_clip.clone();
@@ -118,20 +120,20 @@ impl ClipsPage {
     }
 
     fn events(&self) {
-        let me = self.clone();
-        self.list.on().nm_click(move |click| {
-            if let Some(path) = me.clip_path(click.iItem) {
+        let page = self.clone();
+        self.0.list.on().nm_click(move |click| {
+            if let Some(path) = page.clip_path(click.iItem) {
                 open(&path);
             }
             Ok(())
         });
-        let me = self.clone();
-        self.list.on().nm_r_click(move |click| {
-            me.on_right_click(click.iItem);
+        let page = self.clone();
+        self.0.list.on().nm_r_click(move |click| {
+            page.on_right_click(click.iItem);
             // Returning 1 suppresses WM_CONTEXTMENU.
             Ok(1)
         });
-        self.list.on().lvn_get_empty_markup(|markup| {
+        self.0.list.on().lvn_get_empty_markup(|markup| {
             markup.dwFlags = co::EMF::CENTERED;
             markup.set_szMarkup(text::NO_CLIPS);
             Ok(true)
@@ -140,7 +142,7 @@ impl ClipsPage {
 
     fn clip_path(&self, index: i32) -> Option<PathBuf> {
         let index = usize::try_from(index).ok()?;
-        let state = self.state.borrow();
+        let state = self.0.state.borrow();
         state.clips.get(index).map(|clip| clip.path.clone())
     }
 
@@ -149,7 +151,7 @@ impl ClipsPage {
             return;
         };
         if let Ok(item) = u32::try_from(index) {
-            let _ = self.list.items().get(item).select(true);
+            let _ = self.0.list.items().get(item).select(true);
         }
         // TrackPopupMenu pumps messages; the timer may rebuild the list meanwhile, hence `path`.
         match self.choose_command() {
@@ -182,7 +184,7 @@ impl ClipsPage {
                 menu.TrackPopupMenu(
                     co::TPM::RETURNCMD | co::TPM::NONOTIFY | co::TPM::RIGHTBUTTON,
                     at,
-                    self.list.hwnd(),
+                    self.0.list.hwnd(),
                 )
             });
         let _ = menu.DestroyMenu();
@@ -190,14 +192,14 @@ impl ClipsPage {
     }
 
     fn delete(&self, path: &Path) {
-        if let Err(error) = shell::recycle(path, self.list.hwnd()) {
+        if let Err(error) = shell::recycle(path, self.0.list.hwnd()) {
             log::warning(text::clip_delete_failed(path, error));
             return;
         }
         log::info(text::clip_deleted(path));
         let folder = {
-            let mut state = self.state.borrow_mut();
-            state.forget(path);
+            let mut state = self.0.state.borrow_mut();
+            state.thumbnails.forget(path);
             state.folder.clone()
         };
         if let Some(folder) = folder {
@@ -206,36 +208,32 @@ impl ClipsPage {
     }
 
     fn rebuild(&self, clips: Vec<Clip>) {
-        let mut state = self.state.borrow_mut();
-        self.list.set_redraw(false);
-        let _ = self.list.items().delete_all();
+        let mut state = self.0.state.borrow_mut();
+        let state = &mut *state;
+        self.0.list.set_redraw(false);
+        let _ = self.0.list.items().delete_all();
         for clip in &clips {
-            let image = state
-                .thumbnails
-                .get(&clip.path)
-                .copied()
-                .or(state.placeholder);
+            let image = state.thumbnails.image(&clip.path);
             if let Err(error) = self.insert_item(&clip.caption(), image) {
                 log::warning(text::clip_not_listed(&clip.path, error));
             }
         }
         self.place_items(clips.len());
-        self.list.set_redraw(true);
-        let _ = self.list.hwnd().InvalidateRect(None, true);
+        self.0.list.set_redraw(true);
+        let _ = self.0.list.hwnd().InvalidateRect(None, true);
         state.clips = clips;
-        state.request_missing_thumbnails();
+        state.thumbnails.request_missing(&state.clips);
     }
 
     /// Places the items on a centred grid: left to itself the list keeps its slack on the
     /// right, even when given a work area.
     #[expect(unsafe_code)]
     fn place_items(&self, count: usize) {
-        let hwnd = self.list.hwnd();
+        let hwnd = self.0.list.hwnd();
         let Ok(client) = hwnd.GetClientRect() else {
             return;
         };
-        let scroll_bar = w::GetSystemMetricsForDpi(co::SM::CXVSCROLL, hwnd.GetDpiForWindow())
-            .unwrap_or_else(|_| w::GetSystemMetrics(co::SM::CXVSCROLL));
+        let scroll_bar = layout::scroll_bar_width();
         let cell = (gui::dpi_x(CELL_WIDTH), gui::dpi_y(CELL_HEIGHT));
         let gutter = cell.0 - gui::dpi_x(THUMB_WIDTH);
         let area = work_area(
@@ -258,7 +256,7 @@ impl ClipsPage {
     /// The thumbnail's offset from an item's position, found by placing item 0 at the origin.
     #[expect(unsafe_code)]
     fn icon_offset(&self) -> w::POINT {
-        let hwnd = self.list.hwnd();
+        let hwnd = self.0.list.hwnd();
         let origin = w::POINT::with(0, 0);
         // SAFETY: LVM_SETITEMPOSITION32 reads the point during the call.
         unsafe {
@@ -288,23 +286,23 @@ impl ClipsPage {
     }
 
     fn receive_thumbnails(&self) {
-        let mut state = self.state.borrow_mut();
-        let made: Vec<_> = match &state.fetcher {
-            Some(fetcher) => fetcher.results.try_iter().collect(),
-            None => return,
+        let mut state = self.0.state.borrow_mut();
+        let Some(fetcher) = &state.thumbnails.fetcher else {
+            return;
         };
+        let made: Vec<_> = fetcher.results.try_iter().collect();
         for (path, result) in made {
             // Deleted while its thumbnail was being made.
-            if !state.requested.contains(&path) {
+            if !state.thumbnails.requested.contains(&path) {
                 continue;
             }
             match result.and_then(|thumbnail| self.add_image(&thumbnail)) {
                 Ok(image) => {
-                    state.thumbnails.insert(path.clone(), image);
+                    state.thumbnails.images.insert(path.clone(), image);
                     if let Some(index) = state.clips.iter().position(|clip| clip.path == path)
                         && let Ok(index) = u32::try_from(index)
                     {
-                        let _ = self.list.items().get(index).set_icon_index(Some(image));
+                        let _ = self.0.list.items().get(index).set_icon_index(Some(image));
                     }
                 }
                 Err(error) => log::warning(text::thumbnail_failed(&path, error)),
@@ -313,7 +311,8 @@ impl ClipsPage {
     }
 
     fn add_image(&self, thumbnail: &Thumbnail) -> Result<u32, ThumbnailError> {
-        self.list
+        self.0
+            .list
             .image_list(co::LVSIL::NORMAL)
             .and_then(|images| images.Add(thumbnail.bitmap(), None))
             .map_err(ThumbnailError::ImageList)
@@ -322,13 +321,10 @@ impl ClipsPage {
     #[expect(unsafe_code)]
     fn install_image_list(&self) {
         let size = thumbnail_size();
-        let images = w::HIMAGELIST::Create(w::SIZE::with(size.0, size.1), co::ILC::COLOR32, 16, 16);
-        let mut images = match images {
-            Ok(images) => images,
-            Err(error) => {
-                log::warning(text::thumbnails_unavailable(error));
-                return;
-            }
+        let images = w::HIMAGELIST::Create(w::SIZE::with(size.0, size.1), co::ILC::COLOR32, 16, 16)
+            .inspect_err(|error| log::warning(text::thumbnails_unavailable(error)));
+        let Ok(mut images) = images else {
+            return;
         };
         let placeholder = shell::placeholder(size, CARD, MARK).and_then(|placeholder| {
             images
@@ -336,12 +332,12 @@ impl ClipsPage {
                 .map_err(ThumbnailError::ImageList)
         });
         match placeholder {
-            Ok(index) => self.state.borrow_mut().placeholder = Some(index),
+            Ok(index) => self.0.state.borrow_mut().thumbnails.placeholder = Some(index),
             Err(error) => log::warning(text::thumbnails_unavailable(error)),
         }
         // SAFETY: LVM_SETIMAGELIST takes the handle by value; the control owns it from here.
         unsafe {
-            self.list.hwnd().SendMessage(w::msg::LvmSetImageList {
+            self.0.list.hwnd().SendMessage(w::msg::LvmSetImageList {
                 kind: co::LVSIL::NORMAL,
                 himagelist: Some(images.leak()),
             });
@@ -352,7 +348,7 @@ impl ClipsPage {
     fn set_icon_spacing(&self) {
         // SAFETY: LVM_SETICONSPACING takes both lengths packed by value.
         unsafe {
-            self.list.hwnd().SendMessage(w::msg::LvmSetIconSpacing {
+            self.0.list.hwnd().SendMessage(w::msg::LvmSetIconSpacing {
                 size: w::SIZE::with(gui::dpi_x(CELL_WIDTH), gui::dpi_y(CELL_HEIGHT)),
             });
         }
@@ -360,7 +356,7 @@ impl ClipsPage {
 
     #[expect(unsafe_code)]
     fn set_colours(&self, background: w::COLORREF, text: w::COLORREF) {
-        let hwnd = self.list.hwnd();
+        let hwnd = self.0.list.hwnd();
         // SAFETY: each message takes one colour by value and nothing by pointer.
         unsafe {
             let _ = hwnd.SendMessage(w::msg::LvmSetBkColor {
@@ -384,7 +380,8 @@ impl ClipsPage {
         item.iImage = image.map_or(-1, |index| i32::try_from(index).unwrap_or(-1));
         // SAFETY: LVM_INSERTITEM reads the item and its text, which both outlive the call.
         unsafe {
-            self.list
+            self.0
+                .list
                 .hwnd()
                 .SendMessage(w::msg::LvmInsertItem { item: &item })
         }
@@ -398,19 +395,28 @@ struct State {
     stale: bool,
     in_view: bool,
     clips: Vec<Clip>,
+    thumbnails: Thumbnails,
+}
+
+/// The clips' pictures in the list's image list, and the requests out for the rest.
+#[derive(Default)]
+struct Thumbnails {
     placeholder: Option<u32>,
-    thumbnails: HashMap<PathBuf, u32>,
+    images: HashMap<PathBuf, u32>,
     requested: HashSet<PathBuf>,
     fetcher: Option<Fetcher>,
 }
 
-impl State {
-    fn request_missing_thumbnails(&mut self) {
-        let missing: Vec<PathBuf> = self
-            .clips
+impl Thumbnails {
+    fn image(&self, path: &Path) -> Option<u32> {
+        self.images.get(path).copied().or(self.placeholder)
+    }
+
+    fn request_missing(&mut self, clips: &[Clip]) {
+        let missing: Vec<PathBuf> = clips
             .iter()
             .map(|clip| clip.path.clone())
-            .filter(|path| !self.thumbnails.contains_key(path) && !self.requested.contains(path))
+            .filter(|path| !self.images.contains_key(path) && !self.requested.contains(path))
             .collect();
         if missing.is_empty() {
             return;
@@ -430,7 +436,7 @@ impl State {
 
     /// The image stays in the image list: removing one renumbers those after it.
     fn forget(&mut self, path: &Path) {
-        self.thumbnails.remove(path);
+        self.images.remove(path);
         self.requested.remove(path);
     }
 }
@@ -580,10 +586,10 @@ fn list_clips(folder: &Path) -> Vec<Clip> {
         .flatten()
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
-            metadata
-                .is_file()
-                .then(|| Clip::new(entry.path(), metadata.len()))
-                .flatten()
+            if !metadata.is_file() {
+                return None;
+            }
+            Clip::new(entry.path(), metadata.len())
         })
         .collect();
     newest_first(&mut clips);
@@ -609,10 +615,14 @@ fn grid_positions(
     (cell_width, cell_height): (i32, i32),
     offset: w::POINT,
 ) -> impl Iterator<Item = w::POINT> {
-    (0..).map(move |index: i32| {
+    (0..).map(move |index: usize| {
+        let (row, column) = (
+            saturating_i32(index / COLUMNS),
+            saturating_i32(index % COLUMNS),
+        );
         w::POINT::with(
-            area.left + (index % COLUMNS) * cell_width - offset.x,
-            area.top + (index / COLUMNS) * cell_height - offset.y,
+            area.left + column * cell_width - offset.x,
+            area.top + row * cell_height - offset.y,
         )
     })
 }
@@ -626,8 +636,8 @@ fn work_area(
     scroll_bar: i32,
     count: usize,
 ) -> w::RECT {
-    let rows = i32::try_from(count.div_ceil(COLUMNS.unsigned_abs() as usize)).unwrap_or(i32::MAX);
-    let span = COLUMNS * cell_width - gutter;
+    let rows = saturating_i32(count.div_ceil(COLUMNS));
+    let span = saturating_i32(COLUMNS) * cell_width - gutter;
     let margin = |width: i32| ((width - span) / 2).max(0);
     let rows_height = rows.saturating_mul(cell_height);
     let overflow = rows_height.saturating_add(2 * margin(width)) > height;
@@ -728,16 +738,16 @@ mod tests {
     fn a_deleted_clip_is_forgotten_and_the_others_keep_their_pictures() {
         let gone = PathBuf::from(r"D:\Clips\hindsight_2026-10-12_21-14-05.mp4");
         let kept = PathBuf::from(r"D:\Clips\hindsight_2026-10-12_21-15-00.mp4");
-        let mut state = State::default();
+        let mut thumbnails = Thumbnails::default();
         for (path, image) in [(&gone, 1), (&kept, 2)] {
-            state.thumbnails.insert(path.clone(), image);
-            state.requested.insert(path.clone());
+            thumbnails.images.insert(path.clone(), image);
+            thumbnails.requested.insert(path.clone());
         }
-        state.forget(&gone);
-        assert!(!state.thumbnails.contains_key(&gone));
-        assert!(!state.requested.contains(&gone));
-        assert_eq!(state.thumbnails.get(&kept), Some(&2));
-        assert!(state.requested.contains(&kept));
+        thumbnails.forget(&gone);
+        assert!(!thumbnails.images.contains_key(&gone));
+        assert!(!thumbnails.requested.contains(&gone));
+        assert_eq!(thumbnails.image(&kept), Some(2));
+        assert!(thumbnails.requested.contains(&kept));
     }
 
     #[test]

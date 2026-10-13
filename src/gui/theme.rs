@@ -71,6 +71,40 @@ const NOVA: Palette = Palette {
     secondary_button: 0x00ED_F3F9,
 };
 
+impl Palette {
+    /// Every colour the theme fills with.
+    fn fills(&self) -> [u32; 6] {
+        [
+            self.background,
+            self.panel,
+            self.secondary_button,
+            self.accent,
+            self.pressed(),
+            self.hot(),
+        ]
+    }
+
+    /// Every colour the theme outlines with.
+    const fn edges(&self) -> [u32; 2] {
+        [self.border, self.accent]
+    }
+
+    const fn surface(&self, surface: Surface) -> u32 {
+        match surface {
+            Surface::Dialog => self.background,
+            Surface::Page => self.panel,
+        }
+    }
+
+    fn pressed(&self) -> u32 {
+        mix(self.accent, BLACK_RGB, PRESSED_PRIMARY)
+    }
+
+    fn hot(&self) -> u32 {
+        mix(self.accent, self.on_accent, HOT_PRIMARY)
+    }
+}
+
 const fn palette(theme: Theme) -> Option<&'static Palette> {
     match theme {
         Theme::Classic => None,
@@ -141,7 +175,7 @@ impl Skin {
     pub(super) fn set(&self, theme: Theme) {
         self.0.theme.set(theme);
         let mut resources = self.0.resources.borrow_mut();
-        resources.brushes = None;
+        resources.gdi = None;
         resources.pictures = None;
         resources.scaled = None;
     }
@@ -203,24 +237,15 @@ impl Skin {
         let Ok(client) = page.GetClientRect() else {
             return;
         };
-        let theme = self.theme();
         let mut resources = self.0.resources.borrow_mut();
-        resources.ensure_title_font(page);
-        resources.ensure_scaled(theme, client.bottom - client.top);
-        if resources.ensure_brushes(Some(palette)).is_none() {
-            return;
-        }
-        let Resources {
-            brushes: Some(brushes),
-            scaled,
-            title_font,
-            ..
-        } = &*resources
-        else {
+        let Some(ready) = resources.ready(self.theme(), page, client.bottom - client.top) else {
             return;
         };
-        let _ = hdc.FillRect(client, &brushes.background);
-        if let Some(scaled) = scaled {
+        let Some(background) = ready.gdi.brush(palette.background) else {
+            return;
+        };
+        let _ = hdc.FillRect(client, background);
+        if let Some(scaled) = ready.scaled {
             let (width, height) = scaled.decoration.size();
             scaled.decoration.draw(
                 hdc,
@@ -230,7 +255,7 @@ impl Skin {
             );
         }
         for frame in frames {
-            paint_frame(hdc, palette, &brushes.panel, title_font.as_deref(), frame);
+            paint_frame(hdc, palette, ready.gdi, ready.title_font, frame);
         }
     }
 
@@ -244,26 +269,26 @@ impl Skin {
         });
     }
 
-    pub(super) fn paint_character(&self, hdc: &w::HDC, page: &w::HWND) {
-        if !self.is_themed() {
-            return;
-        }
+    fn paint_character(&self, hdc: &w::HDC, page: &w::HWND) {
         let Ok(client) = page.GetClientRect() else {
             return;
         };
-        let theme = self.theme();
         let mut resources = self.0.resources.borrow_mut();
-        resources.ensure_scaled(theme, client.bottom - client.top);
-        if let Some(scaled) = &resources.scaled {
-            let (width, height) = scaled.character.size();
-            let margin = gui::dpi_x(ART_MARGIN);
-            scaled.character.draw(
-                hdc,
-                client.right - width - margin,
-                client.bottom - height - margin,
-                u8::MAX,
-            );
-        }
+        let Some(Ready {
+            scaled: Some(scaled),
+            ..
+        }) = resources.ready(self.theme(), page, client.bottom - client.top)
+        else {
+            return;
+        };
+        let (width, height) = scaled.character.size();
+        let margin = gui::dpi_x(ART_MARGIN);
+        scaled.character.draw(
+            hdc,
+            client.right - width - margin,
+            client.bottom - height - margin,
+            u8::MAX,
+        );
     }
 
     pub(super) fn paint_button(&self, draw: &w::NMCUSTOMDRAW, text: &str) -> co::CDRF {
@@ -277,13 +302,18 @@ impl Skin {
         let (fill, edge, ink) = button_colours(palette, state);
 
         let hdc = &draw.hdc;
-        let (Ok(brush), Ok(pen)) = (solid_brush(fill), solid_pen(edge)) else {
+        let mut resources = self.0.resources.borrow_mut();
+        let Some(gdi) = resources.gdi(palette) else {
+            return co::CDRF::DODEFAULT;
+        };
+        let (Some(brush), Some(pen), Some(behind)) =
+            (gdi.brush(fill), gdi.pen(edge), gdi.brush(palette.panel))
+        else {
             return co::CDRF::DODEFAULT;
         };
         // Behind the rounded corners: the panel the button sits on.
-        let behind = self.brush(Surface::Page).unwrap_or(w::HBRUSH::NULL);
-        let _ = hdc.FillRect(draw.rc, &behind);
-        if !round_rect(hdc, draw.rc, &pen, &brush) {
+        let _ = hdc.FillRect(draw.rc, behind);
+        if !round_rect(hdc, draw.rc, pen, brush) {
             return co::CDRF::DODEFAULT;
         }
         let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
@@ -306,10 +336,14 @@ impl Skin {
         let Ok(client) = hwnd.GetClientRect() else {
             return;
         };
+        let mut resources = self.0.resources.borrow_mut();
+        let Some(gdi) = resources.gdi(palette) else {
+            return;
+        };
         // The pages paint the display area themselves; keep out of it.
         let pages = display_rect(hwnd, client);
         buffered(&paint, (client.right, client.bottom), pages, |target| {
-            paint_tab_strip(target, palette, tab, client);
+            paint_tab_strip(target, palette, gdi, tab, client);
         });
     }
 
@@ -318,31 +352,50 @@ impl Skin {
     }
 
     fn brush(&self, surface: Surface) -> Option<w::HBRUSH> {
+        let palette = self.palette()?;
         let mut resources = self.0.resources.borrow_mut();
-        resources
-            .ensure_brushes(self.palette())
-            .map(|brushes| copy_handle(brushes.of(surface)))
+        let gdi = resources.gdi(palette)?;
+        gdi.brush(palette.surface(surface)).map(copy_handle)
     }
 }
 
 #[derive(Default)]
 struct Resources {
-    brushes: Option<Brushes>,
+    gdi: Option<Gdi>,
     pictures: Option<Pictures>,
     scaled: Option<Scaled>,
     title_font: Option<DeleteObjectGuard<w::HFONT>>,
 }
 
+/// What one themed paint of a page borrows.
+struct Ready<'a> {
+    gdi: &'a Gdi,
+    scaled: Option<&'a Scaled>,
+    title_font: Option<&'a w::HFONT>,
+}
+
 impl Resources {
-    fn ensure_brushes(&mut self, palette: Option<&Palette>) -> Option<&Brushes> {
-        if self.brushes.is_none() {
-            let palette = palette?;
-            self.brushes = Some(Brushes {
-                background: solid_brush(palette.background).ok()?,
-                panel: solid_brush(palette.panel).ok()?,
-            });
+    fn ready(&mut self, theme: Theme, page: &w::HWND, page_height: i32) -> Option<Ready<'_>> {
+        let palette = palette(theme)?;
+        self.ensure_title_font(page);
+        self.ensure_scaled(theme, page_height);
+        self.ensure_gdi(palette);
+        Some(Ready {
+            gdi: self.gdi.as_ref()?,
+            scaled: self.scaled.as_ref(),
+            title_font: self.title_font.as_deref(),
+        })
+    }
+
+    fn gdi(&mut self, palette: &Palette) -> Option<&Gdi> {
+        self.ensure_gdi(palette);
+        self.gdi.as_ref()
+    }
+
+    fn ensure_gdi(&mut self, palette: &Palette) {
+        if self.gdi.is_none() {
+            self.gdi = Gdi::new(palette);
         }
-        self.brushes.as_ref()
     }
 
     fn ensure_title_font(&mut self, window: &w::HWND) {
@@ -379,17 +432,39 @@ impl Resources {
     }
 }
 
-struct Brushes {
-    background: DeleteObjectGuard<w::HBRUSH>,
-    panel: DeleteObjectGuard<w::HBRUSH>,
+/// A brush for every colour the theme fills with and a pen for every one it outlines with.
+struct Gdi {
+    brushes: Vec<(u32, DeleteObjectGuard<w::HBRUSH>)>,
+    pens: Vec<(u32, DeleteObjectGuard<w::HPEN>)>,
 }
 
-impl Brushes {
-    fn of(&self, surface: Surface) -> &w::HBRUSH {
-        match surface {
-            Surface::Dialog => &self.background,
-            Surface::Page => &self.panel,
-        }
+impl Gdi {
+    fn new(palette: &Palette) -> Option<Self> {
+        let brushes = palette
+            .fills()
+            .into_iter()
+            .map(|hex| Some((hex, solid_brush(hex).ok()?)))
+            .collect::<Option<_>>()?;
+        let pens = palette
+            .edges()
+            .into_iter()
+            .map(|hex| Some((hex, solid_pen(hex).ok()?)))
+            .collect::<Option<_>>()?;
+        Some(Self { brushes, pens })
+    }
+
+    fn brush(&self, hex: u32) -> Option<&w::HBRUSH> {
+        self.brushes
+            .iter()
+            .find(|(fill, _)| *fill == hex)
+            .map(|(_, brush)| &**brush)
+    }
+
+    fn pen(&self, hex: u32) -> Option<&w::HPEN> {
+        self.pens
+            .iter()
+            .find(|(edge, _)| *edge == hex)
+            .map(|(_, pen)| &**pen)
     }
 }
 
@@ -419,18 +494,11 @@ impl Scaled {
         let margin = gui::dpi_y(ART_MARGIN);
         let character_height = usize::try_from(page_height - 2 * margin).unwrap_or(1);
         let decoration_height = usize::try_from(page_height).unwrap_or(1);
-        let layers = (
-            Layer::new(&pictures.character.scaled_to_height(character_height)),
-            Layer::new(&pictures.decoration.scaled_to_height(decoration_height)),
-        );
-        match layers {
-            (Some(character), Some(decoration)) => Some(Self {
-                page_height,
-                character,
-                decoration,
-            }),
-            _ => None,
-        }
+        Some(Self {
+            page_height,
+            character: Layer::new(&pictures.character.scaled_to_height(character_height))?,
+            decoration: Layer::new(&pictures.decoration.scaled_to_height(decoration_height))?,
+        })
     }
 }
 
@@ -451,15 +519,15 @@ pub(super) fn paint_tabs_natively(tab: &w::HWND) {
 fn paint_frame(
     hdc: &w::HDC,
     palette: &Palette,
-    panel: &w::HBRUSH,
+    gdi: &Gdi,
     title_font: Option<&w::HFONT>,
     frame: &Frame,
 ) {
     let rect = frame.rect();
-    let Ok(pen) = solid_pen(palette.border) else {
+    let (Some(pen), Some(panel)) = (gdi.pen(palette.border), gdi.brush(palette.panel)) else {
         return;
     };
-    if !round_rect(hdc, rect, &pen, panel) {
+    if !round_rect(hdc, rect, pen, panel) {
         return;
     }
     let _font = title_font.and_then(|font| hdc.SelectObject(font).ok());
@@ -499,17 +567,15 @@ fn paint_title(hdc: &w::HDC, palette: &Palette, panel: &w::HBRUSH, frame: &Frame
     );
 }
 
-fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::RECT) {
+fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, gdi: &Gdi, tab: &gui::Tab, client: w::RECT) {
     let faces = tab_faces(tab);
     let strip_bottom = faces.iter().map(|face| face.rect.bottom).max().unwrap_or(0);
 
-    let Ok(pen) = solid_pen(palette.border) else {
+    let (Some(pen), Some(background)) = (gdi.pen(palette.border), gdi.brush(palette.background))
+    else {
         return;
     };
-    let Ok(background) = solid_brush(palette.background) else {
-        return;
-    };
-    let _ = hdc.FillRect(client, &background);
+    let _ = hdc.FillRect(client, background);
 
     let font = control_font(tab.hwnd());
     let _font = font.as_ref().and_then(|font| hdc.SelectObject(font).ok());
@@ -519,13 +585,13 @@ fn paint_tab_strip(hdc: &w::HDC, palette: &Palette, tab: &gui::Tab, client: w::R
         top: strip_bottom - 1,
         ..client
     };
-    if !outline_rect(hdc, frame, &pen) {
+    if !outline_rect(hdc, frame, pen) {
         return;
     }
 
-    let _pen = hdc.SelectObject(&*pen);
+    let _pen = hdc.SelectObject(pen);
     for face in &faces {
-        paint_tab(hdc, palette, face);
+        paint_tab(hdc, palette, gdi, face);
     }
 }
 
@@ -544,7 +610,7 @@ fn tab_faces(tab: &gui::Tab) -> Vec<TabFace> {
         .collect()
 }
 
-fn paint_tab(hdc: &w::HDC, palette: &Palette, face: &TabFace) {
+fn paint_tab(hdc: &w::HDC, palette: &Palette, gdi: &Gdi, face: &TabFace) {
     let TabFace {
         rect,
         text,
@@ -555,10 +621,10 @@ fn paint_tab(hdc: &w::HDC, palette: &Palette, face: &TabFace) {
     } else {
         palette.secondary_button
     };
-    let Ok(brush) = solid_brush(fill) else {
+    let Some(brush) = gdi.brush(fill) else {
         return;
     };
-    let _ = hdc.FillRect(*rect, &brush);
+    let _ = hdc.FillRect(*rect, brush);
     let _ = hdc.MoveToEx(rect.left, rect.bottom, None);
     let _ = hdc.LineTo(rect.left, rect.top);
     let _ = hdc.LineTo(rect.right - 1, rect.top);
@@ -571,7 +637,7 @@ fn paint_tab(hdc: &w::HDC, palette: &Palette, face: &TabFace) {
                 right: rect.right - 1,
                 bottom: rect.bottom + 1,
             },
-            &brush,
+            brush,
         );
     } else {
         let _ = hdc.MoveToEx(rect.left, rect.bottom - 1, None);
@@ -591,9 +657,9 @@ fn button_colours(palette: &Palette, state: co::CDIS) -> (u32, u32, u32) {
         return (palette.secondary_button, palette.border, palette.muted);
     }
     let fill = if state.has(co::CDIS::SELECTED) {
-        mix(palette.accent, BLACK_RGB, PRESSED_PRIMARY)
+        palette.pressed()
     } else if state.has(co::CDIS::HOT) {
-        mix(palette.accent, palette.on_accent, HOT_PRIMARY)
+        palette.hot()
     } else {
         palette.accent
     };
@@ -775,6 +841,20 @@ mod tests {
                 EMBER.on_accent
             )
         );
+    }
+
+    #[test]
+    fn every_button_look_is_painted_with_a_fill_and_an_edge_the_theme_keeps() {
+        for state in [
+            co::CDIS::default(),
+            co::CDIS::HOT,
+            co::CDIS::SELECTED,
+            co::CDIS::DISABLED,
+        ] {
+            let (fill, edge, _) = button_colours(&EMBER, state);
+            assert!(EMBER.fills().contains(&fill), "{state:?}");
+            assert!(EMBER.edges().contains(&edge), "{state:?}");
+        }
     }
 
     #[test]

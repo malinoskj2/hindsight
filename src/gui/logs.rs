@@ -1,7 +1,7 @@
 //! The Logs tab: a read-only text box that receives journal entries as they are recorded.
 
 use super::{
-    layout::{self, BLACK, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X},
+    layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X},
     theme::{Skin, Surface},
 };
 use crate::log;
@@ -12,15 +12,18 @@ use winsafe::{self as w, co, gui, prelude::*};
 const VIEW_LIMIT: i32 = 200_000;
 
 #[derive(Clone)]
-pub(super) struct LogsPage {
+pub(super) struct LogsPage(Rc<Inner>);
+
+struct Inner {
     page: gui::TabPage,
     view: gui::Edit,
-    tail: Rc<Tail>,
+    sequence: Cell<u64>,
+    need_scroll: Cell<bool>,
 }
 
 impl LogsPage {
     pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
-        let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
+        let page = layout::page(parent);
         let view = gui::Edit::new(
             &page,
             gui::EditOpts {
@@ -36,38 +39,39 @@ impl LogsPage {
                 ..Default::default()
             },
         );
-        layout::draw(&page, page.on(), Vec::new(), skin, Surface::Page, |_| BLACK);
+        layout::draw(&page, page.on(), skin, Surface::Page, ());
 
-        Self {
+        Self(Rc::new(Inner {
             page,
             view,
-            tail: Rc::default(),
-        }
+            sequence: Cell::new(0),
+            need_scroll: Cell::new(false),
+        }))
     }
 
     pub(super) fn page(&self) -> &gui::TabPage {
-        &self.page
+        &self.0.page
     }
 
-    pub(super) fn view(&self) -> &gui::Edit {
-        &self.view
+    pub(super) fn grow(&self, delta: i32) {
+        layout::resize_height_by(self.0.view.hwnd(), delta);
     }
 
     pub(super) fn on_create(&self) {
         // A multi-line edit otherwise stops accepting text after 32 K characters.
-        self.view.limit_text(None);
+        self.0.view.limit_text(None);
     }
 
     pub(super) fn update(&self) {
-        let entries = log::since(self.tail.sequence.get());
+        let entries = log::since(self.0.sequence.get());
         if let Some(latest) = entries.last() {
-            self.tail.sequence.set(latest.sequence);
-            self.tail.need_scroll.set(true);
+            self.0.sequence.set(latest.sequence);
+            self.0.need_scroll.set(true);
             self.append(&entries);
         }
-        if self.tail.need_scroll.get() && self.view.hwnd().IsWindowVisible() {
+        if self.0.need_scroll.get() && self.0.view.hwnd().IsWindowVisible() {
             self.scroll_to_end();
-            self.tail.need_scroll.set(false);
+            self.0.need_scroll.set(false);
         }
     }
 
@@ -75,32 +79,28 @@ impl LogsPage {
         if entries.is_empty() {
             return;
         }
-        let mut length = self.view.hwnd().GetWindowTextLength().unwrap_or(0);
+        let view = &self.0.view;
+        let mut length = view.hwnd().GetWindowTextLength().unwrap_or(0);
         if length > VIEW_LIMIT {
-            let _ = self.view.set_text("");
+            let _ = view.set_text("");
             length = 0;
         }
         let text: String = entries
             .iter()
             .map(|entry| entry.line().replace('\n', "\r\n") + "\r\n")
             .collect();
-        self.view.set_selection(length, length);
-        self.view.replace_selection(&text);
+        view.set_selection(length, length);
+        view.replace_selection(&text);
     }
 
     /// A read-only edit without focus does not follow its caret, and a hidden one ignores the
     /// scroll, so this runs once the tab is showing.
     #[expect(unsafe_code)]
     fn scroll_to_end(&self) {
-        let length = self.view.hwnd().GetWindowTextLength().unwrap_or(0);
-        self.view.set_selection(length, length);
+        let view = &self.0.view;
+        let length = view.hwnd().GetWindowTextLength().unwrap_or(0);
+        view.set_selection(length, length);
         // SAFETY: EM_SCROLLCARET takes no parameters.
-        unsafe { self.view.hwnd().SendMessage(w::msg::EmScrollCaret {}) };
+        unsafe { view.hwnd().SendMessage(w::msg::EmScrollCaret {}) };
     }
-}
-
-#[derive(Default)]
-struct Tail {
-    sequence: Cell<u64>,
-    need_scroll: Cell<bool>,
 }

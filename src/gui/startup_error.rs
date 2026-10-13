@@ -1,47 +1,54 @@
 //! The window shown instead of the application when it could not start.
 
 use super::{
-    ICON_RESOURCE,
-    layout::{self, BLACK, Frame, INNER_WIDTH, INNER_X, LINE, RED, WINDOW_WIDTH, label},
+    layout::{
+        self, Frame, INNER_WIDTH, INNER_X, LINE, Painted, RED, TintedLabel, WINDOW_WIDTH, label,
+    },
     text,
     theme::{Skin, Surface},
 };
-use crate::{APP_NAME, config::Theme, sys::window};
+use crate::{config::Theme, sys::window};
 use anyhow::Result;
+use std::{iter, rc::Rc};
 use winsafe::{gui, prelude::*};
 
-const HEIGHT: i32 = 170;
+const DIALOG_HEIGHT: i32 = 170;
 const MESSAGE_Y: i32 = 28;
 const MESSAGE_LINES: i32 = 4;
 
-pub(super) fn show(message: &str) -> Result<()> {
-    let dialog = ErrorDialog::new(message);
+pub(super) fn show(message: &str, icon: u16) -> Result<()> {
+    let dialog = ErrorDialog::new(message, icon);
     dialog.events();
     dialog.draw();
-    dialog
-        .wnd
-        .run_main(None)
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("show the startup error: {error}"))
+    layout::run(&dialog.0.main_window, None, "show the startup error")
 }
 
-struct ErrorDialog {
-    wnd: gui::WindowMain,
+#[derive(Clone)]
+struct ErrorDialog(Rc<Inner>);
+
+struct Inner {
+    main_window: gui::WindowMain,
     frames: Vec<Frame>,
-    message: gui::Label,
+    message: TintedLabel,
+}
+
+impl Painted for Inner {
+    fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
+        iter::once(&self.message)
+    }
 }
 
 impl ErrorDialog {
-    fn new(message: &str) -> Self {
-        let wnd = gui::WindowMain::new(gui::WindowMainOpts {
-            title: APP_NAME,
-            size: gui::dpi(WINDOW_WIDTH, HEIGHT),
-            class_icon: gui::Icon::Id(ICON_RESOURCE),
-            ..Default::default()
-        });
-        let frame = Frame::new(&wnd, text::STARTUP_FAILED_TITLE, 6, 140);
+    fn new(message: &str, icon: u16) -> Self {
+        let main_window =
+            gui::WindowMain::new(layout::window_opts(WINDOW_WIDTH, DIALOG_HEIGHT, icon));
+        let frame = Frame::new(&main_window, text::STARTUP_FAILED_TITLE, 6, 140);
         let message = label(
-            &wnd,
+            &main_window,
             message,
             INNER_X,
             MESSAGE_Y,
@@ -49,41 +56,36 @@ impl ErrorDialog {
             MESSAGE_LINES,
         );
         let _help = label(
-            &wnd,
+            &main_window,
             text::STARTUP_FAILED_HELP,
             INNER_X,
             MESSAGE_Y + MESSAGE_LINES * LINE + 6,
             INNER_WIDTH,
             1,
         );
-        Self {
-            wnd,
+        Self(Rc::new(Inner {
+            main_window,
             frames: vec![frame],
-            message,
-        }
+            message: TintedLabel::new(message, RED),
+        }))
     }
 
     fn events(&self) {
-        let create_wnd = self.wnd.clone();
-        let create_frames = self.frames.clone();
-        self.wnd.on().wm_create(move |_| {
-            window::match_dialog_title_bar(create_wnd.hwnd());
-            layout::fit_titles(&create_frames);
+        let dialog = self.clone();
+        self.0.main_window.on().wm_create(move |_| {
+            window::match_dialog_title_bar(dialog.0.main_window.hwnd());
+            layout::fit_titles(&dialog.0.frames);
             Ok(0)
         });
     }
 
     fn draw(&self) {
-        let message = self.message.clone();
         layout::draw(
-            &self.wnd,
-            self.wnd.on(),
-            self.frames.clone(),
+            &self.0.main_window,
+            self.0.main_window.on(),
             &Skin::new(Theme::Classic),
             Surface::Dialog,
-            move |hwnd| {
-                if *hwnd == *message.hwnd() { RED } else { BLACK }
-            },
+            Rc::clone(&self.0),
         );
     }
 }

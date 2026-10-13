@@ -11,10 +11,6 @@ const ATTEMPTS: u32 = 50;
 // SAFETY: `WM` is a plain newtype over the message number; this one is in the app range.
 pub(crate) const SHOW_MESSAGE: co::WM = unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) };
 
-pub(crate) const fn show_message() -> co::WM {
-    SHOW_MESSAGE
-}
-
 pub(crate) fn show_running() -> bool {
     for _ in 0..ATTEMPTS {
         if let Ok(Some(window)) =

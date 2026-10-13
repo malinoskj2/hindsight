@@ -2,8 +2,8 @@
 
 use super::{
     layout::{
-        self, BLACK, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH,
-        INNER_X, LINE, RED, button, label, skin_button,
+        self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X,
+        LINE, Painted, RED, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
     },
     text,
     theme::{Skin, Surface},
@@ -14,14 +14,23 @@ use crate::{
         MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
     },
     log,
-    sys::startup,
+    sys::{hotkey::Hotkey, startup},
 };
-use winsafe::{self as w, co, gui, prelude::*};
+use std::rc::Rc;
+use winsafe::{co, gui, prelude::*};
 
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
 const COLUMN_X: i32 = INNER_X + 204;
 const FIELD_OFFSET: i32 = 88;
 const NUMBER_WIDTH: i32 = 52;
+const CODEC_WIDTH: i32 = 90;
+const HOTKEY_WIDTH: i32 = 110;
+const CHOICE_WIDTH: i32 = 190;
+/// A field that reaches the group's right edge from the first column.
+const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
+/// The same from the second column.
+const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
+const ERROR_X: i32 = BUTTON_WIDTH + 8;
 const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 const FIRST_ROW: i32 = 20;
 const FIELD_PITCH: i32 = 28;
@@ -50,29 +59,31 @@ mod rows {
 }
 
 #[derive(Clone)]
-pub(super) struct SettingsPage {
+pub(super) struct SettingsPage(Rc<Inner>);
+
+struct Inner {
     page: gui::TabPage,
     frames: Vec<Frame>,
     general_group: ExpandableGroup,
-    codec: gui::ComboBox,
-    frame_rate: gui::Edit,
-    buffer_seconds: gui::Edit,
-    bitrate: gui::Edit,
-    _spins: [gui::UpDown; 3],
-    hotkey: gui::Edit,
-    mode: gui::ComboBox,
-    pub(super) backend: gui::ComboBox,
-    folder: gui::Edit,
-    memory: gui::ComboBox,
-    audio: gui::CheckBox,
-    cursor: gui::CheckBox,
-    estimate: gui::Label,
-    pub(super) apply: gui::Button,
-    settings_error: gui::Label,
-    pub(super) theme: gui::ComboBox,
-    pub(super) start_with_windows: gui::CheckBox,
+    recording: RecordingControls,
+    general: GeneralControls,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
+}
+
+impl Painted for Inner {
+    fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
+        [
+            &self.recording.error,
+            &self.recording.estimate,
+            &self.general.error,
+        ]
+        .into_iter()
+    }
 }
 
 impl SettingsPage {
@@ -83,83 +94,108 @@ impl SettingsPage {
         start_with_windows: bool,
         skin: &Skin,
     ) -> Self {
-        let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
-        let recording = RecordingControls::new(&page, config, codecs, skin);
-        let general = GeneralControls::new(&page, config, start_with_windows);
-        let frames = vec![recording.frame, general.frame];
-        layout::draw(
+        let page = layout::page(parent);
+        let recording_frame = Frame::new(
             &page,
-            page.on(),
-            frames.clone(),
-            skin,
-            Surface::Page,
-            label_colours(
-                [recording.error.clone(), general.error],
-                recording.estimate.clone(),
-            ),
+            text::GROUP_RECORDING,
+            rows::RECORDING_FRAME,
+            rows::RECORDING_HEIGHT,
         );
-
-        Self {
+        let recording = RecordingControls::new(&page, config, codecs, skin);
+        let general_frame = Frame::new(
+            &page,
+            text::GROUP_GENERAL,
+            rows::GENERAL_FRAME,
+            rows::GENERAL_HEIGHT,
+        );
+        let general = GeneralControls::new(&page, config, start_with_windows);
+        let frames = vec![recording_frame, general_frame];
+        let general_group =
+            ExpandableGroup::new(1, general.error.label().clone(), STARTUP_ERROR_EXTRA);
+        let inner = Rc::new(Inner {
             page,
             frames,
-            general_group: general.group,
-            codec: recording.codec,
-            frame_rate: recording.frame_rate,
-            buffer_seconds: recording.buffer_seconds,
-            bitrate: recording.bitrate,
-            _spins: recording.spins,
-            hotkey: recording.hotkey,
-            mode: recording.mode,
-            backend: recording.backend,
-            folder: recording.folder,
-            memory: recording.memory,
-            audio: recording.audio,
-            cursor: recording.cursor,
-            estimate: recording.estimate,
-            apply: recording.apply,
-            settings_error: recording.error,
-            theme: general.theme,
-            start_with_windows: general.check_box,
+            general_group,
+            recording,
+            general,
             codecs: codecs.to_vec(),
-        }
+        });
+        layout::draw(
+            &inner.page,
+            inner.page.on(),
+            skin,
+            Surface::Page,
+            Rc::clone(&inner),
+        );
+        let page = Self(inner);
+        page.estimate_events();
+        page
     }
 
     pub(super) fn page(&self) -> &gui::TabPage {
-        &self.page
+        &self.0.page
     }
 
     pub(super) fn frames(&self) -> &[Frame] {
-        &self.frames
+        &self.0.frames
     }
 
     pub(super) fn on_create(&self) {
-        layout::fit_titles(&self.frames);
-        self.general_group.on_create();
+        layout::fit_titles(&self.0.frames);
         self.update_estimate();
     }
 
     pub(super) fn extra(&self) -> i32 {
-        self.general_group.extra()
+        self.0.general_group.extra()
     }
 
-    pub(super) fn configuration(&self) -> Result<Config, String> {
+    pub(super) fn on_apply(&self, apply: impl Fn() + 'static) {
+        self.0.recording.apply.on().bn_clicked(move || {
+            apply();
+            Ok(())
+        });
+    }
+
+    pub(super) fn on_theme_chosen(&self, chosen: impl Fn(Theme) + 'static) {
+        let page = self.clone();
+        self.0.general.theme.on().cbn_sel_change(move || {
+            chosen(page.chosen_theme());
+            Ok(())
+        });
+    }
+
+    /// `resized` runs when the toggle changed the General group's height.
+    pub(super) fn on_startup_toggled(&self, resized: impl Fn() + 'static) {
+        let page = self.clone();
+        self.0.general.start_with_windows.on().bn_clicked(move || {
+            if page.toggle_startup() {
+                resized();
+            }
+            Ok(())
+        });
+    }
+
+    /// The configuration as entered, with its hotkey parsed.
+    pub(super) fn configuration(&self) -> Result<(Config, Hotkey), String> {
         validated(self.entered()?)
     }
 
-    pub(super) fn chosen_theme(&self) -> Theme {
-        chosen(&self.theme, &Theme::ALL)
-    }
-
     pub(super) fn show_settings_error(&self, message: &str) {
-        layout::set_text(&self.settings_error, message);
+        self.0.recording.error.set_text(message);
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
-        layout::set_text(&self.hotkey, hotkey);
+        layout::set_text(&self.0.recording.hotkey, hotkey);
     }
 
-    pub(super) fn estimate_events(&self) {
-        for field in [&self.buffer_seconds, &self.bitrate] {
+    /// Reports whether the General group changed height.
+    pub(super) fn show_startup_error(&self, message: Option<&str>) -> bool {
+        self.0.general_group.set_message(&self.0.frames, message)
+    }
+
+    fn estimate_events(&self) {
+        let encoding = &self.0.recording.encoding;
+        for field in [&encoding.buffer_seconds, &encoding.bitrate] {
             let page = self.clone();
             field.on().en_change(move || {
                 page.update_estimate();
@@ -167,31 +203,35 @@ impl SettingsPage {
             });
         }
         let page = self.clone();
-        self.memory.on().cbn_sel_change(move || {
+        self.0.recording.memory.on().cbn_sel_change(move || {
             page.update_estimate();
             Ok(())
         });
     }
 
-    pub(super) fn update_estimate(&self) {
-        let estimate = number(&self.buffer_seconds)
-            .zip(number(&self.bitrate))
+    fn update_estimate(&self) {
+        let recording = &self.0.recording;
+        let estimate = number(&recording.encoding.buffer_seconds)
+            .zip(number(&recording.encoding.bitrate))
             .and_then(|(buffer_seconds, bitrate_mbps)| {
                 estimate_megabytes(buffer_seconds, bitrate_mbps)
                     .map(|megabytes| (megabytes, bitrate_mbps))
             });
-        let memory = chosen(&self.memory, &Memory::ALL);
-        layout::set_text(
-            &self.estimate,
+        let memory = chosen(&recording.memory, &Memory::ALL);
+        recording.estimate.set_text(
             &estimate.map_or_else(String::new, |(megabytes, bitrate_mbps)| {
                 text::buffer_estimate(megabytes, memory, bitrate_mbps)
             }),
         );
     }
 
+    fn chosen_theme(&self) -> Theme {
+        chosen(&self.0.general.theme, &Theme::ALL)
+    }
+
     /// Reports whether the General group changed height.
-    pub(super) fn toggle_startup(&self) -> bool {
-        let wanted = self.start_with_windows.is_checked();
+    fn toggle_startup(&self) -> bool {
+        let wanted = self.0.general.start_with_windows.is_checked();
         match startup::set(wanted) {
             Ok(()) => {
                 log::info(if wanted {
@@ -204,46 +244,38 @@ impl SettingsPage {
             Err(error) => {
                 let message = text::startup_setting_failed(error);
                 log::error(&message);
-                self.start_with_windows.set_check(!wanted);
+                self.0.general.start_with_windows.set_check(!wanted);
                 self.show_startup_error(Some(&message))
             }
         }
     }
 
-    /// Reports whether the General group changed height.
-    pub(super) fn show_startup_error(&self, message: Option<&str>) -> bool {
-        self.general_group.set_message(message)
-    }
-
     fn entered(&self) -> Result<Config, String> {
         let required =
             |field: &gui::Edit| number(field).ok_or_else(|| text::NUMBER_REQUIRED.to_owned());
-        let hotkey = self.hotkey.text().unwrap_or_default();
-        let folder = self.folder.text().unwrap_or_default();
+        let recording = &self.0.recording;
+        let encoding = &recording.encoding;
+        let hotkey = recording.hotkey.text().unwrap_or_default();
+        let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
-            mode: chosen(&self.mode, &Mode::ALL),
-            backend: chosen(&self.backend, &Backend::ALL),
-            codec: chosen(&self.codec, &self.codecs),
-            frame_rate: required(&self.frame_rate)?,
-            buffer_seconds: required(&self.buffer_seconds)?,
-            bitrate_mbps: required(&self.bitrate)?,
+            mode: chosen(&recording.mode, &Mode::ALL),
+            backend: chosen(&recording.backend, &Backend::ALL),
+            codec: chosen(&encoding.codec, &self.0.codecs),
+            frame_rate: required(&encoding.frame_rate)?,
+            buffer_seconds: required(&encoding.buffer_seconds)?,
+            bitrate_mbps: required(&encoding.bitrate)?,
             hotkey: hotkey.trim().to_owned(),
             clip_directory: stored_folder(folder.trim()),
-            audio: self.audio.is_checked(),
-            cursor: self.cursor.is_checked(),
-            buffer_memory: chosen(&self.memory, &Memory::ALL),
-            theme: chosen(&self.theme, &Theme::ALL),
+            audio: recording.audio.is_checked(),
+            cursor: recording.cursor.is_checked(),
+            buffer_memory: chosen(&recording.memory, &Memory::ALL),
+            theme: chosen(&self.0.general.theme, &Theme::ALL),
         })
     }
 }
 
 struct RecordingControls {
-    frame: Frame,
-    codec: gui::ComboBox,
-    frame_rate: gui::Edit,
-    buffer_seconds: gui::Edit,
-    bitrate: gui::Edit,
-    spins: [gui::UpDown; 3],
+    encoding: EncodingFields,
     hotkey: gui::Edit,
     mode: gui::ComboBox,
     backend: gui::ComboBox,
@@ -251,27 +283,27 @@ struct RecordingControls {
     memory: gui::ComboBox,
     audio: gui::CheckBox,
     cursor: gui::CheckBox,
-    estimate: gui::Label,
+    estimate: TintedLabel,
     apply: gui::Button,
-    error: gui::Label,
+    error: TintedLabel,
 }
 
 impl RecordingControls {
     fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec], skin: &Skin) -> Self {
-        let frame = Frame::new(
-            page,
-            text::GROUP_RECORDING_SETTINGS,
-            rows::RECORDING_FRAME,
-            rows::RECORDING_HEIGHT,
-        );
         let encoding = EncodingFields::new(page, config, codecs);
-        let hotkey = text_field(page, text::HOTKEY, rows::HOTKEY, 110, &config.hotkey);
+        let hotkey = text_field(
+            page,
+            text::HOTKEY,
+            rows::HOTKEY,
+            HOTKEY_WIDTH,
+            &config.hotkey,
+        );
         let (mode, backend) = source_fields(page, config);
         let folder = text_field(
             page,
             text::FOLDER,
             rows::FOLDER,
-            INNER_WIDTH - FIELD_OFFSET,
+            FULL_WIDTH,
             &config.clip_directory().display().to_string(),
         );
         let memory = choice_field(
@@ -279,31 +311,29 @@ impl RecordingControls {
             text::MEMORY,
             INNER_X,
             rows::MEMORY,
-            190,
+            CHOICE_WIDTH,
             &Memory::ALL.map(Memory::name),
             index_of(&Memory::ALL, config.buffer_memory),
         );
         let audio = check_box(page, text::AUDIO, rows::AUDIO, config.audio);
         let cursor = check_box(page, text::CURSOR, rows::CURSOR, config.cursor);
-        let estimate = label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1);
+        let estimate = TintedLabel::new(
+            label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1),
+            GRAY,
+        );
         let apply = button(page, text::APPLY, INNER_X, rows::APPLY, BUTTON_WIDTH);
         skin_button(&apply, skin);
-        let error_x = BUTTON_WIDTH + 8;
         let error = label(
             page,
-            "",
-            INNER_X + error_x,
+            &codec_warning(config, codecs),
+            INNER_X + ERROR_X,
             rows::APPLY - 2,
-            INNER_WIDTH - error_x,
+            INNER_WIDTH - ERROR_X,
             2,
         );
+        let error = TintedLabel::new(error, RED);
         Self {
-            frame,
-            codec: encoding.codec,
-            frame_rate: encoding.frame_rate,
-            buffer_seconds: encoding.buffer_seconds,
-            bitrate: encoding.bitrate,
-            spins: encoding.spins,
+            encoding,
             hotkey,
             mode,
             backend,
@@ -323,7 +353,7 @@ struct EncodingFields {
     frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
     bitrate: gui::Edit,
-    spins: [gui::UpDown; 3],
+    _spins: [gui::UpDown; 3],
 }
 
 impl EncodingFields {
@@ -334,7 +364,7 @@ impl EncodingFields {
             text::CODEC,
             INNER_X,
             rows::ENCODING,
-            90,
+            CODEC_WIDTH,
             &names,
             index_of(codecs, config.codec).or(Some(0)),
         );
@@ -367,65 +397,42 @@ impl EncodingFields {
             frame_rate,
             buffer_seconds,
             bitrate,
-            spins: [frame_rate_spin, buffer_spin, bitrate_spin],
+            _spins: [frame_rate_spin, buffer_spin, bitrate_spin],
         }
     }
 }
 
 struct GeneralControls {
-    frame: Frame,
     theme: gui::ComboBox,
-    check_box: gui::CheckBox,
-    error: gui::Label,
-    group: ExpandableGroup,
+    start_with_windows: gui::CheckBox,
+    error: TintedLabel,
 }
 
 impl GeneralControls {
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
-        let frame = Frame::new(
-            page,
-            text::GROUP_GENERAL,
-            rows::GENERAL_FRAME,
-            rows::GENERAL_HEIGHT,
-        );
         let theme = choice_field(
             page,
             text::THEME,
             INNER_X,
             rows::THEME,
-            190,
+            CHOICE_WIDTH,
             &Theme::ALL.map(Theme::name),
             index_of(&Theme::ALL, config.theme),
         );
-        let check_box = check_box(
+        let start_with_windows = check_box(
             page,
             text::START_WITH_WINDOWS,
             rows::START_WITH_WINDOWS,
             start_with_windows,
         );
-        let error = label(page, "", INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1);
-        let group = ExpandableGroup::new(frame.clone(), error.clone(), STARTUP_ERROR_EXTRA);
+        let error = TintedLabel::new(
+            hidden_label(page, INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1),
+            RED,
+        );
         Self {
-            frame,
             theme,
-            check_box,
+            start_with_windows,
             error,
-            group,
-        }
-    }
-}
-
-fn label_colours(
-    errors: [gui::Label; 2],
-    muted: gui::Label,
-) -> impl Fn(&w::HWND) -> w::COLORREF + 'static {
-    move |hwnd| {
-        if errors.iter().any(|error| *hwnd == *error.hwnd()) {
-            RED
-        } else if *hwnd == *muted.hwnd() {
-            GRAY
-        } else {
-            BLACK
         }
     }
 }
@@ -475,11 +482,8 @@ fn number_field(
     let spin = gui::UpDown::new(
         page,
         gui::UpDownOpts {
-            range: (
-                i32::try_from(minimum).unwrap_or(i32::MAX),
-                i32::try_from(maximum).unwrap_or(i32::MAX),
-            ),
-            value: i32::try_from(value).unwrap_or(i32::MAX),
+            range: (saturating_i32(minimum), saturating_i32(maximum)),
+            value: saturating_i32(value),
             // No thousands separators: the field is parsed back as a plain number.
             control_style: co::UDS::AUTOBUDDY
                 | co::UDS::SETBUDDYINT
@@ -530,7 +534,7 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         text::MODE,
         COLUMN_X,
         rows::HOTKEY,
-        INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET,
+        COLUMN_WIDTH,
         &Mode::ALL.map(Mode::name),
         index_of(&Mode::ALL, config.mode),
     );
@@ -539,24 +543,32 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         text::BACKEND,
         INNER_X,
         rows::BACKEND,
-        INNER_WIDTH - FIELD_OFFSET,
+        FULL_WIDTH,
         &Backend::ALL.map(Backend::name),
         index_of(&Backend::ALL, config.backend),
     );
     (mode, backend)
 }
 
+/// Logged as well: the label is seen only once the tab is.
+fn codec_warning(config: &Config, codecs: &[Codec]) -> String {
+    if codecs.contains(&config.codec) {
+        return String::new();
+    }
+    let warning = text::codec_unsupported(config.codec.name());
+    log::warning(&warning);
+    warning
+}
+
 fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
     let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
 }
 
-fn validated(mut config: Config) -> Result<Config, String> {
+fn validated(mut config: Config) -> Result<(Config, Hotkey), String> {
     config.validate().map_err(|error| error.to_string())?;
-    config.hotkey = config
-        .parsed_hotkey()
-        .map_err(|error| error.to_string())?
-        .to_string();
-    Ok(config)
+    let hotkey = config.parsed_hotkey().map_err(|error| error.to_string())?;
+    config.hotkey = hotkey.to_string();
+    Ok((config, hotkey))
 }
 
 /// Empty for the default folder, so a moved default is followed.
@@ -594,7 +606,7 @@ fn chosen<T: Copy + Default>(field: &gui::ComboBox, all: &[T]) -> T {
     field
         .items()
         .selected_index()
-        .and_then(|index| all.get(index as usize).copied())
+        .and_then(|index| all.get(usize::try_from(index).ok()?).copied())
         .unwrap_or_default()
 }
 

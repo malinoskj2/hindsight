@@ -2,119 +2,154 @@
 
 use super::{
     layout::{
-        self, AMBER, BLACK, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, RED,
-        TintedLabel, VALUE_WIDTH, VALUE_X, label, path_label,
+        self, AMBER, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X, LINE, Painted, RED,
+        TintedLabel, VALUE_WIDTH, VALUE_X, hidden_label, label, path_label,
     },
     text,
     theme::{Skin, Surface},
 };
 use crate::service::Status;
-use winsafe::{self as w, gui, prelude::*};
+use std::rc::Rc;
+use winsafe::{gui, prelude::*};
 
 const NOTICE_EXTRA: i32 = 2 * LINE + 4;
+const FIRST_ROW: i32 = 20;
+const ROW_PITCH: i32 = 20;
+
+mod rows {
+    use super::{FIRST_ROW, LINE, ROW_PITCH};
+
+    pub(super) const RECORDING_FRAME: i32 = 6;
+    pub(super) const STATE: i32 = RECORDING_FRAME + FIRST_ROW;
+    pub(super) const SOURCE: i32 = STATE + LINE + 4;
+    pub(super) const BACKEND: i32 = SOURCE + ROW_PITCH;
+    pub(super) const ENCODER: i32 = BACKEND + ROW_PITCH;
+    pub(super) const RATES: i32 = ENCODER + ROW_PITCH;
+    pub(super) const NOTICE: i32 = RATES + LINE + 4;
+    pub(super) const RECORDING_HEIGHT: i32 = RATES + LINE + 6 - RECORDING_FRAME;
+    pub(super) const STATS_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT + 6;
+    pub(super) const SESSION_WRITTEN: i32 = STATS_FRAME + FIRST_ROW;
+    pub(super) const SESSION_SAVED: i32 = SESSION_WRITTEN + ROW_PITCH;
+    pub(super) const LIFETIME_WRITTEN: i32 = SESSION_SAVED + ROW_PITCH;
+    pub(super) const LIFETIME_SAVED: i32 = LIFETIME_WRITTEN + ROW_PITCH;
+    pub(super) const STATS_HEIGHT: i32 = LIFETIME_SAVED + LINE + 2 - STATS_FRAME;
+}
 
 #[derive(Clone)]
-pub(super) struct StatusPage {
+pub(super) struct StatusPage(Rc<Inner>);
+
+struct Inner {
     page: gui::TabPage,
     frames: Vec<Frame>,
     recording_group: ExpandableGroup,
-    state: TintedLabel,
-    source: gui::Label,
-    backend: gui::Label,
-    encoder: gui::Label,
-    rates: gui::Label,
-    notice: TintedLabel,
-    session_written: gui::Label,
-    session_saved: gui::Label,
-    lifetime_written: gui::Label,
-    lifetime_saved: gui::Label,
+    recording: RecordingLabels,
+    stats: StatsLabels,
+}
+
+impl Painted for Inner {
+    fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
+        [&self.recording.state, &self.recording.notice].into_iter()
+    }
 }
 
 impl StatusPage {
     pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
-        let page = gui::TabPage::new(parent, gui::TabPageOpts::default());
-        let recording = RecordingLabels::new(&page);
-        let stats = StatsLabels::new(&page);
-        let recording_group = expanding_recording_group(&recording, &stats);
-        let frames = vec![recording.frame, stats.frame];
-        layout::draw(
+        let page = layout::page(parent);
+        let recording_frame = Frame::new(
             &page,
-            page.on(),
-            frames.clone(),
-            skin,
-            Surface::Page,
-            label_colours([recording.state.clone(), recording.notice.clone()]),
+            text::GROUP_RECORDING,
+            rows::RECORDING_FRAME,
+            rows::RECORDING_HEIGHT,
         );
-
-        Self {
+        let recording = RecordingLabels::new(&page);
+        let stats_frame = Frame::new(
+            &page,
+            text::GROUP_STATS,
+            rows::STATS_FRAME,
+            rows::STATS_HEIGHT,
+        );
+        let stats = StatsLabels::new(&page);
+        let frames = vec![recording_frame, stats_frame];
+        let recording_group =
+            ExpandableGroup::new(0, recording.notice.label().clone(), NOTICE_EXTRA)
+                .moving(stats.labels());
+        let inner = Rc::new(Inner {
             page,
             frames,
             recording_group,
-            state: recording.state,
-            source: recording.source,
-            backend: recording.backend,
-            encoder: recording.encoder,
-            rates: recording.rates,
-            notice: recording.notice,
-            session_written: stats.session_written.value,
-            session_saved: stats.session_saved.value,
-            lifetime_written: stats.lifetime_written.value,
-            lifetime_saved: stats.lifetime_saved.value,
-        }
+            recording,
+            stats,
+        });
+        layout::draw(
+            &inner.page,
+            inner.page.on(),
+            skin,
+            Surface::Page,
+            Rc::clone(&inner),
+        );
+        Self(inner)
     }
 
     pub(super) fn page(&self) -> &gui::TabPage {
-        &self.page
+        &self.0.page
     }
 
     pub(super) fn frames(&self) -> &[Frame] {
-        &self.frames
+        &self.0.frames
     }
 
     pub(super) fn on_create(&self) {
-        layout::fit_titles(&self.frames);
-        self.recording_group.on_create();
+        layout::fit_titles(&self.0.frames);
     }
 
     pub(super) fn extra(&self) -> i32 {
-        self.recording_group.extra()
+        self.0.recording_group.extra()
     }
 
-    /// Reports whether the Recording group changed height.
-    pub(super) fn update(&self, status: &Status, hotkey_error: Option<&str>) -> bool {
+    /// Reports whether the Recording group changed height. The window's own notices come
+    /// before the service's.
+    pub(super) fn update(&self, status: &Status, window_notices: [Option<&str>; 2]) -> bool {
         self.show_state(status);
         self.show_figures(status);
-        self.show_notices(status, hotkey_error)
+        self.show_notices(status, window_notices)
     }
 
     fn show_state(&self, status: &Status) {
         let live = status.recording && status.stream.is_some();
-        self.state.set_colour(if live { GREEN } else { GRAY });
-        self.state.set_text(&text::status(status.state));
+        let state = &self.0.recording.state;
+        state.set_colour(if live { GREEN } else { GRAY });
+        state.set_text(&text::status(status.state));
     }
 
     fn show_figures(&self, status: &Status) {
-        layout::set_text(&self.source, &text::source(status));
-        layout::set_text(&self.backend, &text::backend(status));
-        layout::set_text(&self.encoder, &text::encoder(status));
-        layout::set_text(&self.rates, &text::rates(status));
-        layout::set_text(&self.session_written, &text::session_written(status));
-        layout::set_text(&self.session_saved, &text::session_saved(status));
-        layout::set_text(&self.lifetime_written, &text::lifetime_written(status));
-        layout::set_text(&self.lifetime_saved, &text::lifetime_saved(status));
+        let recording = &self.0.recording;
+        layout::set_text(&recording.source, &text::source(status));
+        layout::set_text(&recording.backend, &text::backend(status));
+        layout::set_text(&recording.encoder, &text::encoder(status));
+        layout::set_text(&recording.rates, &text::rates(status));
+        for (row, figure) in self.0.stats.figures(status) {
+            layout::set_text(&row.value, &figure);
+        }
     }
 
-    fn show_notices(&self, status: &Status, hotkey_error: Option<&str>) -> bool {
-        self.notice
+    fn show_notices(&self, status: &Status, window_notices: [Option<&str>; 2]) -> bool {
+        self.0
+            .recording
+            .notice
             .set_colour(if status.error.is_some() { RED } else { AMBER });
-        let notice = notice_text(status, hotkey_error);
-        self.recording_group
-            .set_message((!notice.is_empty()).then_some(notice.as_str()))
+        let notice = notice_text(status, window_notices);
+        self.0.recording_group.set_message(
+            &self.0.frames,
+            (!notice.is_empty()).then_some(notice.as_str()),
+        )
     }
 }
 
 struct RecordingLabels {
-    frame: Frame,
     state: TintedLabel,
     source: gui::Label,
     backend: gui::Label,
@@ -125,27 +160,21 @@ struct RecordingLabels {
 
 impl RecordingLabels {
     fn new(page: &gui::TabPage) -> Self {
-        let frame = Frame::new(page, text::GROUP_RECORDING, 6, 126);
-        let state = TintedLabel::new(page, INNER_X, 26, INNER_WIDTH, 1, GRAY);
-        let source = Row::path(page, text::SOURCE, 48).value;
-        let backend = Row::text(page, text::BACKEND, 68).value;
-        let encoder = Row::text(page, text::ENCODER, 88).value;
-        let rates = Row::text(page, text::CAPTURE_RATE, 108).value;
-        let notice = TintedLabel::new(page, INNER_X, 130, INNER_WIDTH, 2, AMBER);
         Self {
-            frame,
-            state,
-            source,
-            backend,
-            encoder,
-            rates,
-            notice,
+            state: TintedLabel::new(label(page, "", INNER_X, rows::STATE, INNER_WIDTH, 1), GRAY),
+            source: Row::path(page, text::SOURCE, rows::SOURCE).value,
+            backend: Row::text(page, text::BACKEND, rows::BACKEND).value,
+            encoder: Row::text(page, text::ENCODER, rows::ENCODER).value,
+            rates: Row::text(page, text::FRAME_RATE, rows::RATES).value,
+            notice: TintedLabel::new(
+                hidden_label(page, INNER_X, rows::NOTICE, INNER_WIDTH, 2),
+                AMBER,
+            ),
         }
     }
 }
 
 struct StatsLabels {
-    frame: Frame,
     session_written: Row,
     session_saved: Row,
     lifetime_written: Row,
@@ -155,12 +184,20 @@ struct StatsLabels {
 impl StatsLabels {
     fn new(page: &gui::TabPage) -> Self {
         Self {
-            frame: Frame::new(page, text::GROUP_STATS, 138, 100),
-            session_written: Row::text(page, text::SESSION_WRITTEN, 158),
-            session_saved: Row::text(page, text::SESSION_SAVED, 178),
-            lifetime_written: Row::text(page, text::LIFETIME_WRITTEN, 198),
-            lifetime_saved: Row::text(page, text::LIFETIME_SAVED, 218),
+            session_written: Row::text(page, text::SESSION_WRITTEN, rows::SESSION_WRITTEN),
+            session_saved: Row::text(page, text::SESSION_SAVED, rows::SESSION_SAVED),
+            lifetime_written: Row::text(page, text::LIFETIME_WRITTEN, rows::LIFETIME_WRITTEN),
+            lifetime_saved: Row::text(page, text::LIFETIME_SAVED, rows::LIFETIME_SAVED),
         }
+    }
+
+    fn figures(&self, status: &Status) -> [(&Row, String); 4] {
+        [
+            (&self.session_written, text::session_written(status)),
+            (&self.session_saved, text::session_saved(status)),
+            (&self.lifetime_written, text::lifetime_written(status)),
+            (&self.lifetime_saved, text::lifetime_saved(status)),
+        ]
     }
 
     fn labels(&self) -> impl Iterator<Item = gui::Label> {
@@ -200,34 +237,12 @@ impl Row {
     }
 }
 
-fn expanding_recording_group(recording: &RecordingLabels, stats: &StatsLabels) -> ExpandableGroup {
-    ExpandableGroup::new(
-        recording.frame.clone(),
-        recording.notice.label().clone(),
-        NOTICE_EXTRA,
-    )
-    .moving_frame(stats.frame.clone())
-    .moving(stats.labels())
-}
-
-fn label_colours(tints: [TintedLabel; 2]) -> impl Fn(&w::HWND) -> w::COLORREF + 'static {
-    move |hwnd| {
-        tints
-            .iter()
-            .find_map(|tint| tint.colour_of(hwnd))
-            .unwrap_or(BLACK)
-    }
-}
-
-fn notice_text(status: &Status, hotkey_error: Option<&str>) -> String {
-    let notices: Vec<&str> = [
-        hotkey_error,
-        status.notice.as_deref(),
-        status.error.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
+    let notices: Vec<&str> = window_notices
+        .into_iter()
+        .chain([status.notice.as_deref(), status.error.as_deref()])
+        .flatten()
+        .collect();
     notices.join("\r\n")
 }
 
@@ -240,15 +255,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_rows_sit_where_they_were_laid_by_hand() {
+        assert_eq!(
+            [
+                rows::STATE,
+                rows::SOURCE,
+                rows::BACKEND,
+                rows::ENCODER,
+                rows::RATES,
+                rows::NOTICE,
+            ],
+            [26, 48, 68, 88, 108, 130]
+        );
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 126));
+        assert_eq!((rows::STATS_FRAME, rows::STATS_HEIGHT), (138, 100));
+        assert_eq!(
+            [
+                rows::SESSION_WRITTEN,
+                rows::SESSION_SAVED,
+                rows::LIFETIME_WRITTEN,
+                rows::LIFETIME_SAVED,
+            ],
+            [158, 178, 198, 218]
+        );
+    }
+
+    #[test]
     fn the_notice_line_lists_what_there_is_one_per_line() {
         let mut status = Status::default();
-        assert_eq!(notice_text(&status, None), "");
+        assert_eq!(notice_text(&status, [None, None]), "");
         status.error = Some("capture failed".to_owned());
-        assert_eq!(notice_text(&status, None), "capture failed");
+        assert_eq!(notice_text(&status, [None, None]), "capture failed");
         status.notice = Some("sound is off".to_owned());
         assert_eq!(
-            notice_text(&status, Some("hotkey taken")),
-            "hotkey taken\r\nsound is off\r\ncapture failed"
+            notice_text(&status, [Some("hotkey taken"), Some("no tray")]),
+            "hotkey taken\r\nno tray\r\nsound is off\r\ncapture failed"
         );
     }
 }

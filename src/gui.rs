@@ -2,32 +2,33 @@
 
 use self::{
     clips::ClipsPage,
-    footer::Footer,
-    layout::{BLACK, GRAY, MARGIN, WINDOW_WIDTH, resize_height_by, resize_width_by, shift_by},
+    layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
     settings::SettingsPage,
     status::StatusPage,
     theme::{Skin, Surface},
 };
 use crate::{
-    APP_NAME,
     config::{Codec, Config, Mode, Theme},
     gpu, log,
     service::Worker,
     sys::{
         foreground::{self, ForegroundHook},
-        hotkey, icon, instance, startup,
+        hotkey::{self, Hotkey},
+        icon, instance, startup,
         tray::{Tray, TrayAction},
         window,
     },
 };
 use anyhow::Result;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, OnceCell, RefCell},
+    rc::Rc,
+};
 use winsafe::{self as w, co, gui, prelude::*};
 
 mod art;
 mod clips;
-mod footer;
 mod layout;
 mod logs;
 mod settings;
@@ -42,28 +43,35 @@ const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
 
-const TAB_HEIGHT: i32 = 406;
-/// The footer row is added only while it is shown.
-const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
-
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
     match startup {
         Ok((worker, config)) => Main::create_and_run(worker, config, start_hidden),
-        Err(error) => startup_error::show(&format!("{error:#}")),
+        Err(error) => startup_error::show(&format!("{error:#}"), ICON_RESOURCE),
     }
 }
 
 #[derive(Clone)]
-struct Main {
-    wnd: gui::WindowMain,
+struct Main(Rc<Inner>);
+
+/// The cells are borrowed briefly, never across a call that can re-enter the window procedure.
+struct Inner {
+    main_window: gui::WindowMain,
     tab: gui::Tab,
     status: StatusPage,
     clips: ClipsPage,
     settings: SettingsPage,
     logs: LogsPage,
-    footer: Footer,
     skin: Skin,
-    shared: Rc<RefCell<Shared>>,
+    worker: Worker,
+    config: RefCell<Config>,
+    tray: RefCell<Option<Tray>>,
+    foreground_hook: RefCell<Option<ForegroundHook>>,
+    quitting: Cell<bool>,
+    hotkey_error: RefCell<Option<String>>,
+    tray_error: OnceCell<String>,
+    initial_startup_error: Cell<Option<String>>,
+    /// By how much the pages have grown for their messages.
+    extra: Cell<i32>,
 }
 
 impl Main {
@@ -78,15 +86,15 @@ impl Main {
     fn create(worker: Worker, config: Config, start_hidden: bool) -> Self {
         let skin = Skin::new(config.theme);
         let width = WINDOW_WIDTH + skin.extra_width();
-        let wnd = main_window(width, start_hidden);
+        let main_window = application_window(width, start_hidden);
         let (start_with_windows, startup_error) = startup_setting();
-        let status = StatusPage::new(&wnd, &skin);
-        let clips = ClipsPage::new(&wnd, &skin);
-        let codecs = offered_codecs(&config);
-        let settings = SettingsPage::new(&wnd, &config, &codecs, start_with_windows, &skin);
-        let logs = LogsPage::new(&wnd, &skin);
+        let status = StatusPage::new(&main_window, &skin);
+        let clips = ClipsPage::new(&main_window, &skin);
+        let codecs = offered_codecs();
+        let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
+        let logs = LogsPage::new(&main_window, &skin);
         let tab = gui::Tab::new(
-            &wnd,
+            &main_window,
             gui::TabOpts {
                 position: gui::dpi(MARGIN, MARGIN),
                 size: gui::dpi(width - 2 * MARGIN, TAB_HEIGHT),
@@ -99,24 +107,30 @@ impl Main {
                 ..Default::default()
             },
         );
-        let footer = Footer::new(&wnd);
-        Self {
-            wnd,
+        Self(Rc::new(Inner {
+            main_window,
             tab,
             status,
             clips,
             settings,
             logs,
-            footer,
             skin,
-            shared: Rc::new(RefCell::new(Shared::new(worker, config, startup_error))),
-        }
+            worker,
+            config: RefCell::new(config),
+            tray: RefCell::default(),
+            foreground_hook: RefCell::default(),
+            quitting: Cell::new(false),
+            hotkey_error: RefCell::default(),
+            tray_error: OnceCell::new(),
+            initial_startup_error: Cell::new(startup_error),
+            extra: Cell::new(0),
+        }))
     }
 
     fn draw(&self) {
-        let skin = self.skin.clone();
-        let tab = self.tab.clone();
-        self.tab.on_subclass().wm_paint(move || {
+        let skin = self.0.skin.clone();
+        let tab = self.0.tab.clone();
+        self.0.tab.on_subclass().wm_paint(move || {
             if skin.is_themed() {
                 skin.paint_tabs(&tab);
             } else {
@@ -124,95 +138,81 @@ impl Main {
             }
             Ok(())
         });
-        let footer = self.footer.clone();
         layout::draw(
-            &self.wnd,
-            self.wnd.on(),
-            Vec::new(),
-            &self.skin,
+            &self.0.main_window,
+            self.0.main_window.on(),
+            &self.0.skin,
             Surface::Dialog,
-            move |hwnd| {
-                if *hwnd == *footer.control().hwnd() {
-                    GRAY
-                } else {
-                    BLACK
-                }
-            },
+            (),
         );
     }
 
     fn window_events(&self) {
-        let me = self.clone();
-        self.wnd.on().wm_create(move |_| {
-            me.on_create();
+        let this = self.clone();
+        self.0.main_window.on().wm_create(move |_| {
+            this.on_create();
             Ok(0)
         });
 
-        let me = self.clone();
-        self.tab.on().tcn_sel_change(move || {
-            me.refresh();
+        let this = self.clone();
+        self.0.tab.on().tcn_sel_change(move || {
+            this.refresh();
             Ok(())
         });
 
-        let me = self.clone();
-        self.wnd.on().wm_show_window(move |p| {
-            me.on_show_window(p.being_shown);
+        let this = self.clone();
+        self.0.main_window.on().wm_show_window(move |params| {
+            this.on_show_window(params.being_shown);
             Ok(())
         });
 
-        let me = self.clone();
-        self.wnd.on().wm_timer(STATUS_TIMER, move || {
-            me.on_timer();
+        let this = self.clone();
+        self.0.main_window.on().wm_timer(STATUS_TIMER, move || {
+            this.on_timer();
             Ok(())
         });
 
-        let me = self.clone();
-        self.wnd.on().wm(co::WM::HOTKEY, move |message| {
-            me.on_hotkey(message.wparam);
+        let this = self.clone();
+        self.0.main_window.on().wm(co::WM::HOTKEY, move |message| {
+            this.on_hotkey(message.wparam);
             Ok(0)
         });
 
-        let me = self.clone();
-        self.wnd.on().wm(instance::show_message(), move |_| {
-            me.show();
-            Ok(0)
-        });
+        let this = self.clone();
+        self.0
+            .main_window
+            .on()
+            .wm(instance::SHOW_MESSAGE, move |_| {
+                this.show();
+                Ok(0)
+            });
 
-        let me = self.clone();
-        self.wnd.on().wm_close(move || {
-            me.on_close();
+        let this = self.clone();
+        self.0.main_window.on().wm_close(move || {
+            this.on_close();
             Ok(())
         });
 
-        let me = self.clone();
-        self.wnd.on().wm_destroy(move || {
-            me.on_destroy();
+        let this = self.clone();
+        self.0.main_window.on().wm_destroy(move || {
+            this.on_destroy();
             Ok(())
         });
     }
 
     fn settings_events(&self) {
-        let me = self.clone();
-        self.settings.apply.on().bn_clicked(move || {
-            me.apply_settings();
-            Ok(())
-        });
+        let this = self.clone();
+        self.0.settings.on_apply(move || this.apply_settings());
 
-        let me = self.clone();
-        self.settings.theme.on().cbn_sel_change(move || {
-            me.on_theme_chosen();
-            Ok(())
-        });
+        let this = self.clone();
+        self.0
+            .settings
+            .on_theme_chosen(move |theme| this.on_theme_chosen(theme));
 
-        let me = self.clone();
-        self.settings.start_with_windows.on().bn_clicked(move || {
-            if me.settings.toggle_startup() {
-                me.fit_window();
-            }
-            Ok(())
-        });
-
-        self.settings.estimate_events();
+        let this = self.clone();
+        self.0
+            .settings
+            .on_startup_toggled(move || this.fit_window());
     }
 
     fn run(&self, start_hidden: bool) -> Result<()> {
@@ -221,56 +221,52 @@ impl Main {
         } else {
             co::SW::SHOW
         };
-        self.wnd
-            .run_main(Some(show))
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!("run the application window: {error}"))
+        layout::run(
+            &self.0.main_window,
+            Some(show),
+            "run the application window",
+        )
     }
 
     fn on_create(&self) {
         self.apply_look();
-        self.status.on_create();
-        self.clips.on_create();
-        self.settings.on_create();
-        self.logs.on_create();
-        self.footer.on_create();
+        self.0.status.on_create();
+        self.0.clips.on_create();
+        self.0.settings.on_create();
+        self.0.logs.on_create();
         self.show_initial_startup_error();
-        let configured = self.shared.borrow().config.clone();
-        let _ = self.register_hotkey(&configured);
+        self.register_configured_hotkey();
         self.watch_foreground_changes();
         self.add_tray_icon();
         self.refresh();
     }
 
     fn show_initial_startup_error(&self) {
-        let initial_error = self.shared.borrow_mut().initial_startup_error.take();
-        if let Some(error) = initial_error
-            && self.settings.show_startup_error(Some(&error))
+        if let Some(error) = self.0.initial_startup_error.take()
+            && self.0.settings.show_startup_error(Some(&error))
         {
             self.fit_window();
         }
     }
 
     fn watch_foreground_changes(&self) {
-        let me = self.clone();
-        let hook = ForegroundHook::install(move || me.watch_foreground());
+        let this = self.clone();
+        let hook = ForegroundHook::install(move || this.watch_foreground());
         if hook.is_none() {
             log::warning(text::FOREGROUND_WATCH_FAILED);
         }
-        self.shared.borrow_mut().foreground_hook = hook;
+        *self.0.foreground_hook.borrow_mut() = hook;
         self.watch_foreground();
     }
 
     fn add_tray_icon(&self) {
-        let me = self.clone();
-        match Tray::new(self.skin.theme(), move |action| me.on_tray(action)) {
-            Ok(tray) => self.shared.borrow_mut().tray = Some(tray),
+        let this = self.clone();
+        match Tray::new(self.0.skin.theme(), move |action| this.on_tray(action)) {
+            Ok(tray) => *self.0.tray.borrow_mut() = Some(tray),
             Err(error) => {
                 let message = text::tray_unavailable(error);
                 log::warning(&message);
-                self.footer.show_hint(&message);
-                self.shared.borrow_mut().heights.footer = footer::HEIGHT;
-                self.fit_window();
+                let _ = self.0.tray_error.set(message);
             }
         }
     }
@@ -279,17 +275,18 @@ impl Main {
     fn on_show_window(&self, being_shown: bool) {
         if being_shown {
             let _ = self
-                .wnd
+                .0
+                .main_window
                 .hwnd()
                 .SetTimer(STATUS_TIMER, STATUS_INTERVAL_MS, None);
             self.refresh();
         } else {
-            let _ = self.wnd.hwnd().KillTimer(STATUS_TIMER);
+            let _ = self.0.main_window.hwnd().KillTimer(STATUS_TIMER);
         }
     }
 
     fn on_timer(&self) {
-        self.shared.borrow().worker.refresh();
+        self.0.worker.refresh();
         self.refresh();
     }
 
@@ -300,31 +297,26 @@ impl Main {
     }
 
     fn show(&self) {
-        self.wnd.hwnd().ShowWindow(co::SW::RESTORE);
-        self.wnd.hwnd().SetForegroundWindow();
+        self.0.main_window.hwnd().ShowWindow(co::SW::RESTORE);
+        self.0.main_window.hwnd().SetForegroundWindow();
     }
 
     fn on_close(&self) {
-        let to_tray = {
-            let shared = self.shared.borrow();
-            shared.tray.is_some() && !shared.quitting
-        };
+        let to_tray = self.0.tray.borrow().is_some() && !self.0.quitting.get();
         if to_tray {
             log::info(text::CLOSED_TO_TRAY);
-            self.wnd.hwnd().ShowWindow(co::SW::HIDE);
+            self.0.main_window.hwnd().ShowWindow(co::SW::HIDE);
             return;
         }
         // DestroyWindow frees this handler: go through a stack copy and touch nothing after.
-        let wnd = self.wnd.clone();
-        let _ = wnd.hwnd().DestroyWindow();
+        let main_window = self.0.main_window.clone();
+        let _ = main_window.hwnd().DestroyWindow();
     }
 
     fn on_destroy(&self) {
-        // Drop outside the borrow: the tray's teardown can re-enter and borrow `shared`.
-        let (tray, hook) = {
-            let mut shared = self.shared.borrow_mut();
-            (shared.tray.take(), shared.foreground_hook.take())
-        };
+        // Dropped outside the borrows: the tray's teardown can re-enter and borrow again.
+        let tray = self.0.tray.take();
+        let hook = self.0.foreground_hook.take();
         drop(tray);
         drop(hook);
     }
@@ -335,85 +327,85 @@ impl Main {
             TrayAction::Save => self.save(),
             TrayAction::Quit => {
                 log::info(text::QUIT_FROM_TRAY);
-                self.shared.borrow_mut().quitting = true;
+                self.0.quitting.set(true);
                 self.on_close();
             }
         }
     }
 
     fn watch_foreground(&self) {
-        let shared = self.shared.borrow();
-        if shared.config.mode == Mode::Fullscreen
-            && let Some(target) = foreground::fullscreen_app()
-        {
-            shared.worker.target(target);
+        let fullscreen = self.0.config.borrow().mode == Mode::Fullscreen;
+        if fullscreen && let Some(target) = foreground::fullscreen_app() {
+            self.0.worker.target(target);
         }
     }
 
     fn save(&self) {
-        self.shared.borrow().worker.save();
-        if self.wnd.hwnd().IsWindowVisible() {
+        self.0.worker.save();
+        if self.0.main_window.hwnd().IsWindowVisible() {
             self.refresh();
         }
     }
 
     fn apply_settings(&self) {
-        let config = match self.settings.configuration() {
-            Ok(config) => config,
+        let (config, hotkey) = match self.0.settings.configuration() {
+            Ok(entered) => entered,
             Err(error) => {
-                self.settings.show_settings_error(&error);
+                self.0.settings.show_settings_error(&error);
                 return;
             }
         };
-        if let Err(error) = self.switch_hotkey(&config) {
-            self.settings.show_settings_error(&error);
+        if let Err(error) = self.switch_hotkey(hotkey) {
+            self.0.settings.show_settings_error(&error);
             return;
         }
-        self.settings.show_settings_error("");
-        self.settings.show_hotkey(&config.hotkey);
-        let mut shared = self.shared.borrow_mut();
-        shared.config = config.clone();
-        shared.worker.start(config);
-        drop(shared);
+        self.0.settings.show_settings_error("");
+        self.0.settings.show_hotkey(&config.hotkey);
+        *self.0.config.borrow_mut() = config.clone();
+        self.0.worker.start(config);
         self.watch_foreground();
     }
 
-    fn on_theme_chosen(&self) {
-        let theme = self.settings.chosen_theme();
-        if theme == self.skin.theme() {
+    fn on_theme_chosen(&self, theme: Theme) {
+        if theme == self.0.skin.theme() {
             return;
         }
-        let before = self.skin.extra_width();
-        self.skin.set(theme);
-        let delta = gui::dpi_x(self.skin.extra_width() - before);
+        let before = self.0.skin.extra_width();
+        self.0.skin.set(theme);
+        let delta = gui::dpi_x(self.0.skin.extra_width() - before);
         if delta != 0 {
             self.widen(delta);
         }
-        let mut shared = self.shared.borrow_mut();
-        shared.config.theme = theme;
-        shared.worker.set_theme(theme);
-        drop(shared);
+        self.0.config.borrow_mut().theme = theme;
+        self.0.worker.set_theme(theme);
         self.apply_look();
     }
 
     fn apply_look(&self) {
         self.apply_icon();
-        match self.skin.title_bar_colours() {
-            Some((caption, text)) => window::paint_title_bar(self.wnd.hwnd(), caption, text),
-            None => window::match_dialog_title_bar(self.wnd.hwnd()),
+        let hwnd = self.0.main_window.hwnd();
+        match self.0.skin.title_bar_colours() {
+            Some((caption, text)) => window::paint_title_bar(hwnd, caption, text),
+            None => window::match_dialog_title_bar(hwnd),
         }
-        let classic = !self.skin.is_themed();
-        for frame in self.status.frames().iter().chain(self.settings.frames()) {
+        let classic = !self.0.skin.is_themed();
+        for frame in self
+            .0
+            .status
+            .frames()
+            .iter()
+            .chain(self.0.settings.frames())
+        {
             frame.show_title_label(classic);
         }
-        self.clips.apply_look(&self.skin);
+        self.0.clips.apply_look(&self.0.skin);
         self.redraw();
     }
 
     fn apply_icon(&self) {
-        let theme = self.skin.theme();
-        window::set_icon(self.wnd.hwnd(), icon::resource(theme));
-        if let Some(tray) = &self.shared.borrow().tray
+        let theme = self.0.skin.theme();
+        window::set_icon(self.0.main_window.hwnd(), icon::resource(theme));
+        if let Some(tray) = &*self.0.tray.borrow()
             && let Err(error) = tray.set_theme(theme)
         {
             log::warning(text::tray_unavailable(error));
@@ -424,52 +416,61 @@ impl Main {
         for window in self.tab_and_pages() {
             resize_width_by(window, delta);
         }
-        resize_width_by(self.wnd.hwnd(), delta);
+        resize_width_by(self.0.main_window.hwnd(), delta);
     }
 
-    fn switch_hotkey(&self, config: &Config) -> Result<(), String> {
-        let result = self.register_hotkey(config);
+    fn switch_hotkey(&self, hotkey: Hotkey) -> Result<(), String> {
+        let result = self.register_hotkey(hotkey);
         if result.is_err() {
-            let previous = self.shared.borrow().config.clone();
-            let _ = self.register_hotkey(&previous);
+            self.register_configured_hotkey();
         }
         result
     }
 
-    fn register_hotkey(&self, config: &Config) -> Result<(), String> {
-        let result = config
-            .parsed_hotkey()
-            .map_err(|error| error.to_string())
-            .and_then(|parsed| {
-                hotkey::register(self.wnd.hwnd(), parsed).map_err(|error| error.to_string())
-            });
-        if let Err(error) = &result {
+    fn register_configured_hotkey(&self) {
+        let configured = self.0.config.borrow().parsed_hotkey();
+        match configured {
+            Ok(hotkey) => {
+                let _ = self.register_hotkey(hotkey);
+            }
+            Err(error) => self.note_hotkey_error(Some(error.to_string())),
+        }
+    }
+
+    fn register_hotkey(&self, hotkey: Hotkey) -> Result<(), String> {
+        let result =
+            hotkey::register(self.0.main_window.hwnd(), hotkey).map_err(|error| error.to_string());
+        self.note_hotkey_error(result.as_ref().err().cloned());
+        result
+    }
+
+    /// Shown on the Status page until the hotkey is registered.
+    fn note_hotkey_error(&self, error: Option<String>) {
+        if let Some(error) = &error {
             log::warning(error);
         }
-        self.shared.borrow_mut().hotkey_error = result.clone().err();
-        result
+        *self.0.hotkey_error.borrow_mut() = error;
     }
 
     fn refresh(&self) {
-        let (status, config, hotkey_error) = {
-            let shared = self.shared.borrow();
-            (
-                shared.worker.status(),
-                shared.config.clone(),
-                shared.hotkey_error.clone(),
-            )
-        };
-        if self.status.update(&status, hotkey_error.as_deref()) {
+        let status = self.0.worker.status();
+        let folder = self.0.config.borrow().clip_directory();
+        let hotkey_error = self.0.hotkey_error.borrow().clone();
+        let window_notices = [
+            hotkey_error.as_deref(),
+            self.0.tray_error.get().map(String::as_str),
+        ];
+        if self.0.status.update(&status, window_notices) {
             self.fit_window();
         }
-        self.clips
-            .update(&status, &config.clip_directory(), self.clips_in_view());
-        self.logs.update();
+        self.0.clips.update(&status, &folder, self.clips_in_view());
+        self.0.logs.update();
     }
 
     fn clips_in_view(&self) -> bool {
-        self.wnd.hwnd().IsWindowVisible()
+        self.0.main_window.hwnd().IsWindowVisible()
             && self
+                .0
                 .tab
                 .items()
                 .selected()
@@ -477,19 +478,15 @@ impl Main {
     }
 
     fn fit_window(&self) {
-        let pages = self.status.extra().max(self.settings.extra());
-        let (page_delta, window_delta) = self.shared.borrow_mut().heights.fit(pages);
-        let (page_delta, window_delta) = (gui::dpi_y(page_delta), gui::dpi_y(window_delta));
-        if page_delta != 0 {
+        let extra = self.0.status.extra().max(self.0.settings.extra());
+        let delta = gui::dpi_y(extra - self.0.extra.replace(extra));
+        if delta != 0 {
             for window in self.tab_and_pages() {
-                resize_height_by(window, page_delta);
+                resize_height_by(window, delta);
             }
-            resize_height_by(self.clips.list().hwnd(), page_delta);
-            resize_height_by(self.logs.view().hwnd(), page_delta);
-            shift_by(self.footer.control().hwnd(), page_delta);
-        }
-        if window_delta != 0 {
-            resize_height_by(self.wnd.hwnd(), window_delta);
+            self.0.clips.grow(delta);
+            self.0.logs.grow(delta);
+            resize_height_by(self.0.main_window.hwnd(), delta);
         }
         // Moved controls keep stale pixels otherwise.
         self.redraw();
@@ -497,17 +494,17 @@ impl Main {
 
     fn tab_and_pages(&self) -> [&w::HWND; 5] {
         [
-            self.tab.hwnd(),
-            self.status.page().hwnd(),
-            self.clips.page().hwnd(),
-            self.settings.page().hwnd(),
-            self.logs.page().hwnd(),
+            self.0.tab.hwnd(),
+            self.0.status.page().hwnd(),
+            self.0.clips.page().hwnd(),
+            self.0.settings.page().hwnd(),
+            self.0.logs.page().hwnd(),
         ]
     }
 
     fn redraw(&self) {
-        if let Ok(client) = self.wnd.hwnd().GetClientRect() {
-            let _ = self.wnd.hwnd().RedrawWindow(
+        if let Ok(client) = self.0.main_window.hwnd().GetClientRect() {
+            let _ = self.0.main_window.hwnd().RedrawWindow(
                 client,
                 &w::HRGN::NULL,
                 co::RDW::INVALIDATE | co::RDW::ERASE | co::RDW::ALLCHILDREN,
@@ -516,51 +513,7 @@ impl Main {
     }
 }
 
-/// Never borrowed while painting; paint-time handlers read colours kept beside their labels.
-struct Shared {
-    worker: Worker,
-    config: Config,
-    tray: Option<Tray>,
-    foreground_hook: Option<ForegroundHook>,
-    quitting: bool,
-    hotkey_error: Option<String>,
-    initial_startup_error: Option<String>,
-    heights: Heights,
-}
-
-impl Shared {
-    fn new(worker: Worker, config: Config, initial_startup_error: Option<String>) -> Self {
-        Self {
-            worker,
-            config,
-            tray: None,
-            foreground_hook: None,
-            quitting: false,
-            hotkey_error: None,
-            initial_startup_error,
-            heights: Heights::default(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct Heights {
-    footer: i32,
-    pages: i32,
-    window: i32,
-}
-
-impl Heights {
-    fn fit(&mut self, pages: i32) -> (i32, i32) {
-        let window = pages + self.footer;
-        let deltas = (pages - self.pages, window - self.window);
-        self.pages = pages;
-        self.window = window;
-        deltas
-    }
-}
-
-fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
+fn application_window(width: i32, start_hidden: bool) -> gui::WindowMain {
     // A window created visible would flash before `--tray` hides it.
     let visibility = if start_hidden {
         co::WS::NoValue
@@ -568,23 +521,20 @@ fn main_window(width: i32, start_hidden: bool) -> gui::WindowMain {
         co::WS::VISIBLE
     };
     gui::WindowMain::new(gui::WindowMainOpts {
-        title: APP_NAME,
         class_name: instance::WINDOW_CLASS,
-        size: gui::dpi(width, WINDOW_HEIGHT),
-        class_icon: gui::Icon::Id(ICON_RESOURCE),
         style: co::WS::CAPTION
             | co::WS::SYSMENU
             | co::WS::MINIMIZEBOX
             | co::WS::CLIPCHILDREN
             | co::WS::BORDER
             | visibility,
-        ..Default::default()
+        ..layout::window_opts(width, WINDOW_HEIGHT, ICON_RESOURCE)
     })
 }
 
 /// The codecs the Settings tab offers: those the GPU encodes, or all of them when it cannot say.
-fn offered_codecs(config: &Config) -> Vec<Codec> {
-    let codecs = match gpu::supported_codecs() {
+fn offered_codecs() -> Vec<Codec> {
+    match gpu::supported_codecs() {
         Ok(codecs) if !codecs.is_empty() => {
             log::info(text::codecs_offered(&codecs));
             codecs
@@ -597,32 +547,12 @@ fn offered_codecs(config: &Config) -> Vec<Codec> {
             log::warning(text::codecs_unknown(error));
             Codec::ALL.to_vec()
         }
-    };
-    if !codecs.contains(&config.codec) {
-        log::warning(text::codec_unsupported(config.codec.name()));
     }
-    codecs
 }
 
 fn startup_setting() -> (bool, Option<String>) {
     match startup::enabled() {
         Ok(enabled) => (enabled, None),
         Err(error) => (false, Some(text::startup_setting_unreadable(error))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_window_grows_by_the_footer_only_once_it_is_shown() {
-        let mut heights = Heights::default();
-        assert_eq!(heights.fit(40), (40, 40));
-        assert_eq!(heights.fit(40), (0, 0));
-        heights.footer = footer::HEIGHT;
-        assert_eq!(heights.fit(40), (0, footer::HEIGHT));
-        assert_eq!(heights.fit(0), (-40, -40));
-        assert_eq!(heights.window, footer::HEIGHT);
     }
 }
