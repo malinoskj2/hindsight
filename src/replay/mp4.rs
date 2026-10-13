@@ -251,8 +251,8 @@ fn interleave(video: Vec<(u64, Chunk)>, audio: Vec<(u64, Chunk)>) -> Vec<Chunk> 
     merged
 }
 
-/// Why a clip couldn't be written; a message ends with its cause, which `source()` doesn't
-/// repeat.
+/// Why a clip couldn't be written. A message names only what failed; a cause is its
+/// `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum MuxError {
     #[error("the replay buffer is empty")]
@@ -263,30 +263,12 @@ pub(crate) enum MuxError {
     TooLarge,
     #[error("the buffered video changed while it was being saved")]
     Changed,
-    #[error("build the clip's index: {0}")]
-    Index(mp4_atom::Error),
-    #[error("write the clip: {0}")]
-    Io(io::Error),
-    #[error("read the buffer back: {0}")]
-    Read(StoreError),
-}
-
-impl From<mp4_atom::Error> for MuxError {
-    fn from(error: mp4_atom::Error) -> Self {
-        Self::Index(error)
-    }
-}
-
-impl From<io::Error> for MuxError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<StoreError> for MuxError {
-    fn from(error: StoreError) -> Self {
-        Self::Read(error)
-    }
+    #[error("build the clip's index")]
+    Index(#[from] mp4_atom::Error),
+    #[error("write the clip")]
+    Io(#[from] io::Error),
+    #[error("read the buffer back")]
+    Read(#[from] StoreError),
 }
 
 pub(crate) type Visit<'a> = dyn FnMut(u64, bool, &[u8]) -> Result<(), MuxError> + 'a;

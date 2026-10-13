@@ -32,11 +32,11 @@ use windows::{
 
 mod config;
 #[cfg(test)]
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls Direct3D 12 and NVENC")]
 mod d3d12_cost;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "binds the NVENC API")]
 mod ffi;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls the NVENC function table")]
 mod session;
 
 use config::{codec_guid, configure, initialize_params};
@@ -102,8 +102,8 @@ pub(super) enum NvencError {
     Windows(&'static str, windows::core::Error),
     #[error("{0}: {1}")]
     Cuda(&'static str, super::cuda::CudaError),
-    #[error("move a frame into the replay buffer in GPU memory: {0}")]
-    Ring(crate::replay::StoreError),
+    #[error("move a frame into the replay buffer in GPU memory")]
+    Ring(#[source] crate::replay::StoreError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,7 +208,7 @@ enum Wait {
     Block,
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls the NVENC session")]
 impl Encoder {
     pub(super) fn open(
         device: &ID3D11Device,
@@ -819,7 +819,7 @@ fn codecs_among(guids: &[GUID]) -> Vec<Codec> {
         .collect()
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateTexture2D")]
 fn create_input_texture(
     device: &ID3D11Device,
     settings: Settings,
@@ -853,7 +853,7 @@ fn staging_bytes(settings: Settings) -> usize {
     (2 * picture).max(STAGING_LAYOUT.head_bytes) + STAGING_LAYOUT.header_bytes
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls CreateEventW")]
 fn create_event() -> Result<Owned<HANDLE>, NvencError> {
     // SAFETY: an unnamed auto-reset event with default security.
     let event = unsafe { CreateEventW(None, false, false, None) }

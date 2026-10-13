@@ -256,9 +256,11 @@ impl Frame {
             let _ = unsafe { DeleteObject(bitmap.into()) };
             return None;
         }
+        // SAFETY: the pointer is the live bitmap handle just created, only retyped.
+        let handle = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
         Some(Self {
             // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
-            bitmap: unsafe { DeleteObjectGuard::new(w::HBITMAP::from_ptr(bitmap.0)) },
+            bitmap: unsafe { DeleteObjectGuard::new(handle) },
             pixels: pixels.cast::<u8>(),
             width,
             height,
@@ -318,8 +320,10 @@ fn shell_picture(
     };
     // SAFETY: a plain call on a live interface; the bitmap it returns is ours to delete.
     let picture = unsafe { factory.GetImage(size, flags) }.map_err(ThumbnailError::Picture)?;
+    // SAFETY: the pointer is the live bitmap handle the shell gave, only retyped.
+    let handle = unsafe { w::HBITMAP::from_ptr(picture.0) };
     // SAFETY: the guard takes over the handle the shell gave, which nothing else frees.
-    Ok(unsafe { DeleteObjectGuard::new(w::HBITMAP::from_ptr(picture.0)) })
+    Ok(unsafe { DeleteObjectGuard::new(handle) })
 }
 
 fn copy_fitted(

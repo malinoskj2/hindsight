@@ -46,6 +46,10 @@ const FLOAT_BITS: u16 = 32;
 
 pub(super) struct Signal(Owned<HANDLE>);
 
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "a kernel event handle is not tied to the thread that opened it"
+)]
 // SAFETY: event handles may be set and waited on from any thread; closed only by the last owner.
 unsafe impl Send for Signal {}
 // SAFETY: as above.
@@ -202,7 +206,11 @@ impl Drop for Watch {
 
 /// A module of its own so the `implement` macro's glue can be exempted from two pedantic lints.
 mod listener {
-    #![allow(clippy::ref_as_ptr, clippy::inline_always)]
+    #![allow(
+        clippy::ref_as_ptr,
+        clippy::inline_always,
+        reason = "the `implement` macro's glue, which this module cannot change"
+    )]
 
     use super::{
         DEVICE_STATE, EDataFlow, ERole, IMMNotificationClient, IMMNotificationClient_Impl, PCWSTR,

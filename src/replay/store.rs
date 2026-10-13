@@ -42,7 +42,7 @@ pub(crate) fn pieces(length: usize, chunk: usize) -> impl Iterator<Item = (usize
         .map(move |done| (done, chunk.min(length - done)))
 }
 
-/// Why the store failed; a message ends with its cause, which `source()` doesn't repeat.
+/// Why the store failed. A message names only what failed; a cause is its `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
     #[error("a {0} byte packet is larger than a page of the store")]
@@ -50,10 +50,11 @@ pub(crate) enum StoreError {
     /// The store has no room for the packet right now; the reason is for the log.
     #[error("{0}")]
     Refused(String),
-    #[error("{step}: {error}")]
+    #[error("{step}")]
     Call {
         step: &'static str,
-        error: Box<dyn Error + Send + Sync>,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
     },
 }
 
@@ -61,9 +62,9 @@ impl StoreError {
     pub(crate) fn call<E: Error + Send + Sync + 'static>(
         step: &'static str,
     ) -> impl FnOnce(E) -> Self {
-        move |error| Self::Call {
+        move |source| Self::Call {
             step,
-            error: Box::new(error),
+            source: Box::new(source),
         }
     }
 }
@@ -126,7 +127,10 @@ pub(crate) struct Pages<P> {
     /// Bytes written to the newest page in use.
     fill: usize,
     page_bytes: usize,
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows GPU stores use it")
+    )]
     reserved: usize,
 }
 
@@ -142,7 +146,10 @@ impl<P: Page + 'static> Pages<P> {
     }
 
     /// `count` pages made up front, so recording never waits on one.
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows GPU stores use it")
+    )]
     pub(crate) fn reserve<E>(
         page_bytes: usize,
         count: usize,
@@ -154,7 +161,10 @@ impl<P: Page + 'static> Pages<P> {
         Ok(Self::new(page_bytes, reserved))
     }
 
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows GPU stores use it")
+    )]
     pub(crate) fn summary(&self) -> String {
         format!(
             "{} MiB reserved in {} MiB pages",

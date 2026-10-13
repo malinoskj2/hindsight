@@ -302,7 +302,7 @@ impl Main {
         match Tray::new(self.0.skin.theme(), move |action| this.on_tray(action)) {
             Ok(tray) => *self.0.tray.borrow_mut() = Some(tray),
             Err(error) => {
-                let message = text::tray_unavailable(error);
+                let message = text::tray_unavailable(log::chain(&error));
                 log::warning(&message);
                 let _ = self.0.tray_error.set(message);
             }
@@ -446,7 +446,7 @@ impl Main {
         if let Some(tray) = &*self.0.tray.borrow()
             && let Err(error) = tray.set_theme(theme)
         {
-            log::warning(text::tray_unavailable(error));
+            log::warning(text::tray_unavailable(log::chain(&error)));
         }
     }
 

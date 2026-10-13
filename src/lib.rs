@@ -8,25 +8,67 @@
 use anyhow::Context;
 use anyhow::Result;
 
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod audio;
 #[cfg(windows)]
 mod cli;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod config;
 #[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
 mod gui;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod log;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod replay;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod service;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod storage;
-#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod sys;
 
 #[cfg(windows)]

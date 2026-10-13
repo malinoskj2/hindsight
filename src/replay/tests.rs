@@ -22,13 +22,19 @@ fn setting_the_stream_twice_is_a_bug() {
 }
 
 #[test]
-fn a_save_error_names_its_cause_once() {
+fn a_save_error_names_its_step_and_chains_its_cause_once() {
     let error = SaveError::io("create", Path::new("clip.mp4"))(io::Error::other("denied"));
-    assert_eq!(error.to_string(), "create clip.mp4: denied");
-    assert!(std::error::Error::source(&error).is_none());
+    assert_eq!(error.to_string(), "create clip.mp4");
+    assert_eq!(log::chain(&error).to_string(), "create clip.mp4: denied");
     let error = SaveError::from(MuxError::from(io::Error::other("full")));
-    assert_eq!(error.to_string(), "write the clip: full");
-    assert!(std::error::Error::source(&error).is_none());
+    assert_eq!(error.to_string(), "write the clip");
+    assert_eq!(log::chain(&error).to_string(), "write the clip: full");
+    let read = StoreError::call("read a page back")(io::Error::other("lost"));
+    let error = SaveError::from(MuxError::from(read));
+    assert_eq!(
+        log::chain(&error).to_string(),
+        "read the buffer back: read a page back: lost"
+    );
 }
 
 /// The real encoder output in `tests/fixtures` is 128×72.
@@ -676,7 +682,7 @@ fn a_failed_save_leaves_no_partial_file() {
 /// test in the crate allocates through `Counting`. It only forwards to the system allocator and
 /// adds to two thread-locals, so the others see no difference. It can't move to an integration
 /// test under `tests/`, since what it measures is crate-private.
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "wraps the system allocator to count bytes")]
 mod heap {
     use std::{
         alloc::{GlobalAlloc, Layout, System},

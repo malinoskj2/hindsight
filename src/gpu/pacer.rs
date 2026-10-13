@@ -24,7 +24,7 @@ pub(super) fn filetime_units(duration: Duration) -> i64 {
 
 pub(super) struct Timer(Owned<HANDLE>);
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls the waitable timer API")]
 impl Timer {
     pub(super) fn new() -> windows::core::Result<Self> {
         // SAFETY: an unnamed timer with default security.

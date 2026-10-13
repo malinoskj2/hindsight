@@ -7,7 +7,7 @@ pub(crate) const WINDOW_CLASS: &str = "HindsightMainWindow";
 const WAIT: Duration = Duration::from_millis(100);
 const ATTEMPTS: u32 = 50;
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "builds a WM constant from a raw value")]
 // SAFETY: `WM` is a plain newtype over the message number; this one is in the app range.
 pub(crate) const SHOW_MESSAGE: co::WM = unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) };
 
@@ -24,7 +24,7 @@ pub(crate) fn show_running() -> bool {
     false
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls PostMessage")]
 fn bring_forward(window: &w::HWND) -> bool {
     // This process has the focus, so it may hand it to the other copy.
     let (_, process) = window.GetWindowThreadProcessId();

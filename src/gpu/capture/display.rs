@@ -108,7 +108,7 @@ fn output_of(monitor: HMONITOR) -> Option<DXGI_OUTPUT_DESC1> {
         .find(|description| description.Monitor == monitor)
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls DXGI to list the outputs")]
 fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
     // SAFETY: creates a factory; no other preconditions.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
@@ -157,7 +157,7 @@ fn sdr_white_level(name: &str) -> Option<f32> {
         .and_then(white_level)
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls the display configuration API")]
 /// Asks again, a few times, when a display is plugged in between sizing and querying.
 fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     for _ in 0..QUERY_ATTEMPTS {
@@ -198,7 +198,7 @@ fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     None
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls DisplayConfigGetDeviceInfo")]
 fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     let mut request = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -214,7 +214,7 @@ fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     (status == ERROR_SUCCESS.0.cast_signed()).then(|| utf16_until_nul(&request.viewGdiDeviceName))
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls DisplayConfigGetDeviceInfo")]
 fn white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Option<f32> {
     let mut request = DISPLAYCONFIG_SDR_WHITE_LEVEL {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {

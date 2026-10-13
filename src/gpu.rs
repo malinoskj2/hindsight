@@ -1,11 +1,11 @@
 //! Capture and encoding on the GPU; only compressed packets reach system memory.
 
 mod capture;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "binds the CUDA driver API")]
 mod cuda;
 mod cuda_output;
 mod device;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "loads the NVIDIA driver's libraries")]
 mod ffi;
 mod nvenc;
 mod pacer;

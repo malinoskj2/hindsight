@@ -103,7 +103,7 @@ impl LogsPage {
 
     /// A read-only edit without focus does not follow its caret, and a hidden one ignores the
     /// scroll, so this runs once the tab is showing.
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends EM_SCROLLCARET")]
     fn scroll_to_end(&self) {
         let view = &self.0.view;
         let length = view.hwnd().GetWindowTextLength().unwrap_or(0);

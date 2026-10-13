@@ -88,7 +88,10 @@ unreachable_pub = "warn"
 pedantic = { level = "warn", priority = -1 }
 # Prefer direct assignment when reusing an allocation would obscure the intent.
 assigning_clones = "allow"
-redundant_pub_crate = "allow"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+non_send_fields_in_send_ty = "warn"
+allow_attributes_without_reason = "warn"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 cast_precision_loss = "allow"

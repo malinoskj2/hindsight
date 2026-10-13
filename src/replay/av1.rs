@@ -279,7 +279,10 @@ impl SequenceHeader {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the flags of the AV1 colour_config syntax"
+)]
 struct ColourConfig {
     high_bitdepth: bool,
     twelve_bit: bool,

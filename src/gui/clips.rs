@@ -325,7 +325,7 @@ impl ClipsPage {
 
     /// Places the items on a centred grid: left to itself the list keeps its slack on the
     /// right, even when given a work area.
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends LVM_SETITEMPOSITION32")]
     fn place_items(&self, count: usize) {
         let hwnd = self.0.list.hwnd();
         let Ok(client) = hwnd.GetClientRect() else {
@@ -352,7 +352,10 @@ impl ClipsPage {
     }
 
     /// The thumbnail's offset from an item's position, found by placing item 0 at the origin.
-    #[expect(unsafe_code)]
+    #[expect(
+        unsafe_code,
+        reason = "sends LVM_SETITEMPOSITION32 and LVM_GETITEMRECT"
+    )]
     fn icon_offset(&self) -> w::POINT {
         let hwnd = self.0.list.hwnd();
         let origin = w::POINT::with(0, 0);
@@ -415,7 +418,7 @@ impl ClipsPage {
             .map_err(ThumbnailError::ImageList)
     }
 
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends LVM_SETIMAGELIST")]
     fn install_image_list(&self) {
         let size = thumbnail_size();
         let images = w::HIMAGELIST::Create(w::SIZE::with(size.0, size.1), co::ILC::COLOR32, 16, 16)
@@ -441,7 +444,7 @@ impl ClipsPage {
         }
     }
 
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends LVM_SETICONSPACING")]
     fn set_icon_spacing(&self) {
         // SAFETY: LVM_SETICONSPACING takes both lengths packed by value.
         unsafe {
@@ -451,7 +454,7 @@ impl ClipsPage {
         }
     }
 
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends LVM_SETBKCOLOR and LVM_SETTEXTCOLOR")]
     fn set_colours(&self, background: w::COLORREF, text: w::COLORREF) {
         let hwnd = self.0.list.hwnd();
         // SAFETY: LVM_SETBKCOLOR takes the colour by value and nothing by pointer.
@@ -471,7 +474,7 @@ impl ClipsPage {
     }
 
     /// Raw `LVM_INSERTITEM`: the control's helper wants a column header, which an icon view lacks.
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "sends LVM_INSERTITEM")]
     fn insert_item(&self, caption: &str, image: Option<u32>) -> w::SysResult<u32> {
         let mut item = w::LVITEM::default();
         item.iItem = i32::MAX;

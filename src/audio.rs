@@ -2,10 +2,10 @@
 //! encoded to AAC-LC when a clip is saved.
 
 #[cfg(windows)]
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls Media Foundation's AAC encoder")]
 mod aac;
 #[cfg(windows)]
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls WASAPI and COM")]
 mod loopback;
 mod pcm;
 #[cfg(windows)]
@@ -22,9 +22,15 @@ use std::num::{NonZeroU16, NonZeroU32};
 use thiserror::Error;
 
 /// Windows resamples other rates to this.
-#[cfg_attr(all(not(windows), test), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), test),
+    expect(dead_code, reason = "only the Windows capture and encoder use it")
+)]
 const SAMPLE_RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
-#[cfg_attr(all(not(windows), test), expect(dead_code))]
+#[cfg_attr(
+    all(not(windows), test),
+    expect(dead_code, reason = "only the Windows capture and encoder use it")
+)]
 const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 
 #[derive(Debug, Error)]

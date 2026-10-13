@@ -111,7 +111,7 @@ pub(super) struct ToneMapper {
     readable: Option<ID3D11Texture2D>,
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls Direct3D 11 to build and run the pass")]
 impl ToneMapper {
     pub(super) fn new(device: &Device, curve: Curve) -> windows::core::Result<Self> {
         let mut vertex = None;
@@ -260,7 +260,7 @@ const fn bind_flag(flag: i32) -> u32 {
     flag.cast_unsigned()
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateBuffer")]
 fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Result<ID3D11Buffer> {
     let constants = curve.constants();
     let description = D3D11_BUFFER_DESC {
@@ -285,7 +285,7 @@ fn constant_buffer(device: &ID3D11Device, curve: &Curve) -> windows::core::Resul
     created(buffer)
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Texture2D::GetDesc")]
 fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     let mut description = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: writes the description of a live texture into a live structure.
@@ -293,7 +293,7 @@ fn texture_description(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     description
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateTexture2D")]
 fn readable_texture(
     device: &ID3D11Device,
     source: &D3D11_TEXTURE2D_DESC,
@@ -318,7 +318,7 @@ fn readable_texture(
     created(texture)
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateShaderResourceView")]
 fn shader_resource_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -329,7 +329,7 @@ fn shader_resource_view(
     created(view)
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateRenderTargetView")]
 fn render_target_view(
     device: &ID3D11Device,
     texture: &ID3D11Texture2D,
@@ -341,7 +341,7 @@ fn render_target_view(
 }
 
 #[cfg(test)]
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "the tests drive Direct3D 11")]
 mod tests {
     use super::*;
     use windows::Win32::{

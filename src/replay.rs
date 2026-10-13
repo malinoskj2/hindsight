@@ -105,7 +105,13 @@ pub(crate) struct Live {
     audio: OnceLock<Arc<AudioFormat>>,
     sound: Mutex<AudioRing>,
     /// Logical processor of the capture thread, or `u32::MAX` until it has said.
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(
+            dead_code,
+            reason = "only the Windows capture and audio threads use it"
+        )
+    )]
     capture_processor: AtomicU32,
 }
 
@@ -155,12 +161,18 @@ impl Live {
     }
 
     /// Where the capture thread runs, so the audio thread can keep away from it.
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows capture thread uses it")
+    )]
     pub(crate) fn note_capture_processor(&self, processor: u32) {
         self.capture_processor.store(processor, Ordering::Relaxed);
     }
 
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows audio thread uses it")
+    )]
     pub(crate) fn capture_processor(&self) -> Option<u32> {
         let processor = self.capture_processor.load(Ordering::Relaxed);
         (processor != u32::MAX).then_some(processor)
@@ -221,7 +233,8 @@ impl Live {
         };
         if let Some(error) = refused {
             log::warning(format!(
-                "The replay buffer could no longer be kept outside RAM ({error}); it continues in RAM"
+                "The replay buffer could no longer be kept outside RAM ({}); it continues in RAM",
+                log::chain(&error)
             ));
         }
         self.counters.frame(bytes, oldest, picture);
@@ -368,15 +381,16 @@ fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
     }
 }
 
-/// Why a save failed. Each message ends with its cause, which `source()` doesn't repeat, since
-/// the messages are shown with plain `Display`.
+/// Why a save failed. A message names only the failed step; the cause is its `source()`, so
+/// it is shown with [`log::chain`].
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
-    #[error("{step} {}: {error}", path.display())]
+    #[error("{step} {}", path.display())]
     Io {
         step: &'static str,
         path: PathBuf,
-        error: io::Error,
+        #[source]
+        source: io::Error,
     },
     #[error(transparent)]
     Mux(#[from] MuxError),
@@ -384,10 +398,10 @@ pub(crate) enum SaveError {
 
 impl SaveError {
     fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
-        move |error| Self::Io {
+        move |source| Self::Io {
             step,
             path: path.to_owned(),
-            error,
+            source,
         }
     }
 }

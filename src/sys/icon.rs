@@ -124,7 +124,11 @@ fn span(index: u32, size: u32, source: u32) -> (u32, u32) {
     (start, end)
 }
 
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is rounded and clamped to 0..=255 first"
+)]
 fn to_byte(value: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }

@@ -280,7 +280,8 @@ fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
                 return;
             }
             Err(error) => log::warning(format!(
-                "The replay buffer could not be placed in CUDA memory ({error}); trying a Direct3D buffer"
+                "The replay buffer could not be placed in CUDA memory ({}); trying a Direct3D buffer",
+                log::chain(&error)
             )),
         }
     }
@@ -290,7 +291,8 @@ fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
             live.set_store(Box::new(store));
         }
         Err(error) => log::warning(format!(
-            "The replay buffer could not be placed in GPU memory ({error}); keeping it in RAM"
+            "The replay buffer could not be placed in GPU memory ({}); keeping it in RAM",
+            log::chain(&error)
         )),
     }
 }
@@ -302,7 +304,8 @@ fn keep_on_disk(config: &Config, live: &Live) {
             live.set_store(Box::new(store));
         }
         Err(error) => log::warning(format!(
-            "The replay buffer could not be placed on disk ({error}); keeping it in RAM"
+            "The replay buffer could not be placed on disk ({}); keeping it in RAM",
+            log::chain(&error)
         )),
     }
 }

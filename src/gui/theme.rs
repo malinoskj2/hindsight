@@ -119,7 +119,7 @@ impl Skin {
     }
 
     /// For `WM_CTLCOLORSTATIC`, which hands the brush to the label by value.
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "copies a brush handle with raw_copy")]
     pub(super) fn label_brush(&self, surface: Surface) -> w::HBRUSH {
         match self.brush(surface) {
             // SAFETY: the label paints with the copy as soon as this message returns, and the

@@ -23,14 +23,18 @@ const SPARE_BLOCKS: usize = 2;
 const KEPT_FREE_BYTES: u64 = 1 << 30;
 const WRITER_THREAD: &str = "buffer writer";
 
-/// Why the disk store couldn't be made; a message ends with its cause, which `source()`
-/// doesn't repeat.
+/// Why the disk store couldn't be made. A message names only the failed step; the cause is its
+/// `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum DiskError {
-    #[error("create the folder {}: {error}", path.display())]
-    Folder { path: PathBuf, error: io::Error },
-    #[error("read the drive's free space: {0}")]
-    FreeSpace(io::Error),
+    #[error("create the folder {}", path.display())]
+    Folder {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("read the drive's free space")]
+    FreeSpace(#[source] io::Error),
     #[error(
         "the buffer would take {} MiB and the drive has {} MiB free, {} MiB of which stay free",
         needed / MEBIBYTE as u64,
@@ -38,15 +42,19 @@ pub(crate) enum DiskError {
         KEPT_FREE_BYTES / MEBIBYTE as u64
     )]
     NoRoom { needed: u64, available: u64 },
-    #[error("create {}: {error}", path.display())]
-    Create { path: PathBuf, error: io::Error },
-    #[error("reserve the file's room: {0}")]
-    Reserve(io::Error),
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("reserve the file's room")]
+    Reserve(#[source] io::Error),
     /// Fails where the drive's sectors are larger than [`SECTOR_BYTES`].
-    #[error("write to the file without buffering: {0}")]
-    Unbuffered(io::Error),
-    #[error("start the buffer's writer thread: {0}")]
-    Writer(io::Error),
+    #[error("write to the file without buffering")]
+    Unbuffered(#[source] io::Error),
+    #[error("start the buffer's writer thread")]
+    Writer(#[source] io::Error),
 }
 
 /// Sizes in bytes, all multiples of [`SECTOR_BYTES`]; tests shrink them.
@@ -70,30 +78,42 @@ pub(crate) struct DiskStore {
     pages: Pages<DiskPage>,
     /// File offset of the next page made beyond the reserved ones.
     end: u64,
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(
+            dead_code,
+            reason = "only the Windows pipeline places the buffer on disk"
+        )
+    )]
     path: PathBuf,
 }
 
 impl DiskStore {
     /// Reserves the file for `bytes` of packets plus a page, replacing a previous buffer's file.
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(
+            dead_code,
+            reason = "only the Windows pipeline places the buffer on disk"
+        )
+    )]
     pub(crate) fn create(path: &Path, bytes: u64) -> Result<Self, DiskError> {
         Self::with_layout(path, reserved_pages(bytes), LAYOUT)
     }
 
     fn with_layout(path: &Path, pages: usize, layout: Layout) -> Result<Self, DiskError> {
         let folder = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(folder).map_err(|error| DiskError::Folder {
+        fs::create_dir_all(folder).map_err(|source| DiskError::Folder {
             path: folder.to_owned(),
-            error,
+            source,
         })?;
         // Removed first so its room counts as free; a stuck file fails the create below instead.
         let _ = fs::remove_file(path);
         let length = (pages as u64).saturating_mul(layout.page as u64);
         has_room(length, free_bytes(folder).map_err(DiskError::FreeSpace)?)?;
-        let file = open(path).map_err(|error| DiskError::Create {
+        let file = open(path).map_err(|source| DiskError::Create {
             path: path.to_owned(),
-            error,
+            source,
         })?;
         file.set_len(length).map_err(DiskError::Reserve)?;
         try_unbuffered(&file).map_err(DiskError::Unbuffered)?;
@@ -130,7 +150,13 @@ impl DiskStore {
         })
     }
 
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(
+            dead_code,
+            reason = "only the Windows pipeline places the buffer on disk"
+        )
+    )]
     pub(crate) fn description(&self) -> String {
         let layout = self.shared.layout;
         format!(
@@ -565,7 +591,10 @@ fn free_bytes(folder: &Path) -> io::Result<u64> {
 }
 
 #[cfg(not(windows))]
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the Windows version's signature"
+)]
 fn free_bytes(_folder: &Path) -> io::Result<u64> {
     Ok(u64::MAX)
 }

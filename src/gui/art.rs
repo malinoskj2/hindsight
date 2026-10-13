@@ -180,7 +180,7 @@ fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -
 }
 
 /// Raw `AlphaBlend`: `winsafe`'s wrapper passes the blend settings by pointer.
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls AlphaBlend")]
 fn alpha_blend(
     dest: &w::HDC,
     (x, y): (i32, i32),
@@ -219,7 +219,7 @@ fn alpha_blend(
 }
 
 /// `AlphaBlend` honours per-pixel alpha only for a DIB section; `winsafe` has no wrapper.
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls CreateDIBSection")]
 fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGuard<w::HBITMAP>> {
     use windows::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,

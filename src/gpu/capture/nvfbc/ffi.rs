@@ -10,7 +10,10 @@ use std::{
 const DLL_VERSION: u32 = 0x70;
 
 /// `NVFBC_STRUCT_VERSION`.
-#[expect(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NvFBC's structures are a few kilobytes at most"
+)]
 pub(super) const fn struct_version(size: usize, version: u32) -> u32 {
     size as u32 | (version << 16) | (DLL_VERSION << 24)
 }

@@ -121,6 +121,7 @@ pub(super) fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Could not save the clip: {error}"))
 }
 
+#[cfg(windows)]
 pub(super) fn background_save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {
         write!(

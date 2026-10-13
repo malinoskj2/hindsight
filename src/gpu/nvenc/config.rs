@@ -25,7 +25,7 @@ const fn profile_guid(codec: Codec) -> GUID {
     }
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "reads the codec union NVENC's preset filled")]
 pub(super) fn configure(config: &mut ffi::Config, settings: Settings) {
     let matrix = u32::from(settings.matrix.code());
     let gop = gop_frames(settings.frame_rate);
@@ -117,7 +117,7 @@ pub(super) fn initialize_params(settings: Settings) -> ffi::InitializeParams {
 }
 
 #[cfg(test)]
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "the tests read the codec union")]
 mod tests {
     use super::*;
     use crate::replay::Matrix;

@@ -15,33 +15,16 @@ thread_local! {
     static HANDLER: Slot<dyn Fn(TrayAction)> = const { Slot::new() };
 }
 
-/// Why the tray icon failed; a message ends with its cause, which `source()` doesn't repeat.
+/// Why the tray icon failed. A message names only the part that failed; the cause is its
+/// `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum TrayError {
-    #[error("system tray: {0}")]
-    Icon(tray_icon::Error),
-    #[error("tray menu: {0}")]
-    Menu(tray_icon::menu::Error),
-    #[error("tray icon image: {0}")]
-    Image(tray_icon::BadIcon),
-}
-
-impl From<tray_icon::Error> for TrayError {
-    fn from(error: tray_icon::Error) -> Self {
-        Self::Icon(error)
-    }
-}
-
-impl From<tray_icon::menu::Error> for TrayError {
-    fn from(error: tray_icon::menu::Error) -> Self {
-        Self::Menu(error)
-    }
-}
-
-impl From<tray_icon::BadIcon> for TrayError {
-    fn from(error: tray_icon::BadIcon) -> Self {
-        Self::Image(error)
-    }
+    #[error("system tray")]
+    Icon(#[from] tray_icon::Error),
+    #[error("tray menu")]
+    Menu(#[from] tray_icon::menu::Error),
+    #[error("tray icon image")]
+    Image(#[from] tray_icon::BadIcon),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

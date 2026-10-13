@@ -4,7 +4,10 @@ use super::*;
 use crate::replay::{Matrix, Packet, Picture};
 use std::sync::atomic::AtomicUsize;
 
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the session function's signature"
+)]
 fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     live.set_stream(Stream {
         codec: config.codec,
@@ -41,14 +44,20 @@ fn failing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
     anyhow::bail!("no capture device")
 }
 
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the session function's signature"
+)]
 fn unsupported(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
     Ok(Ended::Unsupported(
         "this GPU's NVENC has no AV1 encoder".to_owned(),
     ))
 }
 
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the session function's signature"
+)]
 fn closing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
     Ok(Ended::Closed)
 }
@@ -489,7 +498,7 @@ fn failing_write(_: &Snapshot, directory: &Path) -> Result<PathBuf, SaveError> {
     Err(SaveError::Io {
         step: "create",
         path: directory.to_owned(),
-        error: io::Error::other("the disk is full"),
+        source: io::Error::other("the disk is full"),
     })
 }
 

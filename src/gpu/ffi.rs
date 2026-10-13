@@ -13,6 +13,10 @@ use windows::{
 /// must be gone before it is dropped.
 pub(super) struct Library(Owned<HMODULE>);
 
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "a module handle is not tied to the thread that loaded it"
+)]
 // SAFETY: an HMODULE may be freed from any thread.
 unsafe impl Send for Library {}
 // SAFETY: a shared library only looks symbols up, which `GetProcAddress` does from any thread.

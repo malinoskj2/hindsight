@@ -1,12 +1,15 @@
 //! Capture of a monitor or a window into the encoder's input, by one of several backends.
 
 mod display;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls DXGI Desktop Duplication and Direct3D 11")]
 mod dxgi_dd;
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "binds the NvFBC driver API")]
 mod nvfbc;
 mod tonemap;
-#[expect(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "calls Windows Graphics Capture and its Direct3D interop"
+)]
 mod wgc;
 
 use crate::{
@@ -351,7 +354,7 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     }
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls MonitorFromPoint")]
 fn monitor(handle: Option<MonitorHandle>) -> HMONITOR {
     match handle {
         Some(handle) => HMONITOR(handle.get() as *mut c_void),
@@ -360,7 +363,7 @@ fn monitor(handle: Option<MonitorHandle>) -> HMONITOR {
     }
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls IsWindow")]
 fn is_window_closed(window: Option<HWND>) -> bool {
     // SAFETY: IsWindow accepts any handle, live or not.
     window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())

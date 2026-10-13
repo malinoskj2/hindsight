@@ -231,15 +231,13 @@ mod native {
             })
     }
 
-    #[expect(unsafe_code)]
+    #[expect(unsafe_code, reason = "builds winsafe's MOD and VK from raw values")]
     fn system_codes(hotkey: Hotkey) -> (co::MOD, co::VK) {
-        // SAFETY: `MOD` and `VK` are plain newtypes; every parsed value is representable.
-        unsafe {
-            (
-                co::MOD::from_raw(hotkey.modifiers) | co::MOD::NOREPEAT,
-                co::VK::from_raw(hotkey.key),
-            )
-        }
+        // SAFETY: `MOD` is a plain newtype; every parsed modifier set is representable.
+        let modifiers = unsafe { co::MOD::from_raw(hotkey.modifiers) };
+        // SAFETY: `VK` is a plain newtype; every parsed key code is representable.
+        let key = unsafe { co::VK::from_raw(hotkey.key) };
+        (modifiers | co::MOD::NOREPEAT, key)
     }
 }
 

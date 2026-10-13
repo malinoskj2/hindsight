@@ -5,11 +5,10 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 
 pub(crate) fn now() -> i64 {
     let (mut counter, mut frequency) = (0, 0);
-    // SAFETY: both calls write one integer to a live local; a failure leaves the zeros.
-    unsafe {
-        let _ = QueryPerformanceCounter(&raw mut counter);
-        let _ = QueryPerformanceFrequency(&raw mut frequency);
-    }
+    // SAFETY: writes one integer to a live local; a failure leaves the zero.
+    let _ = unsafe { QueryPerformanceCounter(&raw mut counter) };
+    // SAFETY: writes one integer to a live local; a failure leaves the zero, checked below.
+    let _ = unsafe { QueryPerformanceFrequency(&raw mut frequency) };
     if frequency <= 0 {
         return 0;
     }

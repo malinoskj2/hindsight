@@ -128,7 +128,10 @@ impl Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     Stopped,
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows capture reports it")
+    )]
     Resized,
     Closed,
     /// The app presents in a way Windows cannot compose; its monitor must be captured instead.
@@ -292,7 +295,10 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    #[cfg_attr(all(not(windows), test), expect(dead_code))]
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows window starts the real worker")
+    )]
     pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
         Self::spawn_with(Services::real(), Some(store), config)
     }
@@ -865,6 +871,7 @@ impl Machine {
             .name("save".to_owned())
             .spawn(move || {
                 let _ending = ending;
+                #[cfg(windows)]
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
@@ -888,7 +895,7 @@ impl Machine {
     fn finish_save(&mut self, saving: Saving) {
         match saving.join.join() {
             Ok(Ok(path)) => self.clip_saved(saving.seconds, path),
-            Ok(Err(error)) => self.report_failed_save(text::save_failed(error)),
+            Ok(Err(error)) => self.report_failed_save(text::save_failed(log::chain(&error))),
             Err(payload) => self.report_failed_save(text::save_failed(text::save_panicked(
                 panic_message(&*payload),
             ))),

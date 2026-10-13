@@ -18,7 +18,7 @@ struct TabFace {
     selected: bool,
 }
 
-#[expect(unsafe_code)]
+#[expect(unsafe_code, reason = "calls DefSubclassProc")]
 pub(in crate::gui) fn paint_tabs_natively(tab: &w::HWND) {
     // SAFETY: forwards WM_PAINT to the control's own window procedure.
     unsafe {
