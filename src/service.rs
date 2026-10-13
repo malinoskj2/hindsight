@@ -69,6 +69,7 @@ impl Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     Stopped,
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     Resized,
     Closed,
     /// The app presents in a way Windows cannot compose; its monitor must be captured instead.
@@ -167,6 +168,7 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
         Self::spawn_with(Services::real(), Some(store), config)
     }

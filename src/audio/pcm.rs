@@ -22,6 +22,7 @@ pub(super) struct Layout {
 }
 
 impl Layout {
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(super) const fn frame_bytes(self) -> usize {
         self.sample.bytes() * self.channels as usize
     }

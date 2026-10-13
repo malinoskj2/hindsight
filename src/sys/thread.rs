@@ -10,10 +10,12 @@ use windows::Win32::System::{
 };
 
 /// Logical processors per Windows processor group.
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 const GROUP_SIZE: u32 = 64;
 
 /// Hints the scheduler to run the caller half the machine away from the thread on processor
 /// `other`, so they share neither a core nor a cache complex.
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 pub(crate) fn keep_off(other: u32) {
     let count = std::thread::available_parallelism()
         .map_or(1, |count| u32::try_from(count.get()).unwrap_or(u32::MAX));
@@ -44,11 +46,13 @@ fn prefer_processor(processor: u32) {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(test, expect(dead_code))]
 pub(crate) fn ideal_processor() -> Option<u32> {
     None
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(test, expect(dead_code))]
 fn prefer_processor(_processor: u32) {}
 
 /// Lowers the thread's CPU, I/O and memory priority, so a clip write does not compete with a game.

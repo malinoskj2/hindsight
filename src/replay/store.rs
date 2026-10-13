@@ -126,6 +126,7 @@ pub(crate) struct Pages<P> {
     /// Bytes written to the newest page in use.
     fill: usize,
     page_bytes: usize,
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     reserved: usize,
 }
 
@@ -141,6 +142,7 @@ impl<P: Page + 'static> Pages<P> {
     }
 
     /// `count` pages made up front, so recording never waits on one.
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(crate) fn reserve<E>(
         page_bytes: usize,
         count: usize,
@@ -152,6 +154,7 @@ impl<P: Page + 'static> Pages<P> {
         Ok(Self::new(page_bytes, reserved))
     }
 
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(crate) fn summary(&self) -> String {
         format!(
             "{} MiB reserved in {} MiB pages",

@@ -42,6 +42,7 @@ pub(crate) fn frames(mut stream: &[u8]) -> Vec<Arc<[u8]>> {
 }
 
 /// The sound of `input` as mono 16-bit samples, decoded by the ffmpeg on the path.
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 pub(crate) fn decode_mono(input: &Path) -> Vec<i16> {
     let raw = input.with_extension("raw");
     let status = Command::new("ffmpeg")
@@ -62,6 +63,7 @@ pub(crate) fn decode_mono(input: &Path) -> Vec<i16> {
 }
 
 /// The position of the loudest sample.
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 pub(crate) fn peak(samples: &[i16]) -> usize {
     (0..samples.len())
         .max_by_key(|&index| samples[index].unsigned_abs())

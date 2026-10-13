@@ -10,10 +10,12 @@ use std::{
 use thiserror::Error;
 
 const MAX_STATE_BYTES: usize = 64 * 1024;
+#[cfg(windows)]
 const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
 const TOTALS_FILE: &str = "totals.json";
+#[cfg(windows)]
 const BUFFER_FILE: &str = "buffer.bin";
 const PENDING_EXTENSION: &str = "pending";
 
@@ -33,6 +35,7 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    #[cfg(windows)]
     pub(crate) fn open() -> Result<Self, StorageError> {
         let base = local_app_data().ok_or(StorageError::NoDirectory)?;
         Self::at(base.join(STATE_DIRECTORY))
@@ -85,12 +88,14 @@ pub(crate) enum StorageError {
     Oversized,
     #[error("another hindsight instance is running")]
     Locked,
+    #[cfg(windows)]
     #[error("the local application data folder is unavailable")]
     NoDirectory,
 }
 
 /// Without the local application data folder paths fall back to the temporary directory;
 /// [`Store::open`] refuses.
+#[cfg(windows)]
 pub(crate) fn state_directory() -> PathBuf {
     local_app_data()
         .unwrap_or_else(std::env::temp_dir)
@@ -103,11 +108,7 @@ fn local_app_data() -> Option<PathBuf> {
     crate::sys::com::known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)
 }
 
-#[cfg(not(windows))]
-fn local_app_data() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-}
-
+#[cfg(windows)]
 pub(crate) fn buffer_file() -> PathBuf {
     state_directory().join(BUFFER_FILE)
 }

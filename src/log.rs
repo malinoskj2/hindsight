@@ -1,10 +1,11 @@
-//! In-memory log for the Logs tab, mirrored to a file in the state directory.
+//! In-memory log for the Logs tab, mirrored to a file in the state directory, and the logger
+//! behind the `log` crate, so dependencies write into it too.
 
 use std::{
     collections::VecDeque,
     fmt::Display,
     fs::File,
-    io::Write,
+    io::{LineWriter, Write},
     path::Path,
     sync::{Mutex, MutexGuard, PoisonError},
 };
@@ -74,7 +75,7 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
 });
 
 /// Locked before the journal, which keeps the file in sequence order.
-static MIRROR: Mutex<Option<File>> = Mutex::new(None);
+static MIRROR: Mutex<Option<LineWriter<File>>> = Mutex::new(None);
 
 pub(crate) fn info(message: impl Display) {
     record(Level::Info, message);
@@ -118,7 +119,7 @@ pub(crate) fn since(sequence: u64) -> Vec<Entry> {
 }
 
 pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
-    let mut created = File::create(path)?;
+    let mut created = LineWriter::new(File::create(path)?);
     let mut file = mirror();
     // Holding the mirror lock keeps entries from slipping between the copy and the switch.
     let lines: Vec<String> = journal().entries.iter().map(Entry::line).collect();
@@ -129,13 +130,67 @@ pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Routes the `log` crate's records, which dependencies write, into the journal: warnings and
+/// errors from dependencies, everything from this crate. Only the first call installs it.
+#[cfg(windows)]
+pub(crate) fn install() {
+    if ::log::set_logger(&Facade).is_ok() {
+        ::log::set_max_level(::log::LevelFilter::Info);
+    }
+}
+
+struct Facade;
+
+impl ::log::Log for Facade {
+    fn enabled(&self, metadata: &::log::Metadata<'_>) -> bool {
+        metadata.level() <= ::log::Level::Warn || is_own(metadata.target())
+    }
+
+    fn log(&self, record: &::log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let level = match record.level() {
+            ::log::Level::Error => Level::Error,
+            ::log::Level::Warn => Level::Warning,
+            ::log::Level::Info | ::log::Level::Debug | ::log::Level::Trace => Level::Info,
+        };
+        if is_own(record.target()) {
+            record_text(level, record.args().to_string());
+        } else {
+            record_text(level, format!("{}: {}", record.target(), record.args()));
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(file) = mirror().as_mut() {
+            let _ = file.flush();
+        }
+    }
+}
+
+fn is_own(target: &str) -> bool {
+    target.split("::").next() == Some(env!("CARGO_CRATE_NAME"))
+}
+
 fn record(level: Level, message: impl Display) {
+    record_text(level, message.to_string());
+}
+
+/// A failed write stops the mirror, with one entry saying why; the journal carries on.
+fn record_text(level: Level, message: String) {
     let time = timestamp();
-    let message = message.to_string();
     let mut file = mirror();
     let line = journal().append(time, level, message);
-    if let Some(file) = file.as_mut() {
-        let _ = writeln!(file, "{line}");
+    if let Some(writer) = file.as_mut()
+        && let Err(error) = writeln!(writer, "{line}")
+    {
+        *file = None;
+        journal().append(
+            timestamp(),
+            Level::Warning,
+            format!("The log file stopped after a failed write: {error}"),
+        );
     }
 }
 
@@ -143,12 +198,12 @@ fn journal() -> MutexGuard<'static, Journal> {
     JOURNAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn mirror() -> MutexGuard<'static, Option<File>> {
+fn mirror() -> MutexGuard<'static, Option<LineWriter<File>>> {
     MIRROR.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
-fn detach_mirror() -> Option<File> {
+fn detach_mirror() -> Option<LineWriter<File>> {
     mirror().take()
 }
 
@@ -165,6 +220,7 @@ pub(crate) fn file_stamp() -> String {
     )
 }
 
+#[cfg(windows)]
 pub(crate) fn today() -> String {
     let now = local_time();
     format!("{:04}-{:02}-{:02}", now.year, now.month, now.day)
@@ -261,6 +317,36 @@ mod tests {
             stamp
                 .chars()
                 .all(|character| character.is_ascii_digit() || matches!(character, '-' | '_'))
+        );
+    }
+
+    #[test]
+    fn dependency_warnings_reach_the_journal_and_their_chatter_does_not() {
+        let logged = |level, target, text: &str| {
+            ::log::Log::log(
+                &Facade,
+                &::log::Record::builder()
+                    .level(level)
+                    .target(target)
+                    .args(format_args!("{text}"))
+                    .build(),
+            );
+        };
+        logged(
+            ::log::Level::Info,
+            "some_crate::module",
+            "log test: chatter",
+        );
+        logged(::log::Level::Warn, "some_crate::module", "log test: warned");
+        logged(::log::Level::Info, "hindsight::service", "log test: own");
+
+        let kept = since(0);
+        assert!(!kept.iter().any(|entry| entry.message.contains("chatter")));
+        assert!(kept.iter().any(|entry| entry.level == Level::Warning
+            && entry.message == "some_crate::module: log test: warned"));
+        assert!(
+            kept.iter()
+                .any(|entry| entry.level == Level::Info && entry.message == "log test: own")
         );
     }
 

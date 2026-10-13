@@ -34,6 +34,7 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
+    #[cfg(windows)]
     pub(crate) const ALL: [Self; 2] = [Self::Fullscreen, Self::Desktop];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -61,10 +62,12 @@ impl Backend {
     // Cheapest for the game first.
     pub(crate) const ALL: [Self; 4] = [Self::Nvfbc, Self::NvfbcCuda, Self::Wgc, Self::Dxgi];
     /// Set to anything to offer the CUDA backend in Settings.
+    #[cfg(windows)]
     pub(crate) const EXPERIMENT_SWITCH: &str = "HINDSIGHT_CUDA_BACKEND";
 
     /// The backends Settings lists: every one but the CUDA experiment, unless the switch is
     /// set or the config already chose it.
+    #[cfg(windows)]
     pub(crate) fn offered(chosen: Self) -> Vec<Self> {
         let experiments = std::env::var_os(Self::EXPERIMENT_SWITCH).is_some();
         Self::offered_with(chosen, experiments)
@@ -151,6 +154,7 @@ pub(crate) enum Theme {
 }
 
 impl Theme {
+    #[cfg(windows)]
     pub(crate) const ALL: [Self; 4] = [Self::Classic, Self::Ember, Self::Selene, Self::Nova];
 
     pub(crate) const fn name(self) -> &'static str {

@@ -325,6 +325,7 @@ dependencies = [
  "hound",
  "ico",
  "jiff",
+ "log",
  "mp4-atom",
  "png",
  "serde",

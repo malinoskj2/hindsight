@@ -76,11 +76,13 @@ pub(crate) struct DiskStore {
     pages: Pages<DiskPage>,
     /// File offset of the next page made beyond the reserved ones.
     end: u64,
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     path: PathBuf,
 }
 
 impl DiskStore {
     /// Reserves the file for `bytes` of packets plus a page, replacing a previous buffer's file.
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(crate) fn create(path: &Path, bytes: u64) -> Result<Self, DiskError> {
         Self::with_layout(path, reserved_pages(bytes), LAYOUT)
     }
@@ -132,6 +134,7 @@ impl DiskStore {
         })
     }
 
+    #[cfg_attr(all(not(windows), test), expect(dead_code))]
     pub(crate) fn description(&self) -> String {
         let layout = self.shared.layout;
         format!(

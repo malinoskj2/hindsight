@@ -21,7 +21,9 @@ use crate::replay::{AudioClip, PcmClip};
 use thiserror::Error;
 
 /// Windows resamples other rates to this.
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 const SAMPLE_RATE: u32 = 48_000;
+#[cfg_attr(all(not(windows), test), expect(dead_code))]
 const CHANNELS: u16 = 2;
 
 #[derive(Debug, Error)]

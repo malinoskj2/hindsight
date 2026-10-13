@@ -1,35 +1,56 @@
 //! hindsight keeps the last moments of a game in a replay buffer, captured and encoded on the
 //! GPU, and saves them as a clip when the hotkey is pressed.
-
-#![cfg_attr(not(windows), expect(dead_code))]
+//!
+//! Off Windows `run` only refuses, so outside tests the portable modules are expected to be dead.
+//! Their test build still checks dead code, excusing only the items that just Windows code uses.
 
 #[cfg(windows)]
 use anyhow::Context;
 use anyhow::Result;
 
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod audio;
 #[cfg(windows)]
 mod cli;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod config;
 #[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
 mod gui;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod log;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod replay;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod service;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod storage;
+#[cfg_attr(all(not(windows), not(test)), expect(dead_code))]
 mod sys;
 
+#[cfg(windows)]
 pub(crate) const APP_NAME: &str = "hindsight";
 
 #[cfg(not(windows))]
 const UNSUPPORTED_PLATFORM_MESSAGE: &str =
     "hindsight requires Windows 10 1903 or newer and an NVIDIA GPU";
 
+/// An error is also shown in a message box: the GUI subsystem has no console for `main`'s
+/// report.
 #[cfg(windows)]
 pub fn run() -> Result<()> {
+    log::install();
     log_panics();
+    launch().inspect_err(|error| {
+        let message = format!("{error:#}");
+        log::error(&message);
+        cli::show_error(&message);
+    })
+}
+
+#[cfg(windows)]
+fn launch() -> Result<()> {
     let tray = match cli::dispatch()? {
         cli::Launch::Handled => return Ok(()),
         cli::Launch::Window { tray } => tray,
