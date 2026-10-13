@@ -3,8 +3,10 @@
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
+    open,
+    pane::{self, Pane},
     text,
-    theme::{Skin, Surface},
+    theme::Skin,
 };
 use crate::{
     log,
@@ -50,6 +52,26 @@ struct Inner {
     state: RefCell<State>,
 }
 
+impl Pane for ClipsPage {
+    fn title(&self) -> &'static str {
+        text::TAB_CLIPS
+    }
+
+    fn page(&self) -> &gui::TabPage {
+        &self.0.page
+    }
+
+    fn on_create(&self) {
+        // Image list first: setting it resets the icon spacing.
+        self.install_image_list();
+        self.set_icon_spacing();
+    }
+
+    fn grow(&self, dy: i32) {
+        layout::resize_height_by(self.0.list.hwnd(), dy);
+    }
+}
+
 impl ClipsPage {
     pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
         let page = layout::page(parent);
@@ -66,7 +88,7 @@ impl ClipsPage {
                 ..Default::default()
             },
         );
-        layout::draw(&page, page.on(), skin, Surface::Page, ());
+        pane::paint(&page, skin, ());
 
         let page = Self(Rc::new(Inner {
             page,
@@ -75,20 +97,6 @@ impl ClipsPage {
         }));
         page.events();
         page
-    }
-
-    pub(super) fn page(&self) -> &gui::TabPage {
-        &self.0.page
-    }
-
-    pub(super) fn grow(&self, delta: i32) {
-        layout::resize_height_by(self.0.list.hwnd(), delta);
-    }
-
-    pub(super) fn on_create(&self) {
-        // Image list first: setting it resets the icon spacing.
-        self.install_image_list();
-        self.set_icon_spacing();
     }
 
     pub(super) fn apply_look(&self, skin: &Skin) {
@@ -683,12 +691,6 @@ fn list_clips(folder: &Path) -> Vec<Clip> {
         .collect();
     newest_first(&mut clips);
     clips
-}
-
-fn open(path: &Path) {
-    if let Err(error) = shell::open(path) {
-        log::warning(text::clip_open_failed(path, error));
-    }
 }
 
 fn newest_first(clips: &mut [Clip]) {

@@ -5,8 +5,9 @@ use super::{
         self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE,
         Painted, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
     },
+    pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
-    theme::{Skin, Surface, Tone},
+    theme::{Skin, Tone},
 };
 use crate::{
     config::{
@@ -35,15 +36,13 @@ const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
 /// The same from the second column.
 const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
 const ERROR_X: i32 = BUTTON_WIDTH + 8;
-const BYTES_PER_MEGABYTE: u64 = 1_000_000;
-const FIRST_ROW: i32 = 20;
 const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
 
 mod rows {
-    use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_ROW, LINE};
+    use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_FRAME, FIRST_ROW, LINE};
 
-    pub(super) const RECORDING_FRAME: i32 = 6;
+    pub(super) const RECORDING_FRAME: i32 = FIRST_FRAME;
     pub(super) const ENCODING: i32 = RECORDING_FRAME + FIRST_ROW;
     pub(super) const BUFFER: i32 = ENCODING + FIELD_PITCH;
     pub(super) const HOTKEY: i32 = BUFFER + FIELD_PITCH;
@@ -103,6 +102,25 @@ impl Painted for Inner {
     }
 }
 
+impl Pane for SettingsPage {
+    fn title(&self) -> &'static str {
+        text::TAB_SETTINGS
+    }
+
+    fn page(&self) -> &gui::TabPage {
+        &self.0.page
+    }
+
+    fn on_create(&self) {
+        layout::fit_titles(&self.0.frames);
+        self.update_estimate();
+    }
+
+    fn frames(&self) -> &[Frame] {
+        &self.0.frames
+    }
+}
+
 impl SettingsPage {
     pub(super) fn new(
         parent: &(impl GuiParent + 'static),
@@ -137,29 +155,10 @@ impl SettingsPage {
             general,
             codecs: codecs.to_vec(),
         });
-        layout::draw(
-            &inner.page,
-            inner.page.on(),
-            skin,
-            Surface::Page,
-            Rc::clone(&inner),
-        );
+        pane::paint(&inner.page, skin, Rc::clone(&inner));
         let page = Self(inner);
         page.estimate_events();
         page
-    }
-
-    pub(super) fn page(&self) -> &gui::TabPage {
-        &self.0.page
-    }
-
-    pub(super) fn frames(&self) -> &[Frame] {
-        &self.0.frames
-    }
-
-    pub(super) fn on_create(&self) {
-        layout::fit_titles(&self.0.frames);
-        self.update_estimate();
     }
 
     pub(super) fn extra(&self) -> i32 {
@@ -235,15 +234,14 @@ impl SettingsPage {
         let estimate = number(&recording.encoding.buffer_seconds)
             .zip(number(&recording.encoding.bitrate))
             .and_then(|(buffer_seconds, bitrate_mbps)| {
-                estimate_megabytes(buffer_seconds, bitrate_mbps)
-                    .map(|megabytes| (megabytes, bitrate_mbps))
+                estimate_bytes(buffer_seconds, bitrate_mbps).map(|bytes| (bytes, bitrate_mbps))
             });
         let memory = chosen(&recording.memory, &Memory::ALL);
-        recording.estimate.set_text(
-            &estimate.map_or_else(String::new, |(megabytes, bitrate_mbps)| {
-                text::buffer_estimate(megabytes, memory, bitrate_mbps)
-            }),
-        );
+        recording
+            .estimate
+            .set_text(&estimate.map_or_else(String::new, |(bytes, bitrate_mbps)| {
+                text::buffer_estimate(bytes, memory, bitrate_mbps)
+            }));
     }
 
     fn chosen_theme(&self) -> Theme {
@@ -602,7 +600,7 @@ fn stored_folder(entered: &str) -> Option<PathBuf> {
 }
 
 /// `None` outside the limits Apply enforces, where the configuration's arithmetic overflows.
-fn estimate_megabytes(buffer_seconds: u32, bitrate_mbps: u32) -> Option<u64> {
+fn estimate_bytes(buffer_seconds: u32, bitrate_mbps: u32) -> Option<u64> {
     let within = (MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&buffer_seconds)
         && (MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&bitrate_mbps);
     within.then(|| {
@@ -612,7 +610,6 @@ fn estimate_megabytes(buffer_seconds: u32, bitrate_mbps: u32) -> Option<u64> {
             ..Config::default()
         }
         .estimated_buffer_bytes()
-            / BYTES_PER_MEGABYTE
     })
 }
 
@@ -694,13 +691,13 @@ mod tests {
 
     #[test]
     fn the_estimate_covers_the_accepted_range_and_nothing_beyond_it() {
-        assert_eq!(estimate_megabytes(60, 20), Some(150));
+        assert_eq!(estimate_bytes(60, 20), Some(150_000_000));
         assert_eq!(
-            estimate_megabytes(MAX_BUFFER_SECONDS, MAX_BITRATE_MBPS),
-            Some(u64::from(MAX_BUFFER_SECONDS) * u64::from(MAX_BITRATE_MBPS) / 8)
+            estimate_bytes(MAX_BUFFER_SECONDS, MAX_BITRATE_MBPS),
+            Some(u64::from(MAX_BUFFER_SECONDS) * u64::from(MAX_BITRATE_MBPS) * 1_000_000 / 8)
         );
-        assert_eq!(estimate_megabytes(60, u32::MAX), None);
-        assert_eq!(estimate_megabytes(MAX_BUFFER_SECONDS + 1, 20), None);
-        assert_eq!(estimate_megabytes(60, MIN_BITRATE_MBPS - 1), None);
+        assert_eq!(estimate_bytes(60, u32::MAX), None);
+        assert_eq!(estimate_bytes(MAX_BUFFER_SECONDS + 1, 20), None);
+        assert_eq!(estimate_bytes(60, MIN_BITRATE_MBPS - 1), None);
     }
 }

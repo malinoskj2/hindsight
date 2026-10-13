@@ -12,8 +12,9 @@ pub(super) use crate::service::text::NOTHING_TO_SAVE;
 pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab says why.";
 
 const NO_VALUE: &str = "—";
-const GIGABYTE: f64 = 1_073_741_824.0;
-const MEGABYTE: f64 = 1_048_576.0;
+// Decimal units, as the bitrate's megabits are.
+const GIGABYTE: u64 = 1_000_000_000;
+const MEGABYTE: u64 = 1_000_000;
 
 pub(super) const TAB_STATUS: &str = "Status";
 pub(super) const TAB_CLIPS: &str = "Clips";
@@ -123,7 +124,7 @@ pub(super) fn clip_menu_failed(error: impl Display) -> String {
 
 pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
     // No-break space: the list view wraps captions and would split the size from its unit.
-    format!("{title} {:.0}\u{a0}MB", bytes as f64 / MEGABYTE)
+    format!("{title} {}", format_bytes(bytes).replace(' ', "\u{a0}"))
 }
 
 pub(super) fn status(state: &State) -> String {
@@ -171,7 +172,7 @@ pub(super) fn rates(status: &Status) -> String {
         .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
 }
 
-/// "27 s of 30 s · 312 MB": the span the next save would cover and what it takes.
+/// "27 s of 30 s · 327 MB": the span the next save would cover and what it takes.
 pub(super) fn buffer_held(status: &Status) -> String {
     let Some((stream, held)) = status
         .buffer
@@ -183,11 +184,11 @@ pub(super) fn buffer_held(status: &Status) -> String {
     format!(
         "{seconds:.0} s of {} s · {}",
         status.buffer_seconds,
-        megabytes(held.bytes)
+        format_bytes(held.bytes)
     )
 }
 
-/// "GPU memory (VRAM) · about 3,648 MB": where the buffer is kept and what it reserves.
+/// "GPU memory (VRAM) · about 3.8 GB": where the buffer is kept and what it reserves.
 pub(super) fn buffer_place(status: &Status) -> String {
     status.buffer.map_or_else(
         || NO_VALUE.to_owned(),
@@ -195,7 +196,7 @@ pub(super) fn buffer_place(status: &Status) -> String {
             format!(
                 "{} · about {}",
                 buffer.memory.name(),
-                megabytes(status.buffer_capacity_bytes)
+                format_bytes(status.buffer_capacity_bytes)
             )
         },
     )
@@ -205,54 +206,55 @@ fn stream(status: &Status) -> Option<Stream> {
     status.buffer.and_then(|buffer| buffer.stream)
 }
 
-fn megabytes(bytes: u64) -> String {
-    format!("{:.0} MB", bytes as f64 / MEGABYTE)
+/// Every size the window shows: "312 MB" below a gigabyte, "1.5 GB" from there, in decimal units.
+fn format_bytes(bytes: u64) -> String {
+    // What would round up to 1000 MB is shown as 1.0 GB.
+    if bytes < GIGABYTE - MEGABYTE / 2 {
+        format!("{:.0} MB", bytes as f64 / MEGABYTE as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GIGABYTE as f64)
+    }
 }
 
 pub(super) fn session_written(status: &Status) -> String {
-    gigabytes(status.bytes.session_written)
+    format_bytes(status.bytes.session_written)
 }
 
 pub(super) fn session_saved(status: &Status) -> String {
-    gigabytes(status.bytes.session_saved)
+    format_bytes(status.bytes.session_saved)
 }
 
 pub(super) fn lifetime_written(status: &Status) -> String {
-    gigabytes_or_dash(status.bytes.lifetime_written)
+    bytes_or_dash(status.bytes.lifetime_written)
 }
 
 pub(super) fn lifetime_saved(status: &Status) -> String {
-    gigabytes_or_dash(status.bytes.lifetime_saved)
+    bytes_or_dash(status.bytes.lifetime_saved)
 }
 
-pub(super) fn buffer_estimate(megabytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
+pub(super) fn buffer_estimate(bytes: u64, memory: Memory, bitrate_mbps: u32) -> String {
     let place = memory.place();
+    let size = format_bytes(bytes);
     match memory {
-        Memory::Ram => format!("Buffer {place} at this bitrate: about {megabytes} MB"),
+        Memory::Ram => format!("Buffer {place} at this bitrate: about {size}"),
         Memory::Vram => format!(
-            "Buffer {place} at this bitrate: about {megabytes} MB, plus as much RAM while a clip is saved"
+            "Buffer {place} at this bitrate: about {size}, plus as much RAM while a clip is saved"
         ),
         Memory::Disk => format!(
-            "Buffer {place} at this bitrate: about {megabytes} MB, writing about {} GB an hour",
-            gigabytes_an_hour(bitrate_mbps)
+            "Buffer {place} at this bitrate: about {size}, writing about {} an hour",
+            format_bytes(bytes_an_hour(bitrate_mbps))
         ),
     }
 }
 
-fn gigabytes_an_hour(bitrate_mbps: u32) -> u64 {
+fn bytes_an_hour(bitrate_mbps: u32) -> u64 {
     const SECONDS_AN_HOUR: u64 = 3600;
     const BITS_PER_BYTE: u64 = 8;
-    const MEGABYTES_PER_GIGABYTE: u64 = 1000;
-    let megabytes = u64::from(bitrate_mbps) * SECONDS_AN_HOUR / BITS_PER_BYTE;
-    (megabytes + MEGABYTES_PER_GIGABYTE / 2) / MEGABYTES_PER_GIGABYTE
+    u64::from(bitrate_mbps) * MEGABYTE * SECONDS_AN_HOUR / BITS_PER_BYTE
 }
 
-fn gigabytes_or_dash(bytes: Option<u64>) -> String {
-    bytes.map_or_else(|| NO_VALUE.to_owned(), gigabytes)
-}
-
-fn gigabytes(bytes: u64) -> String {
-    format!("{:.2} GB", bytes as f64 / GIGABYTE)
+fn bytes_or_dash(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| NO_VALUE.to_owned(), format_bytes)
 }
 
 fn file_name(path: &Path) -> String {
@@ -283,11 +285,15 @@ mod tests {
     use crate::{config::Backend, service::Running};
 
     #[test]
-    fn totals_are_shown_in_gigabytes_to_two_decimals_or_as_a_dash() {
-        assert_eq!(gigabytes_or_dash(None), "—");
-        assert_eq!(gigabytes_or_dash(Some(0)), "0.00 GB");
-        assert_eq!(gigabytes(1_073_741_824), "1.00 GB");
-        assert_eq!(gigabytes(1_610_612_736), "1.50 GB");
+    fn sizes_are_decimal_megabytes_below_a_gigabyte_and_tenths_of_one_above() {
+        assert_eq!(format_bytes(0), "0 MB");
+        assert_eq!(format_bytes(327_155_712), "327 MB");
+        assert_eq!(format_bytes(999_499_999), "999 MB");
+        assert_eq!(format_bytes(999_500_000), "1.0 GB");
+        assert_eq!(format_bytes(1_550_000_000), "1.6 GB");
+        assert_eq!(format_bytes(45_000_000_000), "45.0 GB");
+        assert_eq!(bytes_or_dash(None), "—");
+        assert_eq!(bytes_or_dash(Some(0)), "0 MB");
     }
 
     #[test]
@@ -306,16 +312,20 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_caption_rounds_the_size_to_whole_megabytes() {
+    fn a_clip_caption_keeps_the_size_with_its_unit() {
         assert_eq!(
             clip_caption("2026-10-12 21:14:05", 0),
             "2026-10-12 21:14:05 0\u{a0}MB"
         );
         assert_eq!(
             clip_caption("boss.mp4", 155_189_248),
-            "boss.mp4 148\u{a0}MB"
+            "boss.mp4 155\u{a0}MB"
         );
         assert_eq!(clip_caption("boss.mp4", 1_572_864), "boss.mp4 2\u{a0}MB");
+        assert_eq!(
+            clip_caption("boss.mp4", 2_000_000_000),
+            "boss.mp4 2.0\u{a0}GB"
+        );
     }
 
     #[test]
@@ -344,32 +354,30 @@ mod tests {
         });
         status.buffer_seconds = 30;
         status.buffer_capacity_bytes = 3_825_205_248;
-        assert_eq!(buffer_held(&status), "27 s of 30 s · 312 MB");
-        assert_eq!(buffer_place(&status), "GPU memory (VRAM) · about 3648 MB");
+        assert_eq!(buffer_held(&status), "27 s of 30 s · 327 MB");
+        assert_eq!(buffer_place(&status), "GPU memory (VRAM) · about 3.8 GB");
     }
 
     #[test]
     fn the_buffer_estimate_names_where_the_buffer_lives() {
         assert_eq!(
-            buffer_estimate(500, Memory::Ram, 50),
+            buffer_estimate(500_000_000, Memory::Ram, 50),
             "Buffer in RAM at this bitrate: about 500 MB"
         );
         assert!(
-            buffer_estimate(500, Memory::Vram, 50)
+            buffer_estimate(500_000_000, Memory::Vram, 50)
                 .ends_with("plus as much RAM while a clip is saved")
         );
         assert_eq!(
-            buffer_estimate(1250, Memory::Disk, 100),
-            "Buffer on disk at this bitrate: about 1250 MB, writing about 45 GB an hour"
+            buffer_estimate(1_260_000_000, Memory::Disk, 100),
+            "Buffer on disk at this bitrate: about 1.3 GB, writing about 45.0 GB an hour"
         );
     }
 
     #[test]
     fn the_hourly_write_volume_is_the_bitrate_for_an_hour() {
-        assert_eq!(gigabytes_an_hour(100), 45);
-        assert_eq!(gigabytes_an_hour(50), 23);
-        assert_eq!(gigabytes_an_hour(5), 2);
-        assert_eq!(gigabytes_an_hour(150), 68);
-        assert_eq!(gigabytes_an_hour(u32::MAX), 1_932_735_283);
+        assert_eq!(bytes_an_hour(100), 45_000_000_000);
+        assert_eq!(bytes_an_hour(5), 2_250_000_000);
+        assert_eq!(bytes_an_hour(u32::MAX), 1_932_735_282_750_000_000);
     }
 }

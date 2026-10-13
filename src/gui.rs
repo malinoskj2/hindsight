@@ -4,6 +4,7 @@ use self::{
     clips::ClipsPage,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
+    pane::Pane,
     settings::{SettingsError, SettingsPage},
     status::{Control, StatusPage},
     theme::{Skin, Surface},
@@ -23,7 +24,7 @@ use crate::{
 use anyhow::Result;
 use std::{
     cell::{Cell, OnceCell, RefCell},
-    fs,
+    fs, iter,
     path::Path,
     rc::Rc,
 };
@@ -33,6 +34,7 @@ mod art;
 mod clips;
 mod layout;
 mod logs;
+mod pane;
 mod settings;
 mod startup_error;
 mod status;
@@ -98,17 +100,14 @@ impl Main {
         let codecs = offered_codecs();
         let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&main_window, &skin);
+        let panes: [&dyn Pane; 4] = [&status, &clips, &settings, &logs];
+        let tab_pages = panes.map(|pane| (pane.title(), pane.page().clone()));
         let tab = gui::Tab::new(
             &main_window,
             gui::TabOpts {
                 position: gui::dpi(MARGIN, MARGIN),
                 size: gui::dpi(width - 2 * MARGIN, TAB_HEIGHT),
-                pages: &[
-                    (text::TAB_STATUS, status.page().clone()),
-                    (text::TAB_CLIPS, clips.page().clone()),
-                    (text::TAB_SETTINGS, settings.page().clone()),
-                    (text::TAB_LOGS, logs.page().clone()),
-                ],
+                pages: &tab_pages,
                 ..Default::default()
             },
         );
@@ -270,10 +269,9 @@ impl Main {
 
     fn on_create(&self) {
         self.apply_look();
-        self.0.status.on_create();
-        self.0.clips.on_create();
-        self.0.settings.on_create();
-        self.0.logs.on_create();
+        for pane in self.panes() {
+            pane.on_create();
+        }
         self.show_initial_startup_error();
         self.register_configured_hotkey();
         self.watch_foreground_changes();
@@ -435,13 +433,7 @@ impl Main {
             None => window::match_dialog_title_bar(hwnd),
         }
         let classic = !self.0.skin.is_themed();
-        for frame in self
-            .0
-            .status
-            .frames()
-            .iter()
-            .chain(self.0.settings.frames())
-        {
+        for frame in self.panes().into_iter().flat_map(Pane::frames) {
             frame.show_title_label(classic);
         }
         self.0.clips.apply_look(&self.0.skin);
@@ -524,22 +516,27 @@ impl Main {
             for window in self.tab_and_pages() {
                 resize_height_by(window, delta);
             }
-            self.0.clips.grow(delta);
-            self.0.logs.grow(delta);
+            for pane in self.panes() {
+                pane.grow(delta);
+            }
             resize_height_by(self.0.main_window.hwnd(), delta);
         }
         // Moved controls keep stale pixels otherwise.
         self.redraw();
     }
 
-    fn tab_and_pages(&self) -> [&w::HWND; 5] {
+    /// The tabs' pages, in tab order.
+    fn panes(&self) -> [&dyn Pane; 4] {
         [
-            self.0.tab.hwnd(),
-            self.0.status.page().hwnd(),
-            self.0.clips.page().hwnd(),
-            self.0.settings.page().hwnd(),
-            self.0.logs.page().hwnd(),
+            &self.0.status,
+            &self.0.clips,
+            &self.0.settings,
+            &self.0.logs,
         ]
+    }
+
+    fn tab_and_pages(&self) -> impl Iterator<Item = &w::HWND> {
+        iter::once(self.0.tab.hwnd()).chain(self.panes().into_iter().map(|pane| pane.page().hwnd()))
     }
 
     fn redraw(&self) {

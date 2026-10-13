@@ -2,7 +2,9 @@
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X},
-    theme::{Skin, Surface},
+    pane::{self, Pane},
+    text,
+    theme::Skin,
 };
 use crate::log;
 use std::{cell::Cell, rc::Rc};
@@ -19,6 +21,25 @@ struct Inner {
     view: gui::Edit,
     sequence: Cell<u64>,
     need_scroll: Cell<bool>,
+}
+
+impl Pane for LogsPage {
+    fn title(&self) -> &'static str {
+        text::TAB_LOGS
+    }
+
+    fn page(&self) -> &gui::TabPage {
+        &self.0.page
+    }
+
+    fn on_create(&self) {
+        // A multi-line edit otherwise stops accepting text after 32 K characters.
+        self.0.view.limit_text(None);
+    }
+
+    fn grow(&self, dy: i32) {
+        layout::resize_height_by(self.0.view.hwnd(), dy);
+    }
 }
 
 impl LogsPage {
@@ -39,7 +60,7 @@ impl LogsPage {
                 ..Default::default()
             },
         );
-        layout::draw(&page, page.on(), skin, Surface::Page, ());
+        pane::paint(&page, skin, ());
 
         Self(Rc::new(Inner {
             page,
@@ -47,19 +68,6 @@ impl LogsPage {
             sequence: Cell::new(0),
             need_scroll: Cell::new(false),
         }))
-    }
-
-    pub(super) fn page(&self) -> &gui::TabPage {
-        &self.0.page
-    }
-
-    pub(super) fn grow(&self, delta: i32) {
-        layout::resize_height_by(self.0.view.hwnd(), delta);
-    }
-
-    pub(super) fn on_create(&self) {
-        // A multi-line edit otherwise stops accepting text after 32 K characters.
-        self.0.view.limit_text(None);
     }
 
     pub(super) fn update(&self) {
