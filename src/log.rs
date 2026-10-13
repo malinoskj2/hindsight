@@ -132,37 +132,58 @@ fn detach_mirror() -> Option<File> {
     mirror().take()
 }
 
-#[cfg(windows)]
 fn timestamp() -> String {
-    let now = winsafe::GetLocalTime();
-    format!("{:02}:{:02}:{:02}", now.wHour, now.wMinute, now.wSecond)
+    let now = local_time();
+    format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second)
 }
 
-#[cfg(windows)]
 pub(crate) fn file_stamp() -> String {
-    let now = winsafe::GetLocalTime();
+    let now = local_time();
     format!(
         "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
+        now.year, now.month, now.day, now.hour, now.minute, now.second
     )
 }
 
-#[cfg(windows)]
 pub(crate) fn today() -> String {
+    let now = local_time();
+    format!("{:04}-{:02}-{:02}", now.year, now.month, now.day)
+}
+
+/// The wall clock on Windows, UTC elsewhere.
+struct LocalTime {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+}
+
+#[cfg(windows)]
+fn local_time() -> LocalTime {
     let now = winsafe::GetLocalTime();
-    format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
+    LocalTime {
+        year: i32::from(now.wYear),
+        month: i32::from(now.wMonth),
+        day: i32::from(now.wDay),
+        hour: i32::from(now.wHour),
+        minute: i32::from(now.wMinute),
+        second: i32::from(now.wSecond),
+    }
 }
 
 #[cfg(not(windows))]
-fn timestamp() -> String {
-    jiff::Timestamp::now().strftime("%H:%M:%S").to_string()
-}
-
-#[cfg(not(windows))]
-pub(crate) fn file_stamp() -> String {
-    jiff::Timestamp::now()
-        .strftime("%Y-%m-%d_%H-%M-%S")
-        .to_string()
+fn local_time() -> LocalTime {
+    let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+    LocalTime {
+        year: i32::from(now.year()),
+        month: i32::from(now.month()),
+        day: i32::from(now.day()),
+        hour: i32::from(now.hour()),
+        minute: i32::from(now.minute()),
+        second: i32::from(now.second()),
+    }
 }
 
 #[cfg(test)]

@@ -8,9 +8,11 @@ const WAIT: Duration = Duration::from_millis(100);
 const ATTEMPTS: u32 = 50;
 
 #[expect(unsafe_code)]
-pub(crate) fn show_message() -> co::WM {
-    // SAFETY: `WM` is a plain newtype over the message number; this one is in the app range.
-    unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) }
+// SAFETY: `WM` is a plain newtype over the message number; this one is in the app range.
+pub(crate) const SHOW_MESSAGE: co::WM = unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) };
+
+pub(crate) const fn show_message() -> co::WM {
+    SHOW_MESSAGE
 }
 
 pub(crate) fn show_running() -> bool {
@@ -32,5 +34,5 @@ fn bring_forward(window: &w::HWND) -> bool {
     let (_, process) = window.GetWindowThreadProcessId();
     let _ = w::AllowSetForegroundWindow(Some(process));
     // SAFETY: the message carries no pointers.
-    unsafe { window.PostMessage(w::msg::Wm::new(show_message(), 0, 0)) }.is_ok()
+    unsafe { window.PostMessage(w::msg::Wm::new(SHOW_MESSAGE, 0, 0)) }.is_ok()
 }

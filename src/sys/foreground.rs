@@ -2,7 +2,7 @@
 
 use super::callback::Slot;
 use crate::{APP_NAME, service::Target};
-use std::rc::Rc;
+use std::{path::Path, rc::Rc};
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -98,8 +98,8 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
     }
 
     Some(Target::Window {
-        window: window.ptr() as isize,
-        monitor: monitor.ptr() as isize,
+        window: window.ptr().addr().cast_signed(),
+        monitor: monitor.ptr().addr().cast_signed(),
         name: process_name(process),
     })
 }
@@ -139,8 +139,11 @@ fn process_name(process: u32) -> String {
     w::HPROCESS::OpenProcess(co::PROCESS::QUERY_LIMITED_INFORMATION, false, process)
         .and_then(|handle| handle.QueryFullProcessImageName(co::PROCESS_NAME::WIN32))
         .ok()
-        .and_then(|path| path.rsplit('\\').next().map(str::to_owned))
-        .filter(|name| !name.is_empty())
+        .and_then(|path| {
+            Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "a full-screen app".to_owned())
 }
 

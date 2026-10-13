@@ -1,6 +1,6 @@
 //! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
 
-use crate::sys::thread;
+use super::thread;
 use std::{
     ffi::OsString,
     os::windows::ffi::OsStrExt,
@@ -29,7 +29,11 @@ use windows::{
     },
     core::{HSTRING, PCWSTR},
 };
-use winsafe::{self as w, co, guard::DeleteObjectGuard, prelude::*};
+use winsafe::{
+    self as w, co,
+    guard::{DeleteDCGuard, DeleteObjectGuard},
+    prelude::*,
+};
 
 const PIXEL: usize = 4;
 const ALPHA: usize = 3;
@@ -184,7 +188,7 @@ fn execute(file: &HSTRING, parameters: Option<&HSTRING>) -> Result<(), usize> {
             SW_SHOWNORMAL,
         )
     };
-    let code = result.0 as usize;
+    let code = result.0.addr();
     if code > SHELL_EXECUTE_OK {
         Ok(())
     } else {
@@ -308,8 +312,7 @@ impl Frame {
     }
 
     fn paint(&mut self, draw: impl FnOnce(&w::HDC) -> w::SysResult<()>) -> w::SysResult<()> {
-        let screen = w::HWND::NULL.GetDC()?;
-        let target = screen.CreateCompatibleDC()?;
+        let target = memory_dc()?;
         let selected = target.SelectObject(&*self.bitmap)?;
         let drawn = draw(&target);
         drop(selected);
@@ -371,8 +374,7 @@ fn copy_fitted(
     (width, height): (i32, i32),
     fit: Fit,
 ) -> w::SysResult<()> {
-    let screen = w::HWND::NULL.GetDC()?;
-    let source = screen.CreateCompatibleDC()?;
+    let source = memory_dc()?;
     let _selected = source.SelectObject(picture)?;
     hdc.SetStretchBltMode(co::STRETCH_MODE::HALFTONE)?;
     hdc.StretchBlt(
@@ -383,6 +385,11 @@ fn copy_fitted(
         w::SIZE::with(width, height),
         co::ROP::SRCCOPY,
     )
+}
+
+/// A device context in memory that matches the screen's pixel format.
+fn memory_dc() -> w::SysResult<DeleteDCGuard> {
+    w::HWND::NULL.GetDC()?.CreateCompatibleDC()
 }
 
 fn draw_placeholder(

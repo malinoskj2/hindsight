@@ -17,6 +17,16 @@ const CLIP_DIRECTORY_ENV: &str = "USERPROFILE";
 const VIDEOS_DIRECTORY: &str = "Videos";
 const CLIP_DIRECTORY: &str = "hindsight";
 
+macro_rules! display_by_name {
+    ($($choice:ty),*) => {$(
+        impl fmt::Display for $choice {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.name())
+            }
+        }
+    )*};
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
@@ -33,12 +43,6 @@ impl Mode {
             Self::Fullscreen => "Full-screen apps",
             Self::Desktop => "Whole desktop, always",
         }
-    }
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
     }
 }
 
@@ -68,12 +72,6 @@ impl Backend {
     }
 }
 
-impl fmt::Display for Backend {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
 /// AV1 needs an RTX 40 series GPU or newer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,12 +91,6 @@ impl Codec {
             Self::Hevc => "HEVC",
             Self::Av1 => "AV1",
         }
-    }
-}
-
-impl fmt::Display for Codec {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
     }
 }
 
@@ -131,12 +123,6 @@ impl Memory {
     }
 }
 
-impl fmt::Display for Memory {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Theme {
@@ -160,11 +146,7 @@ impl Theme {
     }
 }
 
-impl fmt::Display for Theme {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
+display_by_name!(Mode, Backend, Codec, Memory, Theme);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

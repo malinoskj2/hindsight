@@ -15,9 +15,7 @@ pub(crate) const TRAY_FLAG_NAME: &str = "tray";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 pub(crate) fn enabled() -> io::Result<bool> {
-    let value = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(RUN_KEY, KEY_READ)
-        .and_then(|key| key.get_value::<String, _>(APP_NAME));
+    let value = run_key(KEY_READ).and_then(|key| key.get_value::<String, _>(APP_NAME));
     match value {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -29,9 +27,7 @@ pub(crate) fn set(enabled: bool) -> io::Result<()> {
     if enabled {
         return add();
     }
-    let removed = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
-        .and_then(|key| key.delete_value(APP_NAME));
+    let removed = run_key(KEY_READ | KEY_WRITE).and_then(|key| key.delete_value(APP_NAME));
     match removed {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
@@ -43,6 +39,11 @@ fn add() -> io::Result<()> {
         .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)?;
     let executable = std::env::current_exe()?;
     key.set_value(APP_NAME, &command(executable.as_os_str()))
+}
+
+/// `access` is a `KEY_*` mask; `winreg` names its type only through `windows-sys`.
+fn run_key(access: u32) -> io::Result<RegKey> {
+    RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, access)
 }
 
 fn command(executable: &OsStr) -> OsString {
