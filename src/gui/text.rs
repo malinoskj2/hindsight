@@ -119,7 +119,6 @@ pub(super) fn status(state: DisplayStatus) -> String {
         DisplayStatus::Waiting => "Waiting for a full-screen app",
         DisplayStatus::Recording => "Recording to the replay buffer",
         DisplayStatus::Retrying => "Capture stopped · retrying shortly",
-        DisplayStatus::Stopped => "Stopped · the replay buffer is off",
         DisplayStatus::Unsupported => "Cannot record with these settings",
     };
     format!("●  {message}")

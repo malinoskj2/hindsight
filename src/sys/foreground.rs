@@ -1,7 +1,8 @@
 //! Full-screen apps: windows whose client area covers their monitor, watched through event hooks.
 
+use super::callback::Slot;
 use crate::{APP_NAME, service::Target};
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -17,10 +18,8 @@ use winsafe::{self as w, co};
 /// Shell windows that fill the monitor: the desktop and its wallpaper hosts.
 const SHELL_CLASSES: [&str; 2] = ["Progman", "WorkerW"];
 
-type Handler = Rc<dyn Fn()>;
-
 thread_local! {
-    static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
+    static HANDLER: Slot<dyn Fn()> = const { Slot::new() };
 }
 
 /// The location hook catches a game going full screen while already in front.
@@ -31,12 +30,12 @@ pub(crate) struct ForegroundHook {
 
 impl ForegroundHook {
     pub(crate) fn install(on_change: impl Fn() + 'static) -> Option<Self> {
-        set_handler(Rc::new(on_change));
+        HANDLER.with(|slot| slot.set(Rc::new(on_change)));
         let (Some(foreground), Some(location)) = (
             EventHook::set(EVENT_SYSTEM_FOREGROUND),
             EventHook::set(EVENT_OBJECT_LOCATIONCHANGE),
         ) else {
-            clear_handler();
+            HANDLER.with(Slot::clear);
             crate::log::warning(format!("{APP_NAME} could not watch the foreground window"));
             return None;
         };
@@ -49,7 +48,7 @@ impl ForegroundHook {
 
 impl Drop for ForegroundHook {
     fn drop(&mut self) {
-        clear_handler();
+        HANDLER.with(Slot::clear);
     }
 }
 
@@ -157,27 +156,13 @@ unsafe extern "system" fn on_event(
     if event == EVENT_OBJECT_LOCATIONCHANGE && !is_foreground_window(window, object, child) {
         return;
     }
-    dispatch();
+    if let Some(handler) = HANDLER.with(Slot::get) {
+        handler();
+    }
 }
 
 fn is_foreground_window(window: HWND, object: i32, child: i32) -> bool {
     // SAFETY: no arguments, no preconditions.
     let foreground = unsafe { GetForegroundWindow() };
     object == OBJID_WINDOW.0 && child == CHILDID_SELF.cast_signed() && window == foreground
-}
-
-fn set_handler(handler: Handler) {
-    HANDLER.with(|slot| *slot.borrow_mut() = Some(handler));
-}
-
-fn clear_handler() {
-    HANDLER.with(|slot| slot.borrow_mut().take());
-}
-
-/// The handler is cloned out first, so it may itself replace or drop the hook.
-fn dispatch() {
-    let handler = HANDLER.with(|slot| slot.borrow().clone());
-    if let Some(handler) = handler {
-        handler();
-    }
 }

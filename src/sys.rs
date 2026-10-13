@@ -1,6 +1,8 @@
 //! OS-level helpers, one Win32 facility each.
 
 #[cfg(windows)]
+pub(crate) mod callback;
+#[cfg(windows)]
 #[expect(unsafe_code)]
 pub(crate) mod clock;
 #[cfg(windows)]

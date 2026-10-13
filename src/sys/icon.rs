@@ -2,33 +2,20 @@
 
 use crate::config::Theme;
 use std::{fs, io, path::Path};
+use table::ICONS;
+
+mod table;
 
 const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
 
-/// Resource id of the embedded icon for `theme`; must match `build.rs`.
+/// Resource id of the embedded icon for `theme`.
 pub(crate) const fn resource(theme: Theme) -> u16 {
-    match theme {
-        Theme::Classic => 1,
-        Theme::Ember => 2,
-        Theme::Selene => 3,
-        Theme::Nova => 4,
-    }
-}
-
-/// The logo under `assets` each theme's icon is made from, and the `.ico` written there.
-const fn files(theme: Theme) -> (&'static str, &'static str) {
-    match theme {
-        Theme::Classic => ("logo/monochrome-owl.png", "hindsight.ico"),
-        Theme::Ember => ("logo/ember-owl.png", "hindsight-ember.ico"),
-        Theme::Selene => ("logo/selene-owl.png", "hindsight-selene.ico"),
-        Theme::Nova => ("logo/nova-owl.png", "hindsight-nova.ico"),
-    }
+    ICONS[theme as usize].3
 }
 
 /// Writes every theme's `.ico` under `assets` from the logos under `assets/logo`.
 pub(crate) fn write_all(assets: &Path) -> io::Result<()> {
-    for theme in Theme::ALL {
-        let (logo, ico) = files(theme);
+    for (_, logo, ico, _) in ICONS {
         let picture = Picture::decode(&fs::read(assets.join(logo))?)?;
         fs::write(assets.join(ico), picture.ico())?;
     }
@@ -214,29 +201,30 @@ mod tests {
 
     #[test]
     fn the_committed_icons_match_the_logos() {
-        let committed: [(&[u8], &[u8]); 4] = [
-            (
-                include_bytes!("../../assets/logo/monochrome-owl.png"),
-                include_bytes!("../../assets/hindsight.ico"),
-            ),
-            (
-                include_bytes!("../../assets/logo/ember-owl.png"),
-                include_bytes!("../../assets/hindsight-ember.ico"),
-            ),
-            (
-                include_bytes!("../../assets/logo/selene-owl.png"),
-                include_bytes!("../../assets/hindsight-selene.ico"),
-            ),
-            (
-                include_bytes!("../../assets/logo/nova-owl.png"),
-                include_bytes!("../../assets/hindsight-nova.ico"),
-            ),
-        ];
-        for (logo, ico) in committed {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        for (_, logo, ico, _) in ICONS {
+            let picture = Picture::decode(&fs::read(assets.join(logo)).unwrap()).unwrap();
             assert!(
-                Picture::decode(logo).unwrap().ico() == ico,
+                picture.ico() == fs::read(assets.join(ico)).unwrap(),
                 "regenerate the icons with `hindsight icon assets`"
             );
         }
+    }
+
+    #[test]
+    fn the_icon_table_follows_the_themes_with_an_id_each() {
+        let mut ids = Vec::new();
+        for (theme, (name, _, _, id)) in Theme::ALL.into_iter().zip(ICONS) {
+            assert_eq!(
+                serde_json::to_string(&theme).unwrap(),
+                format!("\"{name}\"")
+            );
+            assert_eq!(resource(theme), id);
+            assert!(id > 0, "resource ids start at 1");
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), ICONS.len(), "the ids are distinct");
     }
 }

@@ -1,12 +1,8 @@
 //! Embeds the Windows icon and manifest.
 
-/// Written by `hindsight icon assets`, one per theme; the ids must match `sys::icon::resource`.
-const ICONS: [(&str, &str); 4] = [
-    ("assets/hindsight.ico", "1"),
-    ("assets/hindsight-ember.ico", "2"),
-    ("assets/hindsight-selene.ico", "3"),
-    ("assets/hindsight-nova.ico", "4"),
-];
+#[path = "src/sys/icon/table.rs"]
+mod table;
+
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
@@ -22,8 +18,8 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>"#;
 
 fn main() {
-    for (icon, _) in ICONS {
-        println!("cargo:rerun-if-changed={icon}");
+    for (_, _, ico, _) in table::ICONS {
+        println!("cargo:rerun-if-changed=assets/{ico}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -38,8 +34,8 @@ fn main() {
             "The lowest-overhead instant replay, captured and encoded on the GPU",
         )
         .set("ProductVersion", env!("CARGO_PKG_VERSION"));
-    for (icon, id) in ICONS {
-        resource.set_icon_with_id(icon, id);
+    for (_, _, ico, id) in table::ICONS {
+        resource.set_icon_with_id(&format!("assets/{ico}"), &id.to_string());
     }
     resource.compile().expect("embed the Windows resources");
 }

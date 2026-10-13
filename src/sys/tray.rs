@@ -1,8 +1,8 @@
 //! The notification-area icon and its menu; callbacks arrive on the window's own thread.
 
-use super::icon;
+use super::{callback::Slot, icon};
 use crate::{APP_NAME, config::Theme};
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 use thiserror::Error;
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -11,10 +11,8 @@ use tray_icon::{
 
 const ICON_SIZE: u32 = 32;
 
-type Handler = Rc<dyn Fn(TrayAction)>;
-
 thread_local! {
-    static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
+    static HANDLER: Slot<dyn Fn(TrayAction)> = const { Slot::new() };
 }
 
 #[derive(Debug, Error)]
@@ -57,7 +55,7 @@ impl Tray {
             .build()?;
 
         // Installed last: a handler left behind by a failed setup would keep the window alive.
-        set_handler(Rc::new(on_action));
+        HANDLER.with(|slot| slot.set(Rc::new(on_action)));
         route_events([
             (show.id().clone(), TrayAction::Show),
             (save.id().clone(), TrayAction::Save),
@@ -76,7 +74,7 @@ impl Drop for Tray {
     fn drop(&mut self) {
         MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
         TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
-        clear_handler();
+        HANDLER.with(Slot::clear);
     }
 }
 
@@ -111,18 +109,8 @@ fn opens_window(event: &TrayIconEvent) -> bool {
     )
 }
 
-fn set_handler(handler: Handler) {
-    HANDLER.with(|slot| *slot.borrow_mut() = Some(handler));
-}
-
-fn clear_handler() {
-    HANDLER.with(|slot| slot.borrow_mut().take());
-}
-
-/// The handler is cloned out first, so it may itself replace or drop the tray.
 fn dispatch(action: TrayAction) {
-    let handler = HANDLER.with(|slot| slot.borrow().clone());
-    if let Some(handler) = handler {
+    if let Some(handler) = HANDLER.with(Slot::get) {
         handler(action);
     }
 }

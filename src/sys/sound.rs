@@ -1,12 +1,9 @@
 //! The tones that say how a save is going, played on a thread of their own.
 
-use std::{f64::consts::TAU, io::Cursor};
-#[cfg(windows)]
 use std::{
-    sync::{
-        Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    f64::consts::TAU,
+    io::Cursor,
+    sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 #[cfg(windows)]
@@ -38,34 +35,34 @@ impl Tone {
     }
 }
 
-#[cfg(windows)]
-static REQUESTED: AtomicU64 = AtomicU64::new(0);
-#[cfg(windows)]
-static PLAYING: Mutex<()> = Mutex::new(());
-
-/// A tone still playing finishes; of those asked for meanwhile only the latest plays.
-#[cfg(windows)]
-pub(crate) fn play(tone: Tone) {
-    let turn = REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
-    let wav = wav(tone.tones());
+/// The thread ends with its last `Sender`. A tone still playing finishes; of those asked for
+/// meanwhile only the latest plays.
+pub(crate) fn start() -> Sender<Tone> {
+    let (sender, receiver) = mpsc::channel();
     let _ = thread::Builder::new()
         .name("sound".to_owned())
-        .spawn(move || {
-            let _playing = PLAYING.lock().unwrap_or_else(PoisonError::into_inner);
-            if REQUESTED.load(Ordering::Relaxed) != turn {
-                return;
-            }
-            let _ = w::PlaySound(Snd::MemSync {
-                src: &wav,
-                default: false,
-                stop: true,
-                sentry: false,
-            });
-        });
+        .spawn(move || serve(&receiver));
+    sender
+}
+
+fn serve(tones: &Receiver<Tone>) {
+    while let Ok(first) = tones.recv() {
+        play(tones.try_iter().last().unwrap_or(first));
+    }
+}
+
+#[cfg(windows)]
+fn play(tone: Tone) {
+    let _ = w::PlaySound(Snd::MemSync {
+        src: &wav(tone.tones()),
+        default: false,
+        stop: true,
+        sentry: false,
+    });
 }
 
 #[cfg(not(windows))]
-pub(crate) fn play(_tone: Tone) {}
+fn play(_tone: Tone) {}
 
 fn wav(tones: &[(u32, u32)]) -> Vec<u8> {
     let spec = hound::WavSpec {

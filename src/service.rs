@@ -5,11 +5,12 @@ use crate::{
     config::{Backend, Config, Mode, Theme},
     log,
     replay::{self, Live, SaveError, Snapshot, Stream},
-    storage::{Store, Totals},
+    storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
 };
 use anyhow::Result;
 use std::{
+    fmt::Display,
     io,
     path::{Path, PathBuf},
     sync::{
@@ -76,26 +77,36 @@ pub(crate) enum Ended {
     Unsupported(String),
 }
 
-pub(crate) type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
+type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
+type Audio = fn(&Arc<Live>) -> Option<audio::Capture>;
+type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
+type Chime = Box<dyn Fn(Tone) + Send>;
 
 #[cfg(windows)]
 const RECORDER: Recorder = crate::gpu::record;
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
-type Writer = fn(&Snapshot, &Path) -> Result<PathBuf, SaveError>;
-type Chime = Box<dyn Fn(Tone) + Send>;
-
-struct Saver {
+/// What the worker drives; tests stand in for any part of it.
+struct Services {
+    record: Recorder,
+    audio: Audio,
     write: Writer,
     chime: Chime,
+    retry_interval: Duration,
 }
 
-impl Saver {
+impl Services {
     fn real() -> Self {
+        let sounds = sys::sound::start();
         Self {
+            record: RECORDER,
+            audio: audio::start,
             write: replay::save,
-            chime: Box::new(sys::sound::play),
+            chime: Box::new(move |tone| {
+                let _ = sounds.send(tone);
+            }),
+            retry_interval: RETRY_INTERVAL,
         }
     }
 }
@@ -107,7 +118,6 @@ pub(crate) enum DisplayStatus {
     Waiting,
     Recording,
     Retrying,
-    Stopped,
     Unsupported,
 }
 
@@ -137,7 +147,6 @@ enum Command {
     Save,
     Theme(Theme),
     Wake,
-    Publish,
     Exit,
 }
 
@@ -149,25 +158,10 @@ pub(crate) struct Worker {
 
 impl Worker {
     pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
-        Self::spawn_with(RECORDER, RETRY_INTERVAL, Some(store), config)
+        Self::spawn_with(Services::real(), Some(store), config)
     }
 
-    fn spawn_with(
-        recorder: Recorder,
-        retry_interval: Duration,
-        store: Option<Store>,
-        config: Config,
-    ) -> io::Result<Self> {
-        Self::spawn_saving_with(recorder, retry_interval, store, config, Saver::real())
-    }
-
-    fn spawn_saving_with(
-        recorder: Recorder,
-        retry_interval: Duration,
-        store: Option<Store>,
-        config: Config,
-        saver: Saver,
-    ) -> io::Result<Self> {
+    fn spawn_with(services: Services, store: Option<Store>, config: Config) -> io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
         let wake = commands.clone();
         let status = Arc::new(Mutex::new(Status::default()));
@@ -175,8 +169,7 @@ impl Worker {
         let join = thread::Builder::new()
             .name("recording-worker".to_owned())
             .spawn(move || {
-                let mut machine =
-                    Machine::new(recorder, retry_interval, store, config, output, wake, saver);
+                let mut machine = Machine::new(services, store, config, output, wake);
                 machine.run(&receiver);
             })?;
 
@@ -211,7 +204,7 @@ impl Worker {
     }
 
     pub(crate) fn refresh(&self) {
-        self.request(Command::Publish);
+        self.request(Command::Wake);
     }
 
     fn request(&self, command: Command) {
@@ -269,13 +262,70 @@ struct Reading {
     sample: Sample,
 }
 
-struct Machine {
-    recorder: Recorder,
-    retry_interval: Duration,
+/// The bytes buffered and saved: this run's, and the lifetime totals kept in the store.
+struct Ledger {
     store: Option<Store>,
     totals: Option<Totals>,
     session_buffered: u64,
     session_saved: u64,
+}
+
+impl Ledger {
+    fn new(store: Option<Store>) -> Self {
+        let totals = store.as_ref().and_then(load_totals);
+        Self {
+            store,
+            totals,
+            session_buffered: 0,
+            session_saved: 0,
+        }
+    }
+
+    fn totals(&self) -> Option<Totals> {
+        self.totals
+    }
+
+    fn save_config(&self, config: &Config) -> Result<(), StorageError> {
+        self.store
+            .as_ref()
+            .map_or(Ok(()), |store| store.save_config(config))
+    }
+
+    /// Counts a replay buffer that is done with.
+    fn bank(&mut self, live: &Live) {
+        let bytes = live.bytes();
+        self.session_buffered = self.session_buffered.saturating_add(bytes);
+        self.add(bytes, |totals| &mut totals.buffered_bytes);
+    }
+
+    fn add_saved(&mut self, path: &Path) {
+        let bytes = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                log::warning(text::clip_size_unreadable(path, error));
+                0
+            }
+        };
+        self.session_saved = self.session_saved.saturating_add(bytes);
+        self.add(bytes, |totals| &mut totals.saved_bytes);
+    }
+
+    fn add(&mut self, bytes: u64, total: fn(&mut Totals) -> &mut u64) {
+        if let Some(totals) = self.totals.as_mut() {
+            let total = total(totals);
+            *total = total.saturating_add(bytes);
+        }
+        if let (Some(store), Some(totals)) = (&self.store, &self.totals)
+            && let Err(error) = store.save_totals(totals)
+        {
+            log::warning(text::save_totals_failed(error));
+        }
+    }
+}
+
+struct Machine {
+    services: Services,
+    ledger: Ledger,
     config: Config,
     output: Arc<Mutex<Status>>,
     status: Status,
@@ -286,27 +336,19 @@ struct Machine {
     saving: Option<Saving>,
     sample: Option<Sample>,
     wake: Sender<Command>,
-    saver: Saver,
 }
 
 impl Machine {
     fn new(
-        recorder: Recorder,
-        retry_interval: Duration,
+        services: Services,
         store: Option<Store>,
         config: Config,
         output: Arc<Mutex<Status>>,
         wake: Sender<Command>,
-        saver: Saver,
     ) -> Self {
-        let totals = store.as_ref().and_then(load_totals);
         Self {
-            recorder,
-            retry_interval,
-            store,
-            totals,
-            session_buffered: 0,
-            session_saved: 0,
+            services,
+            ledger: Ledger::new(store),
             config,
             output,
             status: Status::default(),
@@ -317,7 +359,6 @@ impl Machine {
             saving: None,
             sample: None,
             wake,
-            saver,
         }
     }
 
@@ -330,7 +371,7 @@ impl Machine {
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
                 Ok(Command::Theme(theme)) => self.remember_theme(theme),
-                Ok(Command::Wake | Command::Publish) | Err(RecvTimeoutError::Timeout) => {}
+                Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
             }
             self.poll();
@@ -357,8 +398,7 @@ impl Machine {
     }
 
     fn apply(&mut self, config: Config) {
-        if let Err(message) = self.write_settings(&config) {
-            self.report_error(message);
+        if !self.save_settings(&config) {
             return;
         }
         log::info(text::settings_applied(&config));
@@ -391,7 +431,7 @@ impl Machine {
         let Some(snapshot) = self.live.as_ref().and_then(|live| live.snapshot()) else {
             log::warning(text::NOTHING_TO_SAVE);
             self.status.notice = Some(text::NOTHING_TO_SAVE.to_owned());
-            (self.saver.chime)(Tone::Failed);
+            (self.services.chime)(Tone::Failed);
             return;
         };
 
@@ -399,7 +439,7 @@ impl Machine {
         let (done, ending) = self.ending();
         match self.spawn_save(snapshot, ending) {
             Ok(join) => {
-                (self.saver.chime)(Tone::Progress);
+                (self.services.chime)(Tone::Progress);
                 self.saving = Some(Saving {
                     seconds,
                     done,
@@ -413,18 +453,21 @@ impl Machine {
     }
 
     fn remember_theme(&mut self, theme: Theme) {
-        self.config.theme = theme;
-        if let Err(message) = self.write_settings(&self.config) {
-            self.report_error(message);
-        }
+        let config = Config {
+            theme,
+            ..self.config.clone()
+        };
+        self.save_settings(&config);
+        self.config = config;
     }
 
-    fn write_settings(&self, config: &Config) -> Result<(), String> {
-        match &self.store {
-            Some(store) => store
-                .save_config(config)
-                .map_err(text::save_settings_failed),
-            None => Ok(()),
+    fn save_settings(&mut self, config: &Config) -> bool {
+        match self.ledger.save_config(config) {
+            Ok(()) => true,
+            Err(error) => {
+                self.report_error(text::save_settings_failed(error));
+                false
+            }
         }
     }
 
@@ -445,8 +488,10 @@ impl Machine {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let audio = (self.config.audio && !cfg!(test))
-            .then(|| audio::start(&live))
+        let audio = self
+            .config
+            .audio
+            .then(|| (self.services.audio)(&live))
             .flatten();
         let (done, ending) = self.ending();
         let spawned = self.spawn_capture(&target, &live, &stop, ending);
@@ -466,7 +511,7 @@ impl Machine {
                 self.status.state = DisplayStatus::Starting;
                 self.status.error = None;
             }
-            Err(error) => self.fail(&text::capture_thread_failed(error)),
+            Err(error) => self.fail(text::capture_thread_failed(error)),
         }
     }
 
@@ -477,8 +522,8 @@ impl Machine {
         stop: &Arc<AtomicBool>,
         ending: Ending,
     ) -> io::Result<JoinHandle<Result<Ended>>> {
-        let (recorder, config, target, live, stop) = (
-            self.recorder,
+        let (record, config, target, live, stop) = (
+            self.services.record,
             self.config.clone(),
             target.clone(),
             Arc::clone(live),
@@ -488,7 +533,7 @@ impl Machine {
             .name("capture".to_owned())
             .spawn(move || {
                 let _ending = ending;
-                recorder(&config, &target, &live, &stop)
+                record(&config, &target, &live, &stop)
             })
     }
 
@@ -527,10 +572,10 @@ impl Machine {
         }
     }
 
-    fn fail(&mut self, error: &str) {
+    fn fail(&mut self, error: impl Display) {
         self.report_error(text::session_failed(error));
         self.status.state = DisplayStatus::Retrying;
-        self.retry_at = Some(Instant::now() + self.retry_interval);
+        self.retry_at = Some(Instant::now() + self.services.retry_interval);
     }
 
     fn report_error(&mut self, message: String) {
@@ -562,7 +607,7 @@ impl Machine {
 
     fn session_ended(&mut self, outcome: thread::Result<Result<Ended>>) {
         match outcome {
-            Ok(Ok(Ended::Stopped)) => self.status.state = DisplayStatus::Stopped,
+            Ok(Ok(Ended::Stopped)) => {}
             Ok(Ok(Ended::Resized)) => {
                 log::info(text::RESIZED);
                 self.restart_session();
@@ -577,10 +622,10 @@ impl Machine {
             }
             Ok(Ok(Ended::NoFrames)) => self.fall_back_to_monitor(),
             Ok(Ok(Ended::Unsupported(reason))) => {
-                self.report_error(text::session_failed(&reason));
+                self.report_error(text::session_failed(reason));
                 self.status.state = DisplayStatus::Unsupported;
             }
-            Ok(Err(error)) => self.fail(&format!("{error:#}")),
+            Ok(Err(error)) => self.fail(format!("{error:#}")),
             Err(_) => self.fail(text::CAPTURE_PANICKED),
         }
     }
@@ -611,7 +656,7 @@ impl Machine {
         ending: Ending,
     ) -> io::Result<JoinHandle<Result<PathBuf, SaveError>>> {
         let directory = self.config.clip_directory();
-        let write = self.saver.write;
+        let write = self.services.write;
         thread::Builder::new()
             .name("save".to_owned())
             .spawn(move || {
@@ -633,7 +678,7 @@ impl Machine {
             return;
         };
         saving.next_tick = now + PROGRESS_INTERVAL;
-        (self.saver.chime)(Tone::Progress);
+        (self.services.chime)(Tone::Progress);
     }
 
     fn finish_save(&mut self, saving: Saving) {
@@ -646,49 +691,20 @@ impl Machine {
 
     fn clip_saved(&mut self, seconds: f64, path: PathBuf) {
         log::info(text::clip_saved(seconds, &path));
-        self.add_saved(&path);
+        self.ledger.add_saved(&path);
         self.status.last_clip = Some(path);
         self.status.error = None;
-        (self.saver.chime)(Tone::Saved);
+        (self.services.chime)(Tone::Saved);
     }
 
     fn report_failed_save(&mut self, message: String) {
         self.report_error(message);
-        (self.saver.chime)(Tone::Failed);
-    }
-
-    fn add_saved(&mut self, path: &Path) {
-        let bytes = match std::fs::metadata(path) {
-            Ok(metadata) => metadata.len(),
-            Err(error) => {
-                log::warning(text::clip_size_unreadable(path, error));
-                0
-            }
-        };
-        self.session_saved = self.session_saved.saturating_add(bytes);
-        if let Some(totals) = self.totals.as_mut() {
-            totals.saved_bytes = totals.saved_bytes.saturating_add(bytes);
-        }
-        self.persist_totals();
+        (self.services.chime)(Tone::Failed);
     }
 
     fn bank_live(&mut self) {
-        let Some(live) = self.live.take() else {
-            return;
-        };
-        let bytes = live.bytes();
-        self.session_buffered = self.session_buffered.saturating_add(bytes);
-        if let Some(totals) = self.totals.as_mut() {
-            totals.buffered_bytes = totals.buffered_bytes.saturating_add(bytes);
-        }
-        self.persist_totals();
-    }
-
-    fn persist_totals(&self) {
-        if let (Some(store), Some(totals)) = (&self.store, &self.totals)
-            && let Err(error) = store.save_totals(totals)
-        {
-            log::warning(text::save_totals_failed(error));
+        if let Some(live) = self.live.take() {
+            self.ledger.bank(&live);
         }
     }
 
@@ -738,12 +754,12 @@ impl Machine {
     }
 
     fn count_bytes(&mut self, live_bytes: u64) {
-        self.status.session_written_bytes = self.session_buffered.saturating_add(live_bytes);
-        self.status.session_saved_bytes = self.session_saved;
-        self.status.saved_bytes = self.totals.map(|totals| totals.saved_bytes);
-        self.status.buffered_lifetime_bytes = self
-            .totals
-            .map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
+        let totals = self.ledger.totals();
+        self.status.session_written_bytes = self.ledger.session_buffered.saturating_add(live_bytes);
+        self.status.session_saved_bytes = self.ledger.session_saved;
+        self.status.saved_bytes = totals.map(|totals| totals.saved_bytes);
+        self.status.buffered_lifetime_bytes =
+            totals.map(|totals| totals.buffered_bytes.saturating_add(live_bytes));
     }
 
     fn measure_rate(&mut self, running: bool, current: Sample) {
@@ -857,23 +873,23 @@ mod tests {
         });
     }
 
-    fn spawn(
-        recorder: Recorder,
-        retry_interval: Duration,
-        store: Option<Store>,
-        config: Config,
-    ) -> Worker {
-        Worker::spawn_with(recorder, retry_interval, store, config).unwrap()
+    fn services(record: Recorder, retry_interval: Duration) -> Services {
+        Services {
+            record,
+            audio: |_| None,
+            write: replay::save,
+            chime: Box::new(|_| {}),
+            retry_interval,
+        }
     }
 
-    fn spawn_saving(
-        recorder: Recorder,
+    fn spawn(
+        record: Recorder,
         retry_interval: Duration,
         store: Option<Store>,
         config: Config,
-        saver: Saver,
     ) -> Worker {
-        Worker::spawn_saving_with(recorder, retry_interval, store, config, saver).unwrap()
+        Worker::spawn_with(services(record, retry_interval), store, config).unwrap()
     }
 
     fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
@@ -1109,13 +1125,14 @@ mod tests {
 
     type Heard = Arc<Mutex<Vec<(Instant, Tone)>>>;
 
-    fn listening(write: Writer) -> (Saver, Heard) {
+    fn spawn_listening(mut services: Services, write: Writer, config: Config) -> (Worker, Heard) {
         let heard = Heard::default();
         let ear = Arc::clone(&heard);
-        let chime = Box::new(move |tone| {
+        services.write = write;
+        services.chime = Box::new(move |tone| {
             ear.lock().unwrap().push((Instant::now(), tone));
         });
-        (Saver { write, chime }, heard)
+        (Worker::spawn_with(services, None, config).unwrap(), heard)
     }
 
     fn tones(heard: &Heard) -> Vec<Tone> {
@@ -1156,13 +1173,10 @@ mod tests {
     #[test]
     fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
         let directory = tempfile::tempdir().unwrap();
-        let (saver, heard) = listening(slow_write);
-        let worker = spawn_saving(
-            steady,
-            RETRY_INTERVAL,
-            None,
+        let (worker, heard) = spawn_listening(
+            services(steady, RETRY_INTERVAL),
+            slow_write,
             config_in(directory.path()),
-            saver,
         );
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
@@ -1180,13 +1194,10 @@ mod tests {
     #[test]
     fn a_failed_save_sounds_failed_and_stops_ticking() {
         let directory = tempfile::tempdir().unwrap();
-        let (saver, heard) = listening(failing_write);
-        let worker = spawn_saving(
-            steady,
-            RETRY_INTERVAL,
-            None,
+        let (worker, heard) = spawn_listening(
+            services(steady, RETRY_INTERVAL),
+            failing_write,
             config_in(directory.path()),
-            saver,
         );
         wait_for(&worker, |status| status.session_written_bytes > 0);
 
@@ -1203,8 +1214,11 @@ mod tests {
 
     #[test]
     fn nothing_to_save_sounds_failed_without_ticking() {
-        let (saver, heard) = listening(slow_write);
-        let worker = spawn_saving(failing, Duration::from_secs(60), None, desktop(), saver);
+        let (worker, heard) = spawn_listening(
+            services(failing, Duration::from_secs(60)),
+            slow_write,
+            desktop(),
+        );
         wait_for(&worker, |status| status.state == DisplayStatus::Retrying);
 
         worker.save();
