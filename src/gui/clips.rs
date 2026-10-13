@@ -446,16 +446,20 @@ impl ClipsPage {
     #[expect(unsafe_code)]
     fn set_colours(&self, background: w::COLORREF, text: w::COLORREF) {
         let hwnd = self.0.list.hwnd();
-        // SAFETY: each message takes one colour by value and nothing by pointer.
-        unsafe {
-            let _ = hwnd.SendMessage(w::msg::LvmSetBkColor {
+        // SAFETY: LVM_SETBKCOLOR takes the colour by value and nothing by pointer.
+        let _ = unsafe {
+            hwnd.SendMessage(w::msg::LvmSetBkColor {
                 color: Some(background),
-            });
-            let _ = hwnd.SendMessage(w::msg::LvmSetTextBkColor {
+            })
+        };
+        // SAFETY: LVM_SETTEXTBKCOLOR takes the colour by value and nothing by pointer.
+        let _ = unsafe {
+            hwnd.SendMessage(w::msg::LvmSetTextBkColor {
                 color: Some(background),
-            });
-            let _ = hwnd.SendMessage(w::msg::LvmSetTextColor { color: Some(text) });
-        }
+            })
+        };
+        // SAFETY: LVM_SETTEXTCOLOR takes the colour by value and nothing by pointer.
+        let _ = unsafe { hwnd.SendMessage(w::msg::LvmSetTextColor { color: Some(text) }) };
     }
 
     /// Raw `LVM_INSERTITEM`: the control's helper wants a column header, which an icon view lacks.

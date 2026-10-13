@@ -142,7 +142,11 @@ fn resample(
     target
 }
 
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the positions are non-negative and capped at the source length"
+)]
 fn coverage(
     index: usize,
     scale: f32,
@@ -158,13 +162,17 @@ fn coverage(
     })
 }
 
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a weighted average of bytes stays within 0..=255"
+)]
 fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -> [u8; PIXEL] {
     let mut sum = [0.0_f32; PIXEL];
     let mut weight = 0.0_f32;
     for (offset, share) in pixels {
         for (channel, total) in sum.iter_mut().enumerate() {
-            *total += f32::from(source[offset + channel]) * share;
+            *total = f32::from(source[offset + channel]).mul_add(share, *total);
         }
         weight += share;
     }
@@ -254,8 +262,10 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
     }
     // SAFETY: the DIB holds exactly `pixels.len()` bytes and does not overlap `pixels`.
     unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len()) };
+    // SAFETY: `bitmap` is the live handle `CreateDIBSection` just returned.
+    let bitmap = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
     // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
-    Some(unsafe { DeleteObjectGuard::new(w::HBITMAP::from_ptr(bitmap.0)) })
+    Some(unsafe { DeleteObjectGuard::new(bitmap) })
 }
 
 #[cfg(test)]

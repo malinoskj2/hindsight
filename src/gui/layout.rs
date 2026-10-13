@@ -261,7 +261,7 @@ pub(super) fn run(window: &gui::WindowMain, show: Option<co::SW>, context: &str)
     window
         .run_main(show)
         .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("{context}: {error}"))
+        .map_err(|error| anyhow::Error::from_boxed(error).context(context.to_owned()))
 }
 
 pub(super) fn page(parent: &(impl GuiParent + 'static)) -> gui::TabPage {
