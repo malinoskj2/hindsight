@@ -72,7 +72,6 @@ buffer lives, which is what decides the cost on a given machine.
 | NVIDIA NvFBC (default) | the least: 2.3% of the game and about 5.5% of a core at AV1 240 fps, about a fifth less of the game than NVIDIA Instant Replay and a third less CPU | your monitor is connected to the NVIDIA GPU, which is almost always |
 | Windows Graphics Capture | about twice NvFBC's cost to the game at 240 fps, most of it in the desktop compositor rather than in hindsight | a laptop whose display hangs off the integrated GPU, an HDR display, or when NvFBC refuses the display (rotated, or of odd width or height) |
 | DXGI Desktop Duplication | the most: it copies every frame and keeps the compositor busy | only when the other two fail |
-| NVIDIA NvFBC to CUDA | twice NvFBC's CPU and a little more of the game | not recommended; kept for experiments |
 
 ### Buffer location
 

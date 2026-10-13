@@ -261,7 +261,7 @@ impl SettingsPage {
         let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
             mode: chosen(&recording.mode, &Mode::ALL),
-            backend: chosen(&recording.backend, &Backend::ALL),
+            backend: chosen(&recording.backend, &recording.backends),
             codec: chosen(&encoding.codec, &self.0.codecs),
             frame_rate: required(&encoding.frame_rate)?,
             buffer_seconds: required(&encoding.buffer_seconds)?,
@@ -281,6 +281,8 @@ struct RecordingControls {
     hotkey: gui::Edit,
     mode: gui::ComboBox,
     backend: gui::ComboBox,
+    /// The backends offered, in the order of the backend list's items.
+    backends: Vec<Backend>,
     folder: gui::Edit,
     memory: gui::ComboBox,
     audio: gui::CheckBox,
@@ -300,7 +302,8 @@ impl RecordingControls {
             HOTKEY_WIDTH,
             &config.hotkey.to_string(),
         );
-        let (mode, backend) = source_fields(page, config);
+        let backends = Backend::offered(config.backend);
+        let (mode, backend) = source_fields(page, config, &backends);
         let folder = text_field(
             page,
             text::FOLDER,
@@ -339,6 +342,7 @@ impl RecordingControls {
             hotkey,
             mode,
             backend,
+            backends,
             folder,
             memory,
             audio,
@@ -530,7 +534,11 @@ fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &st
     )
 }
 
-fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::ComboBox) {
+fn source_fields(
+    page: &gui::TabPage,
+    config: &Config,
+    backends: &[Backend],
+) -> (gui::ComboBox, gui::ComboBox) {
     let mode = choice_field(
         page,
         text::MODE,
@@ -546,8 +554,11 @@ fn source_fields(page: &gui::TabPage, config: &Config) -> (gui::ComboBox, gui::C
         INNER_X,
         rows::BACKEND,
         FULL_WIDTH,
-        &Backend::ALL.map(Backend::name),
-        index_of(&Backend::ALL, config.backend),
+        &backends
+            .iter()
+            .map(|backend| backend.name())
+            .collect::<Vec<_>>(),
+        index_of(backends, config.backend),
     );
     (mode, backend)
 }

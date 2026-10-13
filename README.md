@@ -20,14 +20,6 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 3. Press **Alt+F10** (or the hotkey you set) to save the last 30 seconds. Clips go to `Videos\hindsight` as `hindsight_<date>_<time>.mp4`.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
-## What gets recorded
-
-By default hindsight records **full-screen apps**: whatever app is in front with a window that fills its monitor, which is how games present whether in exclusive or borderless full screen. A maximized window doesn't count, since the taskbar still shows. Recording starts when such an app comes to the front and follows it if you alt-tab away; only the app's own window goes into the buffer, so nothing you switch to appears in a clip. When the app exits, its last 30 seconds stay saveable until the next one starts, so a crash to desktop can still be clipped. Between apps nothing runs: no capture, no encoder, no timer.
-
-The other mode, **Whole desktop, always**, records the primary monitor from the moment hindsight starts, everything on it included.
-
-**Sound** is recorded too: whatever the default output device plays (the game, voice chat, music), as Windows mixes it, captured with WASAPI loopback, kept beside the video and saved as AAC at 192 kb/s, as Instant Replay stores it, starting and ending with the video. If you switch output devices or unplug a headset, recording follows the new default device as soon as Windows reports the change and the gap is silent. The microphone isn't recorded. Turn off **Record system sound** in Settings for silent clips.
-
 ## How it stays light
 
 - **Capture and encode never touch the CPU's memory.** Each new frame is copied once, GPU-side, into an input texture NVENC has registered; NVENC converts it to YUV and encodes it on its own silicon, which games do not use.
@@ -47,17 +39,11 @@ Run as administrator for the highest GPU priority. To check parity yourself, com
 
 ## Quick fixes
 
-- **"this GPU's NVENC has no AV1 encoder"**: choose H.264 or HEVC in Settings.
-- **"the NVIDIA driver supports NVENC API …"**: update the NVIDIA driver.
-- **"the display is … larger than … this GPU's H.264 encoder accepts"**: H.264 stops at 4096 pixels across; choose HEVC or AV1 for super-ultrawide and 8K displays.
-- **The monitor was unplugged or the driver reset**: capture starts again by itself within ten seconds.
-- **The hotkey does nothing**: another application holds it; the Status tab says so. Choose another in Settings.
-- **The display or the app's window changed size** (a game switched modes): capture restarts by itself and the buffer starts over.
-- **An app in exclusive full screen** can't be captured as a window; hindsight notices within two seconds and captures its monitor instead.
-- On Windows 10 a yellow border marks the captured screen; Windows 11 lets hindsight turn it off.
-- **Clips have no sound**: the Logs tab says why. Without any output device the sound track is silent until one is connected; on Windows N editions install the Media Feature Pack, which brings the AAC encoder.
+- **An error names the encoder**: your GPU's NVENC lacks that codec or the driver is old; choose another codec in Settings or update the NVIDIA driver.
+- **The hotkey does nothing**: another application holds it; choose another in Settings.
+- **Clips have no sound**: the Logs tab says why.
 
-HDR displays are captured as SDR for now.
+Display changes, driver resets and mode switches recover by themselves within seconds. HDR displays are captured as SDR for now.
 
 ## Build from source
 

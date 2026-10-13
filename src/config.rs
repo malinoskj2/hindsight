@@ -46,7 +46,8 @@ impl Mode {
     }
 }
 
-/// NvFBC needs NVIDIA's vendor key; `NvfbcCuda` grabs into CUDA memory the encoder reads in place.
+/// NvFBC needs NVIDIA's vendor key; `NvfbcCuda` grabs into CUDA memory the encoder reads in place
+/// and is offered only with the experiment switch set, since it costs twice NvFBC's CPU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
@@ -61,6 +62,24 @@ pub(crate) enum Backend {
 impl Backend {
     // Cheapest for the game first.
     pub(crate) const ALL: [Self; 4] = [Self::Nvfbc, Self::NvfbcCuda, Self::Wgc, Self::Dxgi];
+    /// Set to anything to offer the CUDA backend in Settings.
+    pub(crate) const EXPERIMENT_SWITCH: &str = "HINDSIGHT_CUDA_BACKEND";
+
+    /// The backends Settings lists: every one but the CUDA experiment, unless the switch is
+    /// set or the config already chose it.
+    pub(crate) fn offered(chosen: Self) -> Vec<Self> {
+        let experiments = std::env::var_os(Self::EXPERIMENT_SWITCH).is_some();
+        Self::offered_with(chosen, experiments)
+    }
+
+    fn offered_with(chosen: Self, experiments: bool) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|backend| {
+                *backend != Self::NvfbcCuda || experiments || chosen == Self::NvfbcCuda
+            })
+            .collect()
+    }
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -354,6 +373,17 @@ mod tests {
         assert_eq!(config.clip_directory.as_deref(), Some(r"D:\Clips"));
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn the_cuda_backend_is_offered_only_by_switch_or_when_already_chosen() {
+        let without = [Backend::Nvfbc, Backend::Wgc, Backend::Dxgi];
+        assert_eq!(Backend::offered_with(Backend::Nvfbc, false), without);
+        assert_eq!(Backend::offered_with(Backend::Nvfbc, true), Backend::ALL);
+        assert_eq!(
+            Backend::offered_with(Backend::NvfbcCuda, false),
+            Backend::ALL
+        );
     }
 
     #[test]
