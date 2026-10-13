@@ -88,6 +88,26 @@ pub(crate) fn error(message: impl Display) {
     record(Level::Error, message);
 }
 
+/// An error followed by each of its sources, joined by `: `, the way `{:#}` prints an
+/// `anyhow::Error`.
+pub(crate) fn chain<'a>(error: &'a (dyn std::error::Error + 'static)) -> impl Display + 'a {
+    Chain(error)
+}
+
+struct Chain<'a>(&'a (dyn std::error::Error + 'static));
+
+impl Display for Chain<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(cause) = source {
+            write!(formatter, ": {cause}")?;
+            source = cause.source();
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn since(sequence: u64) -> Vec<Entry> {
     journal()
         .entries

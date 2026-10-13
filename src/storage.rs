@@ -3,7 +3,7 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
@@ -80,13 +80,13 @@ impl Store {
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
-    #[error("state I/O: {0}")]
+    #[error("the application state could not be read or written")]
     Io(#[from] io::Error),
-    #[error("invalid state JSON: {0}")]
+    #[error("the application state is not valid JSON")]
     Json(#[from] serde_json::Error),
     #[error("application state is larger than {} KB", MAX_STATE_BYTES / 1024)]
     Oversized,
-    #[error("another hindsight instance is running, or the state directory cannot be locked")]
+    #[error("another hindsight instance is running")]
     Locked,
     #[error("{} is unavailable", STATE_DIRECTORY_ENV)]
     NoDirectory,
@@ -110,8 +110,11 @@ fn lock_instance(root: &Path) -> Result<File, StorageError> {
         .read(true)
         .write(true)
         .open(root.join(INSTANCE_LOCK_FILE))?;
-    lock.try_lock().map_err(|_| StorageError::Locked)?;
-    Ok(lock)
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(StorageError::Locked),
+        Err(TryLockError::Error(error)) => Err(StorageError::Io(error)),
+    }
 }
 
 fn open_if_present(path: &Path) -> io::Result<Option<File>> {
@@ -211,6 +214,15 @@ mod tests {
         let store = Store::at(directory.path().to_owned()).unwrap();
         fs::write(directory.path().join(CONFIG_FILE), b"broken").unwrap();
         assert_matches!(store.load_config(), Err(StorageError::Json(_)));
+    }
+
+    #[test]
+    fn the_cause_is_printed_once_through_the_chain() {
+        let error = StorageError::from(io::Error::other("access is denied"));
+        assert_eq!(
+            crate::log::chain(&error).to_string(),
+            "the application state could not be read or written: access is denied"
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ const UNSUPPORTED_PLATFORM_MESSAGE: &str =
 
 #[cfg(windows)]
 pub fn run() -> Result<()> {
+    log_panics();
     let tray = match cli::dispatch()? {
         cli::Launch::Handled => return Ok(()),
         cli::Launch::Window { tray } => tray,
@@ -53,6 +54,25 @@ pub fn run() -> Result<()> {
 #[cfg(not(windows))]
 pub fn run() -> Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
+}
+
+/// The GUI subsystem has no console, so a panic on any thread is written to the journal (and
+/// its file mirror) before the previous hook runs.
+#[cfg(windows)]
+fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let payload = info.payload_as_str().unwrap_or("a panic without a message");
+        let location = info
+            .location()
+            .map_or_else(|| "an unknown location".to_owned(), ToString::to_string);
+        log::error(format!(
+            "The thread {} panicked at {location}: {payload}",
+            thread.name().unwrap_or("<unnamed>")
+        ));
+        previous(info);
+    }));
 }
 
 #[cfg(windows)]

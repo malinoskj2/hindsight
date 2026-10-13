@@ -341,7 +341,7 @@ impl Ledger {
         if let (Some(store), Some(totals)) = (&self.store, &self.totals)
             && let Err(error) = store.save_totals(totals)
         {
-            log::warning(text::save_totals_failed(error));
+            log::warning(text::save_totals_failed(log::chain(&error)));
         }
     }
 }
@@ -525,7 +525,7 @@ impl Machine {
         match self.ledger.save_config(config) {
             Ok(()) => true,
             Err(error) => {
-                self.report_error(text::save_settings_failed(error));
+                self.report_error(text::save_settings_failed(log::chain(&error)));
                 false
             }
         }
@@ -857,7 +857,7 @@ impl Machine {
 fn load_totals(store: &Store) -> Option<Totals> {
     store
         .load_totals()
-        .inspect_err(|error| log::error(text::load_totals_failed(error)))
+        .inspect_err(|error| log::error(text::load_totals_failed(log::chain(error))))
         .ok()
 }
 
