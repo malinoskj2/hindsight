@@ -2,12 +2,12 @@
 
 use super::{
     layout::{
-        self, AMBER, BUTTON_HEIGHT, ExpandableGroup, Frame, GRAY, GREEN, INNER_WIDTH, INNER_X,
-        LINE, Painted, RED, TintedLabel, VALUE_WIDTH, VALUE_X, button, hidden_label, label,
-        path_label, saturating_i32, skin_button,
+        self, BUTTON_HEIGHT, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE, Painted,
+        TintedLabel, VALUE_WIDTH, VALUE_X, button, hidden_label, label, path_label, saturating_i32,
+        skin_button,
     },
     text,
-    theme::{Skin, Surface},
+    theme::{Skin, Surface, Tone},
 };
 use crate::service::{DisplayStatus, Status};
 use std::rc::Rc;
@@ -174,7 +174,7 @@ impl StatusPage {
     fn show_state(&self, status: &Status) {
         let live = status.recording && status.stream.is_some();
         let state = &self.0.recording.state;
-        state.set_colour(if live { GREEN } else { GRAY });
+        state.set_tone(if live { Tone::Good } else { Tone::Muted });
         state.set_text(&text::status(status.state));
     }
 
@@ -192,10 +192,11 @@ impl StatusPage {
     }
 
     fn show_notices(&self, status: &Status, window_notices: [Option<&str>; 2]) -> bool {
-        self.0
-            .recording
-            .notice
-            .set_colour(if status.error.is_some() { RED } else { AMBER });
+        self.0.recording.notice.set_tone(if status.error.is_some() {
+            Tone::Error
+        } else {
+            Tone::Warning
+        });
         let notice = notice_text(status, window_notices);
         self.0.recording_group.set_message(
             &self.0.frames,
@@ -216,14 +217,17 @@ struct RecordingLabels {
 impl RecordingLabels {
     fn new(page: &gui::TabPage) -> Self {
         Self {
-            state: TintedLabel::new(label(page, "", INNER_X, rows::STATE, INNER_WIDTH, 1), GRAY),
+            state: TintedLabel::new(
+                label(page, "", INNER_X, rows::STATE, INNER_WIDTH, 1),
+                Tone::Muted,
+            ),
             source: Row::path(page, text::SOURCE, rows::SOURCE).value,
             backend: Row::text(page, text::BACKEND, rows::BACKEND).value,
             encoder: Row::text(page, text::ENCODER, rows::ENCODER).value,
             rates: Row::text(page, text::FRAME_RATE, rows::RATES).value,
             notice: TintedLabel::new(
                 hidden_label(page, INNER_X, rows::NOTICE, INNER_WIDTH, 2),
-                AMBER,
+                Tone::Warning,
             ),
         }
     }

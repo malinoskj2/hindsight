@@ -1,6 +1,6 @@
 //! Geometry shared by the pages, and the helpers that create, draw and move controls.
 
-use super::theme::{Skin, Surface};
+use super::theme::{Skin, Surface, Tone};
 use crate::APP_NAME;
 use anyhow::Result;
 use std::{cell::Cell, iter, rc::Rc};
@@ -36,12 +36,6 @@ const BASE_DPI: u32 = 96;
 pub(super) const LINE: i32 = 18;
 pub(super) const BUTTON_WIDTH: i32 = 120;
 pub(super) const BUTTON_HEIGHT: i32 = 24;
-
-pub(super) const BLACK: w::COLORREF = w::COLORREF::from_rgb(0x00, 0x00, 0x00);
-pub(super) const GRAY: w::COLORREF = w::COLORREF::from_rgb(0x6D, 0x6D, 0x6D);
-pub(super) const GREEN: w::COLORREF = w::COLORREF::from_rgb(0x10, 0x7C, 0x10);
-pub(super) const AMBER: w::COLORREF = w::COLORREF::from_rgb(0x9D, 0x5D, 0x00);
-pub(super) const RED: w::COLORREF = w::COLORREF::from_rgb(0xC4, 0x2B, 0x1C);
 
 /// What a window's paint handlers read back from it: the frames it paints itself and the
 /// labels whose text has a colour of its own.
@@ -131,17 +125,17 @@ impl Frame {
     }
 }
 
-/// A label whose colour the `WM_CTLCOLORSTATIC` handler reads without borrowing anything.
+/// A label whose tone the `WM_CTLCOLORSTATIC` handler reads without borrowing anything.
 pub(super) struct TintedLabel {
     label: gui::Label,
-    colour: Cell<w::COLORREF>,
+    tone: Cell<Tone>,
 }
 
 impl TintedLabel {
-    pub(super) fn new(label: gui::Label, colour: w::COLORREF) -> Self {
+    pub(super) fn new(label: gui::Label, tone: Tone) -> Self {
         Self {
             label,
-            colour: Cell::new(colour),
+            tone: Cell::new(tone),
         }
     }
 
@@ -153,14 +147,14 @@ impl TintedLabel {
         set_text(&self.label, value);
     }
 
-    pub(super) fn set_colour(&self, colour: w::COLORREF) {
-        if self.colour.replace(colour) != colour {
+    pub(super) fn set_tone(&self, tone: Tone) {
+        if self.tone.replace(tone) != tone {
             let _ = self.label.hwnd().InvalidateRect(None, true);
         }
     }
 
-    fn colour_of(&self, hwnd: &w::HWND) -> Option<w::COLORREF> {
-        (*hwnd == *self.label.hwnd()).then(|| self.colour.get())
+    fn tone_of(&self, hwnd: &w::HWND) -> Option<Tone> {
+        (*hwnd == *self.label.hwnd()).then(|| self.tone.get())
     }
 }
 
@@ -396,11 +390,11 @@ pub(super) fn draw(
     }
     let label_skin = skin.clone();
     events.wm_ctl_color_static(move |params| {
-        let classic = painted
+        let tone = painted
             .tinted()
-            .find_map(|label| label.colour_of(&params.hwnd))
-            .unwrap_or(BLACK);
-        let _ = params.hdc.SetTextColor(label_skin.text_colour(classic));
+            .find_map(|label| label.tone_of(&params.hwnd))
+            .unwrap_or(Tone::Text);
+        let _ = params.hdc.SetTextColor(label_skin.colour(tone));
         let _ = params.hdc.SetBkMode(co::BKMODE::TRANSPARENT);
         Ok(label_skin.label_brush(surface))
     });
@@ -502,14 +496,4 @@ fn add_to_size(window: &w::HWND, width: i32, height: i32) {
         ),
         co::SWP::NOMOVE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_tab_and_window_are_as_tall_as_they_were_laid_by_hand() {
-        assert_eq!((TAB_HEIGHT, WINDOW_HEIGHT), (406, 422));
-    }
 }

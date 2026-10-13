@@ -1,11 +1,9 @@
 //! The window shown instead of the application when it could not start.
 
 use super::{
-    layout::{
-        self, Frame, INNER_WIDTH, INNER_X, LINE, Painted, RED, TintedLabel, WINDOW_WIDTH, label,
-    },
+    layout::{self, Frame, INNER_WIDTH, INNER_X, LINE, Painted, TintedLabel, WINDOW_WIDTH, label},
     text,
-    theme::{Skin, Surface},
+    theme::{Skin, Surface, Tone},
 };
 use crate::{config::Theme, sys::window};
 use anyhow::Result;
@@ -66,7 +64,7 @@ impl ErrorDialog {
         Self(Rc::new(Inner {
             main_window,
             frames: vec![frame],
-            message: TintedLabel::new(message, RED),
+            message: TintedLabel::new(message, Tone::Error),
         }))
     }
 

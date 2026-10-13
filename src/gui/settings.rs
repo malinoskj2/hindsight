@@ -2,11 +2,11 @@
 
 use super::{
     layout::{
-        self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, GRAY, INNER_WIDTH, INNER_X,
-        LINE, Painted, RED, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
+        self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE,
+        Painted, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
     },
     text,
-    theme::{Skin, Surface},
+    theme::{Skin, Surface, Tone},
 };
 use crate::{
     config::{
@@ -324,7 +324,7 @@ impl RecordingControls {
         let cursor = check_box(page, text::CURSOR, rows::CURSOR, config.cursor);
         let estimate = TintedLabel::new(
             label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1),
-            GRAY,
+            Tone::Muted,
         );
         let apply = button(page, text::APPLY, INNER_X, rows::APPLY, BUTTON_WIDTH);
         skin_button(&apply, skin);
@@ -336,7 +336,7 @@ impl RecordingControls {
             INNER_WIDTH - ERROR_X,
             2,
         );
-        let error = TintedLabel::new(error, RED);
+        let error = TintedLabel::new(error, Tone::Error);
         Self {
             encoding,
             hotkey,
@@ -433,7 +433,7 @@ impl GeneralControls {
         );
         let error = TintedLabel::new(
             hidden_label(page, INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1),
-            RED,
+            Tone::Error,
         );
         Self {
             theme,

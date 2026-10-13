@@ -9,7 +9,7 @@ license = "BSD-2-Clause"
 publish = false
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.97"
 bitstream-io = "4"
 hound = "3.5"
 log = "0.4"
