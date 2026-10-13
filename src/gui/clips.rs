@@ -1,5 +1,5 @@
-//! The Clips tab: the clip folder as thumbnails, newest first, with the shell's thumbnails made
-//! on a thread of their own.
+//! The Clips tab: the clip folder as thumbnails, newest first, with the folder read and the
+//! shell's thumbnails made on a thread of their own.
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
@@ -10,16 +10,22 @@ use crate::{
     log,
     replay::ClipName,
     service::Status,
-    sys::shell::{self, Thumbnail, ThumbnailError},
+    sys::{
+        com::Apartment,
+        shell::{self, Thumbnail, ThumbnailError},
+        thread as sys_thread,
+    },
 };
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::{Duration, Instant},
 };
 use winsafe::{self as w, co, gui, prelude::*};
 
@@ -31,6 +37,9 @@ const COLUMNS: usize = 3;
 
 const CARD: w::COLORREF = w::COLORREF::from_rgb(0xE4, 0xE4, 0xE4);
 const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
+/// How long a refresh waits for the folder before leaving it to the next tick; a local folder
+/// answers well within it, a slow network one no longer freezes the window.
+const LISTING_WAIT: Duration = Duration::from_millis(200);
 
 #[derive(Clone)]
 pub(super) struct ClipsPage(Rc<Inner>);
@@ -95,7 +104,7 @@ impl ClipsPage {
     /// Rereads the folder when the tab comes into view, the folder changes or a clip was saved;
     /// finished thumbnails are taken in either way.
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
-        self.receive_thumbnails();
+        self.receive(None);
         let rebuild = {
             let mut state = self.0.state.borrow_mut();
             if state.folder.as_deref() != Some(folder) || state.last_clip != status.last_clip {
@@ -114,7 +123,7 @@ impl ClipsPage {
             rebuild
         };
         if rebuild {
-            self.rebuild(list_clips(folder));
+            self.request_listing(folder);
         }
     }
 
@@ -132,7 +141,12 @@ impl ClipsPage {
             // Returning 1 suppresses WM_CONTEXTMENU.
             Ok(1)
         });
-        self.0.list.on().lvn_get_empty_markup(|markup| {
+        let page = self.clone();
+        self.0.list.on().lvn_get_empty_markup(move |markup| {
+            // Not "no clips" while the folder is still being read.
+            if page.0.state.borrow().listings_out > 0 {
+                return Ok(false);
+            }
             markup.dwFlags = co::EMF::CENTERED;
             markup.set_szMarkup(text::NO_CLIPS);
             Ok(true)
@@ -202,17 +216,85 @@ impl ClipsPage {
             state.folder.clone()
         };
         if let Some(folder) = folder {
-            self.rebuild(list_clips(&folder));
+            self.request_listing(&folder);
         }
     }
 
+    /// Reads the folder on the worker and waits a moment for it; on the UI thread only when
+    /// the worker cannot start.
+    fn request_listing(&self, folder: &Path) {
+        let sent = {
+            let mut state = self.0.state.borrow_mut();
+            let sent = state
+                .worker()
+                .is_some_and(|worker| worker.jobs.send(Job::List(folder.to_owned())).is_ok());
+            if sent {
+                state.listings_out += 1;
+            }
+            sent
+        };
+        if sent {
+            self.receive(Some(Instant::now() + LISTING_WAIT));
+        } else {
+            self.rebuild(list_clips(folder));
+        }
+    }
+
+    /// Takes in the worker's finished jobs; with a deadline, waits until then for a listing.
+    fn receive(&self, deadline: Option<Instant>) {
+        loop {
+            let done = {
+                let state = self.0.state.borrow();
+                let Some(worker) = &state.worker else {
+                    return;
+                };
+                match deadline {
+                    Some(deadline) => worker
+                        .done
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .ok(),
+                    None => worker.done.try_recv().ok(),
+                }
+            };
+            match done {
+                Some(Done::Thumbnail(path, result)) => self.receive_thumbnail(path, result),
+                Some(Done::List(folder, clips)) => {
+                    self.receive_listing(&folder, clips);
+                    if deadline.is_some() {
+                        return;
+                    }
+                }
+                None => return,
+            }
+        }
+    }
+
+    /// A listing of a folder since left behind is dropped.
+    fn receive_listing(&self, folder: &Path, clips: Vec<Clip>) {
+        let current = {
+            let mut state = self.0.state.borrow_mut();
+            state.listings_out = state.listings_out.saturating_sub(1);
+            state.folder.as_deref() == Some(folder)
+        };
+        if current {
+            self.rebuild(clips);
+        }
+    }
+
+    /// The list's messages send notifications back into the window procedure, so the state is
+    /// not borrowed while they run; meanwhile no clip is listed, so no item finds a stale path.
     fn rebuild(&self, clips: Vec<Clip>) {
-        let mut state = self.0.state.borrow_mut();
-        let state = &mut *state;
+        let images: Vec<Option<u32>> = {
+            let mut state = self.0.state.borrow_mut();
+            state.clips.clear();
+            clips
+                .iter()
+                .map(|clip| state.thumbnails.image(&clip.path))
+                .collect()
+        };
         self.0.list.set_redraw(false);
         let _ = self.0.list.items().delete_all();
-        for clip in &clips {
-            let image = state.thumbnails.image(&clip.path);
+        for (clip, image) in clips.iter().zip(images) {
             if let Err(error) = self.insert_item(&clip.caption(), image) {
                 log::warning(text::clip_not_listed(&clip.path, error));
             }
@@ -220,8 +302,17 @@ impl ClipsPage {
         self.place_items(clips.len());
         self.0.list.set_redraw(true);
         let _ = self.0.list.hwnd().InvalidateRect(None, true);
+        let mut state = self.0.state.borrow_mut();
         state.clips = clips;
-        state.thumbnails.request_missing(&state.clips);
+        let State {
+            clips,
+            thumbnails,
+            worker,
+            ..
+        } = &mut *state;
+        if let Some(worker) = worker {
+            thumbnails.request_missing(clips, worker);
+        }
     }
 
     /// Places the items on a centred grid: left to itself the list keeps its slack on the
@@ -284,28 +375,27 @@ impl ClipsPage {
         )
     }
 
-    fn receive_thumbnails(&self) {
-        let mut state = self.0.state.borrow_mut();
-        let Some(fetcher) = &state.thumbnails.fetcher else {
+    /// The borrow ends before the list is told: `LVM_SETITEM` notifies the window procedure.
+    fn receive_thumbnail(&self, path: PathBuf, result: Result<Thumbnail, ThumbnailError>) {
+        // Deleted while its thumbnail was being made.
+        if !self.0.state.borrow().thumbnails.requested.contains(&path) {
             return;
-        };
-        let made: Vec<_> = fetcher.results.try_iter().collect();
-        for (path, result) in made {
-            // Deleted while its thumbnail was being made.
-            if !state.thumbnails.requested.contains(&path) {
-                continue;
-            }
-            match result.and_then(|thumbnail| self.add_image(&thumbnail)) {
-                Ok(image) => {
-                    state.thumbnails.images.insert(path.clone(), image);
-                    if let Some(index) = state.clips.iter().position(|clip| clip.path == path)
-                        && let Ok(index) = u32::try_from(index)
-                    {
-                        let _ = self.0.list.items().get(index).set_icon_index(Some(image));
-                    }
+        }
+        match result.and_then(|thumbnail| self.add_image(&thumbnail)) {
+            Ok(image) => {
+                let index = {
+                    let mut state = self.0.state.borrow_mut();
+                    let index = state.clips.iter().position(|clip| clip.path == path);
+                    state.thumbnails.images.insert(path, image);
+                    index
+                };
+                if let Some(index) = index
+                    && let Ok(index) = u32::try_from(index)
+                {
+                    let _ = self.0.list.items().get(index).set_icon_index(Some(image));
                 }
-                Err(error) => log::warning(text::thumbnail_failed(&path, error)),
             }
+            Err(error) => log::warning(text::thumbnail_failed(&path, error)),
         }
     }
 
@@ -394,7 +484,20 @@ struct State {
     stale: bool,
     in_view: bool,
     clips: Vec<Clip>,
+    /// Listings asked of the worker and not yet taken in.
+    listings_out: usize,
     thumbnails: Thumbnails,
+    worker: Option<Worker>,
+}
+
+impl State {
+    /// The worker, started on first use.
+    fn worker(&mut self) -> Option<&Worker> {
+        if self.worker.is_none() {
+            self.worker = Worker::start(thumbnail_size());
+        }
+        self.worker.as_ref()
+    }
 }
 
 /// The clips' pictures in the list's image list, and the requests out for the rest.
@@ -403,7 +506,6 @@ struct Thumbnails {
     placeholder: Option<u32>,
     images: HashMap<PathBuf, u32>,
     requested: HashSet<PathBuf>,
-    fetcher: Option<Fetcher>,
 }
 
 impl Thumbnails {
@@ -411,23 +513,14 @@ impl Thumbnails {
         self.images.get(path).copied().or(self.placeholder)
     }
 
-    fn request_missing(&mut self, clips: &[Clip]) {
+    fn request_missing(&mut self, clips: &[Clip], worker: &Worker) {
         let missing: Vec<PathBuf> = clips
             .iter()
             .map(|clip| clip.path.clone())
             .filter(|path| !self.images.contains_key(path) && !self.requested.contains(path))
             .collect();
-        if missing.is_empty() {
-            return;
-        }
-        if self.fetcher.is_none() {
-            self.fetcher = Fetcher::start(thumbnail_size());
-        }
-        let Some(fetcher) = &self.fetcher else {
-            return;
-        };
         for path in missing {
-            if fetcher.requests.send(path.clone()).is_ok() {
+            if worker.jobs.send(Job::Thumbnail(path.clone())).is_ok() {
                 self.requested.insert(path);
             }
         }
@@ -474,22 +567,57 @@ impl ClipCommand {
     }
 }
 
-/// Dropping this closes the request channel and ends the thread.
-struct Fetcher {
-    requests: Sender<PathBuf>,
-    results: Receiver<(PathBuf, Result<Thumbnail, shell::ThumbnailError>)>,
+/// Work that can block on the disk or the shell, kept off the UI thread.
+enum Job {
+    List(PathBuf),
+    Thumbnail(PathBuf),
 }
 
-impl Fetcher {
+enum Done {
+    List(PathBuf, Vec<Clip>),
+    Thumbnail(PathBuf, Result<Thumbnail, ThumbnailError>),
+}
+
+/// Dropping this closes the job channel and ends the thread.
+struct Worker {
+    jobs: Sender<Job>,
+    done: Receiver<Done>,
+}
+
+impl Worker {
     fn start(size: (i32, i32)) -> Option<Self> {
-        let (requests, requests_in) = mpsc::channel();
-        let (results_out, results) = mpsc::channel();
+        let (jobs, jobs_in) = mpsc::channel();
+        let (done_out, done) = mpsc::channel();
         thread::Builder::new()
-            .name("thumbnails".to_owned())
-            .spawn(move || shell::serve_thumbnails(size, &requests_in, &results_out))
+            .name("clips".to_owned())
+            .spawn(move || serve(size, &jobs_in, &done_out))
             .inspect_err(|error| log::warning(text::thumbnails_unavailable(error)))
             .ok()?;
-        Some(Self { requests, results })
+        Some(Self { jobs, done })
+    }
+}
+
+/// Serves until the sender drops.
+fn serve(size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Done>) {
+    let _ = sys_thread::enter_background_mode();
+    let com = Apartment::single_threaded();
+    for job in jobs {
+        let finished = match job {
+            Job::List(folder) => {
+                let clips = list_clips(&folder);
+                Done::List(folder, clips)
+            }
+            Job::Thumbnail(path) => {
+                let made = match &com {
+                    Ok(_) => shell::thumbnail(&path, size),
+                    Err(error) => Err(ThumbnailError::Com(error.clone())),
+                };
+                Done::Thumbnail(path, made)
+            }
+        };
+        if done.send(finished).is_err() {
+            return;
+        }
     }
 }
 
@@ -528,9 +656,10 @@ impl Clip {
         text::clip_caption(&title, self.size)
     }
 
-    /// Sort key: the recorder's names before the rest, then by name.
-    fn order(&self) -> (Option<&ClipName>, String) {
-        (self.name.as_ref(), self.file_name())
+    /// Sort key: the recorder's names before the rest, then by name. Borrowed, so sorting
+    /// allocates nothing; `new` admits only UTF-8 names, which order as their text does.
+    fn order(&self) -> (Option<&ClipName>, Option<&OsStr>) {
+        (self.name.as_ref(), self.path.file_name())
     }
 }
 

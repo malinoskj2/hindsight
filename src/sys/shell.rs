@@ -1,12 +1,6 @@
 //! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
 
-use super::{com::Apartment, thread};
-use std::{
-    ffi::OsString,
-    os::windows::ffi::OsStrExt,
-    path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender},
-};
+use std::{ffi::OsString, os::windows::ffi::OsStrExt, path::Path};
 use thiserror::Error;
 use windows::{
     Win32::{
@@ -92,26 +86,7 @@ pub(crate) enum RecycleError {
     Cancelled,
 }
 
-/// Serves until the sender drops; for its own thread, since the shell may take a second per frame.
-pub(crate) fn serve_thumbnails(
-    size: (i32, i32),
-    requests: &Receiver<PathBuf>,
-    results: &Sender<(PathBuf, Result<Thumbnail, ThumbnailError>)>,
-) {
-    let _ = thread::enter_background_mode();
-    let com = Apartment::single_threaded();
-    for path in requests {
-        let made = match &com {
-            Ok(_) => thumbnail(&path, size),
-            Err(error) => Err(ThumbnailError::Com(error.clone())),
-        };
-        if results.send((path, made)).is_err() {
-            return;
-        }
-    }
-}
-
-/// COM must be started on the calling thread.
+/// COM must be started on the calling thread; the shell may take a second per frame.
 pub(crate) fn thumbnail(path: &Path, size: (i32, i32)) -> Result<Thumbnail, ThumbnailError> {
     let picture = shell_picture(path, size)?;
     let measured = picture.GetObject().map_err(ThumbnailError::Draw)?;
@@ -404,6 +379,7 @@ fn draw_placeholder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::com::Apartment;
 
     #[test]
     fn a_picture_fits_its_frame_touching_two_sides_and_centred() {

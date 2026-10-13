@@ -44,6 +44,8 @@ const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
+/// Destroys the main window from a timer callback, outside every winsafe handler.
+const DESTROY_TIMER: usize = 2;
 
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
     match startup {
@@ -349,9 +351,13 @@ impl Main {
             self.0.main_window.hwnd().ShowWindow(co::SW::HIDE);
             return;
         }
-        // DestroyWindow frees this handler: go through a stack copy and touch nothing after.
-        let main_window = self.0.main_window.clone();
-        let _ = main_window.hwnd().DestroyWindow();
+        // winsafe frees its handlers, this one included, when the window is destroyed. The
+        // timer callback is dispatched straight from the message loop, so no handler is running.
+        let _ = self
+            .0
+            .main_window
+            .hwnd()
+            .SetTimer(DESTROY_TIMER, 0, Some(destroy_window));
     }
 
     fn on_destroy(&self) {
@@ -369,7 +375,8 @@ impl Main {
             TrayAction::Quit => {
                 log::info(text::QUIT_FROM_TRAY);
                 self.0.quitting.set(true);
-                self.on_close();
+                // Closed from the message loop, not from inside the tray's own callback.
+                self.0.main_window.close();
             }
         }
     }
@@ -597,4 +604,10 @@ fn startup_setting() -> (bool, Option<String>) {
         Ok(enabled) => (enabled, None),
         Err(error) => (false, Some(text::startup_setting_unreadable(error))),
     }
+}
+
+/// A one-shot timer callback that destroys the main window once no winsafe handler is running.
+extern "system" fn destroy_window(window: w::HWND, _: co::WM, id: usize, _: u32) {
+    let _ = window.KillTimer(id);
+    let _ = window.DestroyWindow();
 }
