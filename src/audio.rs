@@ -50,8 +50,16 @@ pub(crate) fn encode(_clip: &PcmClip) -> Result<AudioClip, EncodeError> {
     Err(EncodeError::Unsupported)
 }
 
+/// Never made off Windows.
 #[cfg(not(windows))]
-pub(crate) struct Capture;
+pub(crate) enum Capture {}
+
+#[cfg(not(windows))]
+impl Capture {
+    pub(crate) fn has_stopped(&self) -> bool {
+        match *self {}
+    }
+}
 
 #[cfg(not(windows))]
 pub(crate) fn start(_live: &std::sync::Arc<crate::replay::Live>) -> Option<Capture> {

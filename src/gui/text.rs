@@ -9,6 +9,8 @@ use std::{fmt::Display, path::Path};
 
 pub(super) use crate::service::text::NOTHING_TO_SAVE;
 
+pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab says why.";
+
 const NO_VALUE: &str = "—";
 const GIGABYTE: f64 = 1_073_741_824.0;
 const MEGABYTE: f64 = 1_048_576.0;

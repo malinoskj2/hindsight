@@ -179,6 +179,14 @@ pub(crate) struct Buffer {
     pub(crate) memory: Memory,
 }
 
+/// Whether system sound goes into the buffer, while capture runs and the settings ask for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sound {
+    Recording,
+    /// Sound capture could not start or has stopped; the log says why.
+    Failed,
+}
+
 /// The bytes buffered and saved, this run and over the app's lifetime.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) struct Bytes {
@@ -195,6 +203,7 @@ pub(crate) struct Status {
     /// The display or app recorded last; kept until another is chosen.
     pub(crate) source: Option<String>,
     pub(crate) buffer: Option<Buffer>,
+    pub(crate) sound: Option<Sound>,
     /// The settings' bitrate, buffer length and the buffer size they come to.
     pub(crate) bitrate_mbps: u32,
     pub(crate) buffer_seconds: u32,
@@ -309,7 +318,8 @@ struct Session {
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<Ended>>,
-    _audio: Option<audio::Capture>,
+    /// `None` when sound is not asked for or its capture could not start.
+    audio: Option<audio::Capture>,
 }
 
 struct Saving {
@@ -639,7 +649,7 @@ impl Machine {
                     stop,
                     done,
                     join,
-                    _audio: audio,
+                    audio,
                 });
                 self.live = Some(live);
                 self.phase = Phase::Starting;
@@ -701,7 +711,7 @@ impl Machine {
         session.stop.store(true, Ordering::Relaxed);
         match session.join.join() {
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::error(text::session_failed(format!("{error:#}"))),
+            Ok(Err(error)) => log::error(text::session_failed(format_args!("{error:#}"))),
             Err(payload) => log::error(text::session_failed(text::capture_panicked(
                 panic_message(&*payload),
             ))),
@@ -714,7 +724,8 @@ impl Machine {
         self.retry_at = Some(self.now() + self.services.retry_interval);
     }
 
-    fn report_error(&mut self, message: String) {
+    fn report_error(&mut self, message: impl Display) {
+        let message = message.to_string();
         log::error(&message);
         self.error = Some(message);
     }
@@ -761,7 +772,7 @@ impl Machine {
                 self.report_error(text::session_failed(reason));
                 self.phase = Phase::Unsupported;
             }
-            Ok(Err(error)) => self.fail(format!("{error:#}")),
+            Ok(Err(error)) => self.fail(format_args!("{error:#}")),
             Err(payload) => self.fail(text::capture_panicked(panic_message(&*payload))),
         }
     }
@@ -835,7 +846,7 @@ impl Machine {
         (self.services.chime)(Tone::Saved);
     }
 
-    fn report_failed_save(&mut self, message: String) {
+    fn report_failed_save(&mut self, message: impl Display) {
         self.report_error(message);
         (self.services.chime)(Tone::Failed);
     }
@@ -896,6 +907,7 @@ impl Machine {
                     Memory::Ram
                 },
             }),
+            sound: self.sound(),
             bitrate_mbps: self.config.bitrate_mbps,
             buffer_seconds: self.config.buffer_seconds,
             buffer_capacity_bytes: self.config.estimated_buffer_bytes(),
@@ -904,6 +916,14 @@ impl Machine {
             error: self.error.clone(),
             nothing_to_save: self.nothing_to_save,
         }
+    }
+
+    fn sound(&self) -> Option<Sound> {
+        let session = self.session.as_ref().filter(|_| self.config.audio)?;
+        Some(match &session.audio {
+            Some(capture) if !capture.has_stopped() => Sound::Recording,
+            _ => Sound::Failed,
+        })
     }
 
     fn state(&self, running: bool) -> State {
@@ -958,7 +978,7 @@ fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mute
     let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| machine.run(commands))) else {
         return;
     };
-    let message = text::worker_panicked(panic_message(&*payload));
+    let message = text::worker_panicked(panic_message(&*payload)).to_string();
     log::error(&message);
     // Stops capture and finishes a save if it can; a second panic is left at that.
     let _ = panic::catch_unwind(AssertUnwindSafe(|| machine.shut_down()));

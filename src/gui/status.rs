@@ -9,7 +9,7 @@ use super::{
     text,
     theme::{Skin, Surface, Tone},
 };
-use crate::service::{State, Status};
+use crate::service::{Sound, State, Status};
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
@@ -399,6 +399,7 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
         .into_iter()
         .chain([
             status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
+            (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
             status.error.as_deref(),
         ])
         .flatten()
@@ -461,11 +462,13 @@ mod tests {
         status.error = Some("capture failed".to_owned());
         assert_eq!(notice_text(&status, [None, None]), "capture failed");
         status.nothing_to_save = true;
+        status.sound = Some(Sound::Failed);
         assert_eq!(
             notice_text(&status, [Some("hotkey taken"), Some("no tray")]),
             format!(
-                "hotkey taken\r\nno tray\r\n{}\r\ncapture failed",
-                text::NOTHING_TO_SAVE
+                "hotkey taken\r\nno tray\r\n{}\r\n{}\r\ncapture failed",
+                text::NOTHING_TO_SAVE,
+                text::SOUND_FAILED,
             )
         );
     }

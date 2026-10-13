@@ -572,3 +572,26 @@ fn a_worker_that_panics_shows_it_has_stopped() {
     worker.save();
     assert_eq!(worker.status().state, State::Stopped);
 }
+
+#[test]
+fn sound_that_could_not_start_is_reported_only_when_asked_for() {
+    let worker = spawn(steady, RETRY_INTERVAL, None, desktop());
+    let status = wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    assert_eq!(
+        status.sound,
+        Some(Sound::Failed),
+        "the stand-in starts no sound"
+    );
+
+    let quiet = Config {
+        audio: false,
+        ..desktop()
+    };
+    let worker = spawn(steady, RETRY_INTERVAL, None, quiet);
+    let status = wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    assert_eq!(status.sound, None);
+}

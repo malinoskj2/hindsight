@@ -33,6 +33,13 @@ pub(crate) struct Capture {
     join: Option<JoinHandle<()>>,
 }
 
+impl Capture {
+    /// Whether the audio thread ended by itself, so sound is no longer recorded.
+    pub(crate) fn has_stopped(&self) -> bool {
+        self.join.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+}
+
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.set();
