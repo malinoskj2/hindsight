@@ -42,6 +42,7 @@ pub(crate) fn pieces(length: usize, chunk: usize) -> impl Iterator<Item = (usize
         .map(move |done| (done, chunk.min(length - done)))
 }
 
+/// Why the store failed; a message ends with its cause, which `source()` doesn't repeat.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
     #[error("a {0} byte packet is larger than a page of the store")]
@@ -49,11 +50,10 @@ pub(crate) enum StoreError {
     /// The store has no room for the packet right now; the reason is for the log.
     #[error("{0}")]
     Refused(String),
-    #[error("{step}: {source}")]
+    #[error("{step}: {error}")]
     Call {
         step: &'static str,
-        #[source]
-        source: Box<dyn Error + Send + Sync>,
+        error: Box<dyn Error + Send + Sync>,
     },
 }
 
@@ -61,9 +61,9 @@ impl StoreError {
     pub(crate) fn call<E: Error + Send + Sync + 'static>(
         step: &'static str,
     ) -> impl FnOnce(E) -> Self {
-        move |source| Self::Call {
+        move |error| Self::Call {
             step,
-            source: Box::new(source),
+            error: Box::new(error),
         }
     }
 }
@@ -321,8 +321,7 @@ impl<'a, I: Iterator<Item = (&'a Entry, &'a Slot)>> RunReader<I> {
         // The sink returns nothing, so a `visit` error is parked; reading a chunk per call lets
         // the read stop there.
         let mut failed = None;
-        for at in (0..span).step_by(CHUNK_BYTES) {
-            let length = CHUNK_BYTES.min(span - at);
+        for (at, length) in pieces(span, CHUNK_BYTES) {
             page.read(self.start + at, length, &mut |offset, piece| {
                 if failed.is_none()
                     && let Err(error) = self.piece(at + offset, piece, visit)

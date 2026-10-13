@@ -2,20 +2,29 @@
 
 use crate::config::Theme;
 use std::{fs, io, path::Path};
-use table::ICONS;
+use table::{ICONS, IconEntry};
 
 mod table;
 
 const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
 
+const fn entry(theme: Theme) -> IconEntry {
+    match theme {
+        Theme::Classic => table::CLASSIC,
+        Theme::Ember => table::EMBER,
+        Theme::Selene => table::SELENE,
+        Theme::Nova => table::NOVA,
+    }
+}
+
 /// Resource id of the embedded icon for `theme`.
 pub(crate) const fn resource(theme: Theme) -> u16 {
-    ICONS[theme as usize].3
+    entry(theme).id
 }
 
 /// Writes every theme's `.ico` under `assets` from the logos under `assets/logo`.
 pub(crate) fn write_all(assets: &Path) -> io::Result<()> {
-    for (_, logo, ico, _) in ICONS {
+    for IconEntry { logo, ico, .. } in ICONS {
         let picture = Picture::decode(&fs::read(assets.join(logo))?)?;
         fs::write(assets.join(ico), picture.ico())?;
     }
@@ -202,7 +211,7 @@ mod tests {
     #[test]
     fn the_committed_icons_match_the_logos() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-        for (_, logo, ico, _) in ICONS {
+        for IconEntry { logo, ico, .. } in ICONS {
             let picture = Picture::decode(&fs::read(assets.join(logo)).unwrap()).unwrap();
             assert!(
                 picture.ico() == fs::read(assets.join(ico)).unwrap(),
@@ -212,16 +221,14 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_table_follows_the_themes_with_an_id_each() {
+    fn every_theme_has_its_own_icon_in_the_table() {
+        assert_eq!(ICONS.len(), Theme::ALL.len());
         let mut ids = Vec::new();
-        for (theme, (name, _, _, id)) in Theme::ALL.into_iter().zip(ICONS) {
-            assert_eq!(
-                serde_json::to_string(&theme).unwrap(),
-                format!("\"{name}\"")
-            );
-            assert_eq!(resource(theme), id);
-            assert!(id > 0, "resource ids start at 1");
-            ids.push(id);
+        for theme in Theme::ALL {
+            let icon = entry(theme);
+            assert!(ICONS.contains(&icon), "{theme:?} is embedded");
+            assert!(icon.id > 0, "resource ids start at 1");
+            ids.push(icon.id);
         }
         ids.sort_unstable();
         ids.dedup();

@@ -3,7 +3,7 @@
 
 use super::{
     annexb::{find_units, nal_units, unescape, units_except},
-    mp4::{self, NAL_LENGTH_BYTES},
+    mp4::NAL_LENGTH_BYTES,
 };
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use mp4_atom::{HvcCArray, Hvcc};
@@ -28,7 +28,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
 }
 
 /// The `hvcC` record, when the access unit carries a VPS, SPS and PPS.
-pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn configuration(access_unit: &[u8]) -> Option<Hvcc> {
     let parameter_sets = find_units(access_unit, nal_type, [NAL_VPS, NAL_SPS, NAL_PPS])?;
     let [_, sps, _] = parameter_sets;
     let mut record = record_fields(sps).ok()?;
@@ -40,7 +40,7 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
             nalus: vec![unit.to_vec()],
         })
         .collect();
-    mp4::record(&record)
+    Some(record)
 }
 
 /// The `hvcC` fields copied from the SPS (7.3.2.2 through `profile_tier_level`); the rest stay
@@ -124,7 +124,7 @@ pub(super) mod tests {
 
     #[test]
     fn configuration_copies_the_profile_and_lists_the_parameter_sets() {
-        let record = configuration(&keyframe()).unwrap();
+        let record = crate::replay::mp4::tests::record(&configuration(&keyframe()).unwrap());
 
         assert_eq!(&record[4..8], b"hvcC");
         let body = &record[8..];

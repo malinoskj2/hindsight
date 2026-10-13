@@ -1,6 +1,10 @@
 //! Embeds the Windows icon and manifest.
 
 #[path = "src/sys/icon/table.rs"]
+#[expect(
+    dead_code,
+    reason = "the build embeds the icons and never reads the logos"
+)]
 mod table;
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -18,7 +22,7 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>"#;
 
 fn main() {
-    for (_, _, ico, _) in table::ICONS {
+    for table::IconEntry { ico, .. } in table::ICONS {
         println!("cargo:rerun-if-changed=assets/{ico}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -34,7 +38,7 @@ fn main() {
             "The lowest-overhead instant replay, captured and encoded on the GPU",
         )
         .set("ProductVersion", env!("CARGO_PKG_VERSION"));
-    for (_, _, ico, id) in table::ICONS {
+    for table::IconEntry { ico, id, .. } in table::ICONS {
         resource.set_icon_with_id(&format!("assets/{ico}"), &id.to_string());
     }
     resource.compile().expect("embed the Windows resources");

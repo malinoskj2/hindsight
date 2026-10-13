@@ -62,9 +62,13 @@ impl Ring {
     }
 
     fn drop_covered_groups(&mut self, latest: u64) {
-        while let Some(&next) = self.keyframes.get(1)
-            && latest - next + 1 >= self.span
-        {
+        while let Some(&next) = self.keyframes.get(1) {
+            // Packet indices rise, so no kept keyframe is past the latest packet; one that is
+            // would be a caller's bug, and the saturating span then keeps the group.
+            debug_assert!(latest >= next, "packet {latest} came after keyframe {next}");
+            if latest.saturating_sub(next) + 1 < self.span {
+                break;
+            }
             while let Some(dropped) = self.packets.pop_front_if(|entry| entry.index < next) {
                 self.bytes -= dropped.length();
             }

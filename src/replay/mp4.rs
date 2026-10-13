@@ -5,12 +5,14 @@
 use super::Packet;
 use super::{AudioClip, FRAME_SAMPLES, StoreError, Stream, configuration, sample_parts};
 use crate::config::Codec;
+#[cfg(test)]
+use mp4_atom::Decode;
 use mp4_atom::{
-    Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Decode, Dinf, Dref, Edts,
-    Elst, ElstEntry, Encode, Esds, FourCC, Ftyp, Hdlr, Hvc1, Hvcc, Mdhd, Mdia, Minf, Moov, Mp4a,
-    Mvhd, Smhd, Stbl, Stsc, StscEntry, Stsd, Stss, Stsz, StszSamples, Stts, SttsEntry, Tkhd, Trak,
-    Url, Visual, Vmhd,
-    esds::{DecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
+    Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Dinf, Dref, Edts, Elst,
+    ElstEntry, Encode, Esds, FourCC, Ftyp, Hdlr, Hvc1, Hvcc, Mdhd, Mdia, Minf, Moov, Mp4a, Mvhd,
+    Smhd, Stbl, Stsc, StscEntry, Stsd, Stss, Stsz, StszSamples, Stts, SttsEntry, Tkhd, Trak, Url,
+    Visual, Vmhd,
+    esds::{DecoderConfig as EsDecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
     u24,
 };
 #[cfg(test)]
@@ -49,9 +51,17 @@ struct Sample {
     keyframe: bool,
 }
 
+/// The decoder configuration record a video sample entry carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DecoderConfig {
+    Avc(Avcc),
+    Hevc(Hvcc),
+    Av1(Av1c),
+}
+
 struct Track<'a> {
     stream: &'a Stream,
-    decoder: &'a [u8],
+    decoder: &'a DecoderConfig,
     samples: &'a [Sample],
 }
 
@@ -241,6 +251,8 @@ fn interleave(video: Vec<(u64, Chunk)>, audio: Vec<(u64, Chunk)>) -> Vec<Chunk> 
     merged
 }
 
+/// Why a clip couldn't be written; a message ends with its cause, which `source()` doesn't
+/// repeat.
 #[derive(Debug, Error)]
 pub(crate) enum MuxError {
     #[error("the replay buffer is empty")]
@@ -252,11 +264,29 @@ pub(crate) enum MuxError {
     #[error("the buffered video changed while it was being saved")]
     Changed,
     #[error("build the clip's index: {0}")]
-    Index(#[from] mp4_atom::Error),
+    Index(mp4_atom::Error),
     #[error("write the clip: {0}")]
-    Io(#[from] io::Error),
+    Io(io::Error),
     #[error("read the buffer back: {0}")]
-    Read(#[from] StoreError),
+    Read(StoreError),
+}
+
+impl From<mp4_atom::Error> for MuxError {
+    fn from(error: mp4_atom::Error) -> Self {
+        Self::Index(error)
+    }
+}
+
+impl From<io::Error> for MuxError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<StoreError> for MuxError {
+    fn from(error: StoreError) -> Self {
+        Self::Read(error)
+    }
 }
 
 pub(crate) type Visit<'a> = dyn FnMut(u64, bool, &[u8]) -> Result<(), MuxError> + 'a;
@@ -321,7 +351,7 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
 fn index<P: Packets + ?Sized>(
     codec: Codec,
     packets: &P,
-) -> Result<(Vec<u8>, Vec<Sample>), MuxError> {
+) -> Result<(DecoderConfig, Vec<Sample>), MuxError> {
     let mut seen = false;
     let mut decoder = None;
     let mut samples: Vec<Sample> = Vec::new();
@@ -632,7 +662,7 @@ fn data_information() -> Dinf {
     }
 }
 
-fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<SampleEntry, MuxError> {
+fn visual_entry(stream: &Stream, decoder: &DecoderConfig) -> Result<SampleEntry, MuxError> {
     let visual = Visual {
         data_reference_index: DATA_REFERENCE,
         width: fit(stream.width)?,
@@ -645,27 +675,25 @@ fn visual_entry(stream: &Stream, decoder: &[u8]) -> Result<SampleEntry, MuxError
         matrix_coefficients: stream.matrix.code().into(),
         full_range_flag: false,
     });
-    // `configuration` built atom bytes; the entry wants the crate's type, so decode them back.
-    let mut record = decoder;
-    Ok(match stream.codec {
-        Codec::H264 => Avc1 {
+    Ok(match decoder {
+        DecoderConfig::Avc(avcc) => Avc1 {
             visual,
-            avcc: Avcc::decode(&mut record)?,
+            avcc: avcc.clone(),
             colr,
             ..Avc1::default()
         }
         .into(),
         // Parameter sets live only in the configuration record (`hvc1`, not `hev1`).
-        Codec::Hevc => Hvc1 {
+        DecoderConfig::Hevc(hvcc) => Hvc1 {
             visual,
-            hvcc: Hvcc::decode(&mut record)?,
+            hvcc: hvcc.clone(),
             colr,
             ..Hvc1::default()
         }
         .into(),
-        Codec::Av1 => Av01 {
+        DecoderConfig::Av1(av1c) => Av01 {
             visual,
-            av1c: Av1c::decode(&mut record)?,
+            av1c: av1c.clone(),
             colr,
             ..Av01::default()
         }
@@ -778,7 +806,7 @@ fn audio_entry(sound: &Sound<'_>) -> Result<SampleEntry, MuxError> {
             es_desc: EsDescriptor {
                 // Elementary streams in MP4 files have id 0.
                 es_id: 0,
-                dec_config: DecoderConfig {
+                dec_config: EsDecoderConfig {
                     object_type_indication: OBJECT_TYPE_MPEG4_AUDIO,
                     stream_type: STREAM_TYPE_AUDIO,
                     up_stream: 0,
@@ -799,17 +827,28 @@ fn audio_entry(sound: &Sound<'_>) -> Result<SampleEntry, MuxError> {
     .into())
 }
 
-pub(super) fn record(atom: &impl Encode) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    atom.encode(&mut bytes).ok()?;
-    Some(bytes)
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use crate::replay::{Matrix, av1, h264, hevc};
     use std::assert_matches;
+
+    /// The atom's bytes, as the file holds them.
+    pub(in crate::replay) fn record(atom: &impl Encode) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        atom.encode(&mut bytes).unwrap();
+        bytes
+    }
+
+    impl DecoderConfig {
+        pub(in crate::replay) fn record(&self) -> Vec<u8> {
+            match self {
+                Self::Avc(avcc) => record(avcc),
+                Self::Hevc(hvcc) => record(hvcc),
+                Self::Av1(av1c) => record(av1c),
+            }
+        }
+    }
 
     pub(in crate::replay) fn atoms(bytes: &[u8]) -> Vec<([u8; 4], &[u8])> {
         let mut found = Vec::new();
@@ -879,13 +918,12 @@ pub(super) mod tests {
     }
 
     pub(in crate::replay) fn decoder_record(track: &Trak) -> Vec<u8> {
-        let record = match &track.mdia.minf.stbl.stsd.codecs[..] {
+        match &track.mdia.minf.stbl.stsd.codecs[..] {
             [SampleEntry::Avc1(entry)] => record(&entry.avcc),
             [SampleEntry::Hvc1(entry)] => record(&entry.hvcc),
             [SampleEntry::Av01(entry)] => record(&entry.av1c),
             other => panic!("expected one video sample entry, found {other:?}"),
-        };
-        record.unwrap()
+        }
     }
 
     fn check_chunks(file: &[u8], table: &Stbl, samples: &[Vec<u8>]) -> Vec<usize> {
@@ -1030,7 +1068,7 @@ pub(super) mod tests {
         );
         assert_eq!(
             decoder_record(track),
-            h264::configuration(&h264::tests::keyframe()).unwrap()
+            record(&h264::configuration(&h264::tests::keyframe()).unwrap())
         );
     }
 
@@ -1047,7 +1085,7 @@ pub(super) mod tests {
         assert_eq!(entry.hvcc.arrays.len(), 3);
         assert_eq!(
             decoder_record(&moov.trak[0]),
-            hevc::configuration(&hevc::tests::keyframe()).unwrap()
+            record(&hevc::configuration(&hevc::tests::keyframe()).unwrap())
         );
         assert_eq!(sizes(table)[0] as usize, hevc::tests::IDR.len() + 4);
     }
@@ -1071,7 +1109,7 @@ pub(super) mod tests {
         );
         assert_eq!(
             decoder_record(&moov.trak[0]),
-            av1::configuration(&av1::tests::keyframe()).unwrap()
+            record(&av1::configuration(&av1::tests::keyframe()).unwrap())
         );
 
         let kept: usize = av1::sample_obus(&packets[0].data)

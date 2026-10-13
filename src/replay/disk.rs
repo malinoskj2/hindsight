@@ -23,16 +23,14 @@ const SPARE_BLOCKS: usize = 2;
 const KEPT_FREE_BYTES: u64 = 1 << 30;
 const WRITER_THREAD: &str = "buffer writer";
 
+/// Why the disk store couldn't be made; a message ends with its cause, which `source()`
+/// doesn't repeat.
 #[derive(Debug, Error)]
 pub(crate) enum DiskError {
-    #[error("create the folder {}: {source}", path.display())]
-    Folder {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    #[error("create the folder {}: {error}", path.display())]
+    Folder { path: PathBuf, error: io::Error },
     #[error("read the drive's free space: {0}")]
-    FreeSpace(#[source] io::Error),
+    FreeSpace(io::Error),
     #[error(
         "the buffer would take {} MiB and the drive has {} MiB free, {} MiB of which stay free",
         needed / MEBIBYTE as u64,
@@ -40,19 +38,15 @@ pub(crate) enum DiskError {
         KEPT_FREE_BYTES / MEBIBYTE as u64
     )]
     NoRoom { needed: u64, available: u64 },
-    #[error("create {}: {source}", path.display())]
-    Create {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    #[error("create {}: {error}", path.display())]
+    Create { path: PathBuf, error: io::Error },
     #[error("reserve the file's room: {0}")]
-    Reserve(#[source] io::Error),
+    Reserve(io::Error),
     /// Fails where the drive's sectors are larger than [`SECTOR_BYTES`].
     #[error("write to the file without buffering: {0}")]
-    Unbuffered(#[source] io::Error),
+    Unbuffered(io::Error),
     #[error("start the buffer's writer thread: {0}")]
-    Writer(#[source] io::Error),
+    Writer(io::Error),
 }
 
 /// Sizes in bytes, all multiples of [`SECTOR_BYTES`]; tests shrink them.
@@ -89,17 +83,17 @@ impl DiskStore {
 
     fn with_layout(path: &Path, pages: usize, layout: Layout) -> Result<Self, DiskError> {
         let folder = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(folder).map_err(|source| DiskError::Folder {
+        fs::create_dir_all(folder).map_err(|error| DiskError::Folder {
             path: folder.to_owned(),
-            source,
+            error,
         })?;
         // Removed first so its room counts as free; a stuck file fails the create below instead.
         let _ = fs::remove_file(path);
         let length = (pages as u64).saturating_mul(layout.page as u64);
         has_room(length, free_bytes(folder).map_err(DiskError::FreeSpace)?)?;
-        let file = open(path).map_err(|source| DiskError::Create {
+        let file = open(path).map_err(|error| DiskError::Create {
             path: path.to_owned(),
-            source,
+            error,
         })?;
         file.set_len(length).map_err(DiskError::Reserve)?;
         try_unbuffered(&file).map_err(DiskError::Unbuffered)?;
@@ -111,6 +105,8 @@ impl DiskStore {
             queued: Condvar::new(),
         });
         let writer = Arc::clone(&shared);
+        // Detached on purpose: the thread drains its queue and ends once the store closes, and
+        // the file lives until the pages a save may still be reading let go, so nothing joins.
         thread::Builder::new()
             .name(WRITER_THREAD.to_owned())
             .spawn(move || writer.write_blocks())

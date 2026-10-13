@@ -29,7 +29,7 @@ pub(crate) use audio::{
 use audio::{AudioRing, tick_time};
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
-use mp4::{MuxError, Visit};
+use mp4::{DecoderConfig, MuxError, Visit};
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
@@ -361,14 +361,15 @@ fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
     }
 }
 
+/// Why a save failed. Each message ends with its cause, which `source()` doesn't repeat, since
+/// the messages are shown with plain `Display`.
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
-    #[error("{step} {}: {source}", path.display())]
+    #[error("{step} {}: {error}", path.display())]
     Io {
         step: &'static str,
         path: PathBuf,
-        #[source]
-        source: io::Error,
+        error: io::Error,
     },
     #[error(transparent)]
     Mux(#[from] MuxError),
@@ -376,10 +377,10 @@ pub(crate) enum SaveError {
 
 impl SaveError {
     fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
-        move |source| Self::Io {
+        move |error| Self::Io {
             step,
             path: path.to_owned(),
-            source,
+            error,
         }
     }
 }
@@ -393,11 +394,11 @@ pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
 }
 
 /// The `avcC`, `hvcC` or `av1C` record from the sequence header in `data`.
-fn configuration(codec: Codec, data: &[u8]) -> Option<Vec<u8>> {
+fn configuration(codec: Codec, data: &[u8]) -> Option<DecoderConfig> {
     match codec {
-        Codec::H264 => h264::configuration(data),
-        Codec::Hevc => hevc::configuration(data),
-        Codec::Av1 => av1::configuration(data),
+        Codec::H264 => h264::configuration(data).map(DecoderConfig::Avc),
+        Codec::Hevc => hevc::configuration(data).map(DecoderConfig::Hevc),
+        Codec::Av1 => av1::configuration(data).map(DecoderConfig::Av1),
     }
 }
 
@@ -481,6 +482,16 @@ mod tests {
         frame_rate: 30,
         matrix: Matrix::Bt709,
     };
+
+    #[test]
+    fn a_save_error_names_its_cause_once() {
+        let error = SaveError::io("create", Path::new("clip.mp4"))(io::Error::other("denied"));
+        assert_eq!(error.to_string(), "create clip.mp4: denied");
+        assert!(std::error::Error::source(&error).is_none());
+        let error = SaveError::from(MuxError::from(io::Error::other("full")));
+        assert_eq!(error.to_string(), "write the clip: full");
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     /// The real encoder output in `tests/fixtures` is 128×72.
     fn fixture_stream(codec: Codec) -> Stream {
@@ -761,7 +772,9 @@ mod tests {
             let record = mp4::tests::decoder_record(track);
             assert_eq!(
                 record,
-                configuration(codec, &clip.packets[0].data).unwrap(),
+                configuration(codec, &clip.packets[0].data)
+                    .unwrap()
+                    .record(),
                 "{codec}"
             );
             let expected_record = match codec {

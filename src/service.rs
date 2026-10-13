@@ -1261,7 +1261,7 @@ mod tests {
         Err(SaveError::Io {
             step: "create",
             path: directory.to_owned(),
-            source: io::Error::other("the disk is full"),
+            error: io::Error::other("the disk is full"),
         })
     }
 

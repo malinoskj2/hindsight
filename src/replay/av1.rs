@@ -1,7 +1,6 @@
 //! AV1 in MP4: each sample is a temporal unit without its temporal delimiter, and `av1C`
 //! repeats the sequence header.
 
-use super::mp4;
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use mp4_atom::Av1c;
 use std::io;
@@ -40,12 +39,12 @@ pub(super) fn is_keyframe(temporal_unit: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn configuration(temporal_unit: &[u8]) -> Option<Av1c> {
     let obu = obus(temporal_unit).find(|obu| obu.kind == OBU_SEQUENCE_HEADER)?;
     let sequence = SequenceHeader::parse(obu.payload).ok()?;
     let mut record = sequence.record();
     write_sized_obu(&mut record.config_obus, &obu);
-    mp4::record(&record)
+    Some(record)
 }
 
 fn write_sized_obu(output: &mut Vec<u8>, obu: &Obu<'_>) {
@@ -445,7 +444,7 @@ pub(super) mod tests {
 
     #[test]
     fn configuration_repeats_the_sequence_header() {
-        let record = configuration(&keyframe()).unwrap();
+        let record = crate::replay::mp4::tests::record(&configuration(&keyframe()).unwrap());
 
         assert_eq!(&record[4..8], b"av1C");
         let body = &record[8..];

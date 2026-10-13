@@ -3,7 +3,7 @@
 
 use super::{
     annexb::{find_units, nal_units, units_except},
-    mp4::{self, NAL_LENGTH_BYTES},
+    mp4::NAL_LENGTH_BYTES,
 };
 use mp4_atom::{Avcc, AvccExt};
 
@@ -23,7 +23,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
 }
 
 /// The `avcC` record, when the access unit carries both an SPS and a PPS.
-pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn configuration(access_unit: &[u8]) -> Option<Avcc> {
     let [sps, pps] = find_units(access_unit, nal_type, [NAL_SPS, NAL_PPS])?;
     let mut record = Avcc::new(sps, pps).ok()?;
     record.length_size = NAL_LENGTH_BYTES;
@@ -34,7 +34,7 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Vec<u8>> {
             ..AvccExt::default()
         });
     }
-    mp4::record(&record)
+    Some(record)
 }
 
 pub(super) fn sample_units(access_unit: &[u8]) -> Vec<&[u8]> {
@@ -79,7 +79,7 @@ pub(super) mod tests {
 
     #[test]
     fn configuration_holds_the_parameter_sets() {
-        let record = configuration(&keyframe()).unwrap();
+        let record = crate::replay::mp4::tests::record(&configuration(&keyframe()).unwrap());
 
         assert_eq!(&record[4..8], b"avcC");
         let body = &record[8..];
