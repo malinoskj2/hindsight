@@ -336,8 +336,8 @@ fn real_encoder_output_muxes_with_sound() {
     let frames = audio::tests::encoded_fixture();
     assert_eq!(frames.len(), 119);
     live.set_audio(AudioFormat {
-        sample_rate: 48_000,
-        channels: 2,
+        sample_rate: audio::tests::RATE,
+        channels: audio::tests::STEREO,
         anchor: 0,
         priming: FRAME_SAMPLES,
     });
@@ -426,8 +426,8 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
     live.set_stream(STREAM);
     live.set_origin(0);
     live.set_audio(AudioFormat {
-        sample_rate: 48_000,
-        channels: 2,
+        sample_rate: audio::tests::RATE,
+        channels: audio::tests::STEREO,
         anchor: 0,
         priming: 0,
     });
@@ -480,8 +480,8 @@ fn live_with_a_click() -> Live {
     let live = live_with(90);
     live.set_origin(0);
     live.set_audio(AudioFormat {
-        sample_rate: 48_000,
-        channels: 2,
+        sample_rate: audio::tests::RATE,
+        channels: audio::tests::STEREO,
         anchor: CLOCK_RATE / 3,
         priming: 0,
     });
@@ -573,8 +573,8 @@ fn encodes_five_minutes_of_sound() {
     push_frames(&live, 9000);
     live.set_origin(0);
     live.set_audio(AudioFormat {
-        sample_rate: 48_000,
-        channels: 2,
+        sample_rate: audio::tests::RATE,
+        channels: audio::tests::STEREO,
         anchor: 0,
         priming: 0,
     });

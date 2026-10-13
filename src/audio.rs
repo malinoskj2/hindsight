@@ -18,13 +18,14 @@ mod timeline;
 pub(crate) use recorder::{Capture, start};
 
 use crate::replay::{AudioClip, PcmClip};
+use std::num::{NonZeroU16, NonZeroU32};
 use thiserror::Error;
 
 /// Windows resamples other rates to this.
 #[cfg_attr(all(not(windows), test), expect(dead_code))]
-const SAMPLE_RATE: u32 = 48_000;
+const SAMPLE_RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
 #[cfg_attr(all(not(windows), test), expect(dead_code))]
-const CHANNELS: u16 = 2;
+const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 
 #[derive(Debug, Error)]
 pub(crate) enum EncodeError {

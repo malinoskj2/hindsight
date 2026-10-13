@@ -1,7 +1,11 @@
 //! The system's sound as 16-bit PCM, numbered on the video's QPC clock, kept as long as the
 //! video ring keeps its packets and cut to the video's first and last frame when a clip is saved.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    num::{NonZeroU16, NonZeroU32},
+    sync::Arc,
+};
 
 /// 100 ns ticks, the unit WASAPI stamps its packets in.
 pub(crate) const CLOCK_RATE: i64 = 10_000_000;
@@ -26,11 +30,10 @@ pub(crate) fn tick_time(origin: i64, frame_rate: u32, index: u64) -> i64 {
     origin.saturating_add(ticks_of(index, frame_rate))
 }
 
-/// Never a zero rate or channel count: `Live::set_audio` raises those to one.
 #[derive(Debug)]
 pub(crate) struct AudioFormat {
-    pub(crate) sample_rate: u32,
-    pub(crate) channels: u16,
+    pub(crate) sample_rate: NonZeroU32,
+    pub(crate) channels: NonZeroU16,
     /// Clock time of input sample 0.
     pub(crate) anchor: i64,
     /// Samples the AAC encoder puts in front of its input.
@@ -40,7 +43,7 @@ pub(crate) struct AudioFormat {
 impl AudioFormat {
     /// Encoder output sample playing at `time`; negative before the stream began.
     fn sample_at(&self, time: i64) -> i64 {
-        samples_of(time.saturating_sub(self.anchor), self.sample_rate)
+        samples_of(time.saturating_sub(self.anchor), self.sample_rate.get())
             .saturating_add(i64::from(self.priming))
     }
 
@@ -48,7 +51,7 @@ impl AudioFormat {
     pub(crate) fn frame_time(&self, number: u64) -> i64 {
         let input = i128::from(number) * i128::from(FRAME_SAMPLES) - i128::from(self.priming);
         self.anchor
-            .saturating_add(ticks_of(input, self.sample_rate))
+            .saturating_add(ticks_of(input, self.sample_rate.get()))
     }
 
     /// The frame before the one playing at `start`; the decoder needs it to rebuild that one.
@@ -63,7 +66,7 @@ impl AudioFormat {
     }
 
     fn channels(&self) -> usize {
-        usize::from(self.channels)
+        usize::from(self.channels.get())
     }
 }
 
@@ -137,7 +140,7 @@ impl AudioRing {
             }
             None => self
                 .end(channels)
-                .saturating_sub(SECONDS_BEFORE_VIDEO * u64::from(format.sample_rate)),
+                .saturating_sub(SECONDS_BEFORE_VIDEO * u64::from(format.sample_rate.get())),
         };
         self.drop_before(channels, keep_from);
     }
@@ -235,10 +238,13 @@ pub(crate) fn cut(ring: &AudioRing, format: &Arc<AudioFormat>, start: i64, end: 
 pub(crate) mod tests {
     use super::*;
 
+    pub(crate) const RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
+    pub(crate) const STEREO: NonZeroU16 = NonZeroU16::new(2).unwrap();
+
     pub(crate) fn format(priming: u32) -> Arc<AudioFormat> {
         Arc::new(AudioFormat {
-            sample_rate: 48_000,
-            channels: 2,
+            sample_rate: RATE,
+            channels: STEREO,
             anchor: 0,
             priming,
         })

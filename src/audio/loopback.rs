@@ -1,6 +1,9 @@
 //! WASAPI loopback capture of the default output device, read on a timer a few packets at a time.
 
-use super::pcm::{Layout, Sample};
+use super::{
+    pcm::{Layout, Sample},
+    timeline::Ticks,
+};
 use listener::Listener;
 use std::{ptr, sync::Arc, time::Duration};
 use task_mem::CoTaskMem;
@@ -347,7 +350,7 @@ fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
     )?;
     Ok(Layout {
         sample: Sample::Float,
-        channels: super::CHANNELS,
+        channels: super::CHANNELS.get(),
     })
 }
 
@@ -389,12 +392,12 @@ impl WaveFormat {
     }
 
     fn float_stereo() -> Self {
-        let block = super::CHANNELS * FLOAT_BITS / 8;
+        let block = super::CHANNELS.get() * FLOAT_BITS / 8;
         Self::plain(WAVEFORMATEX {
             wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
-            nChannels: super::CHANNELS,
-            nSamplesPerSec: super::SAMPLE_RATE,
-            nAvgBytesPerSec: super::SAMPLE_RATE * u32::from(block),
+            nChannels: super::CHANNELS.get(),
+            nSamplesPerSec: super::SAMPLE_RATE.get(),
+            nAvgBytesPerSec: super::SAMPLE_RATE.get() * u32::from(block),
             nBlockAlign: block,
             wBitsPerSample: FLOAT_BITS,
             cbSize: 0,
@@ -438,7 +441,7 @@ impl WaveFormat {
             _ => return None,
         };
         let channels = basic.nChannels;
-        (basic.nSamplesPerSec == super::SAMPLE_RATE && (1..=2).contains(&channels))
+        (basic.nSamplesPerSec == super::SAMPLE_RATE.get() && (1..=2).contains(&channels))
             .then_some(Layout { sample, channels })
     }
 }
@@ -469,8 +472,8 @@ pub(super) struct Packet<'a> {
     /// `None` for a silent packet.
     pub(super) data: Option<&'a [u8]>,
     pub(super) frames: u32,
-    /// Performance-counter time of the first sample, when stamped.
-    pub(super) time: Option<i64>,
+    /// Performance-counter time of the first frame, when stamped.
+    pub(super) time: Option<Ticks>,
 }
 
 pub(super) struct Loopback {
@@ -524,7 +527,7 @@ impl Loopback {
                     std::slice::from_raw_parts(data, frames as usize * frame_bytes)
                 }),
                 frames,
-                time: stamped.then(|| i64::try_from(time).unwrap_or(i64::MAX)),
+                time: stamped.then(|| Ticks(i64::try_from(time).unwrap_or(i64::MAX))),
             };
             let handled = each(&packet);
             // SAFETY: releases the buffer taken above, once `packet` no longer refers to it.

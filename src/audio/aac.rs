@@ -269,10 +269,10 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
     let _com = Apartment::multi_threaded().map_err(failed("initialise COM"))?;
     let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;
     let format = &clip.format;
-    let mut encoder = Encoder::open(format.sample_rate, format.channels)
+    let mut encoder = Encoder::open(format.sample_rate.get(), format.channels.get())
         .map_err(failed("open the AAC encoder"))?;
     let mut frames = Vec::with_capacity(clip.frames);
-    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels)];
+    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels.get())];
     let input = i64::try_from(clip.frames)
         .unwrap_or(i64::MAX)
         .saturating_mul(i64::from(FRAME_SAMPLES))
@@ -294,8 +294,8 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
     }
     frames.truncate(clip.frames);
     Ok(AudioClip {
-        sample_rate: format.sample_rate,
-        channels: format.channels,
+        sample_rate: format.sample_rate.get(),
+        channels: format.channels.get(),
         config: encoder.config(),
         frames,
         lead: clip.lead,

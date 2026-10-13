@@ -227,9 +227,7 @@ impl Live {
         self.counters.frame(bytes, oldest, picture);
     }
 
-    pub(crate) fn set_audio(&self, mut format: AudioFormat) {
-        format.sample_rate = format.sample_rate.max(1);
-        format.channels = format.channels.max(1);
+    pub(crate) fn set_audio(&self, format: AudioFormat) {
         set_once(&self.audio, Arc::new(format), "audio format");
     }
 

@@ -28,35 +28,45 @@ impl Layout {
     }
 }
 
-/// Mono is doubled; channels past the first two are dropped.
+/// Mono is doubled. `WaveFormat::layout` only lets one- or two-channel formats through; any
+/// channels past two would be dropped.
 pub(super) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
     let channels = usize::from(layout.channels);
-    let width = layout.sample.bytes();
-    for frame in data.chunks_exact(width * channels) {
-        let left = read(&frame[..width], layout.sample);
-        let right = if channels > 1 {
-            read(&frame[width..2 * width], layout.sample)
-        } else {
-            left
-        };
+    match layout.sample {
+        Sample::Float => append(output, data.as_chunks::<4>().0, channels, |bytes| {
+            from_float(f32::from_le_bytes(bytes))
+        }),
+        Sample::Int16 => append(
+            output,
+            data.as_chunks::<2>().0,
+            channels,
+            i16::from_le_bytes,
+        ),
+    }
+}
+
+fn append<const N: usize>(
+    output: &mut Vec<i16>,
+    samples: &[[u8; N]],
+    channels: usize,
+    convert: impl Fn([u8; N]) -> i16,
+) {
+    output.reserve(samples.len() / channels * 2);
+    for frame in samples.chunks_exact(channels) {
+        let left = convert(frame[0]);
+        let right = frame.get(1).map_or(left, |&right| convert(right));
         output.extend([left, right]);
     }
 }
 
-fn read(bytes: &[u8], sample: Sample) -> i16 {
-    match sample {
-        Sample::Float => {
-            let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            // NaN survives the clamp and casts to 0.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "clamped to the i16 range first"
-            )]
-            let scaled = (value * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16;
-            scaled
-        }
-        Sample::Int16 => i16::from_le_bytes([bytes[0], bytes[1]]),
-    }
+fn from_float(value: f32) -> i16 {
+    // NaN survives the clamp and casts to 0.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to the i16 range first"
+    )]
+    let scaled = (value * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16;
+    scaled
 }
 
 #[cfg(test)]
