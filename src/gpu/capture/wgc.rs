@@ -9,6 +9,7 @@ use crate::{
     gpu::{device::Device, pacer::filetime_units},
     log,
     service::Target,
+    sys::com::Apartment,
 };
 use std::{
     ffi::c_void,
@@ -34,7 +35,6 @@ use windows::{
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
-            RO_INIT_MULTITHREADED, RoInitialize,
         },
     },
     core::{Interface, factory},
@@ -63,6 +63,8 @@ pub(super) struct Capture {
     tone_map: Option<ToneMapper>,
     monitor: HMONITOR,
     next_hdr_check: Instant,
+    /// The apartment the capture objects live in; declared last so they all go first.
+    _apartment: Apartment,
 }
 
 impl Capture {
@@ -75,7 +77,7 @@ impl Capture {
         cursor: bool,
         tone_map: Option<ToneMapper>,
     ) -> Result<Self, CaptureError> {
-        prepare_thread()?;
+        let apartment = prepare_thread()?;
         let item = capture_item(target)?;
         let size = item.Size().map_err(failed("read the capture size"))?;
         let (closed, closed_token) = watch_closed(&item)?;
@@ -104,6 +106,7 @@ impl Capture {
             tone_map,
             monitor: monitor_of(target).0,
             next_hdr_check: Instant::now() + HDR_CHECK_INTERVAL,
+            _apartment: apartment,
         })
     }
 }
@@ -228,16 +231,18 @@ impl Drop for Capture {
     }
 }
 
-fn prepare_thread() -> Result<(), CaptureError> {
-    // SAFETY: initializes WinRT for the calling thread only.
-    let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+/// The multithreaded apartment, which is what `RoInitialize(RO_INIT_MULTITHREADED)` sets up,
+/// until the returned guard is dropped on this thread.
+fn prepare_thread() -> Result<Apartment, CaptureError> {
+    let apartment =
+        Apartment::multi_threaded().map_err(failed("start WinRT on the capture thread"))?;
     if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
         return Err(CaptureError::Unsupported(
             "Windows Graphics Capture is not available; Windows 10 version 1903 or newer is needed"
                 .to_owned(),
         ));
     }
-    Ok(())
+    Ok(apartment)
 }
 
 fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {

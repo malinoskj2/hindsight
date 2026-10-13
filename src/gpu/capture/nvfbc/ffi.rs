@@ -249,6 +249,9 @@ pub(super) struct ToDx9VidVtable {
     release: Release<Self>,
     _cursor_capture: unsafe extern "system" fn(*mut ToDx9Vid, *mut c_void) -> Status,
 }
+const _: () = assert!(size_of::<ToDx9VidVtable>() == 5 * size_of::<usize>());
+const _: () = assert!(offset_of!(ToDx9VidVtable, release) == 3 * size_of::<usize>());
+const _: () = assert!(offset_of!(ToDx9VidVtable, _cursor_capture) == 4 * size_of::<usize>());
 
 impl Vtable for ToDx9VidVtable {
     fn release(&self) -> Release<Self> {

@@ -34,7 +34,7 @@ use windows::{
     core::{BOOL, Interface, s, w},
 };
 
-use crate::gpu::ffi::{Library, Zeroed};
+use crate::gpu::ffi::{Library, Symbol, Zeroed};
 pub(super) use cuda::Capture as CudaCapture;
 pub(in crate::gpu) use ffi::Status;
 
@@ -247,12 +247,14 @@ fn prepare_capture(
 
     let library = load_library()?;
     let entry_points = EntryPoints::look_up(&library)?;
-    if !is_capture_possible(entry_points.get_status, &key, adapter)? {
-        turn_on(entry_points.enable)?;
+    if !is_capture_possible(*entry_points.get_status, &key, adapter)? {
+        turn_on(*entry_points.enable)?;
     }
+    // Detached from the borrow: each capture keeps the library in its last field.
+    let create = *entry_points.create;
     Ok(Prepared {
         library,
-        create: entry_points.create,
+        create,
         key,
         adapter,
         d3d9,
@@ -270,33 +272,33 @@ fn load_library() -> Result<Library, CaptureError> {
     })
 }
 
-struct EntryPoints {
-    get_status: ffi::GetStatusEx,
-    create: ffi::CreateEx,
-    enable: ffi::Enable,
+struct EntryPoints<'lib> {
+    get_status: Symbol<'lib, ffi::GetStatusEx>,
+    create: Symbol<'lib, ffi::CreateEx>,
+    enable: Symbol<'lib, ffi::Enable>,
 }
 
-impl EntryPoints {
-    fn look_up(library: &Library) -> Result<Self, CaptureError> {
+impl<'lib> EntryPoints<'lib> {
+    fn look_up(library: &'lib Library) -> Result<Self, CaptureError> {
         let missing = |name: &str| {
             CaptureError::Unsupported(format!(
                 "NvFBC64.dll has no {name}; update the NVIDIA driver"
             ))
         };
-        // SAFETY: each symbol has the documented signature.
-        unsafe {
-            Ok(Self {
-                get_status: library
-                    .export(s!("NvFBC_GetStatusEx"))
-                    .ok_or_else(|| missing("NvFBC_GetStatusEx"))?,
-                create: library
-                    .export(s!("NvFBC_CreateEx"))
-                    .ok_or_else(|| missing("NvFBC_CreateEx"))?,
-                enable: library
-                    .export(s!("NvFBC_Enable"))
-                    .ok_or_else(|| missing("NvFBC_Enable"))?,
-            })
-        }
+        // SAFETY: declared `NVFBCRESULT NVFBCAPI (NvFBCStatusEx*)` in NvFBC.h.
+        let get_status = unsafe { library.export(s!("NvFBC_GetStatusEx")) }
+            .ok_or_else(|| missing("NvFBC_GetStatusEx"))?;
+        // SAFETY: declared `NVFBCRESULT NVFBCAPI (void*)` in NvFBC.h, taking `NvFBCCreateParams`.
+        let create = unsafe { library.export(s!("NvFBC_CreateEx")) }
+            .ok_or_else(|| missing("NvFBC_CreateEx"))?;
+        // SAFETY: declared `NVFBCRESULT NVFBCAPI (NVFBC_STATE)` in NvFBC.h.
+        let enable =
+            unsafe { library.export(s!("NvFBC_Enable")) }.ok_or_else(|| missing("NvFBC_Enable"))?;
+        Ok(Self {
+            get_status,
+            create,
+            enable,
+        })
     }
 }
 

@@ -1,4 +1,10 @@
 //! The CUDA driver API (`nvcuda.dll`), loaded at run time: the device, its primary context and device memory.
+//!
+//! The `_v2` entry points are the 64-bit `CUdeviceptr` and context-stack revisions of CUDA 3.2
+//! and 4.0, `cuDevicePrimaryCtxRetain` is from CUDA 7.0 and `cuDeviceGetLuid` from 10.0. The
+//! newest entry point used, `cuCtxSetFlags`, is believed to have come with CUDA 12.1 (driver
+//! 530 or newer), so that is believed to be the floor; an older driver fails [`Driver::load`]
+//! with [`CudaError::MissingEntryPoint`] rather than misbehaving.
 
 use crate::gpu::ffi::{Library, raw_status};
 use std::{
@@ -113,6 +119,7 @@ type StreamSynchronize = unsafe extern "system" fn(*mut c_void) -> Status;
 type CtxSynchronize = unsafe extern "system" fn() -> Status;
 type CtxSetFlags = unsafe extern "system" fn(u32) -> Status;
 
+/// The driver's entry points, which may be called from any thread.
 pub(super) struct Driver {
     init: Init,
     get_version: DriverGetVersion,
@@ -136,16 +143,13 @@ pub(super) struct Driver {
     _library: Library,
 }
 
-// SAFETY: the library stays loaded while this lives, and the driver API is thread-safe.
-unsafe impl Send for Driver {}
-// SAFETY: as above; the entry points are plain function pointers that are only read.
-unsafe impl Sync for Driver {}
-
 macro_rules! entry_point {
     ($library:expr, $name:literal, $type:ty) => {{
         // SAFETY: the export has the declared signature, as the macro's contract says.
-        unsafe { $library.export::<$type>(PCSTR(concat!($name, "\0").as_ptr())) }
-            .ok_or(CudaError::MissingEntryPoint($name))?
+        let symbol = unsafe { $library.export::<$type>(PCSTR(concat!($name, "\0").as_ptr())) }
+            .ok_or(CudaError::MissingEntryPoint($name))?;
+        // Detached from the borrow: `Driver` keeps the library in its last field.
+        *symbol
     }};
 }
 

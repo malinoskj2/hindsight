@@ -1,5 +1,6 @@
 //! What the bindings to the NVIDIA driver's interfaces have in common.
 
+use std::{marker::PhantomData, ops::Deref};
 use windows::{
     Win32::{
         Foundation::HMODULE,
@@ -12,6 +13,11 @@ use windows::{
 /// must be gone before it is dropped.
 pub(super) struct Library(Owned<HMODULE>);
 
+// SAFETY: an HMODULE may be freed from any thread.
+unsafe impl Send for Library {}
+// SAFETY: a shared library only looks symbols up, which `GetProcAddress` does from any thread.
+unsafe impl Sync for Library {}
+
 impl Library {
     pub(super) fn load(name: PCWSTR) -> windows::core::Result<Self> {
         // SAFETY: loads a system library by name.
@@ -22,18 +28,63 @@ impl Library {
 
     /// # Safety
     /// `F` must be the signature the library exports `name` with.
-    pub(super) unsafe fn export<F: Copy>(&self, name: PCSTR) -> Option<F> {
+    pub(super) unsafe fn export<F: FnPtr>(&self, name: PCSTR) -> Option<Symbol<'_, F>> {
         const {
             assert!(size_of::<F>() == size_of::<usize>());
         }
-        // SAFETY: looks a symbol up in the loaded library.
+        // SAFETY: the module is loaded while `self` lives; a missing name returns `None`.
         let address = unsafe { GetProcAddress(*self.0, name) }?;
-        // SAFETY: a function pointer of the size of `F`, with the signature the caller vouches for.
-        Some(unsafe {
+        // SAFETY: both are function pointers of the same size, and the caller vouches that the
+        // export has the signature `F`.
+        let function = unsafe {
             std::mem::transmute_copy::<unsafe extern "system" fn() -> isize, F>(&address)
+        };
+        Some(Symbol {
+            function,
+            _library: PhantomData,
         })
     }
 }
+
+/// A function exported by a [`Library`], usable while the library is borrowed.
+///
+/// Copying the pointer out with `*` detaches it from the library's lifetime: whoever does so
+/// keeps the library loaded for as long as the copy is called, as a struct does by holding the
+/// library in a field declared after the pointers.
+pub(super) struct Symbol<'lib, F> {
+    function: F,
+    _library: PhantomData<&'lib Library>,
+}
+
+impl<F> Deref for Symbol<'_, F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        &self.function
+    }
+}
+
+mod sealed {
+    pub(in crate::gpu) trait Sealed {}
+}
+
+/// An `unsafe extern "system"` function pointer: the only types a library export may be read as.
+pub(super) trait FnPtr: Copy + sealed::Sealed {}
+
+macro_rules! fn_ptr {
+    ($($argument:ident),*) => {
+        impl<R, $($argument),*> sealed::Sealed for unsafe extern "system" fn($($argument),*) -> R {}
+        impl<R, $($argument),*> FnPtr for unsafe extern "system" fn($($argument),*) -> R {}
+    };
+}
+
+fn_ptr!();
+fn_ptr!(A);
+fn_ptr!(A, B);
+fn_ptr!(A, B, C);
+fn_ptr!(A, B, C, D);
+fn_ptr!(A, B, C, D, E);
+fn_ptr!(A, B, C, D, E, G);
 
 /// A status code kept raw, since a driver may return codes this program does not know, with
 /// the names of the ones it does.

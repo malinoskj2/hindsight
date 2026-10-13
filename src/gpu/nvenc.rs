@@ -7,7 +7,7 @@ use crate::{
         cuda::DevicePointer,
         cuda_output::{CudaRing, StagingId, StagingLayout},
         device::Locked,
-        ffi::{Library, Zeroed},
+        ffi::{Library, Symbol, Zeroed},
     },
     replay::{Matrix, Picture, Slot as StoreSlot},
 };
@@ -1023,7 +1023,7 @@ fn load_library() -> Result<Library, NvencError> {
 
 fn create_api(library: &Library) -> Result<Box<ffi::FunctionList>, NvencError> {
     let (max_version, create_instance) = resolve_exports(library)?;
-    require_driver_version(max_version)?;
+    require_driver_version(*max_version)?;
     let mut api = Box::new(ffi::FunctionList::zeroed());
     api.version = ffi::FUNCTION_LIST_VER;
     // SAFETY: the list is a properly versioned, writable `NV_ENCODE_API_FUNCTION_LIST`.
@@ -1046,7 +1046,13 @@ fn require_driver_version(max_version: ffi::GetMaxSupportedVersion) -> Result<()
 
 fn resolve_exports(
     library: &Library,
-) -> Result<(ffi::GetMaxSupportedVersion, ffi::CreateInstance), NvencError> {
+) -> Result<
+    (
+        Symbol<'_, ffi::GetMaxSupportedVersion>,
+        Symbol<'_, ffi::CreateInstance>,
+    ),
+    NvencError,
+> {
     // SAFETY: declared `NVENCSTATUS NVENCAPI (uint32_t*)` in nvEncodeAPI.h.
     let max_version = unsafe { library.export(s!("NvEncodeAPIGetMaxSupportedVersion")) }
         .ok_or(NvencError::Library)?;
