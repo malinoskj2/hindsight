@@ -12,6 +12,7 @@ use crate::{gpu::device::Device, log, service::Target};
 use std::{
     ffi::c_void,
     ptr::{self, NonNull},
+    sync::Arc,
     time::Instant,
 };
 use windows::{
@@ -43,13 +44,12 @@ const SLOT_COUNT: u32 = 3;
 const SLOTS: usize = SLOT_COUNT as usize;
 
 pub(super) struct Capture {
-    /// Must outlive the session.
-    _library: Library,
+    /// Declared first: released before the surfaces it grabs into and their device.
+    session: Option<Session>,
     create: ffi::CreateEx,
     key: Key,
     device: IDirect3DDevice9Ex,
     slots: [Slot; SLOTS],
-    session: Option<Session>,
     /// The slot whose grab is in flight, handed over on the next tick.
     pending: Option<usize>,
     next: u32,
@@ -59,6 +59,8 @@ pub(super) struct Capture {
     window: Option<HWND>,
     reopen: ReopenThrottle,
     cursor: bool,
+    /// Declared last: `create` points into it. Each session holds it too.
+    library: Arc<Library>,
 }
 
 impl Capture {
@@ -85,12 +87,11 @@ impl Capture {
         ];
 
         let mut capture = Self {
-            _library: library,
+            session: None,
             create,
             key,
             device: d3d9_device,
             slots,
-            session: None,
             pending: None,
             next: 0,
             handed_over: false,
@@ -99,6 +100,7 @@ impl Capture {
             window,
             reopen: ReopenThrottle::default(),
             cursor,
+            library,
         };
         capture.session = Some(capture.open_session()?);
         Ok(capture)
@@ -111,7 +113,7 @@ impl Capture {
         // Released by `Drop` should setup fail.
         let session = Session {
             object,
-            buffers: Box::new(output_buffers(&self.slots)),
+            buffers: OutputTable::new(output_buffers(&self.slots)),
         };
         session
             .set_up(self.cursor)
@@ -128,7 +130,7 @@ impl Capture {
         params.private_data_size = KEY_BYTES;
         // SAFETY: the device and the key outlive the call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
-        Object::new(params.nvfbc).ok_or(Status::UNSUPPORTED)
+        Object::new(params.nvfbc, &self.library).ok_or(Status::UNSUPPORTED)
     }
 
     fn reopen(&mut self) -> Result<Frame, CaptureError> {
@@ -209,16 +211,9 @@ impl Source for Capture {
     }
 }
 
-impl Drop for Capture {
-    fn drop(&mut self) {
-        // The session goes before the library that implements it.
-        self.session = None;
-    }
-}
-
 /// What both backends need before their first session.
 struct Prepared {
-    library: Library,
+    library: Arc<Library>,
     create: ffi::CreateEx,
     key: Key,
     /// Direct3D 9 adapter ordinal; the driver counts by it.
@@ -253,7 +248,7 @@ fn prepare_capture(
     // Detached from the borrow: each capture keeps the library in its last field.
     let create = *entry_points.create;
     Ok(Prepared {
-        library,
+        library: Arc::new(library),
         create,
         key,
         adapter,
@@ -303,27 +298,38 @@ impl<'lib> EntryPoints<'lib> {
 }
 
 /// A live interface object from `NvFBC_CreateEx`, released on drop.
-struct Object<V: ffi::Vtable>(NonNull<ffi::Interface<V>>);
+struct Object<V: ffi::Vtable> {
+    pointer: NonNull<ffi::Interface<V>>,
+    /// The library that implements the object and holds its method table; dropped after the
+    /// release in `Drop`.
+    _library: Arc<Library>,
+}
 
 impl<V: ffi::Vtable> Object<V> {
-    fn new(pointer: *mut c_void) -> Option<Self> {
-        NonNull::new(pointer.cast()).map(Self)
+    fn new(pointer: *mut c_void, library: &Arc<Library>) -> Option<Self> {
+        Some(Self {
+            pointer: NonNull::new(pointer.cast())?,
+            _library: Arc::clone(library),
+        })
     }
 
     fn as_ptr(&self) -> *mut ffi::Interface<V> {
-        self.0.as_ptr()
+        self.pointer.as_ptr()
     }
 
     fn methods(&self) -> &V {
-        // SAFETY: the object is live and the library holding its table is loaded.
-        unsafe { &*(*self.0.as_ptr()).vtable }
+        // SAFETY: the object is live until `Drop` releases it, so its header can be read.
+        let vtable = unsafe { (*self.pointer.as_ptr()).vtable };
+        // SAFETY: the table lives in the library, which `self` keeps loaded, and is never
+        // written.
+        unsafe { &*vtable }
     }
 }
 
 impl<V: ffi::Vtable> Drop for Object<V> {
     fn drop(&mut self) {
         // SAFETY: a live object from `NvFBC_CreateEx`; nothing uses it afterwards.
-        let _ = unsafe { (self.methods().release())(self.0.as_ptr()) };
+        let _ = unsafe { (self.methods().release())(self.pointer.as_ptr()) };
     }
 }
 
@@ -334,9 +340,32 @@ struct Slot {
 }
 
 struct Session {
+    /// Declared first: released before the table it was set up with is freed.
     object: Object<ffi::ToDx9VidVtable>,
-    /// The driver may read these for the session's life.
-    buffers: Box<[ffi::OutputBuffer; SLOTS]>,
+    buffers: OutputTable,
+}
+
+/// The table of output buffers a session is set up with, which the driver keeps a pointer to
+/// for the session's life: allocated once, never moved, freed on drop.
+struct OutputTable(NonNull<[ffi::OutputBuffer; SLOTS]>);
+
+impl OutputTable {
+    fn new(buffers: [ffi::OutputBuffer; SLOTS]) -> Self {
+        Self(NonNull::from(Box::leak(Box::new(buffers))))
+    }
+
+    /// For the driver, which may read and write through it.
+    const fn as_mut_ptr(&self) -> *mut ffi::OutputBuffer {
+        self.0.as_ptr().cast()
+    }
+}
+
+impl Drop for OutputTable {
+    fn drop(&mut self) {
+        // SAFETY: leaked from a `Box` in `new` and freed only here; the session that handed the
+        // pointer to the driver was released first.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
 }
 
 impl Session {
@@ -346,7 +375,7 @@ impl Session {
         setup.flags = if cursor { ffi::SETUP_WITH_HW_CURSOR } else { 0 };
         setup.mode = ffi::TODX9VID_ARGB;
         setup.buffer_count = SLOT_COUNT;
-        setup.buffers = self.buffers.as_ptr().cast_mut();
+        setup.buffers = self.buffers.as_mut_ptr();
         // SAFETY: a live object; the surfaces are on its device and outlive the session.
         unsafe { (self.object.methods().set_up)(self.object.as_ptr(), &raw mut setup) }.ok()
     }
@@ -427,7 +456,8 @@ fn note_reopened<S>(
 const KEY_BYTES: u32 = 16;
 type Key = [u8; KEY_BYTES as usize];
 
-// The driver's key, masked in the binary and unmasked at use.
+// The driver's key, masked in the source only: the optimiser folds the unmasking, so a release
+// binary holds the key in the clear.
 const MASKED_KEY: Key = [
     0x58, 0x01, 0xDB, 0x6A, 0x68, 0x12, 0xEE, 0x2A, 0x09, 0x77, 0x6C, 0x2B, 0x3E, 0x91, 0x06, 0xEC,
 ];
@@ -502,7 +532,8 @@ fn is_capture_possible(
 }
 
 fn turn_on(enable: ffi::Enable) -> Result<(), CaptureError> {
-    // SAFETY: a plain call into the loaded library.
+    // SAFETY: `enable` is `NvFBC_Enable` from the library `prepare_capture` still holds, and
+    // takes the state by value.
     let result = unsafe { enable(ffi::STATE_ENABLE) };
     if result == Status::INSUFFICIENT_PRIVILEGES {
         return Err(CaptureError::Unsupported(
@@ -715,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn the_key_is_unmasked_at_use_and_never_stored_in_the_clear() {
+    fn the_masked_key_and_its_mask_give_the_key() {
         let key = saved_key();
         assert_eq!(key.len(), MASKED_KEY.len());
         assert_ne!(key.as_slice(), MASKED_KEY.as_slice());

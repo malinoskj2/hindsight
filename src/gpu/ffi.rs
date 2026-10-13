@@ -20,7 +20,7 @@ unsafe impl Sync for Library {}
 
 impl Library {
     pub(super) fn load(name: PCWSTR) -> windows::core::Result<Self> {
-        // SAFETY: loads a system library by name.
+        // SAFETY: `name` is a NUL-terminated wide string, and the search is limited to System32.
         let module = unsafe { LoadLibraryExW(name, None, LOAD_LIBRARY_SEARCH_SYSTEM32) }?;
         // SAFETY: the module was just loaded, and only this `Owned` frees it.
         Ok(Self(unsafe { Owned::new(module) }))

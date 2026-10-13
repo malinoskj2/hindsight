@@ -28,8 +28,6 @@ const BYTES_PER_PIXEL: u32 = 4;
 const MEBIBYTE: u32 = 1024 * 1024;
 
 pub(in crate::gpu::capture) struct Capture {
-    /// Must outlive the session.
-    _library: Library,
     create: nvfbc_ffi::CreateEx,
     key: Key,
     /// Direct3D 9 adapter ordinal; the driver counts by it.
@@ -50,6 +48,8 @@ pub(in crate::gpu::capture) struct Capture {
     /// The context is current on the thread that started the capture, and the context stack is
     /// per thread, so the capture stays on that thread.
     _thread: PhantomData<*const ()>,
+    /// Declared last: `create` points into it. Each session holds it too.
+    library: Arc<Library>,
 }
 
 impl Capture {
@@ -72,7 +72,6 @@ impl Capture {
         let cuda = Arc::new(open_primary_context(device)?);
 
         let mut capture = Self {
-            _library: library,
             create,
             key,
             adapter,
@@ -88,6 +87,7 @@ impl Capture {
             reopen: ReopenThrottle::default(),
             cursor,
             _thread: PhantomData,
+            library,
         };
         capture.session = Some(capture.open_session()?);
         Ok(capture)
@@ -128,7 +128,7 @@ impl Capture {
         params.private_data_size = KEY_BYTES;
         // SAFETY: the parameters are complete and the key outlives the call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
-        Object::new(params.nvfbc).ok_or(Status::UNSUPPORTED)
+        Object::new(params.nvfbc, &self.library).ok_or(Status::UNSUPPORTED)
     }
 
     /// Adopts a context of the driver's own the first time; after that the context must be the
@@ -308,8 +308,8 @@ impl Source for Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // Buffers before the session, the session before the context, which the hold releases
-        // after this.
+        // Buffers before the session, both while the context is still on this thread's stack;
+        // the hold releases the context after this, and the library goes last of all.
         self.buffers.clear();
         self.session = None;
         let driver = self.cuda.driver();
