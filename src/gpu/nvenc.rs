@@ -4,7 +4,7 @@ use crate::{
     config::Codec,
     gpu::{
         capture::{EncoderDevice, Surface},
-        cuda::DevicePointer,
+        cuda::{DeviceBuffer, DevicePointer},
         cuda_output::{CudaRing, StagingId, StagingLayout},
         device::Locked,
         ffi::{Library, Symbol, Zeroed},
@@ -437,12 +437,12 @@ impl Encoder {
 
     fn register_cuda_buffer(
         &self,
-        pointer: DevicePointer,
+        buffer: &DeviceBuffer,
         pitch: u32,
     ) -> Result<ffi::Registered, NvencError> {
         self.register_resource(
             ffi::INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER,
-            pointer.as_api_pointer(),
+            buffer.pointer().as_api_pointer(),
             pitch,
             ffi::BUFFER_FORMAT_ARGB,
         )
@@ -547,9 +547,7 @@ impl Encoder {
         );
         let registered = match handle {
             Surface::Texture(texture) => self.register_texture(texture)?,
-            Surface::CudaBuffer { pointer, pitch } => {
-                self.register_cuda_buffer(*pointer, *pitch)?
-            }
+            Surface::CudaBuffer { buffer, pitch } => self.register_cuda_buffer(buffer, *pitch)?,
             Surface::Direct3D9(surface) => self.register_d3d9_surface(surface)?,
         };
         if self.surfaces.len() <= surface {
@@ -892,6 +890,11 @@ impl Drop for Encoder {
             self.release_slot(slot);
         }
         self.unregister_surfaces();
+        if self.stalled
+            && let Some(ring) = &mut self.ring
+        {
+            ring.leak_staging();
+        }
         // Under the device lock, which `Drop` alone would not hold.
         self.session.destroy();
     }

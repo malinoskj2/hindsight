@@ -1,13 +1,14 @@
 //! The replay buffer in CUDA memory, written by NVENC itself: packets never cross to system memory.
 
 use crate::{
-    gpu::cuda::{Context, CudaError, Device, DevicePointer, Driver},
+    gpu::cuda::{ContextHold, CudaError, Device, DeviceBuffer, DevicePointer, Driver},
+    log,
     replay::{
         BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, StoreError, pages_within,
         pieces,
     },
 };
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 use thiserror::Error;
 
 /// How the encoder lays a frame out in a staging buffer: a header, then the bitstream.
@@ -41,28 +42,11 @@ struct Oversized {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StagingId(usize);
 
-struct Staging {
-    pointer: DevicePointer,
-    bytes: usize,
-}
-
-/// The driver and the primary context retained on it, released once the last page is gone.
-struct ContextHold {
-    driver: Driver,
-    device: Device,
-    context: Context,
-}
-
-impl Drop for ContextHold {
-    fn drop(&mut self) {
-        let _ = self.driver.release_primary_context(self.device);
-    }
-}
-
 pub(super) struct CudaRing {
+    /// The primary context, released once the last page is gone.
     hold: Arc<ContextHold>,
     pages: Pages<CudaPage>,
-    staging: Vec<Staging>,
+    staging: Vec<DeviceBuffer>,
     layout: StagingLayout,
     head: Box<[u8]>,
 }
@@ -76,16 +60,13 @@ impl CudaRing {
     ) -> Result<Self, CudaRingError> {
         let driver =
             Driver::load().map_err(|error| CudaRingError::Cuda("load the CUDA driver", error))?;
-        let context = driver
-            .retain_primary_context(device)
-            .map_err(|error| CudaRingError::Cuda("retain the CUDA context", error))?;
-        let hold = Arc::new(ContextHold {
-            driver,
-            device,
-            context,
-        });
+        let hold = Arc::new(
+            driver
+                .retain_primary_context(device)
+                .map_err(|error| CudaRingError::Cuda("retain the CUDA context", error))?,
+        );
         let (_, available) = hold
-            .driver
+            .driver()
             .memory_info()
             .map_err(|error| CudaRingError::Cuda("read the GPU's memory size", error))?;
         let count = pages_within(bytes, available)?;
@@ -116,9 +97,25 @@ impl CudaRing {
             bytes >= self.head.len(),
             "a staging buffer holds a frame's head"
         );
-        let pointer = self.hold.driver.allocate(bytes)?;
-        self.staging.push(Staging { pointer, bytes });
+        let buffer = self.hold.allocate(bytes)?;
+        let pointer = buffer.pointer();
+        self.staging.push(buffer);
         Ok((StagingId(self.staging.len() - 1), pointer))
+    }
+
+    /// Leaks the staging buffers rather than free memory a stalled encoder may still write;
+    /// with them, the context stays held for the rest of the process.
+    pub(super) fn leak_staging(&mut self) {
+        if self.staging.is_empty() {
+            return;
+        }
+        log::warning(format!(
+            "The encoder stalled; leaving its {} output buffers in GPU memory rather than freeing memory it may still write",
+            self.staging.len()
+        ));
+        for buffer in self.staging.drain(..) {
+            mem::forget(buffer);
+        }
     }
 
     /// Moves the frame the encoder finished in `staging` into the ring.
@@ -126,20 +123,20 @@ impl CudaRing {
         let Self {
             hold,
             pages,
+            staging: buffers,
             layout,
             head,
-            ..
         } = self;
-        let driver = &hold.driver;
+        let driver = hold.driver();
         let StagingLayout {
             header_bytes,
             size_offset,
             head_bytes,
         } = *layout;
-        let Staging { pointer, bytes } = self.staging[staging.0];
-        let room = bytes.saturating_sub(header_bytes);
-        driver
-            .copy_to_host(head, pointer)
+        let staging = &buffers[staging.0];
+        let room = staging.bytes().saturating_sub(header_bytes);
+        staging
+            .copy_to_host(0, head)
             .map_err(StoreError::call("read a frame's header back"))?;
         let size = bitstream_size(head, size_offset);
         if size > room {
@@ -153,29 +150,14 @@ impl CudaRing {
         let (page, offset) = pages.place(size, || {
             CudaPage::allocate(hold).map_err(StoreError::call("reserve a page of GPU memory"))
         })?;
-        driver
-            .copy_on_device(
-                page.pointer.offset(offset),
-                pointer.offset(header_bytes),
-                size,
-            )
+        page.0
+            .copy_from(offset, staging, header_bytes, size)
             .map_err(StoreError::call("move a frame into the buffer"))?;
         // The copy must be done before the encoder writes the staging buffer again.
         driver
             .synchronize()
             .map_err(StoreError::call("wait for a frame's move"))?;
         Ok((Slot::new(page, offset, size), head))
-    }
-}
-
-impl Drop for CudaRing {
-    fn drop(&mut self) {
-        // Allocated in the ring's context, which need not be current here.
-        if let Ok(_current) = Current::push(&self.hold.driver, self.hold.context) {
-            for buffer in self.staging.drain(..) {
-                let _ = self.hold.driver.free(buffer.pointer);
-            }
-        }
     }
 }
 
@@ -186,17 +168,11 @@ fn bitstream_size(staging: &[u8], size_offset: usize) -> usize {
     u32::from_le_bytes(bytes) as usize
 }
 
-struct CudaPage {
-    pointer: DevicePointer,
-    hold: Arc<ContextHold>,
-}
+struct CudaPage(DeviceBuffer);
 
 impl CudaPage {
     fn allocate(hold: &Arc<ContextHold>) -> Result<Self, CudaError> {
-        Ok(Self {
-            pointer: hold.driver.allocate(PAGE_BYTES)?,
-            hold: Arc::clone(hold),
-        })
+        hold.allocate(PAGE_BYTES).map(Self)
     }
 }
 
@@ -207,42 +183,19 @@ impl Page for CudaPage {
         length: usize,
         sink: &mut dyn FnMut(usize, &[u8]),
     ) -> Result<(), StoreError> {
-        let driver = &self.hold.driver;
         // A save reads on a thread of its own, where the context is not current.
-        let _current = Current::push(driver, self.hold.context)
+        let _current = self
+            .0
+            .make_current()
             .map_err(StoreError::call("make the CUDA context current"))?;
         let mut chunk = vec![0; length.min(CHUNK_BYTES)];
         for (done, piece) in pieces(length, chunk.len()) {
-            driver
-                .copy_to_host(&mut chunk[..piece], self.pointer.offset(offset + done))
+            self.0
+                .copy_to_host(offset + done, &mut chunk[..piece])
                 .map_err(StoreError::call("read a page back"))?;
             sink(done, &chunk[..piece]);
         }
         Ok(())
-    }
-}
-
-impl Drop for CudaPage {
-    fn drop(&mut self) {
-        // The last slot of a page may go on any thread.
-        if let Ok(_current) = Current::push(&self.hold.driver, self.hold.context) {
-            let _ = self.hold.driver.free(self.pointer);
-        }
-    }
-}
-
-struct Current<'a>(&'a Driver);
-
-impl<'a> Current<'a> {
-    fn push(driver: &'a Driver, context: Context) -> Result<Self, CudaError> {
-        driver.push_context(context)?;
-        Ok(Self(driver))
-    }
-}
-
-impl Drop for Current<'_> {
-    fn drop(&mut self) {
-        let _ = self.0.pop_context();
     }
 }
 

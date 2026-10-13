@@ -9,7 +9,10 @@
 use crate::gpu::ffi::{Library, raw_status};
 use std::{
     ffi::{c_char, c_void},
+    fmt,
+    marker::PhantomData,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 use thiserror::Error;
 use windows::{
@@ -25,6 +28,12 @@ pub(super) enum CudaError {
     MissingEntryPoint(&'static str),
     #[error("{0} failed with {1}")]
     Call(&'static str, Status),
+    #[error("{length} bytes at {offset} overrun a device buffer of {bytes}")]
+    OutOfRange {
+        offset: usize,
+        length: usize,
+        bytes: usize,
+    },
 }
 
 raw_status! {
@@ -63,13 +72,14 @@ const CTX_SCHED_BLOCKING_SYNC: u32 = 0x04;
 /// `CUdevice`.
 pub(super) type Device = i32;
 
-/// `CUdeviceptr`: an address in device memory, not a pointer into this process.
+/// `CUdeviceptr`: an address in device memory, not a pointer into this process. Only a
+/// [`DeviceBuffer`] hands one out, and nothing safe frees or writes memory through it.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DevicePointer(u64);
 
 impl DevicePointer {
-    pub(super) fn offset(self, bytes: usize) -> Self {
+    fn offset(self, bytes: usize) -> Self {
         Self(self.0 + bytes as u64)
     }
 
@@ -234,18 +244,24 @@ impl Driver {
         Ok(device)
     }
 
-    pub(super) fn retain_primary_context(&self, device: Device) -> Result<Context, CudaError> {
+    /// The primary context of `device`, held with the driver until the hold is dropped.
+    pub(super) fn retain_primary_context(self, device: Device) -> Result<ContextHold, CudaError> {
         let mut context = ptr::null_mut();
         // SAFETY: the out-parameter is written on success.
         check("cuDevicePrimaryCtxRetain", unsafe {
             (self.device_primary_ctx_retain)(&raw mut context, device)
         })?;
-        NonNull::new(context)
+        let context = NonNull::new(context)
             .map(Context)
-            .ok_or(CudaError::Call("cuDevicePrimaryCtxRetain", Status::UNKNOWN))
+            .ok_or(CudaError::Call("cuDevicePrimaryCtxRetain", Status::UNKNOWN))?;
+        Ok(ContextHold {
+            context,
+            primary: Some(device),
+            driver: self,
+        })
     }
 
-    pub(super) fn release_primary_context(&self, device: Device) -> Result<(), CudaError> {
+    fn release_primary_context(&self, device: Device) -> Result<(), CudaError> {
         // SAFETY: undoes a `retain_primary_context` on the same device.
         check("cuDevicePrimaryCtxRelease", unsafe {
             (self.device_primary_ctx_release)(device)
@@ -277,17 +293,20 @@ impl Driver {
         Ok(NonNull::new(context).map(Context))
     }
 
-    pub(super) fn allocate(&self, bytes: usize) -> Result<DevicePointer, CudaError> {
+    /// In the current context; [`ContextHold::allocate`] makes the right one current.
+    fn allocate(&self, bytes: usize) -> Result<DevicePointer, CudaError> {
         let mut pointer = DevicePointer(0);
-        // SAFETY: a context is current; the out-parameter is written on success.
+        // SAFETY: the out-parameter outlives the call and is written on success.
         check("cuMemAlloc", unsafe {
             (self.mem_alloc)(&raw mut pointer, bytes)
         })?;
         Ok(pointer)
     }
 
-    pub(super) fn free(&self, pointer: DevicePointer) -> Result<(), CudaError> {
-        // SAFETY: the pointer came from `allocate` and is freed once.
+    /// # Safety
+    /// `pointer` came from [`Self::allocate`], has not been freed, and is not used again.
+    unsafe fn free(&self, pointer: DevicePointer) -> Result<(), CudaError> {
+        // SAFETY: the caller vouches that this is the one free of a live allocation.
         check("cuMemFree", unsafe { (self.mem_free)(pointer) })
     }
 
@@ -300,24 +319,27 @@ impl Driver {
         Ok((free, total))
     }
 
-    pub(super) fn copy_to_host(
-        &self,
-        into: &mut [u8],
-        from: DevicePointer,
-    ) -> Result<(), CudaError> {
-        // SAFETY: the host slice is writable for the length passed.
+    /// # Safety
+    /// The `into.len()` bytes from `from` on lie within one live allocation.
+    unsafe fn copy_to_host(&self, into: &mut [u8], from: DevicePointer) -> Result<(), CudaError> {
+        // SAFETY: the host slice is writable for its length, and the caller vouches for the
+        // device range.
         check("cuMemcpyDtoH", unsafe {
             (self.memcpy_dtoh)(into.as_mut_ptr().cast(), from, into.len())
         })
     }
 
-    pub(super) fn copy_on_device(
+    /// # Safety
+    /// The `bytes` bytes from `to` on and from `from` on each lie within one live allocation,
+    /// and nothing else relies on what `to` held.
+    unsafe fn copy_on_device(
         &self,
         to: DevicePointer,
         from: DevicePointer,
         bytes: usize,
     ) -> Result<(), CudaError> {
-        // SAFETY: device memory only; the driver rejects an unallocated range.
+        // SAFETY: the caller vouches for both ranges; with unified addressing the driver
+        // rejects only unmapped pages, not an overrun into another allocation.
         check("cuMemcpyDtoD", unsafe {
             (self.memcpy_dtod)(to, from, bytes)
         })
@@ -344,6 +366,185 @@ impl Driver {
     }
 }
 
+/// The driver and the context its memory is allocated in: a primary context, retained until
+/// this is dropped, or one the NvFBC driver opened, which that driver keeps alive.
+pub(super) struct ContextHold {
+    context: Context,
+    /// The device whose primary context `context` is.
+    primary: Option<Device>,
+    /// Declared last: the release in `Drop` calls into it.
+    driver: Driver,
+}
+
+impl ContextHold {
+    pub(super) const fn driver(&self) -> &Driver {
+        &self.driver
+    }
+
+    pub(super) const fn context(&self) -> Context {
+        self.context
+    }
+
+    /// The device whose primary context this holds, if it is a primary context.
+    pub(super) const fn primary(&self) -> Option<Device> {
+        self.primary
+    }
+
+    /// Releases a primary context and holds `made` instead, which the driver that made it keeps
+    /// alive.
+    pub(super) fn adopt(&mut self, made: Context) -> Result<(), CudaError> {
+        self.context = made;
+        match self.primary.take() {
+            Some(device) => self.driver.release_primary_context(device),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for ContextHold {
+    fn drop(&mut self) {
+        if let Some(device) = self.primary {
+            let _ = self.driver.release_primary_context(device);
+        }
+    }
+}
+
+impl ContextHold {
+    /// Pushes the context onto this thread's stack until the guard is dropped.
+    pub(super) fn make_current(&self) -> Result<Current<'_>, CudaError> {
+        self.driver.push_context(self.context)?;
+        Ok(Current {
+            driver: &self.driver,
+            _thread: PhantomData,
+        })
+    }
+
+    /// `bytes` of device memory in this context, which stays held while the memory lives.
+    pub(super) fn allocate(self: &Arc<Self>, bytes: usize) -> Result<DeviceBuffer, CudaError> {
+        let pointer = {
+            let _current = self.make_current()?;
+            self.driver.allocate(bytes)?
+        };
+        Ok(DeviceBuffer {
+            pointer,
+            bytes,
+            hold: Arc::clone(self),
+        })
+    }
+}
+
+/// A context pushed onto this thread's stack, popped off again on drop.
+pub(super) struct Current<'a> {
+    driver: &'a Driver,
+    /// The context stack is per thread, so the guard must be dropped on the thread it was made.
+    _thread: PhantomData<*const ()>,
+}
+
+impl Drop for Current<'_> {
+    fn drop(&mut self) {
+        let _ = self.driver.pop_context();
+    }
+}
+
+/// Device memory, freed on drop, in a context that stays held until then.
+///
+/// Device memory is not memory of this process: writing it through `&self` races only with GPU
+/// work, which the owners order by synchronising.
+pub(super) struct DeviceBuffer {
+    pointer: DevicePointer,
+    bytes: usize,
+    hold: Arc<ContextHold>,
+}
+
+impl DeviceBuffer {
+    /// Where the buffer is, for the APIs that take device addresses; valid while `self` lives.
+    pub(super) const fn pointer(&self) -> DevicePointer {
+        self.pointer
+    }
+
+    pub(super) const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Pushes the buffer's context onto this thread's stack until the guard is dropped.
+    pub(super) fn make_current(&self) -> Result<Current<'_>, CudaError> {
+        self.hold.make_current()
+    }
+
+    /// Fills `into` from `offset` on; the buffer's context must be current.
+    pub(super) fn copy_to_host(&self, offset: usize, into: &mut [u8]) -> Result<(), CudaError> {
+        self.check_range(offset, into.len())?;
+        let from = self.pointer.offset(offset);
+        // SAFETY: the range was just checked to lie within this live allocation.
+        unsafe { self.hold.driver.copy_to_host(into, from) }
+    }
+
+    /// Copies `length` bytes at `from_offset` in `from` to `offset` in this buffer, queued on
+    /// the null stream; the buffer's context must be current.
+    pub(super) fn copy_from(
+        &self,
+        offset: usize,
+        from: &Self,
+        from_offset: usize,
+        length: usize,
+    ) -> Result<(), CudaError> {
+        self.check_range(offset, length)?;
+        from.check_range(from_offset, length)?;
+        let (to, from) = (
+            self.pointer.offset(offset),
+            from.pointer.offset(from_offset),
+        );
+        // SAFETY: both ranges were just checked to lie within their live allocations, and the
+        // owner of this buffer decides what its bytes are for.
+        unsafe { self.hold.driver.copy_on_device(to, from, length) }
+    }
+
+    fn check_range(&self, offset: usize, length: usize) -> Result<(), CudaError> {
+        check_range(offset, length, self.bytes)
+    }
+}
+
+impl Drop for DeviceBuffer {
+    fn drop(&mut self) {
+        // The last owner may be on any thread, where the context need not be current.
+        if let Ok(_current) = self.hold.make_current() {
+            // SAFETY: allocated by `ContextHold::allocate` and owned by this buffer alone, so
+            // this is its one free; a buffer the GPU may still use is leaked instead.
+            let _ = unsafe { self.hold.driver.free(self.pointer) };
+        }
+    }
+}
+
+/// Two live buffers never share an address.
+impl PartialEq for DeviceBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.pointer == other.pointer
+    }
+}
+
+impl Eq for DeviceBuffer {}
+
+impl fmt::Debug for DeviceBuffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceBuffer")
+            .field("pointer", &self.pointer)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+fn check_range(offset: usize, length: usize, bytes: usize) -> Result<(), CudaError> {
+    match offset.checked_add(length) {
+        Some(end) if end <= bytes => Ok(()),
+        _ => Err(CudaError::OutOfRange {
+            offset,
+            length,
+            bytes,
+        }),
+    }
+}
+
 fn luid_bytes(luid: LUID) -> [u8; LUID_BYTES] {
     let mut bytes = [0; LUID_BYTES];
     bytes[..4].copy_from_slice(&luid.LowPart.to_le_bytes());
@@ -365,6 +566,18 @@ mod tests {
         assert_eq!(
             check("cuDeviceGet", Status(3)).unwrap_err().to_string(),
             "cuDeviceGet failed with CUDA_ERROR_NOT_INITIALIZED (3)"
+        );
+    }
+
+    #[test]
+    fn a_range_must_end_within_the_buffer() {
+        assert!(check_range(0, 16, 16).is_ok());
+        assert!(check_range(16, 0, 16).is_ok());
+        assert!(check_range(8, 9, 16).is_err());
+        assert!(check_range(17, 0, 16).is_err());
+        assert_eq!(
+            check_range(usize::MAX, 2, 16).unwrap_err().to_string(),
+            format!("2 bytes at {} overrun a device buffer of 16", usize::MAX)
         );
     }
 

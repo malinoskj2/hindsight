@@ -13,7 +13,7 @@ use crate::{
             CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface,
             failed, is_window_closed,
         },
-        cuda::{Context, CudaError, Device as CudaDevice, DevicePointer, Driver},
+        cuda::{Context, ContextHold, CudaError, Device as CudaDevice, DeviceBuffer, Driver},
         device::Device,
         ffi::Zeroed,
     },
@@ -21,6 +21,7 @@ use crate::{
     service::Target,
 };
 use nvfbc_ffi::Status;
+use std::{marker::PhantomData, sync::Arc};
 use windows::Win32::{Foundation::HWND, Graphics::Gdi::HMONITOR};
 
 const BYTES_PER_PIXEL: u32 = 4;
@@ -33,10 +34,10 @@ pub(in crate::gpu::capture) struct Capture {
     key: Key,
     /// Direct3D 9 adapter ordinal; the driver counts by it.
     adapter: u32,
-    cuda: Driver,
     /// Current on this thread for the whole session.
-    context: SessionContext,
-    buffers: Vec<DevicePointer>,
+    cuda: Arc<ContextHold>,
+    /// Shared with the encoder, which reads them in place.
+    buffers: Vec<Arc<DeviceBuffer>>,
     pitch: Option<u32>,
     session: Option<Session>,
     next: u32,
@@ -46,24 +47,9 @@ pub(in crate::gpu::capture) struct Capture {
     window: Option<HWND>,
     reopen: ReopenThrottle,
     cursor: bool,
-}
-
-#[derive(Clone, Copy)]
-enum SessionContext {
-    Primary {
-        device: CudaDevice,
-        context: Context,
-    },
-    /// A context the driver opened for itself at session creation.
-    Adopted(Context),
-}
-
-impl SessionContext {
-    const fn handle(self) -> Context {
-        match self {
-            Self::Primary { context, .. } | Self::Adopted(context) => context,
-        }
-    }
+    /// The context is current on the thread that started the capture, and the context stack is
+    /// per thread, so the capture stays on that thread.
+    _thread: PhantomData<*const ()>,
 }
 
 impl Capture {
@@ -83,7 +69,7 @@ impl Capture {
             monitor,
             window,
         } = prepare_capture(device, target, "NVIDIA NvFBC to CUDA")?;
-        let (cuda, cuda_device, context) = open_primary_context(device)?;
+        let cuda = Arc::new(open_primary_context(device)?);
 
         let mut capture = Self {
             _library: library,
@@ -91,10 +77,6 @@ impl Capture {
             key,
             adapter,
             cuda,
-            context: SessionContext::Primary {
-                device: cuda_device,
-                context,
-            },
             buffers: Vec::with_capacity(SLOTS),
             pitch: None,
             session: None,
@@ -105,6 +87,7 @@ impl Capture {
             window,
             reopen: ReopenThrottle::default(),
             cursor,
+            _thread: PhantomData,
         };
         capture.session = Some(capture.open_session()?);
         Ok(capture)
@@ -119,9 +102,12 @@ impl Capture {
         };
         self.settle_context()?;
         // Block rather than spin while a grab lands.
-        self.cuda.block_on_synchronize().map_err(cuda_failed(
-            "let CUDA block rather than spin while a grab lands",
-        ))?;
+        self.cuda
+            .driver()
+            .block_on_synchronize()
+            .map_err(cuda_failed(
+                "let CUDA block rather than spin while a grab lands",
+            ))?;
         if self.buffers.is_empty() {
             self.allocate_buffers(&session)?;
         }
@@ -150,10 +136,11 @@ impl Capture {
     fn settle_context(&mut self) -> Result<(), CaptureError> {
         let current = self
             .cuda
+            .driver()
             .current_context()
             .map_err(cuda_failed("read the current CUDA context"))?;
         match current {
-            Some(current) if current == self.context.handle() => Ok(()),
+            Some(current) if current == self.cuda.context() => Ok(()),
             Some(made) if self.buffers.is_empty() => self.adopt(made),
             _ => Err(CaptureError::Restart(
                 "the NVIDIA driver opened the new NvFBC session on another CUDA context than the encoder's",
@@ -162,16 +149,22 @@ impl Capture {
     }
 
     fn adopt(&mut self, made: Context) -> Result<(), CaptureError> {
-        let SessionContext::Primary { device, .. } = self.context else {
-            return Ok(());
+        // Only memory allocated in the context shares the hold, and there is none yet.
+        let Some(hold) = Arc::get_mut(&mut self.cuda) else {
+            return Err(CaptureError::Restart(
+                "the CUDA context is in use and cannot give way to the NvFBC driver's",
+            ));
         };
+        if hold.primary().is_none() {
+            return Ok(());
+        }
         let step = cuda_failed("adopt the NvFBC driver's CUDA context");
+        let driver = hold.driver();
         // The stack is the primary context with the driver's on top.
-        self.cuda.pop_context().map_err(&step)?;
-        self.cuda.pop_context().map_err(&step)?;
-        self.cuda.push_context(made).map_err(&step)?;
-        self.context = SessionContext::Adopted(made);
-        self.cuda.release_primary_context(device).map_err(&step)?;
+        driver.pop_context().map_err(&step)?;
+        driver.pop_context().map_err(&step)?;
+        driver.push_context(made).map_err(&step)?;
+        hold.adopt(made).map_err(&step)?;
         log::info(
             "NvFBC opened a CUDA context of its own for the capture; the encoder runs on it too",
         );
@@ -187,7 +180,7 @@ impl Capture {
                 .cuda
                 .allocate(bytes as usize)
                 .map_err(cuda_failed("allocate an NvFBC buffer"))?;
-            self.buffers.push(buffer);
+            self.buffers.push(Arc::new(buffer));
         }
         log::info(format!(
             "NvFBC grabs into {SLOT_COUNT} CUDA buffers of {} MiB",
@@ -211,7 +204,7 @@ impl Capture {
         let Some(session) = &self.session else {
             return Ok(Grabbed::Lost);
         };
-        let (status, info) = session.grab_frame(self.buffers[slot], self.cursor);
+        let (status, info) = session.grab_frame(&self.buffers[slot], self.cursor);
         let grabbed = classify_grab(
             status,
             &info,
@@ -226,6 +219,7 @@ impl Capture {
         }
         // The grab only queues the copy; NVENC must not read the buffer before it lands.
         self.cuda
+            .driver()
             .synchronize_context()
             .map_err(cuda_failed("wait for an NvFBC grab to land"))?;
         self.next = (self.next + 1) % SLOT_COUNT;
@@ -295,9 +289,9 @@ impl Source for Capture {
     }
 
     fn surface(&self, index: usize) -> Option<Surface> {
-        let pointer = *self.buffers.get(index)?;
+        let buffer = Arc::clone(self.buffers.get(index)?);
         let pitch = self.pitch?;
-        Some(Surface::CudaBuffer { pointer, pitch })
+        Some(Surface::CudaBuffer { buffer, pitch })
     }
 
     fn next_surface(&self) -> Option<usize> {
@@ -306,30 +300,24 @@ impl Source for Capture {
 
     fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Cuda {
-            context: self.context.handle(),
-            primary: match self.context {
-                SessionContext::Primary { device, .. } => Some(device),
-                SessionContext::Adopted(_) => None,
-            },
+            context: self.cuda.context(),
+            primary: self.cuda.primary(),
         }
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // Buffers before the session, the session before the context.
-        for buffer in self.buffers.drain(..) {
-            let _ = self.cuda.free(buffer);
-        }
+        // Buffers before the session, the session before the context, which the hold releases
+        // after this.
+        self.buffers.clear();
         self.session = None;
+        let driver = self.cuda.driver();
         // The driver may have taken its own context off the thread with the session.
-        if let Ok(Some(current)) = self.cuda.current_context()
-            && current == self.context.handle()
+        if let Ok(Some(current)) = driver.current_context()
+            && current == self.cuda.context()
         {
-            let _ = self.cuda.pop_context();
-        }
-        if let SessionContext::Primary { device, .. } = self.context {
-            let _ = self.cuda.release_primary_context(device);
+            let _ = driver.pop_context();
         }
     }
 }
@@ -366,7 +354,7 @@ impl Session {
     /// The copy may still be under way when this returns.
     fn grab_frame(
         &self,
-        buffer: DevicePointer,
+        buffer: &DeviceBuffer,
         cursor: bool,
     ) -> (Status, nvfbc_ffi::FrameGrabInfo) {
         let mut info = nvfbc_ffi::FrameGrabInfo::zeroed();
@@ -380,7 +368,7 @@ impl Session {
             } else {
                 0
             };
-        params.cuda_device_buffer = buffer.as_api_pointer();
+        params.cuda_device_buffer = buffer.pointer().as_api_pointer();
         params.grab_info = &raw mut info;
         // SAFETY: a live, set-up object; the buffer is the driver's maximum size and `info`
         // outlives the call.
@@ -389,7 +377,7 @@ impl Session {
     }
 }
 
-fn open_primary_context(device: &Device) -> Result<(Driver, CudaDevice, Context), CaptureError> {
+fn open_primary_context(device: &Device) -> Result<ContextHold, CaptureError> {
     let cuda = Driver::load().map_err(cuda_failed("load the CUDA driver"))?;
     let cuda_device = pick_device(&cuda, device)?;
     let version = cuda
@@ -400,15 +388,14 @@ fn open_primary_context(device: &Device) -> Result<(Driver, CudaDevice, Context)
         version / 1000,
         version % 1000 / 10
     ));
-    let context = cuda
+    let hold = cuda
         .retain_primary_context(cuda_device)
         .map_err(cuda_failed("open the CUDA context"))?;
     // `Capture`'s `Drop` pops it again.
-    if let Err(error) = cuda.push_context(context) {
-        let _ = cuda.release_primary_context(cuda_device);
-        return Err(cuda_failed("make the CUDA context current")(error));
-    }
-    Ok((cuda, cuda_device, context))
+    hold.driver()
+        .push_context(hold.context())
+        .map_err(cuda_failed("make the CUDA context current"))?;
+    Ok(hold)
 }
 
 fn pick_device(cuda: &Driver, device: &Device) -> Result<CudaDevice, CaptureError> {
@@ -432,6 +419,6 @@ fn cuda_failed(step: &'static str) -> impl Fn(CudaError) -> CaptureError {
         CudaError::Library | CudaError::MissingEntryPoint(_) => {
             CaptureError::Unsupported(error.to_string())
         }
-        CudaError::Call(..) => CaptureError::Cuda(step, error),
+        CudaError::Call(..) | CudaError::OutOfRange { .. } => CaptureError::Cuda(step, error),
     }
 }

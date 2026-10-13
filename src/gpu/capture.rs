@@ -9,7 +9,7 @@ mod wgc;
 use crate::{
     config::Backend,
     gpu::{
-        cuda::{Context, CudaError, DevicePointer},
+        cuda::{Context, CudaError, DeviceBuffer},
         device::Device,
     },
     log,
@@ -18,7 +18,10 @@ use crate::{
 };
 use std::{
     ffi::c_void,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -56,7 +59,7 @@ pub(super) enum Surface {
     Texture(ID3D11Texture2D),
     /// BGRA rows `pitch` bytes apart in the source's CUDA context.
     CudaBuffer {
-        pointer: DevicePointer,
+        buffer: Arc<DeviceBuffer>,
         pitch: u32,
     },
     /// BGRA on the source's Direct3D 9Ex device.
