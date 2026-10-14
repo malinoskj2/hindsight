@@ -6,9 +6,10 @@ use crate::{
     config::Codec,
     gpu::{
         cuda::ContextHold,
-        ffi::{Library, Symbol, Zeroed},
+        ffi::{Library, Symbol},
     },
 };
+use bytemuck::Zeroable;
 use std::{
     ffi::{CStr, c_void},
     ptr,

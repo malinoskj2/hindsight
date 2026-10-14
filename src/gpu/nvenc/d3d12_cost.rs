@@ -8,12 +8,10 @@ use super::{
 };
 use crate::{
     config::Codec,
-    gpu::{
-        device::{Device, null_output},
-        ffi::Zeroed,
-    },
+    gpu::device::{Device, null_output},
     replay::Matrix,
 };
+use bytemuck::Zeroable;
 use std::{
     ffi::c_void,
     ptr,
@@ -44,10 +42,9 @@ use windows::{
             Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC},
         },
         System::{
-            Threading::{CreateEventW, GetCurrentProcess, GetCurrentThread, WaitForSingleObject},
+            Threading::{CreateEventW, WaitForSingleObject},
             WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime},
         },
-        UI::WindowsAndMessaging::GetDesktopWindow,
     },
     core::{Interface, Owned},
 };
@@ -72,6 +69,7 @@ type Costs = [u64; CALLS.len()];
 
 /// `NV_ENC_FENCE_POINT_D3D12` (`nvEncodeAPI.h`, SDK 12.1, nv-codec-headers n12.1.14.0).
 #[repr(C)]
+#[derive(Zeroable)]
 struct FencePoint {
     version: u32,
     _reserved: u32,
@@ -88,6 +86,7 @@ const FENCE_SIGNAL: u32 = 1 << 1;
 
 /// `NV_ENC_INPUT_RESOURCE_D3D12` and `NV_ENC_OUTPUT_RESOURCE_D3D12`, which share one layout.
 #[repr(C)]
+#[derive(Zeroable)]
 struct ResourceD3D12 {
     version: u32,
     _reserved: u32,
@@ -96,9 +95,6 @@ struct ResourceD3D12 {
     _reserved1: [u32; 16],
     _reserved2: [*mut c_void; 16],
 }
-
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for ResourceD3D12 {}
 
 const _: () = assert!(size_of::<FencePoint>() == 64);
 const _: () = assert!(size_of::<ResourceD3D12>() == 272);
@@ -250,8 +246,7 @@ fn d3d12_encode_cost() {
 
 fn thread_cycles() -> u64 {
     let mut cycles = 0;
-    // SAFETY: returns a pseudo-handle that needs no closing.
-    let thread = unsafe { GetCurrentThread() };
+    let thread = HANDLE(winsafe::HTHREAD::GetCurrentThread().ptr());
     // SAFETY: the calling thread's pseudo-handle and one integer to write.
     unsafe { QueryThreadCycleTime(thread, &raw mut cycles) }.expect("query the thread's cycles");
     cycles
@@ -259,8 +254,7 @@ fn thread_cycles() -> u64 {
 
 fn process_cycles() -> u64 {
     let mut cycles = 0;
-    // SAFETY: returns a pseudo-handle that needs no closing.
-    let process = unsafe { GetCurrentProcess() };
+    let process = HANDLE(winsafe::HPROCESS::GetCurrentProcess().ptr());
     // SAFETY: this process's pseudo-handle and one integer to write.
     unsafe { QueryProcessCycleTime(process, &raw mut cycles) }.expect("query the process's cycles");
     cycles
@@ -867,8 +861,7 @@ fn open_d3d9(device: &Device) -> windows::core::Result<Backend> {
         BackBufferFormat: D3DFMT_UNKNOWN,
         BackBufferCount: 1,
         SwapEffect: D3DSWAPEFFECT_DISCARD,
-        // SAFETY: returns the desktop's handle; no preconditions.
-        hDeviceWindow: unsafe { GetDesktopWindow() },
+        hDeviceWindow: HWND(winsafe::HWND::GetDesktopWindow().ptr()),
         Windowed: true.into(),
         PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ..Default::default()

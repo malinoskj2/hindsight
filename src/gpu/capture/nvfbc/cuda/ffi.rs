@@ -4,7 +4,7 @@
 use crate::gpu::capture::nvfbc::ffi::{
     FrameGrabInfo, Interface, Release, Status, Vtable, struct_version,
 };
-use crate::gpu::ffi::Zeroed;
+use bytemuck::Zeroable;
 use std::{
     ffi::c_void,
     mem::{offset_of, size_of},
@@ -28,6 +28,7 @@ pub(super) const TOCUDA_ARGB: u32 = 0;
 
 /// `NVFBC_CUDA_SETUP_PARAMS_V1`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct SetupParams {
     pub(super) version: u32,
     /// `bEnableSeparateCursorCapture`, then `bHDRRequest`.
@@ -37,8 +38,6 @@ pub(super) struct SetupParams {
     _reserved: [u32; 61],
     _reserved_pointers: [*mut c_void; 31],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for SetupParams {}
 const _: () = assert!(size_of::<SetupParams>() == 512);
 const _: () = assert!(offset_of!(SetupParams, _cursor_capture_event) == 8);
 const _: () = assert!(offset_of!(SetupParams, format) == 16);
@@ -47,6 +46,7 @@ const _: () = assert!(offset_of!(SetupParams, _reserved_pointers) == 264);
 
 /// `NVFBC_CUDA_GRAB_FRAME_PARAMS_V1`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct GrabFrameParams {
     pub(super) version: u32,
     pub(super) flags: u32,
@@ -57,8 +57,6 @@ pub(super) struct GrabFrameParams {
     _reserved: [u32; 61],
     _reserved_pointers: [*mut c_void; 30],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for GrabFrameParams {}
 const _: () = assert!(size_of::<GrabFrameParams>() == 512);
 const _: () = assert!(offset_of!(GrabFrameParams, cuda_device_buffer) == 8);
 const _: () = assert!(offset_of!(GrabFrameParams, grab_info) == 16);

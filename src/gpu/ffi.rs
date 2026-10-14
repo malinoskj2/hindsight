@@ -127,14 +127,3 @@ macro_rules! raw_status {
     };
 }
 pub(super) use raw_status;
-
-/// All-zero is a valid value.
-/// # Safety
-/// Implementors contain only integers, GUIDs, raw pointers, optional function pointers and
-/// unions or arrays of those.
-pub(super) unsafe trait Zeroed: Sized {
-    fn zeroed() -> Self {
-        // SAFETY: guaranteed by the trait's contract.
-        unsafe { std::mem::zeroed() }
-    }
-}

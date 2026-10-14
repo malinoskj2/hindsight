@@ -1,7 +1,8 @@
 //! The parts of `nvEncodeAPI.h` (Video Codec SDK API 12.1, drivers 531 and newer) this program uses;
 //! every layout is checked at compile time against the 64-bit Windows header.
 
-use crate::gpu::ffi::{Zeroed, raw_status};
+use crate::gpu::ffi::raw_status;
+use bytemuck::Zeroable;
 use std::{
     ffi::{c_char, c_void},
     mem::{offset_of, size_of},
@@ -185,6 +186,7 @@ pub(super) type GetEncodePresetConfigEx =
 
 /// `NV_ENCODE_API_FUNCTION_LIST`, filled in by `NvEncodeAPICreateInstance`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct FunctionList {
     pub(super) version: u32,
     _reserved: u32,
@@ -219,9 +221,6 @@ pub(super) struct FunctionList {
     _rest: [Entry; 3 + 275],
 }
 
-// SAFETY: pointers and optional function pointers only.
-unsafe impl Zeroed for FunctionList {}
-
 const _: () = assert!(size_of::<FunctionList>() == 2552);
 const _: () = assert!(offset_of!(FunctionList, get_encode_guids) == 40);
 const _: () = assert!(offset_of!(FunctionList, get_encode_caps) == 64);
@@ -238,6 +237,7 @@ const _: () = assert!(offset_of!(FunctionList, get_encode_preset_config_ex) == 3
 
 /// `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct OpenEncodeSessionExParams {
     pub(super) version: u32,
     pub(super) device_type: u32,
@@ -248,22 +248,17 @@ pub(super) struct OpenEncodeSessionExParams {
     _reserved2: [*mut c_void; 64],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for OpenEncodeSessionExParams {}
-
 const _: () = assert!(size_of::<OpenEncodeSessionExParams>() == 1552);
 const _: () = assert!(offset_of!(OpenEncodeSessionExParams, api_version) == 24);
 
 /// `NV_ENC_CAPS_PARAM`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct CapsParam {
     pub(super) version: u32,
     pub(super) caps_to_query: u32,
     _reserved: [u32; 62],
 }
-
-// SAFETY: integers only.
-unsafe impl Zeroed for CapsParam {}
 
 const _: () = assert!(size_of::<CapsParam>() == 256);
 
@@ -446,8 +441,9 @@ pub(super) struct PresetConfig {
     _reserved2: [*mut c_void; 64],
 }
 
-// SAFETY: integers, GUIDs, pointers and unions of those only.
-unsafe impl Zeroed for PresetConfig {}
+// SAFETY: integers, GUIDs (four integers each), pointers and a union of those only; written
+// by hand because `GUID` is not `Zeroable`.
+unsafe impl Zeroable for PresetConfig {}
 
 const _: () = assert!(size_of::<PresetConfig>() == 5128);
 const _: () = assert!(offset_of!(PresetConfig, config) == 8);
@@ -482,8 +478,9 @@ pub(super) struct InitializeParams {
     _reserved2: [*mut c_void; 64],
 }
 
-// SAFETY: integers, GUIDs and pointers only.
-unsafe impl Zeroed for InitializeParams {}
+// SAFETY: integers, GUIDs (four integers each) and pointers only; written by hand because
+// `GUID` is not `Zeroable`.
+unsafe impl Zeroable for InitializeParams {}
 
 const _: () = assert!(size_of::<InitializeParams>() == 1808);
 const _: () = assert!(offset_of!(InitializeParams, encode_width) == 36);
@@ -495,6 +492,7 @@ const _: () = assert!(offset_of!(InitializeParams, buffer_format) == 140);
 
 /// `NV_ENC_REGISTER_RESOURCE`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct RegisterResource {
     pub(super) version: u32,
     pub(super) resource_type: u32,
@@ -511,15 +509,13 @@ pub(super) struct RegisterResource {
     _rest: [u64; 185],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for RegisterResource {}
-
 const _: () = assert!(size_of::<RegisterResource>() == 1536);
 const _: () = assert!(offset_of!(RegisterResource, resource_to_register) == 24);
 const _: () = assert!(offset_of!(RegisterResource, buffer_format) == 40);
 
 /// `NV_ENC_CREATE_BITSTREAM_BUFFER`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct CreateBitstreamBuffer {
     pub(super) version: u32,
     _size_heap_reserved: [u32; 3],
@@ -527,14 +523,12 @@ pub(super) struct CreateBitstreamBuffer {
     _rest: [u64; 94],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for CreateBitstreamBuffer {}
-
 const _: () = assert!(size_of::<CreateBitstreamBuffer>() == 776);
 const _: () = assert!(offset_of!(CreateBitstreamBuffer, bitstream_buffer) == 16);
 
 /// `NV_ENC_EVENT_PARAMS`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct EventParams {
     pub(super) version: u32,
     _reserved: u32,
@@ -542,13 +536,11 @@ pub(super) struct EventParams {
     _rest: [u64; 191],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for EventParams {}
-
 const _: () = assert!(size_of::<EventParams>() == 1544);
 
 /// `NV_ENC_MAP_INPUT_RESOURCE`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct MapInputResource {
     pub(super) version: u32,
     _sub_resource_index: u32,
@@ -559,15 +551,13 @@ pub(super) struct MapInputResource {
     _rest: [u32; 377],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for MapInputResource {}
-
 const _: () = assert!(size_of::<MapInputResource>() == 1544);
 const _: () = assert!(offset_of!(MapInputResource, mapped_resource) == 24);
 const _: () = assert!(offset_of!(MapInputResource, mapped_buffer_format) == 32);
 
 /// `NV_ENC_PIC_PARAMS`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct PicParams {
     pub(super) version: u32,
     pub(super) input_width: u32,
@@ -586,9 +576,6 @@ pub(super) struct PicParams {
     _rest: [u32; 821],
 }
 
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for PicParams {}
-
 const _: () = assert!(size_of::<PicParams>() == 3360);
 const _: () = assert!(offset_of!(PicParams, input_time_stamp) == 24);
 const _: () = assert!(offset_of!(PicParams, input_buffer) == 40);
@@ -597,6 +584,7 @@ const _: () = assert!(offset_of!(PicParams, buffer_format) == 64);
 
 /// `NV_ENC_LOCK_BITSTREAM`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct LockBitstream {
     pub(super) version: u32,
     pub(super) flags: u32,
@@ -610,9 +598,6 @@ pub(super) struct LockBitstream {
     pub(super) picture_type: u32,
     _rest: [u32; 371],
 }
-
-// SAFETY: integers and pointers only.
-unsafe impl Zeroed for LockBitstream {}
 
 const _: () = assert!(size_of::<LockBitstream>() == 1552);
 const _: () = assert!(offset_of!(LockBitstream, bitstream_size_in_bytes) == 36);

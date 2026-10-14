@@ -6,8 +6,8 @@ use windows::{
         Foundation::{HANDLE, NTSTATUS},
         System::Threading::{
             AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
-            AvSetMmThreadPriority, GetCurrentProcess, GetCurrentThread,
-            PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            AvSetMmThreadPriority, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
             PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
             ProcessPowerThrottling, SetProcessInformation, SetThreadPriority,
             THREAD_PRIORITY_HIGHEST,
@@ -45,10 +45,14 @@ pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread>
 
 #[expect(unsafe_code, reason = "calls SetThreadPriority")]
 pub(super) fn raise_thread() -> windows::core::Result<()> {
-    // SAFETY: returns a pseudo-handle that needs no closing.
-    let thread = unsafe { GetCurrentThread() };
+    let thread = HANDLE(winsafe::HTHREAD::GetCurrentThread().ptr());
     // SAFETY: changes the priority of the calling thread only.
     unsafe { SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST) }
+}
+
+/// The current process's pseudo-handle, which needs no closing.
+fn current_process() -> HANDLE {
+    HANDLE(winsafe::HPROCESS::GetCurrentProcess().ptr())
 }
 
 #[expect(unsafe_code, reason = "calls SetProcessInformation")]
@@ -60,12 +64,10 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
         StateMask: 0,
     };
     let size = cb_size::<PROCESS_POWER_THROTTLING_STATE>();
-    // SAFETY: returns a pseudo-handle that needs no closing.
-    let process = unsafe { GetCurrentProcess() };
     // SAFETY: `state` is a `PROCESS_POWER_THROTTLING_STATE` of `size` bytes, live for the call.
     unsafe {
         SetProcessInformation(
-            process,
+            current_process(),
             ProcessPowerThrottling,
             (&raw const state).cast(),
             size,
@@ -82,9 +84,7 @@ pub(super) fn raise_gpu_class() -> windows::core::Result<()> {
         gdi.export::<SetSchedulingPriorityClass>(s!("D3DKMTSetProcessSchedulingPriorityClass"))
     }
     .ok_or_else(windows::core::Error::from_thread)?;
-    // SAFETY: returns a pseudo-handle that needs no closing.
-    let process = unsafe { GetCurrentProcess() };
     // SAFETY: `gdi` stays loaded across the call, which changes the scheduling class of the
     // current process only.
-    unsafe { set_class(process, SCHEDULING_HIGH) }.ok()
+    unsafe { set_class(current_process(), SCHEDULING_HIGH) }.ok()
 }

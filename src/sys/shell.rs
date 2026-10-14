@@ -1,31 +1,27 @@
 //! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
 
-use super::com::Apartment;
+use super::com::{Apartment, hresult_error};
 use std::{
-    ffi::{OsString, c_void},
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    ffi::OsString,
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::{ERROR_CANCELLED, HWND, SIZE},
-        Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
-        },
-        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
+        Foundation::{HWND, SIZE},
+        Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS},
         UI::{
             Shell::{
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-                FOF_WANTNUKEWARNING, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS,
-                FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemImageFactory,
-                SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW, SIGDN_FILESYSPATH,
-                SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY, ShellExecuteW,
+                FOF_WANTNUKEWARNING, IShellItemImageFactory, SHCreateItemFromParsingName,
+                SHFILEOPSTRUCTW, SHFileOperationW, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
+                ShellExecuteW,
             },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
     },
-    core::{HRESULT, HSTRING, PCWSTR},
+    core::{HSTRING, PCWSTR},
 };
 use winsafe::{
     self as w, co,
@@ -49,9 +45,6 @@ const RECYCLE_FLAGS: u16 = (FOF_ALLOWUNDO.0
 const MARK_SHARE: i32 = 3;
 
 pub(crate) struct Thumbnail(DeleteObjectGuard<w::HBITMAP>);
-
-// SAFETY: a GDI bitmap belongs to the process, not to the thread that made it.
-unsafe impl Send for Thumbnail {}
 
 impl Thumbnail {
     pub(crate) fn bitmap(&self) -> &w::HBITMAP {
@@ -110,38 +103,35 @@ pub(crate) fn pick_folder(
     start: Option<&Path>,
 ) -> Result<Option<PathBuf>, PickFolderError> {
     let _com = Apartment::single_threaded().map_err(PickFolderError::Com)?;
-    // SAFETY: an in-process class creation; the interface it returns is ours to release.
-    let dialog: IFileOpenDialog =
-        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
-            .map_err(PickFolderError::Dialog)?;
-    // SAFETY: a plain call on the live dialog.
-    unsafe { dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR) }
-        .map_err(PickFolderError::Dialog)?;
+    let dialog_error = |code| PickFolderError::Dialog(hresult_error(code));
+    let dialog = w::CoCreateInstance::<w::IFileOpenDialog>(
+        &co::CLSID::FileOpenDialog,
+        None::<&w::IUnknown>,
+        co::CLSCTX::INPROC_SERVER,
+    )
+    .map_err(dialog_error)?;
+    dialog
+        .SetOptions(co::FOS::PICKFOLDERS | co::FOS::FORCEFILESYSTEM | co::FOS::NOCHANGEDIR)
+        .map_err(dialog_error)?;
     if let Some(start) = start.filter(|start| start.is_dir()) {
-        let name = HSTRING::from(start.as_os_str());
-        // SAFETY: the wide string outlives the call.
-        let item: Result<IShellItem, _> = unsafe { SHCreateItemFromParsingName(&name, None) };
+        let item = w::SHCreateItemFromParsingName::<w::IShellItem>(
+            &start.to_string_lossy(),
+            None::<&w::IBindCtx>,
+        );
         if let Ok(item) = item {
-            // SAFETY: both interfaces are live; a start folder the shell declines is no error.
-            let _ = unsafe { dialog.SetFolder(&item) };
+            // A start folder the shell declines is no error.
+            let _ = dialog.SetFolder(&item);
         }
     }
-    // SAFETY: the owner is the live window the dialog is modal to.
-    match unsafe { dialog.Show(Some(HWND(owner.ptr()))) } {
-        Ok(()) => {}
-        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Ok(None),
-        Err(error) => return Err(PickFolderError::Dialog(error)),
+    // `false` when the dialog was cancelled.
+    if !dialog.Show(owner).map_err(dialog_error)? {
+        return Ok(None);
     }
-    // SAFETY: `Show` returned success, so the dialog holds a chosen item.
-    let item = unsafe { dialog.GetResult() }.map_err(PickFolderError::Dialog)?;
-    // SAFETY: a plain call on the live item; the string it returns is freed below.
-    let name =
-        unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(PickFolderError::NoPath)?;
-    // SAFETY: the shell handed back a null-terminated string in task memory.
-    let path = PathBuf::from(OsString::from_wide(unsafe { name.as_wide() }));
-    // SAFETY: the string came from the shell in task memory and is read no further.
-    unsafe { CoTaskMemFree(Some(name.0.cast::<c_void>().cast_const())) };
-    Ok(Some(path))
+    let item = dialog.GetResult().map_err(dialog_error)?;
+    let name = item
+        .GetDisplayName(co::SIGDN::FILESYSPATH)
+        .map_err(|code| PickFolderError::NoPath(hresult_error(code)))?;
+    Ok(Some(PathBuf::from(name)))
 }
 
 /// COM must be started on the calling thread; the shell may take a second per frame.
@@ -309,16 +299,15 @@ impl Frame {
             )
         }
         .ok()?;
-        if pixels.is_null() {
-            // SAFETY: the handle was just created and nothing else refers to it.
-            let _ = unsafe { DeleteObject(bitmap.into()) };
-            return None;
-        }
         // SAFETY: the pointer is the live bitmap handle just created, only retyped.
         let handle = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
+        // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
+        let bitmap = unsafe { DeleteObjectGuard::new(handle) };
+        if pixels.is_null() {
+            return None;
+        }
         Some(Self {
-            // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
-            bitmap: unsafe { DeleteObjectGuard::new(handle) },
+            bitmap,
             pixels: pixels.cast::<u8>(),
             width,
             height,

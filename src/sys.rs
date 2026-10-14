@@ -3,13 +3,11 @@
 #[cfg(windows)]
 pub(crate) mod callback;
 #[cfg(windows)]
-#[expect(unsafe_code, reason = "calls QueryPerformanceCounter")]
 pub(crate) mod clock;
 #[cfg(windows)]
-#[expect(unsafe_code, reason = "calls CoInitializeEx and SHGetKnownFolderPath")]
 pub(crate) mod com;
 #[cfg(windows)]
-#[expect(unsafe_code, reason = "calls SetWinEventHook and reads other windows")]
+#[expect(unsafe_code, reason = "calls SetWinEventHook and UnhookWinEvent")]
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
 #[cfg(windows)]
@@ -30,7 +28,6 @@ pub(crate) mod thread;
 #[cfg(windows)]
 pub(crate) mod tray;
 #[cfg(windows)]
-#[expect(unsafe_code, reason = "calls GetDiskFreeSpaceExW")]
 pub(crate) mod volume;
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls DWM and sends raw window messages")]

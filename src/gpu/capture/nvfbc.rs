@@ -30,12 +30,12 @@ use windows::{
             },
             Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
         },
-        UI::WindowsAndMessaging::GetDesktopWindow,
     },
     core::{BOOL, Interface, s, w},
 };
 
-use crate::gpu::ffi::{Library, Symbol, Zeroed};
+use crate::gpu::ffi::{Library, Symbol};
+use bytemuck::Zeroable;
 pub(super) use cuda::Capture as CudaCapture;
 pub(in crate::gpu) use ffi::Status;
 
@@ -559,8 +559,7 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
         BackBufferFormat: D3DFMT_UNKNOWN,
         BackBufferCount: 1,
         SwapEffect: D3DSWAPEFFECT_DISCARD,
-        // SAFETY: returns the desktop's handle; no preconditions.
-        hDeviceWindow: unsafe { GetDesktopWindow() },
+        hDeviceWindow: HWND(winsafe::HWND::GetDesktopWindow().ptr()),
         Windowed: BOOL::from(true),
         PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ..Default::default()

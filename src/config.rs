@@ -393,7 +393,7 @@ pub(crate) fn default_clip_directory() -> PathBuf {
 /// The Videos library from the shell, which follows it when it is moved or redirected.
 #[cfg(windows)]
 fn videos_directory() -> Option<PathBuf> {
-    crate::sys::com::known_folder(&windows::Win32::UI::Shell::FOLDERID_Videos)
+    crate::sys::com::known_folder(&winsafe::co::KNOWNFOLDERID::Videos)
 }
 
 #[cfg(not(windows))]

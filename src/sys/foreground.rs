@@ -8,8 +8,8 @@ use windows::Win32::{
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
-            CHILDID_SELF, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND,
-            GetForegroundWindow, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+            CHILDID_SELF, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW,
+            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
         },
     },
 };
@@ -154,7 +154,7 @@ fn process_name(process: u32) -> String {
         .unwrap_or_else(|| "a full-screen app".to_owned())
 }
 
-unsafe extern "system" fn on_event(
+extern "system" fn on_event(
     _hook: HWINEVENTHOOK,
     event: u32,
     window: HWND,
@@ -172,7 +172,7 @@ unsafe extern "system" fn on_event(
 }
 
 fn is_foreground_window(window: HWND, object: i32, child: i32) -> bool {
-    // SAFETY: no arguments, no preconditions.
-    let foreground = unsafe { GetForegroundWindow() };
+    let foreground =
+        w::HWND::GetForegroundWindow().map_or(HWND::default(), |found| HWND(found.ptr()));
     object == OBJID_WINDOW.0 && child == CHILDID_SELF.cast_signed() && window == foreground
 }

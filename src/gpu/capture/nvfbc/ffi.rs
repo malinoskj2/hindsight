@@ -1,7 +1,8 @@
 //! The parts of NVIDIA Capture SDK 7 (`NvFBC.h`, `NvFBCToDx9Vid.h`, `NVFBC_DLL_VERSION` 0x70)
 //! this program uses, laid out for 64-bit Windows.
 
-use crate::gpu::ffi::{Zeroed, raw_status};
+use crate::gpu::ffi::raw_status;
+use bytemuck::Zeroable;
 use std::{
     ffi::c_void,
     mem::{offset_of, size_of},
@@ -94,6 +95,7 @@ pub(super) type Enable = unsafe extern "system" fn(u32) -> Status;
 
 /// `NvFBCStatusEx`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct StatusEx {
     pub(super) version: u32,
     pub(super) flags: u32,
@@ -104,8 +106,6 @@ pub(super) struct StatusEx {
     _reserved: [u32; 59],
     _reserved_pointers: [*mut c_void; 31],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for StatusEx {}
 const _: () = assert!(size_of::<StatusEx>() == 512);
 const _: () = assert!(offset_of!(StatusEx, adapter_index) == 12);
 const _: () = assert!(offset_of!(StatusEx, private_data) == 16);
@@ -113,6 +113,7 @@ const _: () = assert!(offset_of!(StatusEx, private_data_size) == 24);
 
 /// `NvFBCCreateParams`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct CreateParams {
     pub(super) version: u32,
     pub(super) interface_type: u32,
@@ -132,8 +133,6 @@ pub(super) struct CreateParams {
     _reserved: [u32; 55],
     _reserved_pointers: [*mut c_void; 27],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for CreateParams {}
 const _: () = assert!(size_of::<CreateParams>() == 512);
 const _: () = assert!(offset_of!(CreateParams, device) == 16);
 const _: () = assert!(offset_of!(CreateParams, private_data) == 24);
@@ -147,16 +146,16 @@ const _: () = assert!(offset_of!(CreateParams, _reserved) == 76);
 
 /// `NVFBC_TODX9VID_OUT_BUF`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct OutputBuffer {
     pub(super) primary: *mut c_void,
     _secondary: *mut c_void,
 }
-// SAFETY: raw pointers only.
-unsafe impl Zeroed for OutputBuffer {}
 const _: () = assert!(size_of::<OutputBuffer>() == 16);
 
 /// `NVFBC_TODX9VID_SETUP_PARAMS_V3`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct SetupParams {
     pub(super) version: u32,
     pub(super) flags: u32,
@@ -175,8 +174,6 @@ pub(super) struct SetupParams {
     _reserved: [u32; 22],
     _reserved_pointers: [*mut c_void; 12],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for SetupParams {}
 const _: () = assert!(size_of::<SetupParams>() == 256);
 const _: () = assert!(offset_of!(SetupParams, mode) == 8);
 const _: () = assert!(offset_of!(SetupParams, buffer_count) == 12);
@@ -186,6 +183,7 @@ const _: () = assert!(offset_of!(SetupParams, _reserved) == 72);
 
 /// `NVFBC_TODX9VID_GRAB_FRAME_PARAMS_V1`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct GrabFrameParams {
     pub(super) version: u32,
     pub(super) flags: u32,
@@ -200,8 +198,6 @@ pub(super) struct GrabFrameParams {
     _reserved: [u32; 23],
     _reserved_pointers: [*mut c_void; 15],
 }
-// SAFETY: integers and raw pointers only.
-unsafe impl Zeroed for GrabFrameParams {}
 const _: () = assert!(size_of::<GrabFrameParams>() == 256);
 const _: () = assert!(offset_of!(GrabFrameParams, _grab_mode) == 24);
 const _: () = assert!(offset_of!(GrabFrameParams, buffer_index) == 28);
@@ -210,6 +206,7 @@ const _: () = assert!(offset_of!(GrabFrameParams, _reserved) == 44);
 
 /// `NvFBCFrameGrabInfo`.
 #[repr(C)]
+#[derive(Zeroable)]
 pub(super) struct FrameGrabInfo {
     pub(super) width: u32,
     pub(super) height: u32,
@@ -221,8 +218,6 @@ pub(super) struct FrameGrabInfo {
     _first_buffer_to_wait_mode_used: [u32; 10],
     _reserved2: [u32; 11],
 }
-// SAFETY: integers only.
-unsafe impl Zeroed for FrameGrabInfo {}
 const _: () = assert!(size_of::<FrameGrabInfo>() == 108);
 const _: () = assert!(offset_of!(FrameGrabInfo, must_recreate) == 20);
 const _: () = assert!(offset_of!(FrameGrabInfo, _reserved2) == 64);

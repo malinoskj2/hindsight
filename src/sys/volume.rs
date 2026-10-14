@@ -1,20 +1,17 @@
 //! The free space of a drive.
 
 use std::{io, path::Path};
-use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::HSTRING};
 
 /// Free bytes for this user (quotas apply) on the drive holding `directory`, which must exist.
 pub(crate) fn free_bytes(directory: &Path) -> io::Result<u64> {
     let mut free = 0;
-    // SAFETY: the wide string outlives the call and the out-parameter is a live u64.
-    unsafe {
-        GetDiskFreeSpaceExW(
-            &HSTRING::from(directory.as_os_str()),
-            Some(&raw mut free),
-            None,
-            None,
-        )
-    }?;
+    winsafe::GetDiskFreeSpaceEx(
+        Some(&directory.to_string_lossy()),
+        Some(&mut free),
+        None,
+        None,
+    )
+    .map_err(|error| io::Error::from_raw_os_error(error.raw().cast_signed()))?;
     Ok(free)
 }
 

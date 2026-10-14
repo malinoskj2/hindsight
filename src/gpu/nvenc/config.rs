@@ -2,7 +2,8 @@
 //! session is initialized with.
 
 use super::{Settings, ffi};
-use crate::{config::Codec, gpu::ffi::Zeroed};
+use crate::config::Codec;
+use bytemuck::Zeroable;
 use windows::core::GUID;
 
 /// Two keyframes a second: a clip starts within half a second of where it is asked to, and

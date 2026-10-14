@@ -222,7 +222,7 @@ fn alpha_blend(
 #[expect(unsafe_code, reason = "calls CreateDIBSection")]
 fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGuard<w::HBITMAP>> {
     use windows::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS,
     };
 
     let wanted = usize::try_from(width).ok()? * usize::try_from(height).ok()? * PIXEL;
@@ -255,17 +255,16 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         )
     }
     .ok()?;
+    // SAFETY: `bitmap` is the live handle `CreateDIBSection` just returned.
+    let bitmap = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
+    // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
+    let bitmap = unsafe { DeleteObjectGuard::new(bitmap) };
     if bits.is_null() {
-        // SAFETY: the handle was just created and nothing else refers to it.
-        let _ = unsafe { DeleteObject(bitmap.into()) };
         return None;
     }
     // SAFETY: the DIB holds exactly `pixels.len()` bytes and does not overlap `pixels`.
     unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len()) };
-    // SAFETY: `bitmap` is the live handle `CreateDIBSection` just returned.
-    let bitmap = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
-    // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
-    Some(unsafe { DeleteObjectGuard::new(bitmap) })
+    Some(bitmap)
 }
 
 #[cfg(test)]

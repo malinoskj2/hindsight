@@ -7,11 +7,11 @@ use crate::{
         cuda::{DeviceBuffer, DevicePointer},
         cuda_output::{CudaRing, StagingId, StagingLayout},
         device::{Locked, null_output},
-        ffi::Zeroed,
         pacer::FrameIndex,
     },
     replay::{Matrix, Picture, Slot as StoreSlot},
 };
+use bytemuck::Zeroable;
 use std::{collections::VecDeque, ffi::c_void, ptr};
 use thiserror::Error;
 use windows::{

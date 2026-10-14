@@ -352,10 +352,7 @@ impl ClipsPage {
     }
 
     /// The thumbnail's offset from an item's position, found by placing item 0 at the origin.
-    #[expect(
-        unsafe_code,
-        reason = "sends LVM_SETITEMPOSITION32 and LVM_GETITEMRECT"
-    )]
+    #[expect(unsafe_code, reason = "sends LVM_SETITEMPOSITION32")]
     fn icon_offset(&self) -> w::POINT {
         let hwnd = self.0.list.hwnd();
         let origin = w::POINT::with(0, 0);
@@ -366,18 +363,9 @@ impl ClipsPage {
                 position: origin,
             });
         }
-        let mut icon = w::RECT::default();
-        // SAFETY: LVM_GETITEMRECT writes the rectangle during the call.
-        let found = unsafe {
-            hwnd.SendMessage(w::msg::LvmGetItemRect {
-                index: 0,
-                rect: &mut icon,
-                portion: co::LVIR::ICON,
-            })
-        };
-        if found.is_err() {
+        let Ok(icon) = self.0.list.items().get(0).rect(co::LVIR::ICON) else {
             return origin;
-        }
+        };
         // The rectangle is the padded icon area; the thumbnail is centred in it.
         let (width, height) = thumbnail_size();
         w::POINT::with(

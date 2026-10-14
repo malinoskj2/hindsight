@@ -33,11 +33,11 @@ use std::{
 };
 use thiserror::Error;
 use windows::Win32::{
-    Foundation::{HWND, POINT},
+    Foundation::HWND,
     Graphics::{
         Direct3D9::{IDirect3DDevice9Ex, IDirect3DSurface9},
         Direct3D11::ID3D11Texture2D,
-        Gdi::{HMONITOR, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
+        Gdi::HMONITOR,
     },
     UI::WindowsAndMessaging::IsWindow,
 };
@@ -352,12 +352,17 @@ fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     }
 }
 
-#[expect(unsafe_code, reason = "calls MonitorFromPoint")]
 fn monitor(handle: Option<MonitorHandle>) -> HMONITOR {
     match handle {
         Some(handle) => HMONITOR(handle.get() as *mut c_void),
-        // SAFETY: (0, 0) always lies on the primary monitor.
-        None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
+        // (0, 0) always lies on the primary monitor.
+        None => HMONITOR(
+            winsafe::HMONITOR::MonitorFromPoint(
+                winsafe::POINT::default(),
+                winsafe::co::MONITOR::DEFAULTTOPRIMARY,
+            )
+            .ptr(),
+        ),
     }
 }
 

@@ -9,3 +9,6 @@ FvSDK*.csv
 # Private notes and the docs that were taken out of the repository.
 /.private/
 /todo.md
+
+# Scratch files that stay local.
+/tmp/

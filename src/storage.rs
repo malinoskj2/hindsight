@@ -105,7 +105,7 @@ pub(crate) fn state_directory() -> PathBuf {
 /// `%LOCALAPPDATA%`, from the shell rather than the environment, which can be stale.
 #[cfg(windows)]
 fn local_app_data() -> Option<PathBuf> {
-    crate::sys::com::known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)
+    crate::sys::com::known_folder(&winsafe::co::KNOWNFOLDERID::LocalAppData)
 }
 
 #[cfg(windows)]

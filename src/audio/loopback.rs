@@ -30,11 +30,12 @@ use windows::{
                 CLSCTX_ALL, CoCreateInstance, STGM_READ,
                 StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             },
-            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
+            Threading::WaitForMultipleObjects,
         },
     },
-    core::{GUID, Owned, PCWSTR, implement},
+    core::{GUID, HRESULT, PCWSTR, implement},
 };
+use winsafe::{HEVENT, guard::CloseHandleGuard};
 
 /// Format tags the audio headers put in modules this one does not otherwise need.
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -44,15 +45,11 @@ const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
 const BUFFER_DURATION: i64 = 2_000_000;
 const FLOAT_BITS: u16 = 32;
 
-pub(super) struct Signal(Owned<HANDLE>);
+/// `Send` through winsafe: a kernel event handle is not tied to the thread that opened it.
+pub(super) struct Signal(CloseHandleGuard<HEVENT>);
 
-#[expect(
-    clippy::non_send_fields_in_send_ty,
-    reason = "a kernel event handle is not tied to the thread that opened it"
-)]
-// SAFETY: event handles may be set and waited on from any thread; closed only by the last owner.
-unsafe impl Send for Signal {}
-// SAFETY: as above.
+// SAFETY: event handles may be set and waited on from any thread at once; closed only by the
+// last owner.
 unsafe impl Sync for Signal {}
 
 impl Signal {
@@ -66,17 +63,19 @@ impl Signal {
         Self::new(false)
     }
 
+    /// Unnamed, with default security, initially clear.
     fn new(manual_reset: bool) -> windows::core::Result<Self> {
-        // SAFETY: no name and no security attributes are passed, so nothing is read through a
-        // pointer; the call only creates an event, initially clear.
-        let event = unsafe { CreateEventW(None, manual_reset, false, PCWSTR::null()) }?;
-        // SAFETY: the event was just created, and only this `Owned` closes it.
-        Ok(Self(unsafe { Owned::new(event) }))
+        HEVENT::CreateEvent(None, manual_reset, false, None)
+            .map(Self)
+            .map_err(|error| HRESULT::from_win32(error.raw()).into())
     }
 
     pub(super) fn set(&self) {
-        // SAFETY: the event is open: `self` owns it and closes it only on drop.
-        let _ = unsafe { SetEvent(*self.0) };
+        let _ = self.0.SetEvent();
+    }
+
+    fn handle(&self) -> HANDLE {
+        HANDLE(self.0.ptr())
     }
 }
 
@@ -98,7 +97,7 @@ pub(super) fn wait(
     changed: Option<HANDLE>,
     timeout: Duration,
 ) -> windows::core::Result<Wake> {
-    let handles = [*stop.0, changed.unwrap_or_default()];
+    let handles = [stop.handle(), changed.unwrap_or_default()];
     let handles = &handles[..=usize::from(changed.is_some())];
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     // SAFETY: both handles are open events for the length of the call: `stop` is borrowed and
@@ -190,7 +189,7 @@ pub(super) struct Watch {
 impl Watch {
     /// Set when the default output changes; `wait` reports it as `Wake::Changed`.
     pub(super) fn event(&self) -> HANDLE {
-        *self.changed.0
+        self.changed.handle()
     }
 }
 

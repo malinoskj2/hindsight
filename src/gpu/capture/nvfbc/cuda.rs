@@ -15,11 +15,11 @@ use crate::{
         },
         cuda::{Context, ContextHold, CudaError, Device as CudaDevice, DeviceBuffer, Driver},
         device::Device,
-        ffi::Zeroed,
     },
     log,
     service::Target,
 };
+use bytemuck::Zeroable;
 use nvfbc_ffi::Status;
 use std::{marker::PhantomData, sync::Arc};
 use windows::Win32::{Foundation::HWND, Graphics::Gdi::HMONITOR};
