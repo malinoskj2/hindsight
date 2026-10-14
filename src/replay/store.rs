@@ -167,7 +167,7 @@ impl<P: Page + 'static> Pages<P> {
     )]
     pub(crate) fn summary(&self) -> String {
         format!(
-            "{} MiB reserved in {} MiB pages",
+            "{} MiB in {} MiB pages",
             self.reserved * self.page_bytes / MEBIBYTE,
             self.page_bytes / MEBIBYTE
         )

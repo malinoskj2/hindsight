@@ -165,9 +165,7 @@ impl Capture {
         driver.pop_context().map_err(&step)?;
         driver.push_context(made).map_err(&step)?;
         hold.adopt(made).map_err(&step)?;
-        log::info(
-            "NvFBC opened a CUDA context of its own for the capture; the encoder runs on it too",
-        );
+        log::info("NvFBC · own CUDA context · encoder runs on it");
         Ok(())
     }
 
@@ -183,7 +181,7 @@ impl Capture {
             self.buffers.push(Arc::new(buffer));
         }
         log::info(format!(
-            "NvFBC grabs into {SLOT_COUNT} CUDA buffers of {} MiB",
+            "NvFBC · {SLOT_COUNT} CUDA buffers of {} MiB",
             bytes.div_ceil(MEBIBYTE)
         ));
         Ok(())
@@ -238,7 +236,7 @@ impl Capture {
         match self.pitch {
             None => {
                 log::info(format!(
-                    "NvFBC grabs {}×{} ARGB with a pitch of {pitch} bytes",
+                    "NvFBC · {}×{} ARGB · pitch {pitch} bytes",
                     info.width, info.height
                 ));
                 self.pitch = Some(pitch);
@@ -394,7 +392,7 @@ fn open_primary_context(device: &Device) -> Result<ContextHold, CaptureError> {
         .version()
         .map_err(cuda_failed("read the CUDA driver version"))?;
     log::info(format!(
-        "NvFBC grabs into CUDA memory on CUDA device {cuda_device}, driver API {}.{}",
+        "NvFBC · CUDA device {cuda_device} · driver API {}.{}",
         version / 1000,
         version % 1000 / 10
     ));
@@ -417,7 +415,7 @@ fn pick_device(cuda: &Driver, device: &Device) -> Result<CudaDevice, CaptureErro
         return Ok(matched);
     }
     log::warning(format!(
-        "No CUDA device reports the LUID of {}; using CUDA device 0 for NvFBC",
+        "NvFBC · no CUDA device matches {} · using device 0",
         device.adapter
     ));
     cuda.first_device()

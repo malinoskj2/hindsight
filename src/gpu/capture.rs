@@ -240,7 +240,7 @@ pub(super) fn start(
 ) -> Result<Capture, CaptureError> {
     let display = display::describe(monitor_of(target).0);
     if let Some(display) = &display {
-        log::info(format!("Display {display}"));
+        log::info(format!("Display · {display}"));
     }
     let hdr = display.as_ref().is_some_and(display::Display::is_hdr);
     let tone_map = match (colour(backend, hdr), &display) {
@@ -284,7 +284,7 @@ fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::T
     match tonemap::ToneMapper::new(device, curve) {
         Ok(mapper) => {
             log::info(format!(
-                "The display is in HDR: capturing scRGB and tone-mapping it to SDR, white at {:.0} nits, highlights rolled off up to {:.0} nits",
+                "HDR · tone-mapped to SDR · white {:.0} nits · roll-off to {:.0} nits",
                 curve.white_nits(),
                 curve.peak_nits()
             ));
@@ -292,7 +292,7 @@ fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::T
         }
         Err(error) => {
             log::warning(format!(
-                "The display is in HDR but the tone-map pass could not be prepared ({error}); highlights are clipped"
+                "HDR · tone-map unavailable ({error}) · highlights clipped"
             ));
             None
         }
@@ -302,9 +302,7 @@ fn tone_mapper(device: &Device, display: &display::Display) -> Option<tonemap::T
 fn warn_hdr_clipped() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
-        log::warning(
-            "The display is in HDR, which NvFBC captures as 8-bit SDR: highlights are clipped and colours may look washed out. Windows Graphics Capture records HDR displays properly",
-        );
+        log::warning("HDR · NvFBC clips it to 8-bit SDR · Windows Graphics Capture tone-maps");
     }
 }
 

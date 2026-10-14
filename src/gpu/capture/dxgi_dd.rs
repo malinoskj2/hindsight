@@ -111,7 +111,7 @@ impl Capture {
         }
         // HDR toggled: restart the session.
         if description.ModeDesc.Format != self.format {
-            log::info("The captured display's colour format changed");
+            log::info("Display · colour format changed");
             return Ok(Frame::Resized);
         }
         self.duplication = Some(duplication);
@@ -222,7 +222,7 @@ fn duplicate(
             Ok(duplication) => return Ok(described(duplication)),
             Err(error) if PASSING_REFUSALS.contains(&error.code()) => return Err(error),
             Err(error) => log::warning(format!(
-                "Desktop Duplication could not deliver the HDR desktop as scRGB ({error}); highlights are clipped"
+                "HDR · no scRGB from Desktop Duplication ({error}) · highlights clipped"
             )),
         }
     }

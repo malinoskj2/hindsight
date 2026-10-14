@@ -548,7 +548,7 @@ fn turn_on(enable: ffi::Enable) -> Result<(), CaptureError> {
             "NvFBC is turned off in the NVIDIA driver and could not be turned on: {result}"
         )));
     }
-    log::info("NvFBC was off in the NVIDIA driver and has been turned on");
+    log::info("NvFBC · turned on in the NVIDIA driver");
     Ok(())
 }
 

@@ -47,7 +47,7 @@ impl Drop for Capture {
             && let Err(payload) = join.join()
         {
             log::error(format!(
-                "The audio thread panicked: {}",
+                "Sound · audio thread panicked · {}",
                 panic_message(&*payload)
             ));
         }
@@ -67,7 +67,7 @@ pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
     let stop = match Signal::latch() {
         Ok(signal) => Arc::new(signal),
         Err(error) => {
-            log::warning(format!("Sound is not recorded: {error}"));
+            log::warning(format!("Sound · not recorded ({error})"));
             return None;
         }
     };
@@ -82,7 +82,7 @@ pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
         }),
         Err(error) => {
             log::warning(format!(
-                "Sound is not recorded: the audio thread could not start ({error})"
+                "Sound · not recorded · audio thread did not start ({error})"
             ));
             None
         }
@@ -112,7 +112,7 @@ fn record(live: &Live, stop: &Signal) {
             Ok(Wake::Stop) => break,
             Ok(wake) => wake,
             Err(error) => {
-                log::error(format!("The audio thread could not wait ({error})"));
+                log::error(format!("Sound · audio thread could not wait ({error})"));
                 break;
             }
         };
@@ -123,7 +123,7 @@ fn record(live: &Live, stop: &Signal) {
         track.catch_up(Ticks(clock::now()).saturating_sub(SILENCE_LAG));
         track.flush();
     }
-    log::info("Sound recording stopped");
+    log::info("Sound · stopped");
 }
 
 /// Fields drop in this order: the open device, its watch and the device list release their COM
@@ -137,8 +137,8 @@ struct Pipeline<'a> {
 
 impl<'a> Pipeline<'a> {
     fn open(live: &'a Live) -> Option<Self> {
-        let com = started(Apartment::multi_threaded(), "COM is unavailable")?;
-        let devices = started(Devices::new(), "the audio devices could not be listed")?;
+        let com = started(Apartment::multi_threaded(), "COM unavailable")?;
+        let devices = started(Devices::new(), "devices not listed")?;
         Some(Self {
             track: Track::open(live),
             device: Device::new(watch_default(&devices)),
@@ -150,7 +150,7 @@ impl<'a> Pipeline<'a> {
 
 fn started<T>(result: windows::core::Result<T>, what: &str) -> Option<T> {
     result
-        .inspect_err(|error| log::warning(format!("Sound is not recorded: {what} ({error})")))
+        .inspect_err(|error| log::warning(format!("Sound · not recorded · {what} ({error})")))
         .ok()
 }
 
@@ -159,7 +159,7 @@ fn watch_default(devices: &Devices) -> Option<Watch> {
         .watch()
         .inspect_err(|error| {
             log::warning(format!(
-                "Windows will not report audio device changes ({error}); checking every {} s instead",
+                "Sound · no device change events ({error}) · checking every {} s",
                 DEFAULT_CHECK_INTERVAL.as_secs()
             ));
         })
@@ -238,7 +238,7 @@ impl Device {
 
     fn switch(&mut self, devices: &Devices, now: Instant) {
         if let DeviceState::Open(_) = self.state {
-            log::info("The default audio output changed; switching to it");
+            log::info("Sound · default output changed · switching");
             self.state = DeviceState::CLOSED_AFTER_OPEN;
         }
         self.open(devices, now);
@@ -255,9 +255,9 @@ impl Device {
         match devices.open() {
             Ok(loopback) => {
                 log::info(format!(
-                    "Capturing sound from {}{}",
+                    "Sound · {}{}",
                     loopback.name(),
-                    if *opened_before { " again" } else { "" }
+                    if *opened_before { " · again" } else { "" }
                 ));
                 self.state = DeviceState::Open(loopback);
                 self.due = Some(now + DEFAULT_CHECK_INTERVAL);
@@ -265,11 +265,11 @@ impl Device {
             Err(error) => {
                 if !*reported {
                     match &error {
-                        OpenError::NoDevice => log::info(
-                            "No audio output device; clips get silence until one is connected",
-                        ),
+                        OpenError::NoDevice => {
+                            log::info("Sound · no output device · silence until one appears");
+                        }
                         OpenError::Windows(_, cause) => log::warning(format!(
-                            "The audio output could not be captured ({error}: {cause}); trying again every second"
+                            "Sound · cannot capture ({error}: {cause}) · retrying every second"
                         )),
                     }
                     *reported = true;
@@ -281,9 +281,9 @@ impl Device {
 
     fn lost(&mut self, error: &windows::core::Error) {
         if error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
-            log::info("The audio output device went away; reopening");
+            log::info("Sound · output device went away · reopening");
         } else {
-            log::warning(format!("Sound capture failed ({error}); reopening"));
+            log::warning(format!("Sound · capture failed ({error}) · reopening"));
         }
         self.state = DeviceState::CLOSED_AFTER_OPEN;
         self.due = None;

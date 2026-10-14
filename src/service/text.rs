@@ -1,8 +1,11 @@
 //! The worker's log lines, some of which the Status tab also shows.
 //!
-//! A whole line starts with a capital; a fragment that completes another line, such as the
-//! reason after "Capture stopped:", does not. Lines with nothing to fill in are constants; the
-//! others are formatted only when they are written.
+//! Every line fits one row of the Logs tab: a short subject in sentence case, then lower-case
+//! details joined by " · ", as in "Recording · AV1 1920×1080 · 240 fps". A cause goes in
+//! parentheses after the detail it explains, and no line ends in a full stop. A fragment that
+//! completes another line, such as the reason after "Capture stopped · ", starts in lower case.
+//! Paths show only the file name, since the folder is in the settings. Lines with nothing to
+//! fill in are constants; the others are formatted only when they are written.
 
 use crate::{config::Config, replay::Stream};
 use std::{
@@ -10,81 +13,70 @@ use std::{
     path::Path,
 };
 
+/// The file name of `path`, or the whole path when it has none.
+fn file_name(path: &Path) -> impl Display {
+    path.file_name().unwrap_or(path.as_os_str()).display()
+}
+
 // The settings.
 
 pub(super) fn settings_applied(config: &Config) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
             f,
-            "Settings applied: {}, {}, {}, {} s buffer {}, {} fps, {} Mbps, hotkey {}",
+            "Settings · {} · {} · {} · {} fps · {} Mbps · {} s {} · {}",
             config.mode,
             config.backend,
             config.codec,
-            config.buffer_seconds,
-            config.buffer_memory.place(),
             config.frame_rate,
             config.bitrate_mbps,
+            config.buffer_seconds,
+            config.buffer_memory.place(),
             config.hotkey
         )
     })
 }
 
 pub(super) fn save_settings_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Could not save the settings: {error}"))
+    fmt::from_fn(move |f| write!(f, "Settings · not saved ({error})"))
 }
 
 // The session.
 
-pub(super) const RESTARTING: &str = "Starting capture again";
-pub(super) const PAUSED: &str = "Capture paused; what is buffered stays saveable";
-pub(super) const RESUMED: &str = "Capture resumed";
-pub(super) const RESIZED: &str =
-    "The display or window changed size; capture restarted and the replay buffer starts over";
-pub(super) const DISPLAY_GONE: &str = "the display went away";
-pub(super) const NO_FRAMES: &str = "no frames arrived from the display";
-pub(super) const NO_PANIC_MESSAGE: &str = "it gave no message";
-pub(super) const WORKER_GONE: &str = "The recording worker has stopped, so the request was dropped";
+pub(super) const RESTARTING: &str = "Restarting capture";
+pub(super) const PAUSED: &str = "Paused · the buffer stays saveable";
+pub(super) const RESUMED: &str = "Resumed";
+pub(super) const RESIZED: &str = "Resized · capture restarted, buffer starts over";
+pub(super) const DISPLAY_GONE: &str = "display gone";
+pub(super) const NO_FRAMES: &str = "no frames from the display";
+pub(super) const NO_PANIC_MESSAGE: &str = "no message";
+pub(super) const WORKER_GONE: &str = "Worker stopped · request dropped";
 
 pub(super) fn capture_panicked(message: &str) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "the capture thread panicked: {message}"))
+    fmt::from_fn(move |f| write!(f, "capture thread panicked · {message}"))
 }
 
 pub(super) fn worker_panicked(message: &str) -> impl Display {
-    fmt::from_fn(move |f| {
-        write!(
-            f,
-            "The recording worker panicked and stopped; start hindsight again to record: {message}"
-        )
-    })
+    fmt::from_fn(move |f| write!(f, "Worker panicked · {message} · start hindsight again"))
 }
 
 pub(super) fn target_found(name: &str) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "{name} is full screen; recording it"))
+    fmt::from_fn(move |f| write!(f, "Capturing · {name}"))
 }
 
 pub(super) fn target_closed(name: &str) -> impl Display {
-    fmt::from_fn(move |f| {
-        write!(
-            f,
-            "{name} closed; the replay buffer stays until the next full-screen app"
-        )
-    })
+    fmt::from_fn(move |f| write!(f, "{name} closed · buffer kept for the next app"))
 }
 
 pub(super) fn falling_back_to_monitor(name: &str) -> impl Display {
-    fmt::from_fn(move |f| {
-        write!(
-            f,
-            "{name} cannot be captured as a window; capturing its monitor instead"
-        )
-    })
+    fmt::from_fn(move |f| write!(f, "Capturing · {name}'s monitor (window not capturable)"))
 }
 
 pub(super) fn recording(stream: &Stream, config: &Config) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
             f,
-            "Recording {} {}×{} at {} fps, {} Mbps, keeping {} s",
+            "Recording · {} {}×{} · {} fps · {} Mbps · {} s",
             stream.codec,
             stream.width,
             stream.height,
@@ -96,33 +88,32 @@ pub(super) fn recording(stream: &Stream, config: &Config) -> impl Display {
 }
 
 pub(super) fn session_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Capture stopped: {error}"))
+    fmt::from_fn(move |f| write!(f, "Capture stopped · {error}"))
 }
 
 pub(super) fn capture_thread_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "the capture thread could not start: {error}"))
+    fmt::from_fn(move |f| write!(f, "capture thread did not start ({error})"))
 }
 
 // Saving.
 
-pub(crate) const NOTHING_TO_SAVE: &str =
-    "Nothing to save yet; the replay buffer fills once capture starts.";
-pub(super) const ALREADY_SAVING: &str = "A clip is already being saved";
+pub(crate) const NOTHING_TO_SAVE: &str = "Nothing to save yet · capture has not started";
+pub(super) const ALREADY_SAVING: &str = "Save · already in progress";
 
 pub(super) fn save_panicked(message: &str) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "the save thread panicked: {message}"))
+    fmt::from_fn(move |f| write!(f, "save thread panicked · {message}"))
 }
 
 pub(super) fn clip_saved(seconds: f64, path: &Path) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Saved a {seconds:.1} s clip to {}", path.display()))
+    fmt::from_fn(move |f| write!(f, "Saved · {seconds:.0} s · {}", file_name(path)))
 }
 
 pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "The clip is saved without sound: {error}"))
+    fmt::from_fn(move |f| write!(f, "Saved without sound · {error}"))
 }
 
 pub(super) fn save_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Could not save the clip: {error}"))
+    fmt::from_fn(move |f| write!(f, "Save failed · {error}"))
 }
 
 #[cfg(windows)]
@@ -130,7 +121,7 @@ pub(super) fn background_save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
             f,
-            "The clip is being written at normal priority; background mode was refused: {error}"
+            "Save · background mode refused ({error}) · normal priority"
         )
     })
 }
@@ -141,21 +132,16 @@ pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> impl Dis
     fmt::from_fn(move |f| {
         write!(
             f,
-            "The size of {} could not be read, so the clip counts as nothing: {error}",
-            path.display()
+            "Totals · size of {} unreadable ({error}) · counted as 0",
+            file_name(path)
         )
     })
 }
 
 pub(super) fn load_totals_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| {
-        write!(
-            f,
-            "The lifetime totals could not be read, so they are not kept: {error}"
-        )
-    })
+    fmt::from_fn(move |f| write!(f, "Totals · not read ({error}) · not kept"))
 }
 
 pub(super) fn save_totals_failed(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "The lifetime totals could not be saved: {error}"))
+    fmt::from_fn(move |f| write!(f, "Totals · not saved ({error})"))
 }

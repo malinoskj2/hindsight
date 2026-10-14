@@ -131,7 +131,7 @@ fn log_panics() {
             .location()
             .map_or_else(|| "an unknown location".to_owned(), ToString::to_string);
         log::error(format!(
-            "The thread {} panicked at {location}: {payload}",
+            "Thread {} panicked · {location} · {payload}",
             thread.name().unwrap_or("<unnamed>")
         ));
         previous(info);
@@ -153,7 +153,7 @@ fn mirror_log() {
     let log_file = storage::state_directory().join(log::FILE_NAME);
     if let Err(error) = log::mirror_to(&log_file) {
         log::warning(format!(
-            "The log file {} could not be created: {error}",
+            "Log file · not created ({error}) · {}",
             log_file.display()
         ));
     }

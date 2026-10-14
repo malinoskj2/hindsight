@@ -50,7 +50,7 @@ impl VideoMemory {
 
     pub(super) fn description(&self) -> String {
         format!(
-            "Replay buffer in GPU memory: {} on {}",
+            "Buffer · GPU memory · {} on {}",
             self.pages.summary(),
             self.device.adapter
         )

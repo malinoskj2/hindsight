@@ -1,10 +1,7 @@
 //! Full-screen apps: windows whose client area covers their monitor, watched through event hooks.
 
 use super::callback::Slot;
-use crate::{
-    APP_NAME,
-    service::{MonitorHandle, Target, WindowHandle},
-};
+use crate::service::{MonitorHandle, Target, WindowHandle};
 use std::{path::Path, rc::Rc};
 use windows::Win32::{
     Foundation::HWND,
@@ -39,7 +36,7 @@ impl ForegroundHook {
             EventHook::set(EVENT_OBJECT_LOCATIONCHANGE),
         ) else {
             HANDLER.with(Slot::clear);
-            crate::log::warning(format!("{APP_NAME} could not watch the foreground window"));
+            crate::log::warning("Foreground hook · not installed · apps noticed every second");
             return None;
         };
         Some(Self {

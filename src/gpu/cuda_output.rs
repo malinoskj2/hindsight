@@ -82,10 +82,7 @@ impl CudaRing {
     }
 
     pub(super) fn description(&self) -> String {
-        format!(
-            "Replay buffer in CUDA memory, written by the encoder: {}",
-            self.pages.summary()
-        )
+        format!("Buffer · CUDA memory · {}", self.pages.summary())
     }
 
     /// A buffer for the encoder to write frames into, and where it is.
@@ -110,7 +107,7 @@ impl CudaRing {
             return;
         }
         log::warning(format!(
-            "The encoder stalled; leaving its {} output buffers in GPU memory rather than freeing memory it may still write",
+            "Encoder stalled · {} output buffers left in GPU memory",
             self.staging.len()
         ));
         for buffer in self.staging.drain(..) {

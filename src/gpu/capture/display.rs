@@ -1,4 +1,4 @@
-//! How a monitor is driven: HDR, colour space, luminance range and SDR white level.
+//! How a monitor is driven: HDR, colour space, bit depth, peak luminance and SDR white level.
 
 use crate::gpu::win32::{cb_size, utf16_until_nul};
 use std::{borrow::Cow, fmt};
@@ -40,9 +40,7 @@ pub(super) struct Display {
     name: String,
     color_space: DXGI_COLOR_SPACE_TYPE,
     bits_per_color: u32,
-    min_nits: f32,
     pub(super) max_nits: f32,
-    max_full_frame_nits: f32,
     pub(super) sdr_white_nits: Option<f32>,
 }
 
@@ -52,24 +50,25 @@ impl Display {
     }
 }
 
+/// One log line's details, such as "DISPLAY1 · HDR · 10-bit · 1000 nits · white 80 nits". The
+/// SDR white level only matters in HDR, where it sets the tone map's white.
 impl fmt::Display for Display {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}: {}, {} bits per colour, {:.4} to {:.0} nits ({:.0} full frame)",
-            self.name,
+            "{} · {} · {}-bit · {:.0} nits",
+            self.name.strip_prefix(r"\\.\").unwrap_or(&self.name),
             color_space_name(self.color_space),
             self.bits_per_color,
-            self.min_nits,
             self.max_nits,
-            self.max_full_frame_nits,
         )?;
-        match self.sdr_white_nits {
-            Some(nits) => write!(formatter, ", SDR white {nits:.0} nits")?,
-            None => write!(formatter, ", SDR white unknown")?,
+        if self.is_hdr() {
+            match self.sdr_white_nits {
+                Some(nits) => write!(formatter, " · white {nits:.0} nits")?,
+                None => write!(formatter, " · white unknown")?,
+            }
         }
-        let hdr = if self.is_hdr() { "on" } else { "off" };
-        write!(formatter, ", HDR {hdr}")
+        Ok(())
     }
 }
 
@@ -80,9 +79,9 @@ pub(super) fn is_hdr(color_space: DXGI_COLOR_SPACE_TYPE) -> bool {
 
 fn color_space_name(color_space: DXGI_COLOR_SPACE_TYPE) -> Cow<'static, str> {
     match color_space {
-        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 => "SDR (sRGB, BT.709)".into(),
-        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 => "HDR (PQ, BT.2020)".into(),
-        DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 => "scRGB (linear, BT.709)".into(),
+        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 => "SDR".into(),
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 => "HDR".into(),
+        DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 => "scRGB".into(),
         other => format!("colour space {}", other.0).into(),
     }
 }
@@ -144,9 +143,7 @@ fn from_description(description: &DXGI_OUTPUT_DESC1) -> Display {
         name,
         color_space: description.ColorSpace,
         bits_per_color: description.BitsPerColor,
-        min_nits: description.MinLuminance,
         max_nits: description.MaxLuminance,
-        max_full_frame_nits: description.MaxFullFrameLuminance,
     }
 }
 
@@ -247,6 +244,25 @@ mod tests {
         assert!((white_level_nits(1000) - 80.0).abs() < 1e-3);
         assert!((white_level_nits(2500) - 200.0).abs() < 1e-3);
         assert!((white_level_nits(3750) - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_display_is_one_short_line() {
+        let mut display = Display {
+            name: r"\\.\DISPLAY1".to_owned(),
+            color_space: DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            bits_per_color: 8,
+            max_nits: 270.0,
+            sdr_white_nits: Some(80.0),
+        };
+        assert_eq!(display.to_string(), "DISPLAY1 · SDR · 8-bit · 270 nits");
+        display.color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        display.bits_per_color = 10;
+        display.max_nits = 1000.0;
+        assert_eq!(
+            display.to_string(),
+            "DISPLAY1 · HDR · 10-bit · 1000 nits · white 80 nits"
+        );
     }
 
     #[test]

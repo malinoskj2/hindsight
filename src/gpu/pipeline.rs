@@ -47,27 +47,21 @@ fn prepare_thread() -> Option<priority::MultimediaThread> {
         }
     };
     if let Err(error) = priority::opt_out_of_throttling() {
-        log::warning(format!(
-            "Windows power throttling could not be turned off: {error}"
-        ));
+        log::warning(format!("Power throttling · not turned off ({error})"));
     }
     match priority::raise_gpu_class() {
-        Ok(()) => log::info("GPU scheduling priority: high"),
-        Err(error) => log::warning(format!(
-            "The GPU scheduling priority could not be raised: {error}"
-        )),
+        Ok(()) => log::info("GPU priority · high"),
+        Err(error) => log::warning(format!("GPU priority · not raised ({error})")),
     }
     multimedia
 }
 
 fn raise_thread_instead(error: &windows::core::Error) {
     log::warning(format!(
-        "The capture thread could not join the multimedia scheduling class ({error}); using a high thread priority instead"
+        "Capture thread · no multimedia class ({error}) · high priority instead"
     ));
     if let Err(error) = priority::raise_thread() {
-        log::warning(format!(
-            "The capture thread priority was not raised: {error}"
-        ));
+        log::warning(format!("Capture thread · priority not raised ({error})"));
     }
 }
 
@@ -225,7 +219,7 @@ impl Session {
                 return Err(error);
             }
             log::warning(format!(
-                "NVENC could not read the captured surfaces directly ({error}); copying each frame instead"
+                "NVENC · cannot read grabs in place ({error}) · copying each frame"
             ));
             self.surfaces = SurfaceDelivery::Copied;
         }
@@ -280,7 +274,7 @@ fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
                 return;
             }
             Err(error) => log::warning(format!(
-                "The replay buffer could not be placed in CUDA memory ({}); trying a Direct3D buffer",
+                "Buffer · not in CUDA memory ({}) · trying Direct3D",
                 log::chain(&error)
             )),
         }
@@ -291,7 +285,7 @@ fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
             live.set_store(Box::new(store));
         }
         Err(error) => log::warning(format!(
-            "The replay buffer could not be placed in GPU memory ({}); keeping it in RAM",
+            "Buffer · not in GPU memory ({}) · kept in RAM",
             log::chain(&error)
         )),
     }
@@ -304,7 +298,7 @@ fn keep_on_disk(config: &Config, live: &Live) {
             live.set_store(Box::new(store));
         }
         Err(error) => log::warning(format!(
-            "The replay buffer could not be placed on disk ({}); keeping it in RAM",
+            "Buffer · not on disk ({}) · kept in RAM",
             log::chain(&error)
         )),
     }
@@ -313,12 +307,12 @@ fn keep_on_disk(config: &Config, live: &Live) {
 fn open_device(config: &Config) -> Result<Device> {
     let device = Device::create()?;
     log::info(format!(
-        "Capturing on {} with {}",
-        device.adapter, config.backend
+        "Capture · {} on {}",
+        config.backend, device.adapter
     ));
     if let Err(error) = device.raise_priority() {
         log::warning(format!(
-            "GPU thread priority was not raised ({error}); run as administrator for the highest priority"
+            "GPU thread priority · not raised ({error}) · run as administrator"
         ));
     }
     Ok(device)

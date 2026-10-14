@@ -127,7 +127,7 @@ impl Source for Capture {
         }
         let target = super::target_of(target)?;
         if self.hdr_turned_off() {
-            log::info("HDR was turned off on the captured display");
+            log::info("Display · HDR turned off");
             return Ok(Frame::Resized);
         }
 

@@ -233,7 +233,7 @@ impl Live {
         };
         if let Some(error) = refused {
             log::warning(format!(
-                "The replay buffer could no longer be kept outside RAM ({}); it continues in RAM",
+                "Buffer · lost its place outside RAM ({}) · continues in RAM",
                 log::chain(&error)
             ));
         }

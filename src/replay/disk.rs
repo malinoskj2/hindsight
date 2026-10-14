@@ -160,9 +160,12 @@ impl DiskStore {
     pub(crate) fn description(&self) -> String {
         let layout = self.shared.layout;
         format!(
-            "Replay buffer on disk: {} in {}, written without the file cache in {} MiB blocks",
+            "Buffer · disk · {} in {} · {} MiB blocks, no file cache",
             self.pages.summary(),
-            self.path.display(),
+            self.path
+                .file_name()
+                .unwrap_or(self.path.as_os_str())
+                .display(),
             layout.block / MEBIBYTE
         )
     }

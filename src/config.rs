@@ -272,7 +272,10 @@ impl TryFrom<RawConfig> for Config {
         } = raw;
         if !unknown.is_empty() {
             let keys: Vec<&str> = unknown.keys().map(String::as_str).collect();
-            log::warning(format!("Unknown settings are ignored: {}", keys.join(", ")));
+            log::warning(format!(
+                "Settings · unknown keys ignored · {}",
+                keys.join(", ")
+            ));
         }
         let config = Self {
             mode,

@@ -68,65 +68,63 @@ pub(super) const NUMBER_REQUIRED: &str =
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
 
-pub(super) const STARTUP_ENABLED: &str = "Start with Windows enabled";
-pub(super) const STARTUP_DISABLED: &str = "Start with Windows disabled";
-pub(super) const QUIT_FROM_TRAY: &str = "Quit chosen from the tray menu";
-pub(super) const CLOSED_TO_TRAY: &str = "Window closed; recording continues from the tray";
-pub(super) const FOREGROUND_WATCH_FAILED: &str = "Full-screen apps are noticed every second rather than at once: the foreground hook could not be installed";
+pub(super) const STARTUP_ENABLED: &str = "Start with Windows · enabled";
+pub(super) const STARTUP_DISABLED: &str = "Start with Windows · disabled";
+pub(super) const QUIT_FROM_TRAY: &str = "Quit · from the tray menu";
+pub(super) const CLOSED_TO_TRAY: &str = "Window closed · recording continues from the tray";
+pub(super) const FOREGROUND_WATCH_FAILED: &str =
+    "Foreground hook · not installed · apps noticed every second";
 
 pub(super) const STARTUP_FAILED_TITLE: &str = "hindsight could not start";
 pub(super) const STARTUP_FAILED_HELP: &str =
     "Close this window, resolve the error, then launch again.";
 
 pub(super) fn tray_unavailable(error: impl Display) -> String {
-    format!("Tray unavailable; closing this window stops recording and quits: {error}")
+    format!("Tray · unavailable ({error}) · closing the window quits")
 }
 
 pub(super) fn startup_setting_unreadable(error: impl Display) -> String {
-    format!("The Start with Windows entry could not be read: {error}")
+    format!("Start with Windows · entry unreadable ({error})")
 }
 
 pub(super) fn startup_setting_failed(error: impl Display) -> String {
-    format!("Could not update the Start with Windows entry: {error}")
+    format!("Start with Windows · not updated ({error})")
 }
 
 pub(super) fn thumbnails_unavailable(error: impl Display) -> String {
-    format!("Clips are listed without thumbnails: {error}")
+    format!("Clips · no thumbnails ({error})")
 }
 
 pub(super) fn thumbnail_failed(path: &Path, error: impl Display) -> String {
-    format!("No thumbnail for {}: {error}", file_name(path))
+    format!("Clips · no thumbnail for {} ({error})", file_name(path))
 }
 
 pub(super) fn clip_not_listed(path: &Path, error: impl Display) -> String {
-    format!("{} could not be listed: {error}", file_name(path))
+    format!("Clips · {} not listed ({error})", file_name(path))
 }
 
 pub(super) fn folder_pick_failed(error: impl Display) -> String {
-    format!("Could not open the folder dialog: {error}")
+    format!("Clip folder · dialog failed ({error})")
 }
 
 pub(super) fn clip_open_failed(path: &Path, error: impl Display) -> String {
-    format!("Could not open {}: {error}", path.display())
+    format!("Could not open {} · {error}", file_name(path))
 }
 
 pub(super) fn clip_reveal_failed(path: &Path, error: impl Display) -> String {
-    format!("Could not show {} in Explorer: {error}", path.display())
+    format!("Could not show {} in Explorer · {error}", file_name(path))
 }
 
 pub(super) fn clip_deleted(path: &Path) -> String {
-    format!("Moved {} to the Recycle Bin", path.display())
+    format!("Recycled · {}", file_name(path))
 }
 
 pub(super) fn clip_delete_failed(path: &Path, error: impl Display) -> String {
-    format!(
-        "Could not move {} to the Recycle Bin: {error}",
-        path.display()
-    )
+    format!("Could not recycle {} · {error}", file_name(path))
 }
 
 pub(super) fn clip_menu_failed(error: impl Display) -> String {
-    format!("The clip menu could not be shown: {error}")
+    format!("Clip menu · not shown ({error})")
 }
 
 pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
@@ -273,11 +271,11 @@ fn file_name(path: &Path) -> String {
 
 pub(super) fn codecs_offered(codecs: &[Codec]) -> String {
     let names = codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>();
-    format!("Codecs this GPU encodes: {}", names.join(", "))
+    format!("Codecs · {}", names.join(", "))
 }
 
 pub(super) fn codecs_unknown(error: impl Display) -> String {
-    format!("Could not ask the GPU which codecs it encodes, so every codec is offered: {error}")
+    format!("Codecs · unknown ({error}) · offering all")
 }
 
 pub(super) fn codec_unsupported(codec: &str) -> String {
