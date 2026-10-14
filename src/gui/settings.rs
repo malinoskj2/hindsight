@@ -17,7 +17,7 @@ use crate::{
     log,
     sys::{
         hotkey::{self, RegisterError},
-        startup,
+        shell, startup,
     },
 };
 use std::{path::PathBuf, rc::Rc};
@@ -36,6 +36,11 @@ const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
 /// The same from the second column.
 const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
 const ERROR_X: i32 = BUTTON_WIDTH + 8;
+const BROWSE_WIDTH: i32 = 76;
+const BROWSE_GAP: i32 = 6;
+/// The clip folder field, which leaves room for the Browse button at the group's right edge.
+const FOLDER_WIDTH: i32 = FULL_WIDTH - BROWSE_WIDTH - BROWSE_GAP;
+const BROWSE_X: i32 = INNER_X + INNER_WIDTH - BROWSE_WIDTH;
 const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
 
@@ -158,6 +163,7 @@ impl SettingsPage {
         pane::paint(&inner.page, skin, Rc::clone(&inner));
         let page = Self(inner);
         page.estimate_events();
+        page.browse_events();
         page
     }
 
@@ -227,6 +233,28 @@ impl SettingsPage {
             page.update_estimate();
             Ok(())
         });
+    }
+
+    fn browse_events(&self) {
+        let page = self.clone();
+        self.0.recording.browse.on().bn_clicked(move || {
+            page.browse_folder();
+            Ok(())
+        });
+    }
+
+    /// Opens the shell's folder dialog on the folder entered and puts the choice in the field.
+    fn browse_folder(&self) {
+        let folder = &self.0.recording.folder;
+        let entered = PathBuf::from(folder.text().unwrap_or_default().trim());
+        let page_window = self.0.page.hwnd();
+        let root = page_window.GetAncestor(co::GA::ROOT);
+        let owner = root.as_ref().unwrap_or(page_window);
+        match shell::pick_folder(owner, Some(&entered)) {
+            Ok(Some(chosen)) => layout::set_text(folder, &chosen.display().to_string()),
+            Ok(None) => {}
+            Err(error) => log::warning(text::folder_pick_failed(log::chain(&error))),
+        }
     }
 
     fn update_estimate(&self) {
@@ -300,6 +328,7 @@ struct RecordingControls {
     /// The backends offered, in the order of the backend list's items.
     backends: Vec<Backend>,
     folder: gui::Edit,
+    browse: gui::Button,
     memory: gui::ComboBox,
     audio: gui::CheckBox,
     cursor: gui::CheckBox,
@@ -324,9 +353,11 @@ impl RecordingControls {
             page,
             text::FOLDER,
             rows::FOLDER,
-            FULL_WIDTH,
+            FOLDER_WIDTH,
             &config.clip_directory().display().to_string(),
         );
+        let browse = button(page, text::BROWSE, BROWSE_X, rows::FOLDER, BROWSE_WIDTH);
+        skin_button(&browse, skin);
         let memory = choice_field(
             page,
             text::MEMORY,
@@ -360,6 +391,7 @@ impl RecordingControls {
             backend,
             backends,
             folder,
+            browse,
             memory,
             audio,
             cursor,

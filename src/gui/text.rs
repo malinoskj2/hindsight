@@ -58,6 +58,7 @@ pub(super) const HOTKEY: &str = "Save hotkey";
 pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
+pub(super) const BROWSE: &str = "Browse…";
 pub(super) const AUDIO: &str = "Record system sound (what the default output device plays)";
 pub(super) const CURSOR: &str = "Record the mouse cursor (not with DXGI Desktop Duplication)";
 pub(super) const MEMORY: &str = "Buffer in";
@@ -99,6 +100,10 @@ pub(super) fn thumbnail_failed(path: &Path, error: impl Display) -> String {
 
 pub(super) fn clip_not_listed(path: &Path, error: impl Display) -> String {
     format!("{} could not be listed: {error}", file_name(path))
+}
+
+pub(super) fn folder_pick_failed(error: impl Display) -> String {
+    format!("Could not open the folder dialog: {error}")
 }
 
 pub(super) fn clip_open_failed(path: &Path, error: impl Display) -> String {

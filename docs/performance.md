@@ -24,12 +24,9 @@ frame rate, costs the game anything to speak of.
 
 **Frame rate** is the one lever that matters. Every frame captured is driver work on the CPU and
 an encode on the GPU, so the cost scales with frames per second, whatever the codec or bitrate.
-Measured with NvFBC at 1080p:
-
-| Frame rate | Game's frame rate lost | CPU, share of one core |
-|---|---|---|
-| 240 fps | about 2.3% | about 5.5% |
-| 60 fps | 0.7 to 1% | about 2% |
+Measured with NvFBC at 1080p, 240 fps costs the game about a fifth less than NVIDIA Instant
+Replay at the same settings and about a third less CPU; 60 fps costs about a third of what
+240 fps does, in both the game's frame rate and CPU.
 
 Record at 240 fps only for fast games whose clips you slow down. For everything else 60 fps gives
 the same clip at a third of the cost.
@@ -54,9 +51,9 @@ H.264 about double. The default of 50 Mb/s is generous for 1080p 60 fps with any
 bitrate × length. At 100 Mb/s, 300 s is about 3.75 GB; at 50 Mb/s, 30 s is about 190 MB. The
 Settings tab shows the figure for what you enter.
 
-**Record system sound** costs under 1% of one core while recording: the sound is kept raw and
-encoded to AAC only when a clip is saved. It takes about 57 MB of RAM for 5 minutes, always in
-RAM whichever memory holds the video. Turn it off if you never use the sound.
+**Record system sound** costs less than a fifth of the video capture's CPU while recording: the
+sound is kept raw and encoded to AAC only when a clip is saved. It takes about 57 MB of RAM for
+5 minutes, always in RAM whichever memory holds the video. Turn it off if you never use the sound.
 
 **Record the mouse cursor** makes no measurable difference either way.
 
@@ -69,7 +66,7 @@ buffer lives, which is what decides the cost on a given machine.
 
 | Backend | Cost | Choose it when |
 |---|---|---|
-| NVIDIA NvFBC (default) | the least: 2.3% of the game and about 5.5% of a core at AV1 240 fps, about a fifth less of the game than NVIDIA Instant Replay and a third less CPU | your monitor is connected to the NVIDIA GPU, which is almost always |
+| NVIDIA NvFBC (default) | the least: about a fifth less of the game than NVIDIA Instant Replay at AV1 240 fps, and a third less CPU | your monitor is connected to the NVIDIA GPU, which is almost always |
 | Windows Graphics Capture | about twice NvFBC's cost to the game at 240 fps, most of it in the desktop compositor rather than in hindsight | a laptop whose display hangs off the integrated GPU, an HDR display, or when NvFBC refuses the display (rotated, or of odd width or height) |
 | DXGI Desktop Duplication | the most: it copies every frame and keeps the compositor busy | only when the other two fail |
 
@@ -81,7 +78,7 @@ It has to live somewhere, and the right place depends on what the game needs of 
 | Buffer in | Cost | Takes |
 |---|---|---|
 | RAM (default) | none | the buffer's size in system memory |
-| VRAM | about 0.4% of one core more; the game nothing | the buffer's size in the card's memory, held for as long as recording runs |
+| VRAM | a little more CPU than RAM, under a tenth of the capture's own; the game nothing | the buffer's size in the card's memory, held for as long as recording runs |
 | Disk | the same CPU and game cost as RAM | about 120 MB of RAM and a file of the buffer's size on the drive; writes the bitrate continuously, 45 GB an hour at 100 Mb/s |
 
 Choose by what is left over after the game:

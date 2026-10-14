@@ -1,24 +1,31 @@
 //! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
 
-use std::{ffi::OsString, os::windows::ffi::OsStrExt, path::Path};
+use super::com::Apartment;
+use std::{
+    ffi::{OsString, c_void},
+    os::windows::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use windows::{
     Win32::{
-        Foundation::{HWND, SIZE},
+        Foundation::{ERROR_CANCELLED, HWND, SIZE},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
         },
+        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
         UI::{
             Shell::{
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-                FOF_WANTNUKEWARNING, IShellItemImageFactory, SHCreateItemFromParsingName,
-                SHFILEOPSTRUCTW, SHFileOperationW, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
-                ShellExecuteW,
+                FOF_WANTNUKEWARNING, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS,
+                FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemImageFactory,
+                SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW, SIGDN_FILESYSPATH,
+                SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY, ShellExecuteW,
             },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
     },
-    core::{HSTRING, PCWSTR},
+    core::{HRESULT, HSTRING, PCWSTR},
 };
 use winsafe::{
     self as w, co,
@@ -84,6 +91,57 @@ pub(crate) enum RecycleError {
     Refused(i32),
     #[error("the deletion was cancelled")]
     Cancelled,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PickFolderError {
+    #[error("COM could not be started on the window thread")]
+    Com(#[source] windows::core::Error),
+    #[error("the folder dialog could not be shown")]
+    Dialog(#[source] windows::core::Error),
+    #[error("the chosen folder has no file system path")]
+    NoPath(#[source] windows::core::Error),
+}
+
+/// Asks for a folder with the shell's dialog, modal to `owner` and opened on `start` when that
+/// is a folder; `None` when the dialog was cancelled.
+pub(crate) fn pick_folder(
+    owner: &w::HWND,
+    start: Option<&Path>,
+) -> Result<Option<PathBuf>, PickFolderError> {
+    let _com = Apartment::single_threaded().map_err(PickFolderError::Com)?;
+    // SAFETY: an in-process class creation; the interface it returns is ours to release.
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(PickFolderError::Dialog)?;
+    // SAFETY: a plain call on the live dialog.
+    unsafe { dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR) }
+        .map_err(PickFolderError::Dialog)?;
+    if let Some(start) = start.filter(|start| start.is_dir()) {
+        let name = HSTRING::from(start.as_os_str());
+        // SAFETY: the wide string outlives the call.
+        let item: Result<IShellItem, _> = unsafe { SHCreateItemFromParsingName(&name, None) };
+        if let Ok(item) = item {
+            // SAFETY: both interfaces are live; a start folder the shell declines is no error.
+            let _ = unsafe { dialog.SetFolder(&item) };
+        }
+    }
+    // SAFETY: the owner is the live window the dialog is modal to.
+    match unsafe { dialog.Show(Some(HWND(owner.ptr()))) } {
+        Ok(()) => {}
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Ok(None),
+        Err(error) => return Err(PickFolderError::Dialog(error)),
+    }
+    // SAFETY: `Show` returned success, so the dialog holds a chosen item.
+    let item = unsafe { dialog.GetResult() }.map_err(PickFolderError::Dialog)?;
+    // SAFETY: a plain call on the live item; the string it returns is freed below.
+    let name =
+        unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(PickFolderError::NoPath)?;
+    // SAFETY: the shell handed back a null-terminated string in task memory.
+    let path = PathBuf::from(OsString::from_wide(unsafe { name.as_wide() }));
+    // SAFETY: the string came from the shell in task memory and is read no further.
+    unsafe { CoTaskMemFree(Some(name.0.cast::<c_void>().cast_const())) };
+    Ok(Some(path))
 }
 
 /// COM must be started on the calling thread; the shell may take a second per frame.
