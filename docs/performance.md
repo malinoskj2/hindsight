@@ -1,10 +1,10 @@
 # Getting the best performance
 
 hindsight is built to cost a game as little as possible, but every setting moves that cost a
-little. This page says what each setting costs and how to choose for your hardware. The numbers
-come from measurements on a Ryzen 9 9950X3D with an RTX 5090, running Counter-Strike 2 at about
-690 fps, where the game is limited by the CPU (on a scene played the same way each time). On a
-slower machine the costs are similar in absolute terms and therefore larger as a share.
+little. This page says what each setting costs and how to choose for your hardware. The costs
+are given relative to one another and to NVIDIA Instant Replay at the same settings, measured
+in a CPU-bound game on a scene played the same way each time; the ratios carry across machines
+better than any absolute figure would.
 
 ## The short version
 
