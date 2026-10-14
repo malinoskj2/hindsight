@@ -175,7 +175,7 @@ impl StatusPage {
         let live = matches!(status.state, State::Recording(_));
         let state = &self.0.recording.state;
         state.set_tone(if live { Tone::Good } else { Tone::Muted });
-        state.set_text(&text::status(&status.state));
+        state.set_text(&text::status(status));
     }
 
     fn show_figures(&self, status: &Status) {

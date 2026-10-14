@@ -13,7 +13,7 @@ use self::{
 use crate::{
     config::{Codec, Config, Mode, Theme},
     gpu, log,
-    service::Worker,
+    service::{Target, Worker},
     sys::{
         foreground::{self, ForegroundHook},
         hotkey::{self, Hotkey, RegisterError},
@@ -43,15 +43,14 @@ mod status;
 mod text;
 mod theme;
 
-/// The Classic icon: the window class and the error window; themed windows set their own.
 const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
-/// The tabs: Status, Clips, Settings, Logs and About.
 const PANES: usize = 5;
-/// Destroys the main window from a timer callback, outside every winsafe handler.
 const DESTROY_TIMER: usize = 2;
+const SETTLE_TIMER: usize = 3;
+const SETTLE_MS: u32 = 500;
 
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
     match startup {
@@ -77,6 +76,8 @@ struct Inner {
     config: RefCell<Config>,
     tray: RefCell<Option<Tray>>,
     foreground_hook: RefCell<Option<ForegroundHook>>,
+    /// The full-screen app seen last, offered to the worker once it has stayed in front.
+    pending_target: RefCell<Option<Target>>,
     quitting: Cell<bool>,
     hotkey_error: RefCell<Option<String>>,
     tray_error: OnceCell<String>,
@@ -130,6 +131,7 @@ impl Main {
             config: RefCell::new(config),
             tray: RefCell::default(),
             foreground_hook: RefCell::default(),
+            pending_target: RefCell::default(),
             quitting: Cell::new(false),
             hotkey_error: RefCell::default(),
             tray_error: OnceCell::new(),
@@ -180,6 +182,12 @@ impl Main {
         let this = self.clone();
         self.0.main_window.on().wm_timer(STATUS_TIMER, move || {
             this.on_timer();
+            Ok(())
+        });
+
+        let this = self.clone();
+        self.0.main_window.on().wm_timer(SETTLE_TIMER, move || {
+            this.settle_foreground();
             Ok(())
         });
 
@@ -383,10 +391,34 @@ impl Main {
         }
     }
 
+    /// Notes the full-screen app in front, if any, and offers it to the worker once it has
+    /// stayed there for `SETTLE_MS`.
     fn watch_foreground(&self) {
-        let fullscreen = self.0.config.borrow().mode == Mode::Fullscreen;
-        if fullscreen && let Some(target) = foreground::fullscreen_app() {
-            self.0.worker.target(target);
+        if self.0.config.borrow().mode != Mode::Fullscreen {
+            return;
+        }
+        let Some(target) = foreground::fullscreen_app() else {
+            return;
+        };
+        if self.0.pending_target.borrow().as_ref() == Some(&target) {
+            return;
+        }
+        *self.0.pending_target.borrow_mut() = Some(target);
+        let _ = self
+            .0
+            .main_window
+            .hwnd()
+            .SetTimer(SETTLE_TIMER, SETTLE_MS, None);
+    }
+
+    /// The settle timer: the app noted is offered only if it is still the one in front.
+    fn settle_foreground(&self) {
+        let _ = self.0.main_window.hwnd().KillTimer(SETTLE_TIMER);
+        let Some(pending) = self.0.pending_target.borrow_mut().take() else {
+            return;
+        };
+        if foreground::fullscreen_app().as_ref() == Some(&pending) {
+            self.0.worker.target(pending);
         }
     }
 

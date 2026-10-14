@@ -119,6 +119,7 @@ impl Pane for SettingsPage {
     fn on_create(&self) {
         layout::fit_titles(&self.0.frames);
         self.update_estimate();
+        self.update_cursor_choice();
     }
 
     fn frames(&self) -> &[Frame] {
@@ -164,6 +165,7 @@ impl SettingsPage {
         let page = Self(inner);
         page.estimate_events();
         page.browse_events();
+        page.backend_events();
         page
     }
 
@@ -233,6 +235,24 @@ impl SettingsPage {
             page.update_estimate();
             Ok(())
         });
+    }
+
+    fn backend_events(&self) {
+        let page = self.clone();
+        self.0.recording.backend.on().cbn_sel_change(move || {
+            page.update_cursor_choice();
+            Ok(())
+        });
+    }
+
+    /// DXGI Desktop Duplication cannot draw the cursor, so the choice is greyed out with it.
+    fn update_cursor_choice(&self) {
+        let recording = &self.0.recording;
+        let backend = chosen(&recording.backend, &recording.backends);
+        recording
+            .cursor
+            .hwnd()
+            .EnableWindow(backend != Backend::Dxgi);
     }
 
     fn browse_events(&self) {

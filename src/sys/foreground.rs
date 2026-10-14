@@ -17,6 +17,8 @@ use winsafe::{self as w, co};
 
 /// Shell windows that fill the monitor: the desktop and its wallpaper hosts.
 const SHELL_CLASSES: [&str; 2] = ["Progman", "WorkerW"];
+/// The shell itself, whose windows cover the monitor only for switchers and overlays.
+const SHELL_PROCESS: &str = "explorer.exe";
 
 thread_local! {
     static HANDLER: Slot<dyn Fn()> = const { Slot::new() };
@@ -97,10 +99,15 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
         return None;
     }
 
+    let name = process_name(process);
+    // The shell's own full-screen surfaces, such as Task View, are never a game.
+    if name.eq_ignore_ascii_case(SHELL_PROCESS) {
+        return None;
+    }
     Some(Target::Window {
         window: WindowHandle::new(window.ptr().addr().cast_signed())?,
         monitor: MonitorHandle::new(monitor.ptr().addr().cast_signed())?,
-        name: process_name(process),
+        name,
     })
 }
 

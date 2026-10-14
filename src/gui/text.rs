@@ -63,8 +63,8 @@ pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
 pub(super) const BROWSE: &str = "Browse…";
-pub(super) const AUDIO: &str = "Record system sound (what the default output device plays)";
-pub(super) const CURSOR: &str = "Record the mouse cursor (not with DXGI Desktop Duplication)";
+pub(super) const AUDIO: &str = "Record system sound";
+pub(super) const CURSOR: &str = "Record the mouse cursor";
 pub(super) const MEMORY: &str = "Buffer in";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
@@ -148,9 +148,13 @@ pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
     format!("{title} {}", format_bytes(bytes).replace(' ', "\u{a0}"))
 }
 
-pub(super) fn status(state: &State) -> String {
-    let message = match state {
+pub(super) fn status(status: &Status) -> String {
+    let message = match status.state {
         State::Starting(_) => "Starting capture…",
+        // The last app's buffer stays until the next one, so a save still has something.
+        State::Waiting if holds_frames(status) => {
+            "Waiting for a full-screen app · the last buffer stays saveable"
+        }
         State::Waiting => "Waiting for a full-screen app",
         State::Recording(_) => "Recording to the replay buffer",
         State::Paused => "Paused · the buffer stays saveable",
@@ -162,8 +166,18 @@ pub(super) fn status(state: &State) -> String {
     format!("●  {message}")
 }
 
+/// The source and the encoder are shown only while capture runs: between apps the buffer is
+/// kept, but the lines would otherwise read as if the last app were still recorded.
 pub(super) fn source(status: &Status) -> String {
-    status.source.clone().unwrap_or_else(|| NO_VALUE.to_owned())
+    status
+        .state
+        .running()
+        .and_then(|_| status.source.clone())
+        .unwrap_or_else(|| NO_VALUE.to_owned())
+}
+
+fn holds_frames(status: &Status) -> bool {
+    status.buffer.is_some_and(|buffer| buffer.held.frames > 0)
 }
 
 pub(super) fn backend(status: &Status) -> String {
@@ -174,15 +188,19 @@ pub(super) fn backend(status: &Status) -> String {
 }
 
 pub(super) fn encoder(status: &Status) -> String {
-    stream(status).map_or_else(
-        || NO_VALUE.to_owned(),
-        |stream| {
-            format!(
-                "{} · {}×{} · {} Mbps",
-                stream.codec, stream.width, stream.height, status.bitrate_mbps
-            )
-        },
-    )
+    status
+        .state
+        .running()
+        .and_then(|_| stream(status))
+        .map_or_else(
+            || NO_VALUE.to_owned(),
+            |stream| {
+                format!(
+                    "{} · {}×{} · {} Mbps",
+                    stream.codec, stream.width, stream.height, status.bitrate_mbps
+                )
+            },
+        )
 }
 
 pub(super) fn rates(status: &Status) -> String {
@@ -363,7 +381,41 @@ fn capitalised(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Backend, service::Running};
+    use crate::{
+        config::{Backend, Memory},
+        replay::Held,
+        service::{Buffer, Running},
+    };
+
+    #[test]
+    fn between_apps_the_source_and_encoder_are_dashes_and_a_kept_buffer_is_said() {
+        let mut shown = Status {
+            state: State::Waiting,
+            source: Some("cs2.exe".to_owned()),
+            ..Status::default()
+        };
+        assert_eq!(source(&shown), "—");
+        assert_eq!(encoder(&shown), "—");
+        assert_eq!(status(&shown), "●  Waiting for a full-screen app");
+        shown.buffer = Some(Buffer {
+            stream: None,
+            held: Held {
+                frames: 240,
+                bytes: 1_000,
+                stored: true,
+            },
+            memory: Memory::Ram,
+        });
+        assert_eq!(
+            status(&shown),
+            "●  Waiting for a full-screen app · the last buffer stays saveable"
+        );
+        shown.state = State::Recording(Running {
+            backend: Backend::Nvfbc,
+            encode_rate: None,
+        });
+        assert_eq!(source(&shown), "cs2.exe");
+    }
 
     #[test]
     fn sizes_are_decimal_megabytes_below_a_gigabyte_and_tenths_of_one_above() {

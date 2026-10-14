@@ -47,4 +47,4 @@ Run as administrator for the highest GPU priority. To check for yourself, compar
 
 ## License
 
-[BSD 2-Clause](LICENSE). [NOTICE](NOTICE) credits the NVIDIA SDK headers the FFI code follows.
+[BSD 2-Clause](LICENSE).
