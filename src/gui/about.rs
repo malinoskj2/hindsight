@@ -1,0 +1,348 @@
+//! The About tab: what hindsight is, the build and the system it runs on for a bug report,
+//! and where to go next.
+
+use super::{
+    layout::{
+        self, BUTTON_HEIGHT, BUTTON_WIDTH, Frame, INNER_WIDTH, INNER_X, LINE, Painted, TintedLabel,
+        VALUE_WIDTH, VALUE_X, button, label, saturating_i32, skin_button,
+    },
+    pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
+    text,
+    theme::{Skin, Surface, Tone},
+};
+use crate::{
+    config::Theme,
+    gpu, log, storage,
+    sys::{icon, release, shell},
+};
+use std::{cell::RefCell, iter, path::Path, rc::Rc};
+use winsafe::{self as w, co, guard::DestroyIconGuard, gui, prelude::*};
+
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+const COMMIT: &str = env!("HINDSIGHT_COMMIT");
+const BUILD_DATE: &str = env!("HINDSIGHT_BUILD_DATE");
+const RUSTC: &str = env!("HINDSIGHT_RUSTC");
+
+const LOGO: i32 = 48;
+const LOGO_GAP: i32 = 12;
+const TEXT_X: i32 = INNER_X + LOGO + LOGO_GAP;
+const TEXT_WIDTH: i32 = INNER_WIDTH - LOGO - LOGO_GAP;
+const ROW_PITCH: i32 = 20;
+const BUTTON_GAP: i32 = 6;
+
+mod rows {
+    use super::{BUTTON_HEIGHT, FIRST_FRAME, FIRST_ROW, LINE, ROW_PITCH};
+
+    pub(super) const ABOUT_FRAME: i32 = FIRST_FRAME;
+    pub(super) const NAME: i32 = ABOUT_FRAME + FIRST_ROW;
+    pub(super) const DESCRIPTION: i32 = NAME + LINE + 2;
+    pub(super) const ABOUT_HEIGHT: i32 = DESCRIPTION + 2 * LINE + 4 - ABOUT_FRAME;
+    pub(super) const DETAILS_FRAME: i32 = ABOUT_FRAME + ABOUT_HEIGHT + 6;
+    pub(super) const BUILD: i32 = DETAILS_FRAME + FIRST_ROW;
+    pub(super) const COMPILER: i32 = BUILD + ROW_PITCH;
+    pub(super) const WINDOWS: i32 = COMPILER + ROW_PITCH;
+    pub(super) const GPU: i32 = WINDOWS + ROW_PITCH;
+    pub(super) const DETAILS_HEIGHT: i32 = GPU + LINE + 2 - DETAILS_FRAME;
+    pub(super) const LINKS_FRAME: i32 = DETAILS_FRAME + DETAILS_HEIGHT + 6;
+    pub(super) const LINKS: i32 = LINKS_FRAME + FIRST_ROW - 2;
+    pub(super) const LINKS_HEIGHT: i32 = LINKS + BUTTON_HEIGHT + 8 - LINKS_FRAME;
+}
+
+const DETAIL_ROWS: [i32; 4] = [rows::BUILD, rows::COMPILER, rows::WINDOWS, rows::GPU];
+
+/// What the Links group's buttons ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Link {
+    Website,
+    Report,
+    LogFolder,
+}
+
+#[derive(Clone)]
+pub(super) struct AboutPage(Rc<Inner>);
+
+struct Inner {
+    page: gui::TabPage,
+    frames: Vec<Frame>,
+    description: TintedLabel,
+    buttons: Vec<(gui::Button, Link)>,
+}
+
+impl Painted for Inner {
+    fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
+        iter::once(&self.description)
+    }
+}
+
+impl Pane for AboutPage {
+    fn title(&self) -> &'static str {
+        text::TAB_ABOUT
+    }
+
+    fn page(&self) -> &gui::TabPage {
+        &self.0.page
+    }
+
+    fn on_create(&self) {
+        layout::fit_titles(&self.0.frames);
+    }
+
+    fn frames(&self) -> &[Frame] {
+        &self.0.frames
+    }
+}
+
+impl AboutPage {
+    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
+        let page = layout::page(parent);
+        let frames = vec![
+            Frame::new(
+                &page,
+                text::GROUP_ABOUT,
+                rows::ABOUT_FRAME,
+                rows::ABOUT_HEIGHT,
+            ),
+            Frame::new(
+                &page,
+                text::GROUP_DETAILS,
+                rows::DETAILS_FRAME,
+                rows::DETAILS_HEIGHT,
+            ),
+            Frame::new(
+                &page,
+                text::GROUP_LINKS,
+                rows::LINKS_FRAME,
+                rows::LINKS_HEIGHT,
+            ),
+        ];
+        logo(&page, skin);
+        let _ = label(
+            &page,
+            &text::name_and_version(),
+            TEXT_X,
+            rows::NAME,
+            TEXT_WIDTH,
+            1,
+        );
+        let description = TintedLabel::new(
+            label(
+                &page,
+                text::DESCRIPTION,
+                TEXT_X,
+                rows::DESCRIPTION,
+                TEXT_WIDTH,
+                2,
+            ),
+            Tone::Muted,
+        );
+        for ((caption, value), y) in details().into_iter().zip(DETAIL_ROWS) {
+            let _ = label(&page, caption, INNER_X, y, VALUE_X - INNER_X, 1);
+            let _ = label(&page, &value, VALUE_X, y, VALUE_WIDTH, 1);
+        }
+        let buttons = buttons(&page, skin);
+        let inner = Rc::new(Inner {
+            page,
+            frames,
+            description,
+            buttons,
+        });
+        pane::paint(&inner.page, skin, Rc::clone(&inner));
+        let this = Self(inner);
+        this.handle_clicks();
+        this
+    }
+
+    fn handle_clicks(&self) {
+        for (button, link) in &self.0.buttons {
+            let link = *link;
+            button.on().bn_clicked(move || {
+                follow(link);
+                Ok(())
+            });
+        }
+    }
+}
+
+/// The Details group's captions and values, read once: none of them changes while running.
+fn details() -> [(&'static str, String); 4] {
+    [
+        (text::BUILD, text::build(COMMIT, BUILD_DATE)),
+        (text::COMPILER, text::compiler(RUSTC)),
+        (text::WINDOWS, text::windows_release(&release::current())),
+        (text::GPU, text::gpu(&gpu::adapter())),
+    ]
+}
+
+fn buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, Link)> {
+    [
+        (text::LINK_WEBSITE, Link::Website),
+        (text::LINK_REPORT, Link::Report),
+        (text::LINK_LOG_FOLDER, Link::LogFolder),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (caption, link))| {
+        let x = INNER_X + saturating_i32(index) * (BUTTON_WIDTH + BUTTON_GAP);
+        let button = button(page, caption, x, rows::LINKS, BUTTON_WIDTH);
+        skin_button(&button, skin);
+        (button, link)
+    })
+    .collect()
+}
+
+fn follow(link: Link) {
+    match link {
+        Link::Website => open_link(REPOSITORY),
+        Link::Report => open_link(&issues_url(REPOSITORY)),
+        Link::LogFolder => open_log_folder(),
+    }
+}
+
+/// The theme's own owl, painted over the panel the label sits on.
+fn logo(page: &gui::TabPage, skin: &Skin) {
+    let logo = gui::Label::new(
+        page,
+        gui::LabelOpts {
+            text: "",
+            position: gui::dpi(INNER_X, rows::NAME),
+            size: gui::dpi(LOGO, LOGO),
+            ..Default::default()
+        },
+    );
+    let skin = skin.clone();
+    let owner = logo.clone();
+    let loaded: RefCell<Option<(Theme, DestroyIconGuard)>> = RefCell::default();
+    logo.on_subclass().wm_paint(move || {
+        let hwnd = owner.hwnd();
+        let Ok(paint) = hwnd.BeginPaint() else {
+            return Ok(());
+        };
+        let Ok(client) = hwnd.GetClientRect() else {
+            return Ok(());
+        };
+        let _ = paint.FillRect(client, &skin.label_brush(Surface::Page));
+        let theme = skin.theme();
+        let mut loaded = loaded.borrow_mut();
+        if loaded.as_ref().is_none_or(|(shown, _)| *shown != theme) {
+            *loaded = load_icon(theme, client.right).map(|icon| (theme, icon));
+        }
+        if let Some((_, icon)) = &*loaded {
+            draw_icon(&paint, icon, client.right);
+        }
+        Ok(())
+    });
+}
+
+/// Not shared: a shared icon keeps the first size it was loaded at.
+fn load_icon(theme: Theme, size: i32) -> Option<DestroyIconGuard> {
+    w::HINSTANCE::GetModuleHandle(None)
+        .ok()?
+        .LoadImageIcon(
+            w::IdOicStr::Id(icon::resource(theme)),
+            w::SIZE::with(size, size),
+            co::LR::DEFAULTCOLOR,
+        )
+        .ok()
+}
+
+/// `winsafe` has no `DrawIconEx`, which blends the icon's alpha over what is there.
+#[expect(unsafe_code, reason = "calls DrawIconEx")]
+fn draw_icon(hdc: &w::HDC, icon: &w::HICON, size: i32) {
+    use windows::Win32::{
+        Graphics::Gdi::HDC,
+        UI::WindowsAndMessaging::{DI_NORMAL, DrawIconEx, HICON},
+    };
+
+    // SAFETY: the DC is the live paint target and the icon is alive for the call.
+    let _ = unsafe {
+        DrawIconEx(
+            HDC(hdc.ptr()),
+            0,
+            0,
+            HICON(icon.ptr()),
+            size,
+            size,
+            0,
+            None,
+            DI_NORMAL,
+        )
+    };
+}
+
+fn open_link(url: &str) {
+    if let Err(error) = shell::open(Path::new(url)) {
+        log::warning(text::link_open_failed(url, error));
+    }
+}
+
+/// Selects the log file in Explorer, or opens its folder before the file is written.
+fn open_log_folder() {
+    let folder = storage::state_directory();
+    let file = folder.join(log::FILE_NAME);
+    let result = if file.is_file() {
+        shell::reveal(&file).map_err(|error| error.to_string())
+    } else {
+        shell::open(&folder).map_err(|error| error.to_string())
+    };
+    if let Err(error) = result {
+        log::warning(text::link_open_failed(folder.display(), error));
+    }
+}
+
+/// Without a trailing slash or `.git`, either of which `Cargo.toml` may give.
+fn issues_url(repository: &str) -> String {
+    let root = repository.trim_end_matches('/');
+    format!("{}/issues", root.strip_suffix(".git").unwrap_or(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rows_fit_the_page_without_growing_the_window() {
+        assert_eq!(
+            [rows::NAME, rows::DESCRIPTION, rows::ABOUT_HEIGHT],
+            [26, 46, 80]
+        );
+        assert_eq!(
+            [
+                rows::DETAILS_FRAME,
+                rows::BUILD,
+                rows::GPU,
+                rows::DETAILS_HEIGHT
+            ],
+            [92, 112, 172, 100]
+        );
+        assert_eq!(
+            [rows::LINKS_FRAME, rows::LINKS, rows::LINKS_HEIGHT],
+            [198, 216, 50]
+        );
+        const {
+            assert!(rows::LINKS_FRAME + rows::LINKS_HEIGHT <= layout::FILL_Y + layout::FILL_HEIGHT);
+            assert!(3 * BUTTON_WIDTH + 2 * BUTTON_GAP <= INNER_WIDTH);
+        }
+    }
+
+    #[test]
+    fn the_issues_hang_off_the_repository_however_it_is_written() {
+        let repository = "https://github.com/malinoskj2/hindsight";
+        let issues = format!("{repository}/issues");
+        assert_eq!(issues_url(repository), issues);
+        assert_eq!(issues_url(&format!("{repository}/")), issues);
+        assert_eq!(issues_url(&format!("{repository}.git")), issues);
+        assert_eq!(issues_url(REPOSITORY), format!("{REPOSITORY}/issues"));
+    }
+
+    #[test]
+    fn the_build_facts_fall_back_to_unknown_rather_than_nothing() {
+        for fact in [COMMIT, BUILD_DATE, RUSTC] {
+            assert_ne!(fact, "");
+        }
+        assert!(BUILD_DATE == "unknown" || BUILD_DATE.len() == "2026-10-14".len());
+    }
+}

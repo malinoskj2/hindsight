@@ -1,9 +1,12 @@
 //! Every string the window shows, log lines included.
 
 use crate::{
+    APP_NAME,
     config::{Codec, Memory},
+    gpu::{Adapter, ProbeError},
     replay::Stream,
     service::{State, Status},
+    sys::release::Release,
 };
 use std::{fmt::Display, path::Path};
 
@@ -22,6 +25,7 @@ pub(super) const TAB_STATUS: &str = "Status";
 pub(super) const TAB_CLIPS: &str = "Clips";
 pub(super) const TAB_SETTINGS: &str = "Settings";
 pub(super) const TAB_LOGS: &str = "Logs";
+pub(super) const TAB_ABOUT: &str = "About";
 
 pub(super) const GROUP_RECORDING: &str = "Recording";
 pub(super) const GROUP_STATS: &str = "Stats";
@@ -67,6 +71,18 @@ pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the frame rate, buffer and bitrate.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
+
+pub(super) const GROUP_ABOUT: &str = "hindsight";
+pub(super) const GROUP_DETAILS: &str = "Details";
+pub(super) const GROUP_LINKS: &str = "Links";
+pub(super) const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
+pub(super) const BUILD: &str = "Build";
+pub(super) const COMPILER: &str = "Compiler";
+pub(super) const WINDOWS: &str = "Windows";
+pub(super) const GPU: &str = "GPU";
+pub(super) const LINK_WEBSITE: &str = "Website";
+pub(super) const LINK_REPORT: &str = "Report a problem";
+pub(super) const LINK_LOG_FOLDER: &str = "Open log folder";
 
 pub(super) const STARTUP_ENABLED: &str = "Start with Windows · enabled";
 pub(super) const STARTUP_DISABLED: &str = "Start with Windows · disabled";
@@ -284,6 +300,66 @@ pub(super) fn codec_unsupported(codec: &str) -> String {
     )
 }
 
+pub(super) fn name_and_version() -> String {
+    format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// "1a2b3c4 · 2026-10-14": the commit built and the day it was built.
+pub(super) fn build(commit: &str, date: &str) -> String {
+    format!("{commit} · {date}")
+}
+
+/// "rustc 1.98.0" out of `rustc --version`, which goes on to the compiler's own commit.
+pub(super) fn compiler(version: &str) -> String {
+    let mut words = version.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(name), Some(number)) => format!("{name} {number}"),
+        _ => version.to_owned(),
+    }
+}
+
+/// "Windows 11 25H2 · build 26200.6899"; Windows 11 is told apart only by its build number.
+pub(super) fn windows_release(release: &Release) -> String {
+    const FIRST_WINDOWS_11_BUILD: u32 = 22_000;
+    let generation = match release.build {
+        Some(build) if build >= FIRST_WINDOWS_11_BUILD => "Windows 11",
+        Some(_) => "Windows 10",
+        None => "Windows",
+    };
+    let mut line = generation.to_owned();
+    if let Some(version) = &release.display_version {
+        line = format!("{line} {version}");
+    }
+    match (release.build, release.revision) {
+        (Some(build), Some(revision)) => format!("{line} · build {build}.{revision}"),
+        (Some(build), None) => format!("{line} · build {build}"),
+        _ => line,
+    }
+}
+
+/// "NVIDIA GeForce RTX 4080 · driver 581.57", or why there is no such GPU.
+pub(super) fn gpu(adapter: &Result<Adapter, ProbeError>) -> String {
+    match adapter {
+        Ok(Adapter {
+            name,
+            driver: Some(driver),
+        }) => format!("{name} · driver {driver}"),
+        Ok(Adapter { name, driver: None }) => name.clone(),
+        Err(error) => capitalised(&error.to_string()),
+    }
+}
+
+pub(super) fn link_open_failed(target: impl Display, error: impl Display) -> String {
+    format!("Could not open {target} · {error}")
+}
+
+fn capitalised(message: &str) -> String {
+    let mut characters = message.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(characters).collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +452,63 @@ mod tests {
         assert_eq!(
             buffer_estimate(1_260_000_000, Memory::Disk, 100),
             "Buffer on disk at this bitrate: about 1.3 GB, writing about 45.0 GB an hour"
+        );
+    }
+
+    #[test]
+    fn the_compiler_line_keeps_the_name_and_number_and_passes_anything_else_through() {
+        assert_eq!(
+            compiler("rustc 1.98.0 (6b00bc388 2026-09-15)"),
+            "rustc 1.98.0"
+        );
+        assert_eq!(compiler("unknown"), "unknown");
+        assert_eq!(
+            build("1a2b3c4-dirty", "2026-10-14"),
+            "1a2b3c4-dirty · 2026-10-14"
+        );
+    }
+
+    #[test]
+    fn the_windows_line_tells_11_from_10_by_build_and_says_what_it_knows() {
+        let release = Release {
+            display_version: Some("25H2".to_owned()),
+            build: Some(26200),
+            revision: Some(6899),
+        };
+        assert_eq!(
+            windows_release(&release),
+            "Windows 11 25H2 · build 26200.6899"
+        );
+        let older = Release {
+            display_version: None,
+            build: Some(17763),
+            revision: None,
+        };
+        assert_eq!(windows_release(&older), "Windows 10 · build 17763");
+        assert_eq!(windows_release(&Release::default()), "Windows");
+    }
+
+    #[test]
+    fn the_gpu_line_adds_the_driver_when_known() {
+        let mut adapter = Adapter {
+            name: "NVIDIA GeForce RTX 4080".to_owned(),
+            driver: Some("581.57".to_owned()),
+        };
+        assert_eq!(
+            gpu(&Ok(adapter.clone())),
+            "NVIDIA GeForce RTX 4080 · driver 581.57"
+        );
+        adapter.driver = None;
+        assert_eq!(gpu(&Ok(adapter)), "NVIDIA GeForce RTX 4080");
+        assert_eq!(capitalised("no NVIDIA GPU"), "No NVIDIA GPU");
+        assert_eq!(capitalised(""), "");
+    }
+
+    #[test]
+    fn the_name_line_carries_the_package_version() {
+        assert_eq!(
+            name_and_version(),
+            format!("hindsight {}", env!("CARGO_PKG_VERSION"))
         );
     }
 

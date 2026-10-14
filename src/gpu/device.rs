@@ -165,6 +165,24 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     Err(DeviceError::NoNvidiaAdapter)
 }
 
+/// The NVIDIA adapter's name and its driver's version, found without creating a device; the
+/// version is `None` when the driver does not report one.
+#[expect(unsafe_code, reason = "calls IDXGIAdapter::CheckInterfaceSupport")]
+pub(super) fn describe_nvidia_adapter() -> Result<(String, Option<String>), DeviceError> {
+    let (adapter, name) = nvidia_adapter()?;
+    // SAFETY: a plain query on a live adapter; the GUID outlives the call.
+    let version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) };
+    Ok((name, version.ok().map(nvidia_driver_version)))
+}
+
+/// The user-mode driver version `32.0.15.8157` as NVIDIA publishes it, `581.57`: the last
+/// digit of the third part and the whole fourth.
+fn nvidia_driver_version(user_mode: i64) -> String {
+    let part = |shift: u32| (user_mode >> shift) & 0xFFFF;
+    let number = (part(16) % 10) * 10_000 + part(0);
+    format!("{}.{:02}", number / 100, number % 100)
+}
+
 fn is_nvidia_hardware(description: &DXGI_ADAPTER_DESC1) -> bool {
     let software = description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
     description.VendorId == NVIDIA_VENDOR_ID && !software
@@ -210,4 +228,26 @@ fn protect_multithreaded(context: &ID3D11DeviceContext) -> windows::core::Result
     // SAFETY: switches on the device's internal locking; returns the previous setting.
     let _ = unsafe { multithread.SetMultithreadProtected(true) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_mode(parts: [i64; 4]) -> i64 {
+        parts[0] << 48 | parts[1] << 32 | parts[2] << 16 | parts[3]
+    }
+
+    #[test]
+    fn the_driver_version_reads_as_nvidia_publishes_it() {
+        assert_eq!(
+            nvidia_driver_version(user_mode([32, 0, 15, 8157])),
+            "581.57"
+        );
+        assert_eq!(
+            nvidia_driver_version(user_mode([31, 0, 15, 5222])),
+            "552.22"
+        );
+        assert_eq!(nvidia_driver_version(user_mode([32, 0, 16, 105])), "601.05");
+    }
 }

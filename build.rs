@@ -1,10 +1,12 @@
-//! Embeds the Windows icon and manifest, and compiles the HDR tone-map shader with the Windows
-//! SDK's `fxc.exe`, which sits beside the `rc.exe` the resources already need.
+//! Embeds the Windows icon and manifest, compiles the HDR tone-map shader with the Windows
+//! SDK's `fxc.exe`, which sits beside the `rc.exe` the resources already need, and records the
+//! commit, date and compiler of the build for the About tab.
 
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[path = "src/sys/icon/table.rs"]
@@ -20,6 +22,8 @@ const SHADER_STAGES: [(&str, &str, &str); 2] = [
     ("fullscreen", "vs_5_0", "tonemap.vs.cso"),
     ("tonemap", "ps_5_0", "tonemap.ps.cso"),
 ];
+/// What a build fact reads when it cannot be found out.
+const UNKNOWN: &str = "unknown";
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -39,6 +43,7 @@ fn main() {
     for table::IconEntry { ico, .. } in table::ICONS {
         println!("cargo:rerun-if-changed=assets/{ico}");
     }
+    record_build_info();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -57,6 +62,97 @@ fn main() {
     }
     resource.compile().expect("embed the Windows resources");
     compile_shaders();
+}
+
+/// `HINDSIGHT_COMMIT`, `HINDSIGHT_BUILD_DATE` and `HINDSIGHT_RUSTC`, each "unknown" when it
+/// cannot be found out, so a build without git or outside a checkout still succeeds.
+fn record_build_info() {
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // HEAD moves on a checkout, its branch's ref on a commit, the index on staging; a worktree
+    // keeps them away from `.git`, so git names the files.
+    for name in ["HEAD", "index", "packed-refs"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = git(&["rev-parse", "--git-path", &branch])
+    {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    let commit = git(&["rev-parse", "--short", "HEAD"]).map_or_else(
+        || UNKNOWN.to_owned(),
+        |hash| {
+            // Without the optional lock git leaves the index alone, which would rerun this.
+            let dirty = git(&[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ])
+            .is_some_and(|changes| !changes.is_empty());
+            if dirty { format!("{hash}-dirty") } else { hash }
+        },
+    );
+    println!("cargo:rustc-env=HINDSIGHT_COMMIT={commit}");
+    println!("cargo:rustc-env=HINDSIGHT_BUILD_DATE={}", build_date());
+    let rustc = env::var_os("RUSTC")
+        .and_then(|rustc| output(Command::new(rustc).arg("--version")))
+        .unwrap_or_else(|| UNKNOWN.to_owned());
+    println!("cargo:rustc-env=HINDSIGHT_RUSTC={rustc}");
+}
+
+/// The trimmed output of a git command run in the package, or `None` when git is missing or
+/// fails, as it does outside a checkout.
+fn git(args: &[&str]) -> Option<String> {
+    output(Command::new("git").args(args))
+}
+
+fn output(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The UTC date as `2026-10-14`: of `SOURCE_DATE_EPOCH` when set, for a reproducible build.
+fn build_date() -> String {
+    let seconds = env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|epoch| epoch.trim().parse::<u64>().ok())
+        .or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|since| since.as_secs())
+        });
+    seconds.map_or_else(
+        || UNKNOWN.to_owned(),
+        |seconds| {
+            let (year, month, day) = civil_date(seconds / 86_400);
+            format!("{year:04}-{month:02}-{day:02}")
+        },
+    )
+}
+
+/// Days since 1970-01-01 as a Gregorian year, month and day (Howard Hinnant's `civil_from_days`).
+fn civil_date(days: u64) -> (u64, u64, u64) {
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// Strict and fully optimized, as `D3DCompile` did at run time before.

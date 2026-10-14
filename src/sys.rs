@@ -17,6 +17,8 @@ pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod instance;
 #[cfg(windows)]
+pub(crate) mod release;
+#[cfg(windows)]
 #[expect(unsafe_code, reason = "calls the shell and GDI")]
 pub(crate) mod shell;
 pub(crate) mod sound;

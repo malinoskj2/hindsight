@@ -1,6 +1,7 @@
 //! The main window: a plain Win32 dialog built from the system's common controls.
 
 use self::{
+    about::AboutPage,
     clips::ClipsPage,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
@@ -30,6 +31,7 @@ use std::{
 };
 use winsafe::{self as w, co, gui, prelude::*};
 
+mod about;
 mod art;
 mod clips;
 mod layout;
@@ -46,6 +48,8 @@ const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
+/// The tabs: Status, Clips, Settings, Logs and About.
+const PANES: usize = 5;
 /// Destroys the main window from a timer callback, outside every winsafe handler.
 const DESTROY_TIMER: usize = 2;
 
@@ -67,6 +71,7 @@ struct Inner {
     clips: ClipsPage,
     settings: SettingsPage,
     logs: LogsPage,
+    about: AboutPage,
     skin: Skin,
     worker: Worker,
     config: RefCell<Config>,
@@ -100,7 +105,8 @@ impl Main {
         let codecs = offered_codecs();
         let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&main_window, &skin);
-        let panes: [&dyn Pane; 4] = [&status, &clips, &settings, &logs];
+        let about = AboutPage::new(&main_window, &skin);
+        let panes: [&dyn Pane; PANES] = [&status, &clips, &settings, &logs, &about];
         let tab_pages = panes.map(|pane| (pane.title(), pane.page().clone()));
         let tab = gui::Tab::new(
             &main_window,
@@ -118,6 +124,7 @@ impl Main {
             clips,
             settings,
             logs,
+            about,
             skin,
             worker,
             config: RefCell::new(config),
@@ -526,12 +533,13 @@ impl Main {
     }
 
     /// The tabs' pages, in tab order.
-    fn panes(&self) -> [&dyn Pane; 4] {
+    fn panes(&self) -> [&dyn Pane; PANES] {
         [
             &self.0.status,
             &self.0.clips,
             &self.0.settings,
             &self.0.logs,
+            &self.0.about,
         ]
     }
 
