@@ -196,6 +196,9 @@ fn window(window: isize) -> Target {
         window: WindowHandle::new(window).unwrap(),
         monitor: MonitorHandle::new(7).unwrap(),
         name: format!("game{window}.exe"),
+        title: String::new(),
+        size: (64, 64),
+        rotated: false,
     }
 }
 
@@ -385,6 +388,66 @@ fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
     assert_eq!(FAILED_SESSIONS.load(Ordering::Relaxed), 1);
     clock.advance(RETRY_INTERVAL);
     wait_for(&worker, |status| status.state == State::Waiting);
+}
+
+static PICKY_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Refuses window 3, as NvFBC refuses a rotated monitor, and records any other target.
+fn refusing_window_3(
+    config: &Config,
+    target: &Target,
+    live: &Live,
+    stop: &AtomicBool,
+) -> Result<Ended> {
+    PICKY_SESSIONS.fetch_add(1, Ordering::Relaxed);
+    match target {
+        Target::Window { window, .. } if window.get() == 3 => {
+            Ok(Ended::Unsupported("the monitor is rotated".to_owned()))
+        }
+        _ => steady(config, target, live, stop),
+    }
+}
+
+#[test]
+fn full_screen_mode_passes_over_an_app_it_cannot_record_and_waits_for_the_next() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Config {
+        mode: Mode::Fullscreen,
+        ..config_in(directory.path())
+    };
+    let worker = spawn(refusing_window_3, RETRY_INTERVAL, None, config);
+    wait_for(&worker, |status| status.state == State::Waiting);
+
+    worker.target(window(3));
+    let status = wait_for(&worker, |status| status.error.is_some());
+    assert_eq!(status.state, State::Waiting);
+    assert!(status.error.unwrap().contains("game3.exe not recorded"));
+    worker.target(window(3));
+    worker.save();
+    wait_for(&worker, |status| status.nothing_to_save);
+    assert_eq!(PICKY_SESSIONS.load(Ordering::Relaxed), 1);
+
+    worker.target(window(2));
+    let status = wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
+    });
+    assert_eq!(status.source.as_deref(), Some("game2.exe"));
+    assert!(status.error.is_none());
+
+    let rotated = Target::Window {
+        window: WindowHandle::new(4).unwrap(),
+        monitor: MonitorHandle::new(8).unwrap(),
+        name: "video.exe".to_owned(),
+        title: String::new(),
+        size: (1080, 1920),
+        rotated: true,
+    };
+    worker.target(rotated);
+    worker.save();
+    let status = wait_for(&worker, |status| status.last_clip.is_some());
+    assert!(matches!(status.state, State::Recording(_)));
+    assert_eq!(status.source.as_deref(), Some("game2.exe"));
+    assert_eq!(PICKY_SESSIONS.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -628,6 +691,9 @@ fn a_target_is_known_by_its_handles_not_its_name() {
         window: WindowHandle::new(1).unwrap(),
         monitor: MonitorHandle::new(7).unwrap(),
         name: "a full-screen app".to_owned(),
+        title: "renamed".to_owned(),
+        size: (1, 1),
+        rotated: true,
     };
     assert_eq!(renamed, window(1));
     assert_ne!(window(2), window(1));

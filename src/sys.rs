@@ -7,7 +7,10 @@ pub(crate) mod clock;
 #[cfg(windows)]
 pub(crate) mod com;
 #[cfg(windows)]
-#[expect(unsafe_code, reason = "calls SetWinEventHook and UnhookWinEvent")]
+#[expect(
+    unsafe_code,
+    reason = "calls SetWinEventHook, UnhookWinEvent and EnumDisplaySettingsW"
+)]
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
 #[cfg(windows)]

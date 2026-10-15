@@ -7,7 +7,11 @@
 //! Paths show only the file name, since the folder is in the settings. Lines with nothing to
 //! fill in are constants. The others are formatted only when they are written.
 
-use crate::{config::Config, replay::Stream};
+use super::Target;
+use crate::{
+    config::{Backend, Config},
+    replay::Stream,
+};
 use std::{
     fmt::{self, Display},
     path::Path,
@@ -60,8 +64,36 @@ pub(super) fn worker_panicked(message: &str) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Worker panicked · {message} · start hindsight again"))
 }
 
-pub(super) fn target_found(name: &str) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Capturing · {name}"))
+/// Names the window as well as the app, so a false detection can be traced to its window.
+pub(super) fn target_found(target: &Target) -> impl Display {
+    fmt::from_fn(move |f| match target {
+        Target::Window {
+            name,
+            title,
+            size: (width, height),
+            ..
+        } => write!(f, "Capturing · {name} · \"{title}\" · {width}×{height}"),
+        Target::Monitor { name, .. } => write!(f, "Capturing · {name}"),
+    })
+}
+
+pub(super) fn passed_over(name: &str, reason: impl Display) -> impl Display {
+    fmt::from_fn(move |f| {
+        write!(
+            f,
+            "{name} not recorded · {reason} · waiting for the next app"
+        )
+    })
+}
+
+pub(super) fn rotated_monitor(backend: Backend) -> impl Display {
+    fmt::from_fn(move |f| {
+        write!(
+            f,
+            "its monitor is rotated, which {} does not undo; choose Windows Graphics Capture",
+            backend.name()
+        )
+    })
 }
 
 pub(super) fn target_closed(name: &str) -> impl Display {

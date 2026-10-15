@@ -4,22 +4,37 @@
 use super::callback::Slot;
 use crate::service::{MonitorHandle, Target, WindowHandle};
 use std::{path::Path, rc::Rc};
-use windows::Win32::{
-    Foundation::HWND,
-    UI::{
-        Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
-        WindowsAndMessaging::{
-            CHILDID_SELF, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW,
-            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+use windows::{
+    Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{
+            DEVMODEW, DMDO_DEFAULT, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+            HMONITOR, MONITORINFOEXW,
+        },
+        UI::{
+            Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
+            WindowsAndMessaging::{
+                CHILDID_SELF, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW,
+                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+            },
         },
     },
+    core::PCWSTR,
 };
 use winsafe::{self as w, co};
 
 /// Shell windows that fill the monitor: the desktop and its wallpaper hosts.
 const SHELL_CLASSES: [&str; 2] = ["Progman", "WorkerW"];
-/// The shell process, whose windows cover the monitor only for switchers and overlays.
-const SHELL_PROCESS: &str = "explorer.exe";
+/// Processes whose windows cover the monitor only as switchers and overlays, never as games: the
+/// shell, the screenshot overlay, the Start menu, search and the lock screen.
+const SHELL_PROCESSES: [&str; 6] = [
+    "explorer.exe",
+    "ScreenClippingHost.exe",
+    "ShellExperienceHost.exe",
+    "StartMenuExperienceHost.exe",
+    "SearchHost.exe",
+    "LockApp.exe",
+];
 
 thread_local! {
     static HANDLER: Slot<dyn Fn()> = const { Slot::new() };
@@ -97,19 +112,22 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
     }
 
     let monitor = window.MonitorFromWindow(co::MONITOR::DEFAULTTONEAREST);
-    if !covers(&window, &monitor)? {
-        return None;
-    }
+    let size = covered_size(&window, &monitor)?;
 
     let name = process_name(process);
-    // The shell's own full-screen surfaces, such as Task View, are never a game.
-    if name.eq_ignore_ascii_case(SHELL_PROCESS) {
+    if SHELL_PROCESSES
+        .iter()
+        .any(|shell| name.eq_ignore_ascii_case(shell))
+    {
         return None;
     }
     Some(Target::Window {
         window: WindowHandle::new(window.ptr().addr().cast_signed())?,
         monitor: MonitorHandle::new(monitor.ptr().addr().cast_signed())?,
         name,
+        title: window.GetWindowText().unwrap_or_default(),
+        size,
+        rotated: is_rotated(&monitor),
     })
 }
 
@@ -133,16 +151,46 @@ fn is_cloaked(window: &w::HWND) -> bool {
     )
 }
 
-fn covers(window: &w::HWND, monitor: &w::HMONITOR) -> Option<bool> {
+/// The client size of a window whose client area covers `monitor`, or `None` when it does not.
+fn covered_size(window: &w::HWND, monitor: &w::HMONITOR) -> Option<(u32, u32)> {
     let bounds = monitor.GetMonitorInfo().ok()?.rcMonitor;
     let client = window.GetClientRect().ok()?;
     let origin = window.ClientToScreen(w::POINT::default()).ok()?;
-    Some(
-        origin.x <= bounds.left
-            && origin.y <= bounds.top
-            && origin.x + client.right >= bounds.right
-            && origin.y + client.bottom >= bounds.bottom,
-    )
+    let covers = origin.x <= bounds.left
+        && origin.y <= bounds.top
+        && origin.x + client.right >= bounds.right
+        && origin.y + client.bottom >= bounds.bottom;
+    if !covers {
+        return None;
+    }
+    Some((
+        client.right.try_into().ok()?,
+        client.bottom.try_into().ok()?,
+    ))
+}
+
+/// Whether the monitor's desktop is turned from the panel's own orientation, as on a monitor
+/// stood on its side. `false` when the orientation cannot be read.
+fn is_rotated(monitor: &w::HMONITOR) -> bool {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize =
+        u32::try_from(size_of::<MONITORINFOEXW>()).expect("the monitor info is a few bytes");
+    let mut mode = DEVMODEW {
+        dmSize: u16::try_from(size_of::<DEVMODEW>()).expect("a display mode is a few bytes"),
+        ..Default::default()
+    };
+    // SAFETY: `info` is a MONITORINFOEXW and its size field says so.
+    if !unsafe { GetMonitorInfoW(HMONITOR(monitor.ptr()), (&raw mut info).cast()) }.as_bool() {
+        return false;
+    }
+    let device = PCWSTR(info.szDevice.as_ptr());
+    // SAFETY: the device name is null-terminated; `mode` is a DEVMODEW and its size field says
+    // so.
+    if !unsafe { EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &raw mut mode) }.as_bool() {
+        return false;
+    }
+    // SAFETY: the display branch of the union is the one EnumDisplaySettingsW fills.
+    unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation != DMDO_DEFAULT }
 }
 
 fn process_name(process: u32) -> String {

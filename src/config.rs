@@ -91,6 +91,12 @@ impl Backend {
             Self::NvfbcCuda => "NVIDIA NvFBC to CUDA",
         }
     }
+
+    /// Whether a rotated monitor is captured upright. NvFBC and Desktop Duplication deliver the
+    /// panel's own orientation, so they refuse a rotated monitor.
+    pub(crate) fn captures_rotated(self) -> bool {
+        self == Self::Wgc
+    }
 }
 
 /// AV1 needs an RTX 40 series GPU or newer.

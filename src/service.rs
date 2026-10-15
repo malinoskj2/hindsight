@@ -76,6 +76,11 @@ pub(crate) enum Target {
         window: WindowHandle,
         monitor: MonitorHandle,
         name: String,
+        title: String,
+        /// The client size, which covers the monitor.
+        size: (u32, u32),
+        /// The monitor is turned from the panel's own orientation.
+        rotated: bool,
     },
 }
 
@@ -502,6 +507,9 @@ struct Machine {
     encode_rate: Option<f64>,
     session: Option<Session>,
     target: Option<Target>,
+    /// The last full-screen app that could not be recorded. It is not offered again until the
+    /// settings change or capture restarts.
+    passed_over: Option<Target>,
     live: Option<Arc<Live>>,
     paused: bool,
     retry_at: Option<Instant>,
@@ -531,6 +539,7 @@ impl Machine {
             encode_rate: None,
             session: None,
             target: None,
+            passed_over: None,
             live: None,
             paused: false,
             retry_at: None,
@@ -620,6 +629,7 @@ impl Machine {
     fn restart(&mut self) {
         log::info(text::RESTARTING);
         self.paused = false;
+        self.passed_over = None;
         self.stop_session();
         self.restart_session();
     }
@@ -633,12 +643,37 @@ impl Machine {
             return;
         }
         let same = self.session.is_some() && self.target.as_ref() == Some(&target);
-        if same {
+        // A window whose session fell back to its monitor is passed over as that monitor.
+        let passed_over = self
+            .passed_over
+            .as_ref()
+            .is_some_and(|passed| *passed == target || *passed == target.monitor());
+        if same || passed_over {
+            return;
+        }
+        if matches!(target, Target::Window { rotated: true, .. })
+            && !self.config.backend.captures_rotated()
+        {
+            let reason = text::rotated_monitor(self.config.backend);
+            self.pass_over(target, reason);
             return;
         }
         self.stop_session();
-        log::info(text::target_found(target.name()));
+        log::info(text::target_found(&target));
         self.start_session(target);
+    }
+
+    /// Leaves a full-screen app unrecorded and waits for the next one. A session already
+    /// recording another app carries on.
+    fn pass_over(&mut self, target: Target, reason: impl Display) {
+        let message = text::passed_over(target.name(), reason);
+        if self.session.is_some() {
+            log::warning(message);
+        } else {
+            self.report_error(message);
+            self.phase = Phase::Waiting;
+        }
+        self.passed_over = Some(target);
     }
 
     fn save(&mut self) {
@@ -689,6 +724,7 @@ impl Machine {
 
     fn begin(&mut self) {
         self.retry_at = None;
+        self.passed_over = None;
         match self.config.mode {
             Mode::Desktop => self.start_session(Target::primary_monitor()),
             Mode::Fullscreen => {
@@ -840,6 +876,13 @@ impl Machine {
                 self.phase = Phase::Waiting;
             }
             Ok(Ok(Ended::NoFrames)) => self.fall_back_to_monitor(),
+            // In full-screen mode the next app may be recordable, such as one on another monitor.
+            Ok(Ok(Ended::Unsupported(reason))) if self.config.mode == Mode::Fullscreen => {
+                match self.target.clone() {
+                    Some(target) => self.pass_over(target, reason),
+                    None => self.begin(),
+                }
+            }
             Ok(Ok(Ended::Unsupported(reason))) => {
                 self.report_error(text::session_failed(reason));
                 self.phase = Phase::Unsupported;
