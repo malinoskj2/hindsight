@@ -1,4 +1,4 @@
-name: Check
+name: CI
 
 on: [push, pull_request]
 
@@ -9,7 +9,7 @@ env:
   CARGO_BUILD_WARNINGS: deny
 
 jobs:
-  rust:
+  test:
     strategy:
       matrix:
         os: [ubuntu-24.04, windows-latest]
@@ -36,8 +36,8 @@ jobs:
           toolchain: 1.98.0
       - run: cargo test --locked
 
-  windows-package:
-    needs: [rust, msrv]
+  package:
+    needs: [test, msrv]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,7 +73,7 @@ jobs:
           retention-days: 90
 
   attest:
-    needs: windows-package
+    needs: package
     # GitHub stores build attestations for public repositories only (or organisation plans).
     if: github.event_name == 'push' && !github.event.repository.private
     runs-on: ubuntu-24.04

@@ -1,10 +1,10 @@
-name: Draft release from build
+name: Release
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: Successful Check push run ID containing the tested build
+        description: Successful CI push run ID containing the tested build
         required: true
         type: string
       tag:
@@ -44,7 +44,7 @@ jobs:
           gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID" > run.json
           jq -e --arg repo "$GH_REPO" '
             .event == "push" and .status == "completed" and .conclusion == "success"
-            and .path == ".github/workflows/check.yml"
+            and .path == ".github/workflows/ci.yml"
             and .head_repository.full_name == $repo
           ' run.json > /dev/null
           build_sha=$(jq -r '.head_sha' run.json)
@@ -63,7 +63,7 @@ jobs:
           gh run download "$BUILD_RUN_ID" --name hindsight-windows-x64 --dir release
           for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt; do
             gh attestation verify "release/$asset" --repo "$GH_REPO" \
-              --signer-workflow "$GH_REPO/.github/workflows/check.yml" \
+              --signer-workflow "$GH_REPO/.github/workflows/ci.yml" \
               --source-digest "$build_sha" --deny-self-hosted-runners
           done
 
@@ -75,7 +75,7 @@ jobs:
             echo
             echo 'Verify the installer with GitHub CLI:'
             echo '```bash'
-            printf 'gh attestation verify hindsight-setup-x64.exe --repo %s --signer-workflow %s/.github/workflows/check.yml --source-digest %s\n' "$GH_REPO" "$GH_REPO" "$build_sha"
+            printf 'gh attestation verify hindsight-setup-x64.exe --repo %s --signer-workflow %s/.github/workflows/ci.yml --source-digest %s\n' "$GH_REPO" "$GH_REPO" "$build_sha"
             echo '```'
           } > release-notes.md
 
