@@ -160,7 +160,7 @@ fn paint_tab(hdc: &w::HDC, palette: &Palette, gdi: &Gdi, face: &TabFace) {
     draw_centred(hdc, text, *rect);
 }
 
-/// Fill, edge and text colour.
+/// The fill, edge and text colour of a button in `state`.
 pub(super) fn button_colours(palette: &Palette, state: co::CDIS) -> (Fill, Edge, u32) {
     if state.has(co::CDIS::DISABLED) {
         return (Fill::SecondaryButton, Edge::Border, palette.muted);

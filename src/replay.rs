@@ -41,14 +41,14 @@ pub(crate) use store::{
 pub(crate) use store::{Store, StoreError};
 
 const PARTIAL_EXTENSION: &str = "partial";
-/// Clips saved within one second before a save gives up looking for a free name.
+/// The number of clips saved within one second before a save gives up looking for a free name.
 const NAME_ATTEMPTS: u32 = 1000;
 const WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 /// One encoded frame: an H.264 or HEVC access unit in Annex B form, or an AV1 temporal unit.
 #[derive(Debug)]
 pub(crate) struct Packet {
-    /// Tick of the session's frame clock; rising, with gaps for skipped ticks.
+    /// The tick of the session's frame clock. Indices rise, with gaps for skipped ticks.
     pub(crate) index: u64,
     pub(crate) keyframe: bool,
     pub(crate) data: Box<[u8]>,
@@ -70,17 +70,18 @@ pub(crate) struct Stream {
     pub(crate) matrix: Matrix,
 }
 
-/// Matrix coefficients the YUV was derived with; primaries and transfer are always BT.709,
-/// range limited.
+/// The matrix coefficients the YUV was derived with. Primaries and transfer are always BT.709,
+/// limited range.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Matrix {
-    /// What NVENC converts BGRA input with.
+    /// The matrix NVENC converts BGRA input with.
     #[default]
     Bt709,
 }
 
 impl Matrix {
-    /// The H.273 code point, as the VUI, the AV1 sequence header and the `colr` atom use.
+    /// Returns the H.273 code point, as used by the VUI, the AV1 sequence header and the `colr`
+    /// atom.
     pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Bt709 => 1,
@@ -88,7 +89,7 @@ impl Matrix {
     }
 }
 
-/// The frames and bytes the buffer holds, and whether they sit in the store outside RAM.
+/// The frames and bytes the buffer holds, and whether they are in the store outside RAM.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Held {
     pub(crate) frames: u64,
@@ -104,7 +105,7 @@ pub(crate) struct Live {
     origin: OnceLock<i64>,
     audio: OnceLock<Arc<AudioFormat>>,
     sound: Mutex<AudioRing>,
-    /// Logical processor of the capture thread, or `u32::MAX` until it has said.
+    /// The logical processor of the capture thread, or `u32::MAX` until it has reported one.
     #[cfg_attr(
         all(not(windows), test),
         expect(
@@ -115,13 +116,13 @@ pub(crate) struct Live {
     capture_processor: AtomicU32,
 }
 
-/// Tallies of the frames pushed, read without the ring's lock.
+/// Counts of the frames pushed, read without taking the ring's lock.
 struct Counters {
     encoded: AtomicU64,
     /// Frames that brought new screen content.
     fresh: AtomicU64,
     bytes: AtomicU64,
-    /// Index of the oldest buffered packet, or `u64::MAX`; the sound is trimmed to it.
+    /// The index of the oldest buffered packet, or `u64::MAX`. The sound is trimmed to it.
     oldest: AtomicU64,
 }
 
@@ -160,7 +161,8 @@ impl Live {
         }
     }
 
-    /// Where the capture thread runs, so the audio thread can keep away from it.
+    /// Records the logical processor the capture thread runs on, so the audio thread can avoid
+    /// it.
     #[cfg_attr(
         all(not(windows), test),
         expect(dead_code, reason = "only the Windows capture thread uses it")
@@ -199,7 +201,7 @@ impl Live {
         self.stream.get().copied()
     }
 
-    /// QPC time, in 100 ns units, of the frame clock's first tick.
+    /// Sets the QPC time, in 100 ns units, of the frame clock's first tick.
     pub(crate) fn set_origin(&self, time: i64) {
         set_once(&self.origin, time, "frame clock's origin");
     }
@@ -264,7 +266,7 @@ impl Live {
         self.counters.bytes.load(Ordering::Relaxed)
     }
 
-    /// Frames encoded, and how many of them were fresh.
+    /// Returns the number of frames encoded, and how many of them were fresh.
     pub(crate) fn counters(&self) -> (u64, u64) {
         (
             self.counters.encoded.load(Ordering::Relaxed),
@@ -272,7 +274,7 @@ impl Live {
         )
     }
 
-    /// What the buffer holds right now.
+    /// Returns what the buffer currently holds.
     pub(crate) fn held(&self) -> Held {
         let ring = self.ring();
         Held {
@@ -282,7 +284,8 @@ impl Live {
         }
     }
 
-    /// Cheap: stored packets are read back, and the sound encoded, only as a save writes them.
+    /// Cheap to call: stored packets are read back, and the sound encoded, only when a save
+    /// writes them.
     pub(crate) fn snapshot(&self) -> Option<Snapshot> {
         let stream = self.stream()?;
         let entries = self.ring().snapshot();
@@ -315,7 +318,8 @@ impl Live {
     }
 }
 
-/// Sets `lock`, which a session sets once; a second set is a caller's bug and keeps the first.
+/// Sets `lock`, which a session sets once. A second set is a caller's bug and keeps the first
+/// value.
 fn set_once<T>(lock: &OnceLock<T>, value: T, what: &str) -> bool {
     let set = lock.set(value).is_ok();
     debug_assert!(set, "the {what} was set twice");
@@ -381,8 +385,8 @@ fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
     }
 }
 
-/// Why a save failed. A message names only the failed step; the cause is its `source()`, so
-/// it is shown with [`log::chain`].
+/// The reason a save failed. The message names only the failed step, and the cause is its
+/// `source()`, so it is displayed with [`log::chain`].
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
     #[error("{step} {}", path.display())]
@@ -414,7 +418,7 @@ pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
     }
 }
 
-/// The `avcC`, `hvcC` or `av1C` record from the sequence header in `data`.
+/// Returns the `avcC`, `hvcC` or `av1C` record from the sequence header in `data`.
 fn configuration(codec: Codec, data: &[u8]) -> Option<DecoderConfig> {
     match codec {
         Codec::H264 => h264::configuration(data).map(DecoderConfig::Avc),
@@ -435,13 +439,14 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
 #[derive(Debug)]
 pub(crate) struct Saved {
     pub(crate) path: PathBuf,
-    /// Why the buffered sound is not in the clip; `None` when it is, or none was buffered.
+    /// The reason the buffered sound is not in the clip, or `None` when it is, or when none was
+    /// buffered.
     pub(crate) sound_error: Option<EncodeError>,
 }
 
-/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`; it is written under a
-/// `.partial` name and takes its final one only once complete. Sound that cannot be encoded is
-/// left out rather than failing the save.
+/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`. The file is written under
+/// a `.partial` name and renamed to its final one only once complete. Sound that cannot be
+/// encoded is left out rather than failing the save.
 pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let name = ClipName::now();
@@ -457,8 +462,8 @@ pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveE
     result
 }
 
-/// Moves the finished `partial` to the first attempt of `name` no file has. Each name is claimed
-/// by creating it, so a file that appears meanwhile is never replaced.
+/// Moves the finished `partial` to the first attempt of `name` that no file has. Each name is
+/// claimed by creating it, so a file that appears in the meantime is never replaced.
 fn claim_name(directory: &Path, name: ClipName, partial: &Path) -> Result<PathBuf, SaveError> {
     let mut name = name;
     for _ in 0..NAME_ATTEMPTS {
@@ -486,7 +491,7 @@ fn claim_name(directory: &Path, name: ClipName, partial: &Path) -> Result<PathBu
     ))
 }
 
-/// Returns why the buffered sound was left out, if it was.
+/// Writes the clip to `path` and returns the reason the buffered sound was left out, if it was.
 fn write_file(snapshot: &Snapshot, path: &Path) -> Result<Option<EncodeError>, SaveError> {
     let (audio, sound_error) = match snapshot.audio.as_ref().map(crate::audio::encode) {
         Some(Ok(audio)) => (Some(audio), None),

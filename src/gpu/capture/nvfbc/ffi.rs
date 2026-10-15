@@ -25,7 +25,7 @@ pub(super) const TODX9VID_SETUP_PARAMS_VER: u32 = struct_version(size_of::<Setup
 pub(super) const TODX9VID_GRAB_FRAME_PARAMS_VER: u32 =
     struct_version(size_of::<GrabFrameParams>(), 1);
 
-// What the header's macros evaluate to.
+// The values the header's macros evaluate to.
 const _: () = assert!(STATUS_VER == 0x7002_0200);
 const _: () = assert!(CREATE_PARAMS_VER == 0x7002_0200);
 const _: () = assert!(TODX9VID_SETUP_PARAMS_VER == 0x7003_0100);
@@ -222,14 +222,15 @@ const _: () = assert!(size_of::<FrameGrabInfo>() == 108);
 const _: () = assert!(offset_of!(FrameGrabInfo, must_recreate) == 20);
 const _: () = assert!(offset_of!(FrameGrabInfo, _reserved2) == 64);
 
-/// An interface object from `NvFBC_CreateEx`: valid until `release`, while the library is
-/// loaded; the method table `V` lives in the library.
+/// An interface object from `NvFBC_CreateEx`. It is valid until `release`, while the library is
+/// loaded. The method table `V` lives in the library.
 #[repr(C)]
 pub(super) struct Interface<V> {
     pub(super) vtable: *const V,
 }
 
-/// A method table in declaration order; pure virtual, no virtual destructor.
+/// A method table in declaration order. The interface is pure virtual and has no virtual
+/// destructor.
 pub(super) trait Vtable: Sized {
     fn release(&self) -> Release<Self>;
 }

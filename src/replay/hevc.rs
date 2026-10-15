@@ -17,7 +17,8 @@ const NAL_PPS: u8 = 34;
 pub(super) const NAL_AUD: u8 = 35;
 /// Intra random access points: BLA, IDR and CRA pictures.
 const IRAP: RangeInclusive<u8> = 16..=21;
-/// Parameter sets live in `hvcC`, and delimiters nowhere; the rest of a unit is its sample.
+/// Parameter sets are stored in `hvcC` and delimiters are dropped. The remaining units of an
+/// access unit form its sample.
 const NOT_IN_SAMPLES: [u8; 4] = [NAL_VPS, NAL_SPS, NAL_PPS, NAL_AUD];
 /// Bytes of an SPS up to and including `general_level_idc`, after emulation prevention.
 const SPS_PROFILE_BYTES: usize = 15;
@@ -27,7 +28,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
     nal_units(access_unit).any(|unit| IRAP.contains(&nal_type(unit)))
 }
 
-/// The `hvcC` record, when the access unit carries a VPS, SPS and PPS.
+/// Returns the `hvcC` record, when the access unit carries a VPS, SPS and PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Hvcc> {
     let parameter_sets = find_units(access_unit, nal_type, [NAL_VPS, NAL_SPS, NAL_PPS])?;
     let [_, sps, _] = parameter_sets;
@@ -43,8 +44,8 @@ pub(super) fn configuration(access_unit: &[u8]) -> Option<Hvcc> {
     Some(record)
 }
 
-/// The `hvcC` fields copied from the SPS (7.3.2.2 through `profile_tier_level`); the rest stay
-/// unknown or zero.
+/// Returns the `hvcC` fields copied from the SPS (7.3.2.2 through `profile_tier_level`). The
+/// rest stay unknown or zero.
 fn record_fields(sps: &[u8]) -> io::Result<Hvcc> {
     let header = unescape(sps, SPS_PROFILE_BYTES);
     let mut bits = BitReader::<_, BigEndian>::new(&header[..]);

@@ -17,7 +17,7 @@ impl<F: ?Sized> Slot<F> {
         self.0.borrow_mut().take();
     }
 
-    /// Cloned out, so the handler may itself replace or clear the slot.
+    /// Returns a clone of the handler, so that the handler may itself replace or clear the slot.
     pub(crate) fn get(&self) -> Option<Rc<F>> {
         self.0.borrow().clone()
     }

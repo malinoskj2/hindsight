@@ -1,4 +1,5 @@
-//! The shell's view of a file: its thumbnail, opening it, revealing it in Explorer, recycling it.
+//! Shell operations on a file: its thumbnail, opening it, revealing it in Explorer and moving it
+//! to the Recycle Bin.
 
 use super::com::{Apartment, hresult_error};
 use std::{
@@ -96,8 +97,8 @@ pub(crate) enum PickFolderError {
     NoPath(#[source] windows::core::Error),
 }
 
-/// Asks for a folder with the shell's dialog, modal to `owner` and opened on `start` when that
-/// is a folder; `None` when the dialog was cancelled.
+/// Shows the shell's folder dialog, modal to `owner` and opened on `start` when that is a folder.
+/// Returns `None` when the dialog was cancelled.
 pub(crate) fn pick_folder(
     owner: &w::HWND,
     start: Option<&Path>,
@@ -119,11 +120,11 @@ pub(crate) fn pick_folder(
             None::<&w::IBindCtx>,
         );
         if let Ok(item) = item {
-            // A start folder the shell declines is no error.
+            // A start folder the shell rejects is not an error.
             let _ = dialog.SetFolder(&item);
         }
     }
-    // `false` when the dialog was cancelled.
+    // `Show` returns `false` when the dialog was cancelled.
     if !dialog.Show(owner).map_err(dialog_error)? {
         return Ok(None);
     }
@@ -134,7 +135,8 @@ pub(crate) fn pick_folder(
     Ok(Some(PathBuf::from(name)))
 }
 
-/// COM must be started on the calling thread; the shell may take a second per frame.
+/// Makes the shell's thumbnail of the file at `path` as a bitmap of `size`. COM must be
+/// initialised on the calling thread, and the shell may take a second per frame.
 pub(crate) fn thumbnail(path: &Path, size: (i32, i32)) -> Result<Thumbnail, ThumbnailError> {
     let picture = shell_picture(path, size)?;
     let measured = picture.GetObject().map_err(ThumbnailError::Draw)?;
@@ -171,7 +173,8 @@ pub(crate) fn reveal(path: &Path) -> Result<(), RevealError> {
 }
 
 pub(crate) fn recycle(path: &Path, owner: &w::HWND) -> Result<(), RecycleError> {
-    // Without a full path the shell deletes for good, as it cannot tell where to restore to.
+    // Without an absolute path the shell deletes permanently, because it cannot record where to
+    // restore the file to.
     if !path.is_absolute() {
         return Err(RecycleError::NotAbsolute);
     }
@@ -183,7 +186,7 @@ pub(crate) fn recycle(path: &Path, owner: &w::HWND) -> Result<(), RecycleError> 
         fFlags: RECYCLE_FLAGS,
         ..Default::default()
     };
-    // SAFETY: the structure and the double-null-ended path list outlive the call.
+    // SAFETY: the structure and the double-null-terminated path list outlive the call.
     let code = unsafe { SHFileOperationW(&raw mut operation) };
     if code != 0 {
         return Err(RecycleError::Refused(code));
@@ -197,7 +200,7 @@ pub(crate) fn recycle(path: &Path, owner: &w::HWND) -> Result<(), RecycleError> 
 fn execute(file: &HSTRING, parameters: Option<&HSTRING>) -> Result<(), usize> {
     let verb = HSTRING::from("open");
     let parameters = parameters.map_or(PCWSTR::null(), |parameters| PCWSTR(parameters.as_ptr()));
-    // SAFETY: the strings outlive the call; absent ones are null.
+    // SAFETY: the strings outlive the call, and absent ones are passed as null.
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -216,7 +219,8 @@ fn execute(file: &HSTRING, parameters: Option<&HSTRING>) -> Result<(), usize> {
     }
 }
 
-/// Quoted, so a comma or a space in the path does not end it early.
+/// Builds Explorer's `/select` argument with the path quoted, so that a comma or a space in the
+/// path does not terminate it early.
 fn select_argument(path: &Path) -> OsString {
     let mut argument = OsString::from("/select,\"");
     argument.push(path);
@@ -262,10 +266,11 @@ impl Fit {
     }
 }
 
-/// A DIB section, not a plain bitmap: an image list honours the alpha channel of nothing else.
+/// A DIB section rather than a plain bitmap, because an image list honours an alpha channel only
+/// in a DIB section.
 struct Frame {
     bitmap: DeleteObjectGuard<w::HBITMAP>,
-    /// Owned by the bitmap; `width * height * PIXEL` bytes, top row first.
+    /// The pixel memory, owned by the bitmap: `width * height * PIXEL` bytes, top row first.
     pixels: *mut u8,
     width: i32,
     height: i32,
@@ -277,7 +282,7 @@ impl Frame {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).ok()?,
                 biWidth: width,
-                // Negative: rows run top to bottom.
+                // A negative height makes the rows run top to bottom.
                 biHeight: -height,
                 biPlanes: 1,
                 biBitCount: 32,
@@ -287,7 +292,7 @@ impl Frame {
             ..Default::default()
         };
         let mut pixels = std::ptr::null_mut();
-        // SAFETY: `info` describes a valid 32-bit bitmap; `pixels` is a live out-parameter.
+        // SAFETY: `info` describes a valid 32-bit bitmap, and `pixels` is a live out-parameter.
         let bitmap = unsafe {
             CreateDIBSection(
                 None,
@@ -299,9 +304,9 @@ impl Frame {
             )
         }
         .ok()?;
-        // SAFETY: the pointer is the live bitmap handle just created, only retyped.
+        // SAFETY: the pointer is the live bitmap handle just created, and is only being retyped.
         let handle = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
-        // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
+        // SAFETY: the guard takes ownership of the new bitmap handle, which nothing else frees.
         let bitmap = unsafe { DeleteObjectGuard::new(handle) };
         if pixels.is_null() {
             return None;
@@ -323,7 +328,8 @@ impl Frame {
         w::GdiFlush()
     }
 
-    /// The shell's picture may carry no alpha, and an image list would then show nothing of it.
+    /// Sets every pixel within `fit` to opaque. The shell's picture may have no alpha channel, and
+    /// an image list would then draw none of it.
     fn make_opaque(&mut self, fit: Fit) {
         let Some(length) = usize::try_from(self.width)
             .ok()
@@ -332,7 +338,7 @@ impl Frame {
         else {
             return;
         };
-        // SAFETY: Windows allotted `length` bytes at `pixels`, and `paint` has flushed GDI.
+        // SAFETY: Windows allocated `length` bytes at `pixels`, and `paint` has flushed GDI.
         let pixels = unsafe { std::slice::from_raw_parts_mut(self.pixels, length) };
         for row in fit.y..fit.y + fit.height {
             for column in fit.x..fit.x + fit.width {
@@ -356,20 +362,21 @@ fn shell_picture(
     (width, height): (i32, i32),
 ) -> Result<DeleteObjectGuard<w::HBITMAP>, ThumbnailError> {
     let name = HSTRING::from(path.as_os_str());
-    // SAFETY: the wide string outlives the call, and COM is started on this thread.
+    // SAFETY: the wide string outlives the call, and COM is initialised on this thread.
     let factory: IShellItemImageFactory =
         unsafe { SHCreateItemFromParsingName(&name, None) }.map_err(ThumbnailError::Item)?;
-    // Without `THUMBNAILONLY` the shell hands back the file type's icon instead.
+    // Without `THUMBNAILONLY` the shell returns the file type's icon instead.
     let flags = SIIGBF_THUMBNAILONLY | SIIGBF_RESIZETOFIT;
     let size = SIZE {
         cx: width,
         cy: height,
     };
-    // SAFETY: a plain call on a live interface; the bitmap it returns is ours to delete.
+    // SAFETY: a plain call on a live interface. The caller owns the bitmap it returns and must
+    // delete it.
     let picture = unsafe { factory.GetImage(size, flags) }.map_err(ThumbnailError::Picture)?;
-    // SAFETY: the pointer is the live bitmap handle the shell gave, only retyped.
+    // SAFETY: the pointer is the live bitmap handle the shell returned, and is only being retyped.
     let handle = unsafe { w::HBITMAP::from_ptr(picture.0) };
-    // SAFETY: the guard takes over the handle the shell gave, which nothing else frees.
+    // SAFETY: the guard takes ownership of the handle the shell returned, which nothing else frees.
     Ok(unsafe { DeleteObjectGuard::new(handle) })
 }
 

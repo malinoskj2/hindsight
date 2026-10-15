@@ -28,7 +28,8 @@ impl Ring {
         self.store = Some(store);
     }
 
-    /// An error means the store refused the packet; it and every later one stay in memory.
+    /// Pushes a packet. An error means the store refused it, and it and every later packet stay
+    /// in memory.
     pub(super) fn push(&mut self, mut entry: Entry) -> Result<(), StoreError> {
         if self.packets.is_empty() && !entry.keyframe {
             return Ok(());
@@ -63,7 +64,7 @@ impl Ring {
 
     fn drop_covered_groups(&mut self, latest: u64) {
         while let Some(&next) = self.keyframes.get(1) {
-            // Packet indices rise, so no kept keyframe is past the latest packet; one that is
+            // Packet indices rise, so no kept keyframe is past the latest packet. One that is
             // would be a caller's bug, and the saturating span then keeps the group.
             debug_assert!(latest >= next, "packet {latest} came after keyframe {next}");
             if latest.saturating_sub(next) + 1 < self.span {
@@ -95,7 +96,7 @@ impl Ring {
         self.bytes
     }
 
-    /// Whether the newest packet went to the store outside RAM.
+    /// Whether the newest packet was placed in the store outside RAM.
     pub(super) fn stored(&self) -> bool {
         self.packets
             .back()

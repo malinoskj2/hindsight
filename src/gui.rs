@@ -76,13 +76,13 @@ struct Inner {
     config: RefCell<Config>,
     tray: RefCell<Option<Tray>>,
     foreground_hook: RefCell<Option<ForegroundHook>>,
-    /// The full-screen app seen last, offered to the worker once it has stayed in front.
+    /// The full-screen app seen most recently, offered to the worker once it has stayed in front.
     pending_target: RefCell<Option<Target>>,
     quitting: Cell<bool>,
     hotkey_error: RefCell<Option<String>>,
     tray_error: OnceCell<String>,
     initial_startup_error: Cell<Option<String>>,
-    /// By how much the pages have grown for their messages.
+    /// The height the pages have grown by to show their messages.
     extra: Cell<i32>,
 }
 
@@ -231,7 +231,7 @@ impl Main {
             Control::Save => self.save(),
             Control::PauseOrResume => {
                 self.0.worker.toggle_pause();
-                // Offered after the toggle, so only a resumed worker takes it.
+                // Offered after the toggle, so only a resumed worker accepts it.
                 self.watch_foreground();
             }
             Control::Restart => {
@@ -371,7 +371,7 @@ impl Main {
     }
 
     fn on_destroy(&self) {
-        // Dropped outside the borrows: the tray's teardown can re-enter and borrow again.
+        // Dropped after the borrows end, since the tray's teardown can re-enter and borrow again.
         let tray = self.0.tray.take();
         let hook = self.0.foreground_hook.take();
         drop(tray);
@@ -391,7 +391,7 @@ impl Main {
         }
     }
 
-    /// Notes the full-screen app in front, if any, and offers it to the worker once it has
+    /// Records the full-screen app in front, if any, and offers it to the worker once it has
     /// stayed there for `SETTLE_MS`.
     fn watch_foreground(&self) {
         if self.0.config.borrow().mode != Mode::Fullscreen {
@@ -411,7 +411,8 @@ impl Main {
             .SetTimer(SETTLE_TIMER, SETTLE_MS, None);
     }
 
-    /// The settle timer: the app noted is offered only if it is still the one in front.
+    /// Handles the settle timer. The recorded app is offered only if it is still the one in
+    /// front.
     fn settle_foreground(&self) {
         let _ = self.0.main_window.hwnd().KillTimer(SETTLE_TIMER);
         let Some(pending) = self.0.pending_target.borrow_mut().take() else {
@@ -515,7 +516,7 @@ impl Main {
         result
     }
 
-    /// Shown on the Status page until the hotkey is registered.
+    /// Records a hotkey error, which is shown on the Status page until the hotkey is registered.
     fn note_hotkey_error(&self, error: Option<String>) {
         if let Some(error) = &error {
             log::warning(error);
@@ -615,7 +616,8 @@ fn open(path: &Path) {
     }
 }
 
-/// The codecs the Settings tab offers: those the GPU encodes, or all of them when it cannot say.
+/// Returns the codecs the Settings tab offers: those the GPU encodes, or all of them when that
+/// cannot be determined.
 fn offered_codecs() -> Vec<Codec> {
     match gpu::supported_codecs() {
         Ok(codecs) if !codecs.is_empty() => {

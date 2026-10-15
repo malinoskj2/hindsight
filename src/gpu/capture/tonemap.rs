@@ -1,5 +1,6 @@
 //! The pixel-shader pass that tone-maps a display's FP16 scRGB picture to the encoder's 8-bit
-//! sRGB: SDR white to 1.0, a Reinhard roll-off above a knee, the display's peak landing on 1.0.
+//! sRGB. SDR white maps to 1.0, a Reinhard roll-off applies above a knee, and the display's peak
+//! reaches 1.0.
 
 use crate::gpu::{
     device::{Device, Locked, null_output},
@@ -24,7 +25,7 @@ use windows::{
 /// compiler (`d3dcompiler_47.dll`) is loaded at run time.
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.vs.cso"));
 const PIXEL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.ps.cso"));
-/// In units of SDR white; below it the picture is kept exactly.
+/// The knee in units of SDR white. Below it the picture is kept exactly.
 const KNEE: f32 = 0.8;
 const DEFAULT_WHITE_NITS: f32 = 200.0;
 const DEFAULT_PEAK_NITS: f32 = 1000.0;
@@ -33,7 +34,7 @@ const MAX_VIEWS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Curve {
-    /// scRGB to units of SDR white.
+    /// The factor from scRGB to units of SDR white.
     scale: f32,
     knee: f32,
     rolloff: f32,
@@ -51,7 +52,7 @@ impl Curve {
         } else {
             DEFAULT_PEAK_NITS.max(white)
         };
-        // Reinhard x / (1 + x b) has slope 1 at 0, meeting the straight part smoothly; b puts
+        // Reinhard x / (1 + x b) has slope 1 at 0, so it meets the straight part smoothly. b puts
         // the peak on 1.0, and no headroom gives b = 0.
         let headroom = peak / white;
         let rolloff = 1.0 / (1.0 - KNEE) - 1.0 / (headroom - KNEE);
@@ -72,7 +73,7 @@ impl Curve {
         self.peak_nits
     }
 
-    /// The shader's reference.
+    /// The reference implementation of the shader.
     #[cfg(test)]
     fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
         let mut rgb = rgb.map(|component| (component * self.scale).max(0.0));
@@ -103,7 +104,7 @@ pub(super) struct ToneMapper {
     vertex: ID3D11VertexShader,
     pixel: ID3D11PixelShader,
     constants: ID3D11Buffer,
-    /// Held while the pass sets state and draws, against the capture API's own threads.
+    /// Held while the pass sets state and draws, to exclude the capture API's own threads.
     lock: ID3D11Multithread,
     sources: Views<ID3D11ShaderResourceView>,
     targets: Views<ID3D11RenderTargetView>,
@@ -176,7 +177,8 @@ impl ToneMapper {
         unsafe { context.VSSetShader(&self.vertex, None) };
         // SAFETY: as above, for the pixel shader.
         unsafe { context.PSSetShader(&self.pixel, None) };
-        // SAFETY: a buffer of this device with constant-buffer binding; the slice outlives the call.
+        // SAFETY: a buffer of this device with constant-buffer binding. The slice outlives the
+        // call.
         unsafe { context.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())])) };
         // SAFETY: a view of this device over a texture with shader-resource binding.
         unsafe { context.PSSetShaderResources(0, Some(&[Some(input)])) };

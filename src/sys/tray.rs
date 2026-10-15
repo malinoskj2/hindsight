@@ -1,4 +1,4 @@
-//! The notification-area icon and its menu; callbacks arrive on the window's own thread.
+//! The notification-area icon and its menu. Callbacks arrive on the window's own thread.
 
 use super::{callback::Slot, icon};
 use crate::{APP_NAME, config::Theme};
@@ -15,7 +15,7 @@ thread_local! {
     static HANDLER: Slot<dyn Fn(TrayAction)> = const { Slot::new() };
 }
 
-/// Why the tray icon failed. A message names only the part that failed; the cause is its
+/// Why the tray icon failed. The message names only the part that failed, and the cause is its
 /// `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum TrayError {
@@ -56,7 +56,8 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
-        // Installed last: a handler left behind by a failed setup would keep the window alive.
+        // Installed last, because a handler left behind by a failed setup would keep the window
+        // alive.
         HANDLER.with(|slot| slot.set(Rc::new(on_action)));
         route_events([
             (show.id().clone(), TrayAction::Show),

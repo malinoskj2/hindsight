@@ -39,7 +39,7 @@ use bytemuck::Zeroable;
 pub(super) use cuda::Capture as CudaCapture;
 pub(in crate::gpu) use ffi::Status;
 
-/// The most the driver accepts; it refuses four.
+/// The most buffers the driver accepts. It refuses four.
 const SLOT_COUNT: u32 = 3;
 const SLOTS: usize = SLOT_COUNT as usize;
 
@@ -50,7 +50,7 @@ pub(super) struct Capture {
     key: Key,
     device: IDirect3DDevice9Ex,
     slots: [Slot; SLOTS],
-    /// The slot whose grab is in flight, handed over on the next tick.
+    /// The slot whose grab is in flight, delivered on the next tick.
     pending: Option<usize>,
     next: u32,
     handed_over: bool,
@@ -110,7 +110,7 @@ impl Capture {
         let object = self
             .create_object()
             .map_err(nvfbc_failed("create the NvFBC session"))?;
-        // Released by `Drop` should setup fail.
+        // Released by `Drop` if setup fails.
         let session = Session {
             object,
             buffers: OutputTable::new(output_buffers(&self.slots)),
@@ -150,7 +150,7 @@ impl Capture {
         let (status, info) = session.grab_frame(self.next);
         let grabbed = classify_grab(status, &info, self.size, "grab the display with NvFBC")?;
         if grabbed == Grabbed::Frame {
-            // No wait: NVENC reads on the same device, which orders the blit first.
+            // No wait is needed: NVENC reads on the same device, which orders the blit first.
             self.pending = Some(self.next as usize);
             self.next = (self.next + 1) % SLOT_COUNT;
         }
@@ -213,12 +213,12 @@ impl Capture {
     }
 }
 
-/// What both backends need before their first session.
+/// The state both backends need before their first session.
 struct Prepared {
     library: Arc<Library>,
     create: ffi::CreateEx,
     key: Key,
-    /// Direct3D 9 adapter ordinal; the driver counts by it.
+    /// The Direct3D 9 adapter ordinal, which the driver counts by.
     adapter: u32,
     d3d9: IDirect3D9Ex,
     size: (u32, u32),
@@ -226,7 +226,7 @@ struct Prepared {
     window: Option<HWND>,
 }
 
-/// Finds the monitor on the encoding GPU, loads the library and turns NvFBC on if need be.
+/// Finds the monitor on the encoding GPU, loads the library and turns NvFBC on if necessary.
 fn prepare_capture(
     device: &Device,
     target: &Target,
@@ -356,7 +356,7 @@ impl OutputTable {
         Self(NonNull::from(Box::leak(Box::new(buffers))))
     }
 
-    /// For the driver, which may read and write through it.
+    /// Returns a pointer for the driver, which may read and write through it.
     const fn as_mut_ptr(&self) -> *mut ffi::OutputBuffer {
         self.0.as_ptr().cast()
     }
@@ -398,7 +398,7 @@ impl Session {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Grabbed {
-    /// The picture is in the buffer asked for.
+    /// The picture is in the requested buffer.
     Frame,
     /// Protected video is on screen.
     Withheld,
@@ -422,7 +422,8 @@ fn classify_grab(
     }
 }
 
-/// `Some(now)` when a lost session may be opened again; a monitor that is gone ends the capture.
+/// Returns `Some(now)` when a lost session may be opened again. A monitor that is gone ends the
+/// capture.
 fn reopen_due(
     throttle: &ReopenThrottle,
     monitor: HMONITOR,
@@ -436,7 +437,8 @@ fn reopen_due(
     Ok(Some(now))
 }
 
-/// A passing refusal holds the next attempt back; permanent ones already read as unsupported.
+/// A passing refusal delays the next attempt. Permanent refusals are already classified as
+/// unsupported.
 fn note_reopened<S>(
     throttle: &mut ReopenThrottle,
     now: Instant,
@@ -564,14 +566,14 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
         PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ..Default::default()
     };
-    // Software vertex processing: with hardware, the NVIDIA driver runs a worker thread for
-    // the device, and nothing here draws.
+    // Software vertex processing is used because with hardware vertex processing the NVIDIA
+    // driver runs a worker thread for the device, and nothing here draws.
     let flags = D3DCREATE_FPU_PRESERVE
         | D3DCREATE_MULTITHREADED
         | D3DCREATE_SOFTWARE_VERTEXPROCESSING
         | D3DCREATE_NOWINDOWCHANGES;
     let mut device = None;
-    // SAFETY: windowed parameters on the desktop window; out-parameter written on success.
+    // SAFETY: windowed parameters on the desktop window. The out-parameter is written on success.
     unsafe {
         d3d9.CreateDeviceEx(
             adapter,
@@ -603,7 +605,8 @@ fn create_texture(
     (width, height): (u32, u32),
 ) -> Result<IDirect3DTexture9, CaptureError> {
     let mut texture = None;
-    // SAFETY: unshared, so the handle pointer may be null; out-parameter written on success.
+    // SAFETY: the texture is unshared, so the handle pointer may be null. The out-parameter is
+    // written on success.
     unsafe {
         d3d9.CreateTexture(
             width,
@@ -638,7 +641,7 @@ fn is_attached(monitor: HMONITOR) -> bool {
     unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool()
 }
 
-/// NVENC encodes even sizes, and grabs are read in place, uncropped.
+/// Requires an even size: NVENC encodes even sizes, and grabs are read in place, uncropped.
 fn require_even((width, height): (u32, u32), backend: &str) -> Result<(), CaptureError> {
     if width % 2 == 0 && height % 2 == 0 {
         return Ok(());

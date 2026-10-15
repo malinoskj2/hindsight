@@ -36,7 +36,7 @@ const NAMED_KEYS: [(u16, &str); 11] = [
     (VK_SCROLL_LOCK, "ScrollLock"),
     (0xC0, "`"),
 ];
-/// Pressing these never types text, so they may stand alone.
+/// Keys that never type text when pressed, so they may be used without a modifier.
 const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
 
 #[derive(Debug, Error)]
@@ -51,7 +51,7 @@ pub(crate) enum ParseError {
     NeedsModifier(String),
 }
 
-/// Stored and shown as its text, so the settings file reads `"Alt+F10"`.
+/// A hotkey, serialised and displayed as text, so the settings file contains `"Alt+F10"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hotkey {
     modifiers: u16,
@@ -233,9 +233,9 @@ mod native {
 
     #[expect(unsafe_code, reason = "builds winsafe's MOD and VK from raw values")]
     fn system_codes(hotkey: Hotkey) -> (co::MOD, co::VK) {
-        // SAFETY: `MOD` is a plain newtype; every parsed modifier set is representable.
+        // SAFETY: `MOD` is a plain newtype, and every parsed modifier set is representable.
         let modifiers = unsafe { co::MOD::from_raw(hotkey.modifiers) };
-        // SAFETY: `VK` is a plain newtype; every parsed key code is representable.
+        // SAFETY: `VK` is a plain newtype, and every parsed key code is representable.
         let key = unsafe { co::VK::from_raw(hotkey.key) };
         (modifiers | co::MOD::NOREPEAT, key)
     }

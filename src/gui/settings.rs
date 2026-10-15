@@ -31,14 +31,15 @@ const NUMBER_WIDTH: i32 = 52;
 const CODEC_WIDTH: i32 = 90;
 const HOTKEY_WIDTH: i32 = 110;
 const CHOICE_WIDTH: i32 = 190;
-/// A field that reaches the group's right edge from the first column.
+/// The width of a field that reaches the group's right edge from the first column.
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
-/// The same from the second column.
+/// The same width from the second column.
 const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
 const ERROR_X: i32 = BUTTON_WIDTH + 8;
 const BROWSE_WIDTH: i32 = 76;
 const BROWSE_GAP: i32 = 6;
-/// The clip folder field, which leaves room for the Browse button at the group's right edge.
+/// The width of the clip folder field, which leaves room for the Browse button at the group's
+/// right edge.
 const FOLDER_WIDTH: i32 = FULL_WIDTH - BROWSE_WIDTH - BROWSE_GAP;
 const BROWSE_X: i32 = INNER_X + INNER_WIDTH - BROWSE_WIDTH;
 const FIELD_PITCH: i32 = 28;
@@ -66,7 +67,7 @@ mod rows {
     pub(super) const GENERAL_HEIGHT: i32 = START_WITH_WINDOWS + LINE + 6 - GENERAL_FRAME;
 }
 
-/// Why the settings entered were not applied; shown beside Apply.
+/// Why the settings entered were not applied. Shown beside Apply.
 #[derive(Debug, Error)]
 pub(super) enum SettingsError {
     #[error("{}", text::NUMBER_REQUIRED)]
@@ -188,7 +189,7 @@ impl SettingsPage {
         });
     }
 
-    /// `resized` runs when the toggle changed the General group's height.
+    /// `resized` is called when the toggle changed the General group's height.
     pub(super) fn on_startup_toggled(&self, resized: impl Fn() + 'static) {
         let page = self.clone();
         self.0.general.start_with_windows.on().bn_clicked(move || {
@@ -199,7 +200,7 @@ impl SettingsPage {
         });
     }
 
-    /// The configuration as entered, validated.
+    /// Returns the configuration as entered, after validating it.
     pub(super) fn configuration(&self) -> Result<Config, SettingsError> {
         let config = self.entered()?;
         config.validate()?;
@@ -245,7 +246,8 @@ impl SettingsPage {
         });
     }
 
-    /// DXGI Desktop Duplication cannot draw the cursor, so the choice is greyed out with it.
+    /// DXGI Desktop Duplication cannot draw the cursor, so the cursor choice is disabled while
+    /// that backend is selected.
     fn update_cursor_choice(&self) {
         let recording = &self.0.recording;
         let backend = chosen(&recording.backend, &recording.backends);
@@ -558,7 +560,7 @@ fn number_field(
         gui::UpDownOpts {
             range: (saturating_i32(minimum), saturating_i32(maximum)),
             value: saturating_i32(value),
-            // No thousands separators: the field is parsed back as a plain number.
+            // No thousands separators, because the field is parsed back as a plain number.
             control_style: co::UDS::AUTOBUDDY
                 | co::UDS::SETBUDDYINT
                 | co::UDS::ALIGNRIGHT
@@ -631,7 +633,7 @@ fn source_fields(
     (mode, backend)
 }
 
-/// Logged as well: the label is seen only once the tab is.
+/// Also logs the warning, because the label is seen only once the tab is.
 fn codec_warning(config: &Config, codecs: &[Codec]) -> String {
     if codecs.contains(&config.codec) {
         return String::new();
@@ -645,13 +647,14 @@ fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
     let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
 }
 
-/// `None` for the default folder, so a moved default is followed.
+/// Returns `None` for the default folder, so that a default folder that later moves is followed.
 fn stored_folder(entered: &str) -> Option<PathBuf> {
     (entered != config::default_clip_directory().display().to_string())
         .then(|| PathBuf::from(entered))
 }
 
-/// `None` outside the limits Apply enforces, where the configuration's arithmetic overflows.
+/// Returns `None` outside the limits Apply enforces, where the configuration's arithmetic would
+/// overflow.
 fn estimate_bytes(buffer_seconds: u32, bitrate_mbps: u32) -> Option<u64> {
     let within = (MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&buffer_seconds)
         && (MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&bitrate_mbps);

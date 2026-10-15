@@ -1,6 +1,6 @@
 //! Embeds the Windows icon and manifest, compiles the HDR tone-map shader with the Windows
-//! SDK's `fxc.exe`, which sits beside the `rc.exe` the resources already need, and records the
-//! commit, date and compiler of the build for the About tab.
+//! SDK's `fxc.exe`, which is installed alongside the `rc.exe` the resources already need, and
+//! records the commit, date and compiler of the build for the About tab.
 
 use std::{
     env, fs,
@@ -22,7 +22,7 @@ const SHADER_STAGES: [(&str, &str, &str); 2] = [
     ("fullscreen", "vs_5_0", "tonemap.vs.cso"),
     ("tonemap", "ps_5_0", "tonemap.ps.cso"),
 ];
-/// What a build fact reads when it cannot be found out.
+/// The value shown for a build fact that could not be determined.
 const UNKNOWN: &str = "unknown";
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -64,12 +64,12 @@ fn main() {
     compile_shaders();
 }
 
-/// `HINDSIGHT_COMMIT`, `HINDSIGHT_BUILD_DATE` and `HINDSIGHT_RUSTC`, each "unknown" when it
-/// cannot be found out, so a build without git or outside a checkout still succeeds.
+/// Sets `HINDSIGHT_COMMIT`, `HINDSIGHT_BUILD_DATE` and `HINDSIGHT_RUSTC`. Each is "unknown" when
+/// it cannot be determined, so a build without git or outside a checkout still succeeds.
 fn record_build_info() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    // HEAD moves on a checkout, its branch's ref on a commit, the index on staging; a worktree
-    // keeps them away from `.git`, so git names the files.
+    // HEAD changes on a checkout, the branch's ref on a commit and the index on staging. A
+    // worktree keeps these files outside `.git`, so git is asked for their paths.
     for name in ["HEAD", "index", "packed-refs"] {
         if let Some(path) = git(&["rev-parse", "--git-path", name]) {
             println!("cargo:rerun-if-changed={path}");
@@ -83,7 +83,8 @@ fn record_build_info() {
     let commit = git(&["rev-parse", "--short", "HEAD"]).map_or_else(
         || UNKNOWN.to_owned(),
         |hash| {
-            // Without the optional lock git leaves the index alone, which would rerun this.
+            // Without the optional lock git leaves the index untouched; refreshing it would rerun
+            // this script.
             let dirty = git(&[
                 "--no-optional-locks",
                 "status",
@@ -102,8 +103,8 @@ fn record_build_info() {
     println!("cargo:rustc-env=HINDSIGHT_RUSTC={rustc}");
 }
 
-/// The trimmed output of a git command run in the package, or `None` when git is missing or
-/// fails, as it does outside a checkout.
+/// Returns the trimmed output of a git command run in the package, or `None` when git is
+/// missing or fails, as it does outside a checkout.
 fn git(args: &[&str]) -> Option<String> {
     output(Command::new("git").args(args))
 }
@@ -116,7 +117,8 @@ fn output(command: &mut Command) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// The UTC date as `2026-10-14`: of `SOURCE_DATE_EPOCH` when set, for a reproducible build.
+/// Returns the UTC date as `2026-10-14`, taken from `SOURCE_DATE_EPOCH` when it is set so that a
+/// build is reproducible.
 fn build_date() -> String {
     let seconds = env::var("SOURCE_DATE_EPOCH")
         .ok()
@@ -155,7 +157,8 @@ fn civil_date(days: u64) -> (u64, u64, u64) {
     (year, month, day)
 }
 
-/// Strict and fully optimized, as `D3DCompile` did at run time before.
+/// Compiles the shader stages, strict and fully optimized, as `D3DCompile` did at run time
+/// previously.
 fn compile_shaders() {
     println!("cargo:rerun-if-changed={SHADER}");
     println!("cargo:rerun-if-env-changed=FXC");
@@ -177,7 +180,8 @@ fn compile_shaders() {
     }
 }
 
-/// `FXC` if set, else the newest SDK's `fxc.exe` for this machine.
+/// Returns the path in `FXC` if it is set, otherwise the newest installed SDK's `fxc.exe` for
+/// this machine.
 fn find_fxc() -> Option<PathBuf> {
     if let Some(path) = env::var_os("FXC") {
         return Some(path.into());
@@ -203,7 +207,7 @@ fn find_fxc() -> Option<PathBuf> {
         .map(|(_, fxc)| fxc)
 }
 
-/// The installed Windows 10+ SDK's root, as the registry records it.
+/// Returns the installed Windows 10+ SDK's root, as recorded in the registry.
 fn kits_root() -> Option<PathBuf> {
     let output = Command::new("reg")
         .args([
@@ -224,7 +228,8 @@ fn kits_root() -> Option<PathBuf> {
     root.is_dir().then(|| root.to_path_buf())
 }
 
-/// `10.0.26100.0` as numbers, so versions sort numerically; `None` for other directories.
+/// Parses a name such as `10.0.26100.0` into numbers so versions sort numerically. Returns
+/// `None` for other directories.
 fn sdk_version(name: &str) -> Option<Vec<u32>> {
     name.split('.').map(|part| part.parse().ok()).collect()
 }

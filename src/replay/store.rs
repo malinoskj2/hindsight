@@ -10,7 +10,8 @@ pub(crate) const PAGE_BYTES: usize = 64 << 20;
 pub(crate) const CHUNK_BYTES: usize = 32 << 20;
 pub(crate) const MEBIBYTE: usize = 1 << 20;
 
-/// Pages for `bytes` of packets, plus one for the group of pictures kept beyond the span.
+/// Returns the pages for `bytes` of packets, plus one for the group of pictures kept beyond the
+/// span.
 pub(crate) fn reserved_pages(bytes: u64) -> usize {
     usize::try_from(bytes)
         .unwrap_or(usize::MAX)
@@ -18,7 +19,7 @@ pub(crate) fn reserved_pages(bytes: u64) -> usize {
         .saturating_add(1)
 }
 
-/// The pages for `bytes` of packets, refused when they would not fit in `available`.
+/// Returns the pages for `bytes` of packets, or an error when they would not fit in `available`.
 pub(crate) fn pages_within(bytes: u64, available: usize) -> Result<usize, BufferTooLarge> {
     let pages = reserved_pages(bytes);
     let needed = pages.saturating_mul(PAGE_BYTES);
@@ -35,19 +36,20 @@ pub(crate) struct BufferTooLarge {
     available: usize,
 }
 
-/// Offsets and lengths that cover `length` bytes `chunk` at a time.
+/// Returns the offsets and lengths that cover `length` bytes `chunk` at a time.
 pub(crate) fn pieces(length: usize, chunk: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..length)
         .step_by(chunk.max(1))
         .map(move |done| (done, chunk.min(length - done)))
 }
 
-/// Why the store failed. A message names only what failed; a cause is its `source()`.
+/// The reason the store failed. The message names only what failed, and the cause is its
+/// `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
     #[error("a {0} byte packet is larger than a page of the store")]
     TooLarge(usize),
-    /// The store has no room for the packet right now; the reason is for the log.
+    /// The store has no room for the packet right now. The reason is intended for the log.
     #[error("{0}")]
     Refused(String),
     #[error("{step}")]
@@ -70,7 +72,7 @@ impl StoreError {
 }
 
 pub(crate) trait Page: Send + Sync {
-    /// Hands `sink` the range in pieces, in order, each with its offset from `offset`.
+    /// Passes the range to `sink` in pieces, in order, each with its offset from `offset`.
     fn read(
         &self,
         offset: usize,
@@ -79,7 +81,7 @@ pub(crate) trait Page: Send + Sync {
     ) -> Result<(), StoreError>;
 }
 
-/// A range of a page; a clone keeps the page alive.
+/// A range of a page. A clone keeps the page alive.
 #[derive(Clone)]
 pub(crate) struct Slot {
     page: Arc<dyn Page>,
@@ -145,7 +147,7 @@ impl<P: Page + 'static> Pages<P> {
         }
     }
 
-    /// `count` pages made up front, so recording never waits on one.
+    /// Creates `count` pages up front, so recording never waits on one.
     #[cfg_attr(
         all(not(windows), test),
         expect(dead_code, reason = "only the Windows GPU stores use it")
@@ -173,7 +175,7 @@ impl<P: Page + 'static> Pages<P> {
         )
     }
 
-    /// A page and offset for `length` bytes; a packet never straddles two pages.
+    /// Returns a page and offset for `length` bytes. A packet never straddles two pages.
     pub(crate) fn place(
         &mut self,
         length: usize,
@@ -200,7 +202,7 @@ impl<P: Page + 'static> Pages<P> {
         Ok((page, offset))
     }
 
-    /// Frees unheld pages from the front; the page being filled stays in use even when empty.
+    /// Frees unheld pages from the front. The page being filled stays in use even when empty.
     fn reclaim(&mut self) {
         while self.used.len() > 1
             && let Some(page) = self.used.pop_front_if(|page| Arc::strong_count(page) == 1)
@@ -292,8 +294,8 @@ pub(crate) fn fetch(entries: &[Arc<Entry>]) -> Result<Vec<Arc<Packet>>, StoreErr
     Ok(packets)
 }
 
-/// Leading entries of `rest` in the page of `first` at rising, non-overlapping offsets, each
-/// with its slot.
+/// Returns the leading entries of `rest` in the page of `first` at rising, non-overlapping
+/// offsets, each with its slot.
 fn run<'a>(rest: &'a [Arc<Entry>], first: &'a Slot) -> impl Iterator<Item = (&'a Entry, &'a Slot)> {
     let mut end = first.offset;
     rest.iter().map_while(move |entry| match &entry.data {
@@ -305,17 +307,17 @@ fn run<'a>(rest: &'a [Arc<Entry>], first: &'a Slot) -> impl Iterator<Item = (&'a
     })
 }
 
-/// How many entries the run starting at `first` has, and the page offset it ends at.
+/// Returns the number of entries in the run starting at `first`, and the page offset it ends at.
 fn extent(rest: &[Arc<Entry>], first: &Slot) -> (usize, usize) {
     run(rest, first).fold((0, first.offset), |(count, _), (_, last)| {
         (count + 1, last.offset + last.length)
     })
 }
 
-/// Lays the pieces of one page read over the run's entries in order.
+/// Maps the pieces of one page read onto the run's entries in order.
 struct RunReader<I: Iterator> {
     run: Peekable<I>,
-    /// Offset in the page the read starts at.
+    /// The offset in the page the read starts at.
     start: usize,
     /// A packet split across two pieces, gathered until it is whole.
     straddling: Vec<u8>,
@@ -328,8 +330,8 @@ impl<'a, I: Iterator<Item = (&'a Entry, &'a Slot)>> RunReader<I> {
         span: usize,
         visit: &mut Visit<'_, E>,
     ) -> Result<(), E> {
-        // The sink returns nothing, so a `visit` error is parked; reading a chunk per call lets
-        // the read stop there.
+        // The sink returns nothing, so a `visit` error is held until the call returns. Reading a
+        // chunk per call lets the read stop there.
         let mut failed = None;
         for (at, length) in pieces(span, CHUNK_BYTES) {
             page.read(self.start + at, length, &mut |offset, piece| {

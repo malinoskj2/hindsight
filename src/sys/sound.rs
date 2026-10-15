@@ -1,4 +1,4 @@
-//! The tones that say how a save is going, played on a thread of their own.
+//! The tones that report a save's progress and outcome, played on a dedicated thread.
 
 use std::{
     f64::consts::TAU,
@@ -25,7 +25,7 @@ pub(crate) enum Tone {
 }
 
 impl Tone {
-    /// `(frequency Hz, milliseconds)` pairs; a frequency of 0 is silence.
+    /// `(frequency Hz, milliseconds)` pairs. A frequency of 0 is silence.
     fn tones(self) -> &'static [(u32, u32)] {
         match self {
             Self::Progress => PROGRESS,
@@ -35,8 +35,8 @@ impl Tone {
     }
 }
 
-/// The thread ends with its last `Sender`. A tone still playing finishes; of those asked for
-/// meanwhile only the latest plays.
+/// Starts the sound thread, which ends when its last `Sender` is dropped. A tone still playing
+/// finishes, and of the tones requested in the meantime only the latest plays.
 pub(crate) fn start() -> Sender<Tone> {
     let (sender, receiver) = mpsc::channel();
     let _ = thread::Builder::new()

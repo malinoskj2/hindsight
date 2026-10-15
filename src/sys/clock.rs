@@ -1,9 +1,9 @@
-//! The performance counter, in the 100 ns units WASAPI stamps its packets in.
+//! The performance counter, converted to the 100 ns units WASAPI timestamps its packets in.
 
 use crate::replay::CLOCK_RATE;
 
 pub(crate) fn now() -> i64 {
-    // A failure reads as zero; a zero frequency is checked below.
+    // A failed call is treated as zero. A zero frequency is checked below.
     let counter = winsafe::QueryPerformanceCounter().unwrap_or(0);
     let frequency = winsafe::QueryPerformanceFrequency().unwrap_or(0);
     if frequency <= 0 {

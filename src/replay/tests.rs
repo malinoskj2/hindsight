@@ -680,7 +680,7 @@ fn a_failed_save_leaves_no_partial_file() {
 ///
 /// The `#[global_allocator]` here serves the whole lib test binary, not just these tests: every
 /// test in the crate allocates through `Counting`. It only forwards to the system allocator and
-/// adds to two thread-locals, so the others see no difference. It can't move to an integration
+/// adds to two thread-locals, so the others see no difference. It cannot move to an integration
 /// test under `tests/`, since what it measures is crate-private.
 #[expect(unsafe_code, reason = "wraps the system allocator to count bytes")]
 mod heap {

@@ -1,4 +1,4 @@
-//! Capture and encoding on the GPU; only compressed packets reach system memory.
+//! Capture and encoding on the GPU. Only compressed packets reach system memory.
 
 mod capture;
 #[expect(unsafe_code, reason = "binds the CUDA driver API")]
@@ -19,7 +19,7 @@ pub(crate) use pipeline::record;
 use crate::config::Codec;
 use thiserror::Error;
 
-/// Why the NVIDIA GPU's encoder could not be asked which codecs it supports.
+/// The reason the NVIDIA GPU's encoder could not be queried for the codecs it supports.
 #[derive(Debug, Error)]
 #[error(transparent)]
 pub(crate) struct ProbeError(#[from] ProbeFailure);
@@ -32,21 +32,22 @@ enum ProbeFailure {
     Nvenc(nvenc::NvencError),
 }
 
-/// The NVIDIA GPU, as a bug report names it.
+/// The NVIDIA GPU, as a bug report identifies it.
 #[derive(Clone, Debug)]
 pub(crate) struct Adapter {
     pub(crate) name: String,
-    /// As NVIDIA numbers its drivers, `581.57`; `None` when the driver does not say.
+    /// The driver version as NVIDIA numbers it, such as `581.57`, or `None` when the driver does
+    /// not report one.
     pub(crate) driver: Option<String>,
 }
 
-/// The NVIDIA GPU's name and driver version, found without creating a device.
+/// Returns the NVIDIA GPU's name and driver version, determined without creating a device.
 pub(crate) fn adapter() -> Result<Adapter, ProbeError> {
     let (name, driver) = device::describe_nvidia_adapter().map_err(ProbeFailure::Device)?;
     Ok(Adapter { name, driver })
 }
 
-/// The codecs the NVIDIA GPU's encoder supports.
+/// Returns the codecs the NVIDIA GPU's encoder supports.
 pub(crate) fn supported_codecs() -> Result<Vec<Codec>, ProbeError> {
     let device = device::Device::create().map_err(ProbeFailure::Device)?;
     Ok(nvenc::supported_codecs(&device.d3d).map_err(ProbeFailure::Nvenc)?)

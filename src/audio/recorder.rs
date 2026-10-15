@@ -1,5 +1,5 @@
-//! The session's audio thread: reads the loopback capture on a timer, keeps the sound on the
-//! shared clock and hands it to the buffer as 16-bit PCM; gaps are left for a save to fill.
+//! The session's audio thread. It reads the loopback capture on a timer, keeps the sound on the
+//! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
     CHANNELS, SAMPLE_RATE, aac,
@@ -20,10 +20,11 @@ use std::{
 };
 use windows::Win32::{Foundation::HANDLE, Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED};
 
-/// Six 10 ms engine packets per read; the 200 ms capture buffer covers a late one.
+/// Each read takes six 10 ms engine packets. The 200 ms capture buffer absorbs a late read.
 const READ_INTERVAL: Duration = Duration::from_millis(60);
 const WAKE_INTERVAL: Duration = Duration::from_millis(100);
-/// Silence is filled in this far behind the present, so a late packet is not taken for a gap.
+/// Silence is filled in this far behind the present, so that a late packet is not mistaken for a
+/// gap.
 const SILENCE_LAG: Ticks = Ticks(CLOCK_RATE / 2);
 const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
@@ -34,7 +35,7 @@ pub(crate) struct Capture {
 }
 
 impl Capture {
-    /// Whether the audio thread ended by itself, so sound is no longer recorded.
+    /// Returns whether the audio thread ended by itself, so that sound is no longer recorded.
     pub(crate) fn has_stopped(&self) -> bool {
         self.join.as_ref().is_some_and(JoinHandle::is_finished)
     }
@@ -54,7 +55,7 @@ impl Drop for Capture {
     }
 }
 
-/// The text a panic was raised with, when it was a string.
+/// Returns the text a panic was raised with, when the payload is a string.
 fn panic_message(payload: &(dyn Any + Send)) -> &str {
     payload
         .downcast_ref::<&str>()
@@ -107,7 +108,7 @@ fn record(live: &Live, stop: &Signal) {
             placed = true;
         }
         device.update(devices, changed);
-        // A failed wait would fail again at once; stopping beats spinning on it.
+        // A failed wait would fail again at once, so stopping is preferable to spinning on it.
         let wake = match loopback::wait(stop, device.wake(), device.interval()) {
             Ok(Wake::Stop) => break,
             Ok(wake) => wake,
@@ -170,7 +171,7 @@ struct Device {
     state: DeviceState,
     /// `None` means the default device is polled.
     watch: Option<Watch>,
-    /// When to next check the default device or try to open one; `None` is now.
+    /// When to next check the default device or try to open one. `None` means now.
     due: Option<Instant>,
 }
 
@@ -185,7 +186,7 @@ enum DeviceState {
 }
 
 impl DeviceState {
-    /// After a device that was open closes.
+    /// The state after a device that was open closes.
     const CLOSED_AFTER_OPEN: Self = Self::Closed {
         opened_before: true,
         reported: false,
@@ -301,7 +302,7 @@ impl Device {
     }
 }
 
-/// Where the track hands finished runs of sound: the live buffer, or a test's list.
+/// The destination the track passes finished runs of sound to: the live buffer, or a test's list.
 trait Sink {
     /// Interleaved samples starting at frame `start`.
     fn push_audio(&self, start: u64, data: Arc<[i16]>);
@@ -318,7 +319,7 @@ struct Track<'a> {
     timeline: Timeline,
     /// Number of the next frame, silence included.
     next: Frames,
-    /// Interleaved samples, `CHANNELS` to a frame, not yet handed to the buffer.
+    /// Interleaved samples, `CHANNELS` to a frame, not yet passed to the buffer.
     pending: Vec<i16>,
     /// Number of the first frame in `pending`.
     pending_start: Frames,
@@ -410,7 +411,7 @@ mod tests {
         channels: 2,
     };
 
-    /// The runs a track handed over, as (first frame, samples).
+    /// The runs a track passed on, as (first frame, samples).
     #[derive(Default)]
     struct Runs(RefCell<Vec<(u64, Vec<i16>)>>);
 

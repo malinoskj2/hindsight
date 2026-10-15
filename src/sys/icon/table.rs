@@ -1,4 +1,4 @@
-//! Every theme's icon. `build.rs` includes this file too, so it stands on its own.
+//! Every theme's icon. `build.rs` also includes this file, so it must be self-contained.
 
 /// One theme's icon: the logo under `assets` it is made from, the `.ico` written there, and the
 /// resource id it is embedded under.

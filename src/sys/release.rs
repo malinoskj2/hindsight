@@ -4,10 +4,11 @@ use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
 
 const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 
-/// Each part is `None` when the registry lacks it; Windows 10 before 20H2 has no display version.
+/// The Windows release. Each part is `None` when the registry lacks it. Windows 10 before 20H2
+/// has no display version.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Release {
-    /// `25H2`.
+    /// The display version, such as `25H2`.
     pub(crate) display_version: Option<String>,
     pub(crate) build: Option<u32>,
     /// The update revision, `6899` in build `26200.6899`.

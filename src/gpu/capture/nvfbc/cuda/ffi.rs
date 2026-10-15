@@ -13,11 +13,12 @@ use std::{
 pub(super) const SETUP_PARAMS_VER: u32 = struct_version(size_of::<SetupParams>(), 1);
 pub(super) const GRAB_FRAME_PARAMS_VER: u32 = struct_version(size_of::<GrabFrameParams>(), 1);
 
-// What the header's macros evaluate to.
+// The values the header's macros evaluate to.
 const _: () = assert!(SETUP_PARAMS_VER == 0x7001_0200);
 const _: () = assert!(GRAB_FRAME_PARAMS_VER == 0x7001_0200);
 
-/// `NVFBC_SHARED_CUDA`: 0x1007 in SDK 7, 0x1006 in SDK 5; it moves with the interface version.
+/// `NVFBC_SHARED_CUDA`: 0x1007 in SDK 7 and 0x1006 in SDK 5. It changes with the interface
+/// version.
 pub(super) const SHARED_CUDA: u32 = 0x1007;
 /// `NVFBC_TOCUDA_NOWAIT`.
 pub(super) const TOCUDA_NOWAIT: u32 = 0x1;
@@ -67,7 +68,7 @@ const _: () = assert!(offset_of!(GrabFrameParams, _reserved_pointers) == 272);
 /// `INvFBCCuda_v3`.
 pub(super) type ToCuda = Interface<ToCudaVtable>;
 
-/// The size query first, the release last.
+/// The method table, with the size query first and the release last.
 #[repr(C)]
 pub(super) struct ToCudaVtable {
     pub(super) get_max_buffer_size: unsafe extern "system" fn(*mut ToCuda, *mut u32) -> Status,

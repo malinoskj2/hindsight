@@ -37,33 +37,34 @@ use windows::{
 };
 use winsafe::{HEVENT, guard::CloseHandleGuard};
 
-/// Format tags the audio headers put in modules this one does not otherwise need.
+/// Format tags from the audio headers that live in modules this one does not otherwise need.
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
-/// 200 ms in 100 ns units; a late read loses nothing.
+/// 200 ms in 100 ns units. A late read loses nothing.
 const BUFFER_DURATION: i64 = 2_000_000;
 const FLOAT_BITS: u16 = 32;
 
-/// `Send` through winsafe: a kernel event handle is not tied to the thread that opened it.
+/// An event handle. It is `Send` through winsafe: a kernel event handle is not tied to the thread
+/// that opened it.
 pub(super) struct Signal(CloseHandleGuard<HEVENT>);
 
-// SAFETY: event handles may be set and waited on from any thread at once; closed only by the
-// last owner.
+// SAFETY: event handles may be set and waited on from any thread at once, and the handle is
+// closed only by the last owner.
 unsafe impl Sync for Signal {}
 
 impl Signal {
-    /// An event that stays set once set, so every wait after a stop request sees it.
+    /// Creates an event that stays set once set, so that every wait after a stop request sees it.
     pub(super) fn latch() -> windows::core::Result<Self> {
         Self::new(true)
     }
 
-    /// An event the wait it wakes clears, so each set is seen once.
+    /// Creates an event that is cleared by the wait it wakes, so that each set is seen once.
     fn pulse() -> windows::core::Result<Self> {
         Self::new(false)
     }
 
-    /// Unnamed, with default security, initially clear.
+    /// Creates an unnamed event with default security, initially clear.
     fn new(manual_reset: bool) -> windows::core::Result<Self> {
         HEVENT::CreateEvent(None, manual_reset, false, None)
             .map(Self)
@@ -83,7 +84,7 @@ pub(super) enum Wake {
     Stop,
     /// The default output device changed.
     Changed,
-    /// The timeout passed: time to read.
+    /// The timeout elapsed, so it is time to read.
     Read,
 }
 
@@ -152,11 +153,11 @@ impl Devices {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(failed("activate the audio client"))?;
         let layout = initialize(&client)?;
-        // SAFETY: the client is initialised, as a capture service needs; the call returns a new
-        // reference.
+        // SAFETY: the client is initialised, which a capture service requires. The call returns a
+        // new reference.
         let capture: IAudioCaptureClient =
             unsafe { client.GetService() }.map_err(failed("get the capture client"))?;
-        // SAFETY: the client is initialised, as starting needs.
+        // SAFETY: the client is initialised, which starting requires.
         unsafe { client.Start() }.map_err(failed("start the audio capture"))?;
         Ok(Loopback {
             client,
@@ -187,7 +188,8 @@ pub(super) struct Watch {
 }
 
 impl Watch {
-    /// Set when the default output changes; `wait` reports it as `Wake::Changed`.
+    /// Returns the event set when the default output changes. `wait` reports it as
+    /// `Wake::Changed`.
     pub(super) fn event(&self) -> HANDLE {
         self.changed.handle()
     }
@@ -217,7 +219,8 @@ mod listener {
     };
     use std::sync::Arc;
 
-    /// Only the default device changing matters; one lost while open shows as a capture failure.
+    /// Only a change of the default device matters. A device lost while open shows up as a
+    /// capture failure.
     #[implement(IMMNotificationClient)]
     pub(super) struct Listener(pub(super) Arc<Signal>);
 
@@ -302,7 +305,8 @@ mod task_mem {
     }
 
     impl CoTaskMem<u16> {
-        /// The string held, invalid UTF-16 replaced with U+FFFD; `None` when the pointer is null.
+        /// Returns the string held, with invalid UTF-16 replaced by U+FFFD, or `None` when the
+        /// pointer is null.
         pub(super) fn to_string_lossy(&self) -> Option<String> {
             if self.0.is_null() {
                 return None;
@@ -315,13 +319,13 @@ mod task_mem {
     }
 
     impl CoTaskMem<WAVEFORMATEX> {
-        /// A copy of the format held; `None` when the pointer is null.
+        /// Returns a copy of the format held, or `None` when the pointer is null.
         pub(super) fn to_wave_format(&self) -> Option<WaveFormat> {
             let format = self.0.cast_const();
             if format.is_null() {
                 return None;
             }
-            // SAFETY: by `from_raw`'s contract the non-null pointer is a valid wave format; the
+            // SAFETY: by `from_raw`'s contract the non-null pointer is a valid wave format. The
             // structure is packed, so it is read unaligned.
             let basic = unsafe { format.read_unaligned() };
             if basic.wFormatTag != WAVE_FORMAT_EXTENSIBLE || basic.cbSize < EXTENSIBLE_EXTRA_BYTES {
@@ -329,7 +333,8 @@ mod task_mem {
             }
             let extensible = format.cast::<WAVEFORMATEXTENSIBLE>();
             // SAFETY: `cbSize` declares the extensible fields, which by `from_raw`'s contract
-            // follow the basic ones in the same allocation; packed, so read unaligned.
+            // follow the basic ones in the same allocation. The structure is packed, so it is read
+            // unaligned.
             Some(WaveFormat::extensible(unsafe {
                 extensible.read_unaligned()
             }))
@@ -386,13 +391,13 @@ enum WaveFormat {
 }
 
 impl WaveFormat {
-    /// Any extra bytes `format` declares are dropped.
+    /// Wraps a plain format. Any extra bytes `format` declares are dropped.
     const fn plain(mut format: WAVEFORMATEX) -> Self {
         format.cbSize = 0;
         Self::Plain(format)
     }
 
-    /// Any bytes past the extensible fields are dropped.
+    /// Wraps an extensible format. Any bytes past the extensible fields are dropped.
     const fn extensible(mut format: WAVEFORMATEXTENSIBLE) -> Self {
         format.Format.cbSize = EXTENSIBLE_EXTRA_BYTES;
         Self::Extensible(format)
@@ -432,7 +437,8 @@ impl WaveFormat {
         }
     }
 
-    /// How captured packets in this format are laid out, if the capture can take it as it is.
+    /// Returns the layout of captured packets in this format, if the capture can use the format
+    /// as it is.
     fn layout(&self) -> Option<Layout> {
         let basic = self.basic();
         let float = match (basic.wFormatTag, self.sub_format()) {

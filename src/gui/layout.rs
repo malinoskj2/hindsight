@@ -23,22 +23,23 @@ pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
 const TITLE_LABEL_INDENT: i32 = 8;
 
 pub(super) const FILL_Y: i32 = 6;
-/// Down to where the Settings tab's last group ends while compact; grows with the page.
+/// The height down to where the Settings tab's last group ends while compact. It grows with the
+/// page.
 pub(super) const FILL_HEIGHT: i32 = 364;
 /// The tab strip above the pages and the slack under their content.
 const TAB_CHROME: i32 = 36;
 pub(super) const TAB_HEIGHT: i32 = FILL_Y + FILL_HEIGHT + TAB_CHROME;
 pub(super) const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
 
-/// The DPI the layout is laid out at before `gui::dpi` scales it.
+/// The DPI the layout is designed at before `gui::dpi` scales it.
 const BASE_DPI: u32 = 96;
 
 pub(super) const LINE: i32 = 18;
 pub(super) const BUTTON_WIDTH: i32 = 120;
 pub(super) const BUTTON_HEIGHT: i32 = 24;
 
-/// What a window's paint handlers read back from it: the frames it paints itself and the
-/// labels whose text has a colour of its own.
+/// What a window's paint handlers query from it: the frames it paints itself and the labels
+/// whose text has a colour of its own.
 pub(super) trait Painted {
     fn frames(&self) -> &[Frame];
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel>;
@@ -64,8 +65,8 @@ impl<P: Painted> Painted for Rc<P> {
     }
 }
 
-/// A group box the window paints itself: a child group-box control never erases its interior
-/// under a clip-children parent.
+/// A group box the window paints itself, because a child group-box control never erases its
+/// interior under a clip-children parent.
 pub(super) struct Frame {
     label: gui::Label,
     title: String,
@@ -158,9 +159,9 @@ impl TintedLabel {
     }
 }
 
-/// A group that grows while its message label shows, moving what is declared below it.
+/// A group that grows while its message label is shown, moving the controls declared below it.
 pub(super) struct ExpandableGroup {
-    /// The growing frame's place among the page's frames; those after it move down.
+    /// The index of the growing frame among the page's frames. Those after it move down.
     frame: usize,
     message: gui::Label,
     extra: i32,
@@ -281,7 +282,7 @@ pub(super) fn label(
     )
 }
 
-/// Shown once it has something to say.
+/// Creates a label that starts hidden and is shown once it has a message.
 pub(super) fn hidden_label(
     parent: &(impl GuiParent + 'static),
     x: i32,
@@ -347,14 +348,14 @@ pub(super) fn skin_button(button: &gui::Button, skin: &Skin) {
     });
 }
 
-/// Sizes each title label to its text, which takes a created window.
+/// Sizes each title label to its text, which requires the window to have been created.
 pub(super) fn fit_titles(frames: &[Frame]) {
     for frame in frames {
         let _ = frame.label.set_text_and_resize(&padded(&frame.title));
     }
 }
 
-/// Spaces on either side keep the group's line off the text.
+/// Pads the title with a space on either side, which keeps the group's line clear of the text.
 fn padded(title: &str) -> String {
     format!(" {title} ")
 }
@@ -411,7 +412,7 @@ fn erase(hdc: &w::HDC, host: &w::HWND, skin: &Skin, surface: Surface, frames: &[
     }
     match surface {
         Surface::Dialog => skin.fill_dialog(hdc, host),
-        // The page paints itself in one go; only a child asking for its backdrop is erased here.
+        // The page paints itself in one pass. Only a child requesting its backdrop is erased here.
         Surface::Page if hdc.WindowFromDC().as_ref() == Some(host) => {}
         Surface::Page => skin.paint_backdrop(hdc, host, frames),
     }
@@ -434,12 +435,12 @@ fn paint_page(hwnd: &w::HWND, skin: &Skin, frames: &[Frame]) {
     }
 }
 
-/// Lengths and counts past `i32::MAX` are taken as that.
+/// Converts to `i32`, clamping lengths and counts past `i32::MAX` to that value.
 pub(super) fn saturating_i32(value: impl TryInto<i32>) -> i32 {
     value.try_into().unwrap_or(i32::MAX)
 }
 
-/// On the scale of `gui::dpi_x`, like every other width here.
+/// The scroll bar width on the scale of `gui::dpi_x`, like every other width in this module.
 pub(super) fn scroll_bar_width() -> i32 {
     w::GetSystemMetricsForDpi(co::SM::CXVSCROLL, BASE_DPI)
         .map_or_else(|_| w::GetSystemMetrics(co::SM::CXVSCROLL), gui::dpi_x)

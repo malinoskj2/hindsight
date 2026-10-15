@@ -1,5 +1,5 @@
-//! The About tab: what hindsight is, the build and the system it runs on for a bug report,
-//! and where to go next.
+//! The About tab: a description of hindsight, the build and system details for a bug report, and
+//! links.
 
 use super::{
     layout::{
@@ -50,7 +50,7 @@ mod rows {
 
 const DETAIL_ROWS: [i32; 4] = [rows::BUILD, rows::COMPILER, rows::WINDOWS, rows::GPU];
 
-/// What the Links group's buttons ask for.
+/// The target of each of the Links group's buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Link {
     Website,
@@ -167,7 +167,8 @@ impl AboutPage {
     }
 }
 
-/// The Details group's captions and values, read once: none of them changes while running.
+/// The Details group's captions and values, read once, since none of them changes while the app
+/// runs.
 fn details() -> [(&'static str, String); 4] {
     [
         (text::BUILD, text::build(COMMIT, BUILD_DATE)),
@@ -202,7 +203,7 @@ fn follow(link: Link) {
     }
 }
 
-/// The theme's own owl, painted over the panel the label sits on.
+/// Creates the logo label, which paints the theme's owl over the panel it sits on.
 fn logo(page: &gui::TabPage, skin: &Skin) {
     let logo = gui::Label::new(
         page,
@@ -237,7 +238,7 @@ fn logo(page: &gui::TabPage, skin: &Skin) {
     });
 }
 
-/// Not shared: a shared icon keeps the first size it was loaded at.
+/// Loads the icon unshared, because a shared icon keeps the first size it was loaded at.
 fn load_icon(theme: Theme, size: i32) -> Option<DestroyIconGuard> {
     w::HINSTANCE::GetModuleHandle(None)
         .ok()?
@@ -249,7 +250,8 @@ fn load_icon(theme: Theme, size: i32) -> Option<DestroyIconGuard> {
         .ok()
 }
 
-/// `winsafe` has no `DrawIconEx`, which blends the icon's alpha over what is there.
+/// Draws the icon with `DrawIconEx`, which blends its alpha over the existing pixels. `winsafe`
+/// has no wrapper for it.
 #[expect(unsafe_code, reason = "calls DrawIconEx")]
 fn draw_icon(hdc: &w::HDC, icon: &w::HICON, size: i32) {
     use windows::Win32::{
@@ -279,7 +281,7 @@ fn open_link(url: &str) {
     }
 }
 
-/// Selects the log file in Explorer, or opens its folder before the file is written.
+/// Selects the log file in Explorer, or opens its folder if the file has not been written yet.
 fn open_log_folder() {
     let folder = storage::state_directory();
     let file = folder.join(log::FILE_NAME);
@@ -293,7 +295,8 @@ fn open_log_folder() {
     }
 }
 
-/// Without a trailing slash or `.git`, either of which `Cargo.toml` may give.
+/// The issues URL of `repository`, stripped of a trailing slash or `.git`, either of which
+/// `Cargo.toml` may include.
 fn issues_url(repository: &str) -> String {
     let root = repository.trim_end_matches('/');
     format!("{}/issues", root.strip_suffix(".git").unwrap_or(root))

@@ -1,4 +1,5 @@
-//! The replay buffer in CUDA memory, written by NVENC itself: packets never cross to system memory.
+//! The replay buffer in CUDA memory, written by NVENC itself, so that packets never cross to
+//! system memory.
 
 use crate::{
     gpu::cuda::{ContextHold, CudaError, Device, DeviceBuffer, DevicePointer, Driver},
@@ -11,13 +12,13 @@ use crate::{
 use std::{mem, sync::Arc};
 use thiserror::Error;
 
-/// How the encoder lays a frame out in a staging buffer: a header, then the bitstream.
+/// The layout of a frame the encoder writes to a staging buffer: a header, then the bitstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StagingLayout {
     pub(super) header_bytes: usize,
-    /// Of the bitstream's size in the header, as a little-endian `u32`.
+    /// The offset of the bitstream's size within the header, stored as a little-endian `u32`.
     pub(super) size_offset: usize,
-    /// Bitstream bytes read back with the header, enough to tell a keyframe.
+    /// The number of bitstream bytes read back with the header, enough to recognise a keyframe.
     pub(super) head_bytes: usize,
 }
 
@@ -38,12 +39,12 @@ struct Oversized {
     room: usize,
 }
 
-/// A staging buffer of the ring's, by the order it was allocated in.
+/// A staging buffer of the ring, identified by its allocation order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StagingId(usize);
 
 pub(super) struct CudaRing {
-    /// The primary context, released once the last page is gone.
+    /// The primary context, released once the last page is dropped.
     hold: Arc<ContextHold>,
     pages: Pages<CudaPage>,
     staging: Vec<DeviceBuffer>,
@@ -52,7 +53,7 @@ pub(super) struct CudaRing {
 }
 
 impl CudaRing {
-    /// The primary context of `device` must be current on this thread.
+    /// Creates the ring. The primary context of `device` must be current on this thread.
     pub(super) fn create(
         device: Device,
         bytes: u64,
@@ -85,7 +86,8 @@ impl CudaRing {
         format!("Buffer · CUDA memory · {}", self.pages.summary())
     }
 
-    /// A buffer for the encoder to write frames into, and where it is.
+    /// Allocates a buffer for the encoder to write frames into, and returns its id and device
+    /// address.
     pub(super) fn allocate_staging(
         &mut self,
         bytes: usize,
@@ -100,8 +102,8 @@ impl CudaRing {
         Ok((StagingId(self.staging.len() - 1), pointer))
     }
 
-    /// Leaks the staging buffers rather than free memory a stalled encoder may still write;
-    /// with them, the context stays held for the rest of the process.
+    /// Leaks the staging buffers rather than freeing memory a stalled encoder may still write
+    /// to. The context stays held with them for the rest of the process.
     pub(super) fn leak_staging(&mut self) {
         if self.staging.is_empty() {
             return;

@@ -1,8 +1,9 @@
 //! hindsight keeps the last moments of a game in a replay buffer, captured and encoded on the
 //! GPU, and saves them as a clip when the hotkey is pressed.
 //!
-//! Off Windows `run` only refuses, so outside tests the portable modules are expected to be dead.
-//! Their test build still checks dead code, excusing only the items that just Windows code uses.
+//! Off Windows, `run` only returns an error, so outside tests the portable modules are expected
+//! to be dead code. Their test build still checks for dead code, exempting only the items that
+//! only Windows code uses.
 
 #[cfg(windows)]
 use anyhow::Context;
@@ -78,8 +79,8 @@ pub(crate) const APP_NAME: &str = "hindsight";
 const UNSUPPORTED_PLATFORM_MESSAGE: &str =
     "hindsight requires Windows 10 1903 or newer and an NVIDIA GPU";
 
-/// An error is also shown in a message box: the GUI subsystem has no console for `main`'s
-/// report.
+/// Runs the application. An error is also shown in a message box, since the GUI subsystem has
+/// no console for `main` to report it to.
 #[cfg(windows)]
 pub fn run() -> Result<()> {
     log::install();
@@ -119,8 +120,8 @@ pub fn run() -> Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM_MESSAGE)
 }
 
-/// The GUI subsystem has no console, so a panic on any thread is written to the journal (and
-/// its file mirror) before the previous hook runs.
+/// Installs a panic hook that writes a panic on any thread to the journal (and its file mirror)
+/// before the previous hook runs, since the GUI subsystem has no console.
 #[cfg(windows)]
 fn log_panics() {
     let previous = std::panic::take_hook();

@@ -10,7 +10,8 @@ use winreg::{
     enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE},
 };
 
-/// Starts hidden in the tray; the command-line parser declares the flag from this.
+/// The name of the flag that starts the app hidden in the tray. The command-line parser declares
+/// the flag from this constant.
 pub(crate) const TRAY_FLAG_NAME: &str = "tray";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -41,7 +42,8 @@ fn add() -> io::Result<()> {
     key.set_value(APP_NAME, &command(executable.as_os_str()))
 }
 
-/// `access` is a `KEY_*` mask; `winreg` names its type only through `windows-sys`.
+/// Opens the `Run` key with `access`, a `KEY_*` mask. `winreg` names the mask's type only
+/// through `windows-sys`.
 fn run_key(access: u32) -> io::Result<RegKey> {
     RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, access)
 }

@@ -6,8 +6,9 @@ use crate::config::Codec;
 use bytemuck::Zeroable;
 use windows::core::GUID;
 
-/// Two keyframes a second: a clip starts within half a second of where it is asked to, and
-/// the rest of the bitrate goes to the P-frames. At 60 fps that is Instant Replay's 30 frames.
+/// Two keyframes a second, so that a clip starts within half a second of where it is asked to
+/// and the rest of the bitrate goes to the P-frames. At 60 fps that is Instant Replay's 30
+/// frames.
 const KEYFRAMES_PER_SECOND: u32 = 2;
 
 pub(super) const fn codec_guid(codec: Codec) -> GUID {
@@ -51,7 +52,8 @@ const fn gop_frames(frame_rate: u32) -> u32 {
     if frames == 0 { 1 } else { frames }
 }
 
-/// Single-pass VBR with no lookahead or adaptive quantization: nothing runs on the shader cores.
+/// Single-pass VBR with no lookahead or adaptive quantization, so that nothing runs on the
+/// shader cores.
 fn configure_rate_control(rc: &mut ffi::RcParams, bitrate_bps: u32) {
     rc.rate_control_mode = ffi::RATE_CONTROL_VBR;
     rc.average_bit_rate = bitrate_bps;
@@ -96,8 +98,8 @@ fn configure_av1(av1: &mut ffi::Av1Config, gop: u32, matrix: u32) {
     av1.signal_colour(matrix);
 }
 
-/// Without the configuration, which [`Session::initialize`](super::session::Session::initialize)
-/// points it at.
+/// The initialization parameters without the configuration, which
+/// [`Session::initialize`](super::session::Session::initialize) points them at.
 pub(super) fn initialize_params(settings: Settings) -> ffi::InitializeParams {
     let mut params = ffi::InitializeParams::zeroed();
     params.version = ffi::INITIALIZE_PARAMS_VER;
@@ -134,7 +136,7 @@ mod tests {
         }
     }
 
-    /// A preset as the driver might hand it back: every bit field set, so the test sees which
+    /// A preset as the driver might return it, with every bit field set, so the test sees which
     /// bits the edits clear, set and leave alone.
     fn preset(codec: Codec) -> ffi::Config {
         let mut config = ffi::PresetConfig::zeroed().config;

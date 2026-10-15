@@ -1,4 +1,5 @@
-//! One capture session: a frame per tick of the clock, from the capture through NVENC into the replay buffer.
+//! One capture session: a frame per tick of the clock, from the capture through NVENC into the
+//! replay buffer.
 
 use crate::{
     config::{Codec, Config, Memory},
@@ -22,7 +23,8 @@ use std::{
     time::Duration,
 };
 
-/// A window capture that shows nothing this long cannot see the window (exclusive full screen).
+/// A window capture that delivers nothing for this long cannot see the window (exclusive full
+/// screen).
 const FIRST_FRAME_TIMEOUT_SECONDS: u64 = 2;
 
 pub(crate) fn record(
@@ -72,7 +74,7 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
     let device = open_device(config)?;
     let frame_rate = NonZeroU32::new(config.frame_rate).context("the frame rate is zero")?;
     let mut pacer = Pacer::new(frame_rate).context("create the frame timer")?;
-    // Frame `i` is this instant plus `i` periods; the audio is lined up against it.
+    // Frame `i` is this instant plus `i` periods. The audio is aligned to it.
     live.set_origin(sys::clock::now());
     let mut session = Session::open(config, device, pacer.period(), target, live)?;
     let settings = session.encoder.settings();
@@ -116,9 +118,9 @@ fn push_frame(live: &Live, keyframes: &mut Keyframes, encoded: Encoded) {
     }
 }
 
-/// The encoder owns what it runs on and what it reads in place, except a CUDA context the NvFBC
-/// driver opened, which lives with the capture's session; so it is declared first and dropped
-/// before the capture.
+/// The encoder owns the device it runs on and the surfaces it reads in place, except a CUDA
+/// context the NvFBC driver opened, which lives with the capture's session. The encoder is
+/// therefore declared first and dropped before the capture.
 struct Session {
     encoder: Encoder,
     capture: capture::Capture,
@@ -252,8 +254,8 @@ fn repeat_latest(
     }
 }
 
-/// Where the replay buffer goes: a store for the replay buffer, or a ring in the CUDA session
-/// `on` for the encoder to write into.
+/// Chooses where the replay buffer is kept: a store, or a ring in the CUDA session `on` for the
+/// encoder to write into.
 fn choose_output(config: &Config, on: &mut EncoderDevice, live: &Live) {
     match config.buffer_memory {
         Memory::Ram => return,

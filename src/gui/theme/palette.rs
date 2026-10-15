@@ -14,7 +14,7 @@ const CLASSIC_GOOD: u32 = 0x0010_7C10;
 const CLASSIC_WARNING: u32 = 0x009D_5D00;
 const CLASSIC_ERROR: u32 = 0x00C4_2B1C;
 
-/// The classic look's tint for a tone; `None` keeps the system's text colour.
+/// The classic look's tint for a tone. `None` keeps the system's text colour.
 pub(super) const fn classic_tint(tone: Tone) -> Option<u32> {
     match tone {
         Tone::Text => None,
@@ -81,7 +81,7 @@ const NOVA: Palette = Palette {
     secondary_button: 0x00ED_F3F9,
 };
 
-/// Every colour a theme fills with; the cache holds a brush for each.
+/// Every colour a theme fills with. The cache holds a brush for each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fill {
     Background,
@@ -92,7 +92,7 @@ pub(super) enum Fill {
     Hot,
 }
 
-/// Every colour a theme outlines with; the cache holds a pen for each.
+/// Every colour a theme outlines with. The cache holds a pen for each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Edge {
     Border,

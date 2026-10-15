@@ -152,7 +152,7 @@ struct SequenceHeader {
 }
 
 impl SequenceHeader {
-    /// `sequence_header_obu()` (spec 5.5) through `color_config()`.
+    /// Parses `sequence_header_obu()` (spec 5.5) through `color_config()`.
     fn parse(payload: &[u8]) -> io::Result<Self> {
         let mut bits = Bits::new(payload);
         let profile = bits.read::<3, u8>()?;
@@ -293,7 +293,7 @@ struct ColourConfig {
 }
 
 impl ColourConfig {
-    /// `color_config()` (spec 5.5.2).
+    /// Parses `color_config()` (spec 5.5.2).
     fn parse(bits: &mut Bits<'_>, profile: u8) -> io::Result<Self> {
         let high_bitdepth = bits.read_bit()?;
         let twelve_bit = profile == PROFILE_PROFESSIONAL && high_bitdepth && bits.read_bit()?;
@@ -344,7 +344,7 @@ impl ColourConfig {
     }
 }
 
-/// `uvlc()`: leading zeros, a one, then as many value bits.
+/// Reads a `uvlc()` value: leading zeros, a one, then as many value bits as there were zeros.
 fn uvlc(bits: &mut Bits<'_>) -> io::Result<u32> {
     let mut zeros = 0;
     while !bits.read_bit()? {

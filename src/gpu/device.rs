@@ -1,4 +1,4 @@
-//! The Direct3D 11 device capture and NVENC share, created on the NVIDIA adapter.
+//! The Direct3D 11 device that capture and NVENC share, created on the NVIDIA adapter.
 
 use crate::gpu::win32::utf16_until_nul;
 use thiserror::Error;
@@ -119,13 +119,13 @@ impl Device {
     }
 }
 
-/// The error for a call that succeeded yet left its out-parameter null: `E_POINTER`, rather
-/// than an empty error that would read "The operation completed successfully".
+/// The error for a call that succeeded but left its out-parameter null: `E_POINTER`, rather
+/// than an empty error whose message would be "The operation completed successfully".
 pub(super) fn null_output() -> windows::core::Error {
     E_POINTER.into()
 }
 
-/// Holds the device's lock against its other threads until dropped.
+/// A guard that holds the device's lock against its other threads until dropped.
 pub(super) struct Locked<'a>(&'a ID3D11Multithread);
 
 #[expect(unsafe_code, reason = "calls ID3D11Multithread::Enter")]
@@ -165,8 +165,8 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
     Err(DeviceError::NoNvidiaAdapter)
 }
 
-/// The NVIDIA adapter's name and its driver's version, found without creating a device; the
-/// version is `None` when the driver does not report one.
+/// Returns the NVIDIA adapter's name and its driver's version, determined without creating a
+/// device. The version is `None` when the driver does not report one.
 #[expect(unsafe_code, reason = "calls IDXGIAdapter::CheckInterfaceSupport")]
 pub(super) fn describe_nvidia_adapter() -> Result<(String, Option<String>), DeviceError> {
     let (adapter, name) = nvidia_adapter()?;
@@ -175,8 +175,8 @@ pub(super) fn describe_nvidia_adapter() -> Result<(String, Option<String>), Devi
     Ok((name, version.ok().map(nvidia_driver_version)))
 }
 
-/// The user-mode driver version `32.0.15.8157` as NVIDIA publishes it, `581.57`: the last
-/// digit of the third part and the whole fourth.
+/// Formats the user-mode driver version `32.0.15.8157` as NVIDIA publishes it, `581.57`: the
+/// last digit of the third part followed by the whole fourth part.
 fn nvidia_driver_version(user_mode: i64) -> String {
     let part = |shift: u32| (user_mode >> shift) & 0xFFFF;
     let number = (part(16) % 10) * 10_000 + part(0);

@@ -93,8 +93,8 @@ pub(crate) enum StorageError {
     NoDirectory,
 }
 
-/// Without the local application data folder paths fall back to the temporary directory;
-/// [`Store::open`] refuses.
+/// Returns the state directory. Without the local application data folder, paths fall back to
+/// the temporary directory, while [`Store::open`] returns an error.
 #[cfg(windows)]
 pub(crate) fn state_directory() -> PathBuf {
     local_app_data()
@@ -102,7 +102,7 @@ pub(crate) fn state_directory() -> PathBuf {
         .join(STATE_DIRECTORY)
 }
 
-/// `%LOCALAPPDATA%`, from the shell rather than the environment, which can be stale.
+/// Returns `%LOCALAPPDATA%` from the shell rather than the environment, which can be stale.
 #[cfg(windows)]
 fn local_app_data() -> Option<PathBuf> {
     crate::sys::com::known_folder(&winsafe::co::KNOWNFOLDERID::LocalAppData)

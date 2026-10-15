@@ -1,4 +1,4 @@
-//! What the bindings to the NVIDIA driver's interfaces have in common.
+//! Code shared by the bindings to the NVIDIA driver's interfaces.
 
 use std::{marker::PhantomData, ops::Deref};
 use windows::{
@@ -9,8 +9,8 @@ use windows::{
     core::{Owned, PCSTR, PCWSTR},
 };
 
-/// A library from System32 only, never a planted copy; everything looked up in or made by it
-/// must be gone before it is dropped.
+/// A library loaded from System32 only, never from a planted copy. Everything looked up in it
+/// or created by it must be dropped before the library is.
 pub(super) struct Library(Owned<HMODULE>);
 
 #[expect(
@@ -52,9 +52,9 @@ impl Library {
 
 /// A function exported by a [`Library`], usable while the library is borrowed.
 ///
-/// Copying the pointer out with `*` detaches it from the library's lifetime: whoever does so
-/// keeps the library loaded for as long as the copy is called, as a struct does by holding the
-/// library in a field declared after the pointers.
+/// Copying the pointer out with `*` detaches it from the library's lifetime. Whoever does so
+/// must keep the library loaded for as long as the copy is called, as a struct does by holding
+/// the library in a field declared after the pointers.
 pub(super) struct Symbol<'lib, F> {
     function: F,
     _library: PhantomData<&'lib Library>,
@@ -72,7 +72,8 @@ mod sealed {
     pub(in crate::gpu) trait Sealed {}
 }
 
-/// An `unsafe extern "system"` function pointer: the only types a library export may be read as.
+/// An `unsafe extern "system"` function pointer, the only kind of type a library export may be
+/// read as.
 pub(super) trait FnPtr: Copy + sealed::Sealed {}
 
 macro_rules! fn_ptr {
@@ -90,8 +91,8 @@ fn_ptr!(A, B, C, D);
 fn_ptr!(A, B, C, D, E);
 fn_ptr!(A, B, C, D, E, G);
 
-/// A status code kept raw, since a driver may return codes this program does not know, with
-/// the names of the ones it does.
+/// A status code kept as its raw value, since a driver may return codes this program does not
+/// know, together with the names of the ones it does.
 macro_rules! raw_status {
     (
         $(#[$meta:meta])*

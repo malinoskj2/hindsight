@@ -144,14 +144,15 @@ pub(super) fn clip_menu_failed(error: impl Display) -> String {
 }
 
 pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
-    // No-break space: the list view wraps captions and would split the size from its unit.
+    // A no-break space, because the list view wraps captions and would split the size from its
+    // unit.
     format!("{title} {}", format_bytes(bytes).replace(' ', "\u{a0}"))
 }
 
 pub(super) fn status(status: &Status) -> String {
     let message = match status.state {
         State::Starting(_) => "Starting capture…",
-        // The last app's buffer stays until the next one, so a save still has something.
+        // The last app's buffer is kept until the next app, so a save still has content.
         State::Waiting if holds_frames(status) => {
             "Waiting for a full-screen app · the last buffer stays saveable"
         }
@@ -166,8 +167,8 @@ pub(super) fn status(status: &Status) -> String {
     format!("●  {message}")
 }
 
-/// The source and the encoder are shown only while capture runs: between apps the buffer is
-/// kept, but the lines would otherwise read as if the last app were still recorded.
+/// The source and the encoder are shown only while capture runs. Between apps the buffer is kept,
+/// but the lines would otherwise suggest that the last app was still being recorded.
 pub(super) fn source(status: &Status) -> String {
     status
         .state
@@ -211,7 +212,7 @@ pub(super) fn rates(status: &Status) -> String {
         .map_or_else(|| NO_VALUE.to_owned(), |rate| format!("{rate:.0} fps"))
 }
 
-/// "27 s of 30 s · 327 MB": the span the next save would cover and what it takes.
+/// The span the next save would cover and the memory it takes, as "27 s of 30 s · 327 MB".
 pub(super) fn buffer_held(status: &Status) -> String {
     let Some((stream, held)) = status
         .buffer
@@ -227,7 +228,7 @@ pub(super) fn buffer_held(status: &Status) -> String {
     )
 }
 
-/// "GPU memory (VRAM) · about 3.8 GB": where the buffer is kept and what it reserves.
+/// Where the buffer is kept and how much it reserves, as "GPU memory (VRAM) · about 3.8 GB".
 pub(super) fn buffer_place(status: &Status) -> String {
     status.buffer.map_or_else(
         || NO_VALUE.to_owned(),
@@ -245,7 +246,8 @@ fn stream(status: &Status) -> Option<Stream> {
     status.buffer.and_then(|buffer| buffer.stream)
 }
 
-/// Every size the window shows: "312 MB" below a gigabyte, "1.5 GB" from there, in decimal units.
+/// Formats every size the window shows: "312 MB" below a gigabyte and "1.5 GB" from there, in
+/// decimal units.
 fn format_bytes(bytes: u64) -> String {
     // What would round up to 1000 MB is shown as 1.0 GB.
     if bytes < GIGABYTE - MEGABYTE / 2 {
@@ -322,12 +324,13 @@ pub(super) fn name_and_version() -> String {
     format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// "1a2b3c4 · 2026-10-14": the commit built and the day it was built.
+/// The commit built and the day it was built, as "1a2b3c4 · 2026-10-14".
 pub(super) fn build(commit: &str, date: &str) -> String {
     format!("{commit} · {date}")
 }
 
-/// "rustc 1.98.0" out of `rustc --version`, which goes on to the compiler's own commit.
+/// The compiler's name and version, as "rustc 1.98.0", taken from `rustc --version`, which
+/// continues with the compiler's own commit.
 pub(super) fn compiler(version: &str) -> String {
     let mut words = version.split_whitespace();
     match (words.next(), words.next()) {
@@ -336,7 +339,8 @@ pub(super) fn compiler(version: &str) -> String {
     }
 }
 
-/// "Windows 11 25H2 · build 26200.6899"; Windows 11 is told apart only by its build number.
+/// The Windows release, as "Windows 11 25H2 · build 26200.6899". Windows 11 is distinguished only
+/// by its build number.
 pub(super) fn windows_release(release: &Release) -> String {
     const FIRST_WINDOWS_11_BUILD: u32 = 22_000;
     let generation = match release.build {
@@ -355,7 +359,8 @@ pub(super) fn windows_release(release: &Release) -> String {
     }
 }
 
-/// "NVIDIA GeForce RTX 4080 · driver 581.57", or why there is no such GPU.
+/// The GPU and its driver, as "NVIDIA GeForce RTX 4080 · driver 581.57", or why there is no such
+/// GPU.
 pub(super) fn gpu(adapter: &Result<Adapter, ProbeError>) -> String {
     match adapter {
         Ok(Adapter {

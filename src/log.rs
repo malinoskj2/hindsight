@@ -10,7 +10,7 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-/// Entries kept in memory; the file keeps everything from the session.
+/// The number of entries kept in memory. The file keeps every entry from the session.
 const CAPACITY: usize = 500;
 pub(crate) const FILE_NAME: &str = "hindsight.log";
 
@@ -74,7 +74,7 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
     next_sequence: 1,
 });
 
-/// Locked before the journal, which keeps the file in sequence order.
+/// Locked before the journal, so the file stays in sequence order.
 static MIRROR: Mutex<Option<LineWriter<File>>> = Mutex::new(None);
 
 pub(crate) fn info(message: impl Display) {
@@ -121,7 +121,7 @@ pub(crate) fn since(sequence: u64) -> Vec<Entry> {
 pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
     let mut created = LineWriter::new(File::create(path)?);
     let mut file = mirror();
-    // Holding the mirror lock keeps entries from slipping between the copy and the switch.
+    // Holding the mirror lock prevents entries being logged between the copy and the switch.
     let lines: Vec<String> = journal().entries.iter().map(Entry::line).collect();
     for line in lines {
         writeln!(created, "{line}")?;
@@ -131,7 +131,8 @@ pub(crate) fn mirror_to(path: &Path) -> std::io::Result<()> {
 }
 
 /// Routes the `log` crate's records, which dependencies write, into the journal: warnings and
-/// errors from dependencies, everything from this crate. Only the first call installs it.
+/// errors from dependencies, and everything from this crate. Only the first call installs the
+/// logger.
 #[cfg(windows)]
 pub(crate) fn install() {
     if ::log::set_logger(&Facade).is_ok() {
@@ -177,7 +178,8 @@ fn record(level: Level, message: impl Display) {
     record_text(level, message.to_string());
 }
 
-/// A failed write stops the mirror, with one entry saying why; the journal carries on.
+/// Records an entry. A failed write stops the mirror, with one entry giving the reason, and the
+/// journal continues.
 fn record_text(level: Level, message: String) {
     let time = timestamp();
     let mut file = mirror();

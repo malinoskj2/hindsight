@@ -1,5 +1,5 @@
-//! The Clips tab: the clip folder as thumbnails, newest first, with the folder read and the
-//! shell's thumbnails made on a thread of their own.
+//! The Clips tab: the clip folder shown as thumbnails, newest first. The folder is read and the
+//! shell's thumbnails are made on a dedicated thread.
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
@@ -39,8 +39,8 @@ const COLUMNS: usize = 3;
 
 const CARD: w::COLORREF = w::COLORREF::from_rgb(0xE4, 0xE4, 0xE4);
 const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
-/// How long a refresh waits for the folder before leaving it to the next tick; a local folder
-/// answers well within it, a slow network one no longer freezes the window.
+/// How long a refresh waits for the folder listing before leaving it to the next tick. A local
+/// folder answers well within this time, and a slow network folder no longer freezes the window.
 const LISTING_WAIT: Duration = Duration::from_millis(200);
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ impl Pane for ClipsPage {
     }
 
     fn on_create(&self) {
-        // Image list first: setting it resets the icon spacing.
+        // The image list is set first, because setting it resets the icon spacing.
         self.install_image_list();
         self.set_icon_spacing();
     }
@@ -109,8 +109,8 @@ impl ClipsPage {
         self.set_colours(background, text);
     }
 
-    /// Rereads the folder when the tab comes into view, the folder changes or a clip was saved;
-    /// finished thumbnails are taken in either way.
+    /// Rereads the folder when the tab comes into view, the folder changes or a clip was saved.
+    /// Finished thumbnails are collected in either case.
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
         self.receive(None);
         let rebuild = {
@@ -151,7 +151,7 @@ impl ClipsPage {
         });
         let page = self.clone();
         self.0.list.on().lvn_get_empty_markup(move |markup| {
-            // Not "no clips" while the folder is still being read.
+            // The "no clips" text is not shown while the folder is still being read.
             if page.0.state.borrow().listings_out > 0 {
                 return Ok(false);
             }
@@ -174,7 +174,8 @@ impl ClipsPage {
         if let Ok(item) = u32::try_from(index) {
             let _ = self.0.list.items().get(item).select(true);
         }
-        // TrackPopupMenu pumps messages; the timer may rebuild the list meanwhile, hence `path`.
+        // TrackPopupMenu pumps messages, so the timer may rebuild the list in the meantime, which
+        // is why `path` was resolved first.
         match self.choose_command() {
             Ok(Some(ClipCommand::Open)) => open(&path),
             Ok(Some(ClipCommand::Reveal)) => {
@@ -228,8 +229,8 @@ impl ClipsPage {
         }
     }
 
-    /// Reads the folder on the worker and waits a moment for it; on the UI thread only when
-    /// the worker cannot start.
+    /// Reads the folder on the worker and waits briefly for the result. The folder is read on the
+    /// UI thread only when the worker cannot start.
     fn request_listing(&self, folder: &Path) {
         let sent = {
             let mut state = self.0.state.borrow_mut();
@@ -248,7 +249,7 @@ impl ClipsPage {
         }
     }
 
-    /// Takes in the worker's finished jobs; with a deadline, waits until then for a listing.
+    /// Collects the worker's finished jobs. With a deadline, waits until then for a listing.
     fn receive(&self, deadline: Option<Instant>) {
         loop {
             let done = {
@@ -277,7 +278,8 @@ impl ClipsPage {
         }
     }
 
-    /// A listing of a folder since left behind is dropped.
+    /// Rebuilds the list from a listing. A listing of a folder that is no longer the current one
+    /// is dropped.
     fn receive_listing(&self, folder: &Path, clips: Vec<Clip>) {
         let current = {
             let mut state = self.0.state.borrow_mut();
@@ -289,8 +291,9 @@ impl ClipsPage {
         }
     }
 
-    /// The list's messages send notifications back into the window procedure, so the state is
-    /// not borrowed while they run; meanwhile no clip is listed, so no item finds a stale path.
+    /// The list's messages re-enter the window procedure with notifications, so the state is not
+    /// borrowed while they run. No clip is listed in the meantime, so no item resolves to a stale
+    /// path.
     fn rebuild(&self, clips: Vec<Clip>) {
         let images: Vec<Option<u32>> = {
             let mut state = self.0.state.borrow_mut();
@@ -323,7 +326,7 @@ impl ClipsPage {
         }
     }
 
-    /// Places the items on a centred grid: left to itself the list keeps its slack on the
+    /// Places the items on a centred grid. Left to its own layout, the list keeps its slack on the
     /// right, even when given a work area.
     #[expect(unsafe_code, reason = "sends LVM_SETITEMPOSITION32")]
     fn place_items(&self, count: usize) {
@@ -351,7 +354,7 @@ impl ClipsPage {
         }
     }
 
-    /// The thumbnail's offset from an item's position, found by placing item 0 at the origin.
+    /// The thumbnail's offset from an item's position, determined by placing item 0 at the origin.
     #[expect(unsafe_code, reason = "sends LVM_SETITEMPOSITION32")]
     fn icon_offset(&self) -> w::POINT {
         let hwnd = self.0.list.hwnd();
@@ -366,7 +369,7 @@ impl ClipsPage {
         let Ok(icon) = self.0.list.items().get(0).rect(co::LVIR::ICON) else {
             return origin;
         };
-        // The rectangle is the padded icon area; the thumbnail is centred in it.
+        // The rectangle is the padded icon area, and the thumbnail is centred in it.
         let (width, height) = thumbnail_size();
         w::POINT::with(
             icon.left + (icon.right - icon.left - width) / 2,
@@ -374,9 +377,10 @@ impl ClipsPage {
         )
     }
 
-    /// The borrow ends before the list is told: `LVM_SETITEM` notifies the window procedure.
+    /// The borrow ends before the list is updated, because `LVM_SETITEM` re-enters the window
+    /// procedure.
     fn receive_thumbnail(&self, path: PathBuf, result: Result<Thumbnail, ThumbnailError>) {
-        // Deleted while its thumbnail was being made.
+        // The clip was deleted while its thumbnail was being made.
         if !self.0.state.borrow().thumbnails.requested.contains(&path) {
             return;
         }
@@ -423,7 +427,7 @@ impl ClipsPage {
             Ok(index) => self.0.state.borrow_mut().thumbnails.placeholder = Some(index),
             Err(error) => log::warning(text::thumbnails_unavailable(error)),
         }
-        // SAFETY: LVM_SETIMAGELIST takes the handle by value; the control owns it from here.
+        // SAFETY: LVM_SETIMAGELIST takes the handle by value, and the control owns it from then on.
         unsafe {
             self.0.list.hwnd().SendMessage(w::msg::LvmSetImageList {
                 kind: co::LVSIL::NORMAL,
@@ -461,7 +465,8 @@ impl ClipsPage {
         let _ = unsafe { hwnd.SendMessage(w::msg::LvmSetTextColor { color: Some(text) }) };
     }
 
-    /// Raw `LVM_INSERTITEM`: the control's helper wants a column header, which an icon view lacks.
+    /// Sends `LVM_INSERTITEM` directly, because the control's helper requires a column header,
+    /// which an icon view lacks.
     #[expect(unsafe_code, reason = "sends LVM_INSERTITEM")]
     fn insert_item(&self, caption: &str, image: Option<u32>) -> w::SysResult<u32> {
         let mut item = w::LVITEM::default();
@@ -487,7 +492,7 @@ struct State {
     stale: bool,
     in_view: bool,
     clips: Vec<Clip>,
-    /// Listings asked of the worker and not yet taken in.
+    /// Listings requested from the worker and not yet collected.
     listings_out: usize,
     thumbnails: Thumbnails,
     worker: Option<Worker>,
@@ -503,7 +508,7 @@ impl State {
     }
 }
 
-/// The clips' pictures in the list's image list, and the requests out for the rest.
+/// The clips' thumbnails in the list's image list, and the outstanding requests for the rest.
 #[derive(Default)]
 struct Thumbnails {
     placeholder: Option<u32>,
@@ -529,7 +534,8 @@ impl Thumbnails {
         }
     }
 
-    /// The image stays in the image list: removing one renumbers those after it.
+    /// Forgets the clip's thumbnail. The image stays in the image list, because removing one
+    /// renumbers those after it.
     fn forget(&mut self, path: &Path) {
         self.images.remove(path);
         self.requested.remove(path);
@@ -546,7 +552,7 @@ enum ClipCommand {
 impl ClipCommand {
     const ALL: [Self; 3] = [Self::Open, Self::Reveal, Self::Delete];
 
-    /// From 1: the menu reports no choice as 0.
+    /// The menu command id, counted from 1, because the menu reports no choice as 0.
     fn id(self) -> u16 {
         match self {
             Self::Open => 1,
@@ -600,7 +606,7 @@ impl Worker {
     }
 }
 
-/// Serves until the sender drops.
+/// Serves jobs until the sender is dropped.
 fn serve(size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Done>) {
     let _ = sys_thread::enter_background_mode();
     let com = Apartment::single_threaded();
@@ -659,8 +665,8 @@ impl Clip {
         text::clip_caption(&title, self.size)
     }
 
-    /// Sort key: the recorder's names before the rest, then by name. Borrowed, so sorting
-    /// allocates nothing; `new` admits only UTF-8 names, which order as their text does.
+    /// The sort key: the recorder's names before the rest, then by name. The key is borrowed, so
+    /// sorting allocates nothing. `new` admits only UTF-8 names, which order as their text does.
     fn order(&self) -> (Option<&ClipName>, Option<&OsStr>) {
         (self.name.as_ref(), self.path.file_name())
     }

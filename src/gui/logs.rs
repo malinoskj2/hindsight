@@ -10,7 +10,7 @@ use crate::log;
 use std::{cell::Cell, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
 
-/// Characters after which the view is cleared; the session log file keeps everything.
+/// The character count after which the view is cleared. The session log file keeps everything.
 const VIEW_LIMIT: i32 = 200_000;
 
 #[derive(Clone)]
@@ -102,7 +102,7 @@ impl LogsPage {
     }
 
     /// A read-only edit without focus does not follow its caret, and a hidden one ignores the
-    /// scroll, so this runs once the tab is showing.
+    /// scroll, so this runs once the tab is visible.
     #[expect(unsafe_code, reason = "sends EM_SCROLLCARET")]
     fn scroll_to_end(&self) {
         let view = &self.0.view;

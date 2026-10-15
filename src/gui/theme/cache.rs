@@ -1,5 +1,5 @@
-//! What a themed paint draws with, made on first use and kept until the theme changes: the
-//! brushes and pens, the title font and the artwork decoded and scaled to the page.
+//! The resources a themed paint draws with, created on first use and kept until the theme
+//! changes: the brushes and pens, the title font and the artwork decoded and scaled to the page.
 
 use super::{
     ART_MARGIN,
@@ -45,7 +45,7 @@ pub(super) struct Resources {
     title_font: Option<DeleteObjectGuard<w::HFONT>>,
 }
 
-/// What one themed paint of a page borrows.
+/// The resources one themed paint of a page borrows.
 pub(super) struct Ready<'a> {
     pub(super) gdi: &'a Gdi,
     pub(super) scaled: Option<&'a Scaled>,
@@ -81,7 +81,8 @@ impl Resources {
         }
     }
 
-    /// Drops what belongs to the old theme; the title font follows the controls, not the theme.
+    /// Drops the resources that belong to the old theme. The title font follows the controls, not
+    /// the theme.
     pub(super) fn forget_theme(&mut self) {
         self.gdi = None;
         self.pictures = None;
@@ -122,7 +123,7 @@ impl Resources {
     }
 }
 
-/// A brush for every `Fill` and a pen for every `Edge`, so no lookup can miss.
+/// A brush for every `Fill` and a pen for every `Edge`, so that no lookup can fail.
 pub(super) struct Gdi {
     background: DeleteObjectGuard<w::HBRUSH>,
     panel: DeleteObjectGuard<w::HBRUSH>,

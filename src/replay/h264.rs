@@ -12,7 +12,8 @@ const NAL_IDR: u8 = 5;
 const NAL_SPS: u8 = 7;
 const NAL_PPS: u8 = 8;
 pub(super) const NAL_AUD: u8 = 9;
-/// Parameter sets live in `avcC`, and delimiters nowhere; the rest of a unit is its sample.
+/// Parameter sets are stored in `avcC` and delimiters are dropped. The remaining units of an
+/// access unit form its sample.
 const NOT_IN_SAMPLES: [u8; 3] = [NAL_SPS, NAL_PPS, NAL_AUD];
 /// Profiles whose `avcC` record also carries the chroma format and bit depths.
 const HIGH_PROFILES: [u8; 4] = [100, 110, 122, 144];
@@ -22,7 +23,7 @@ pub(super) fn is_keyframe(access_unit: &[u8]) -> bool {
     nal_units(access_unit).any(|unit| nal_type(unit) == NAL_IDR)
 }
 
-/// The `avcC` record, when the access unit carries both an SPS and a PPS.
+/// Returns the `avcC` record, when the access unit carries both an SPS and a PPS.
 pub(super) fn configuration(access_unit: &[u8]) -> Option<Avcc> {
     let [sps, pps] = find_units(access_unit, nal_type, [NAL_SPS, NAL_PPS])?;
     let mut record = Avcc::new(sps, pps).ok()?;

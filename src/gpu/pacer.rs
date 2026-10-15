@@ -53,8 +53,8 @@ impl Timer {
     }
 }
 
-/// A tick of the frame clock, counted from the start of the session: the frame shown then.
-/// NVENC carries it through a frame's encode as the picture's timestamp.
+/// A tick of the frame clock, counted from the start of the session, identifying the frame
+/// shown at that tick. NVENC carries it through a frame's encode as the picture's timestamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct FrameIndex(u64);
 
@@ -68,7 +68,7 @@ impl FrameIndex {
     }
 }
 
-/// Where the pacer reads the time and how it sleeps; a fake one makes its tests exact.
+/// The source of time the pacer reads and sleeps on. A fake clock makes the pacer's tests exact.
 pub(super) trait Clock {
     /// Time since the clock started.
     fn elapsed(&self) -> Duration;
@@ -76,7 +76,7 @@ pub(super) trait Clock {
     fn sleep(&mut self, duration: Duration) -> windows::core::Result<()>;
 }
 
-/// The wall clock, slept on through the high-resolution timer.
+/// The wall clock, which sleeps through the high-resolution timer.
 pub(super) struct WallClock {
     timer: Timer,
     start: Instant,
@@ -152,7 +152,7 @@ fn tick(elapsed: Duration, period: Duration) -> u64 {
 mod tests {
     use super::*;
 
-    /// Time moves only when the pacer sleeps or a test moves it.
+    /// Time advances only when the pacer sleeps or a test advances it.
     #[derive(Default)]
     struct FakeClock {
         now: Duration,

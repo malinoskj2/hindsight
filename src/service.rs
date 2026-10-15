@@ -32,11 +32,13 @@ const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// A monitor's OS handle, never null; carried as an integer so the worker stays portable.
+/// A monitor's OS handle, which is never null. It is carried as an integer so the worker stays
+/// portable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MonitorHandle(NonZeroIsize);
 
-/// A window's OS handle, never null; carried as an integer so the worker stays portable.
+/// A window's OS handle, which is never null. It is carried as an integer so the worker stays
+/// portable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WindowHandle(NonZeroIsize);
 
@@ -62,7 +64,7 @@ impl WindowHandle {
     }
 }
 
-/// What to capture. Two targets are the same when their handles are; the name only describes.
+/// The capture target. Equality compares handles only; the name is descriptive.
 #[derive(Clone, Debug)]
 pub(crate) enum Target {
     /// `None` is the primary monitor.
@@ -134,7 +136,7 @@ pub(crate) enum Ended {
     )]
     Resized,
     Closed,
-    /// The app presents in a way Windows cannot compose; its monitor must be captured instead.
+    /// The app presents in a way Windows cannot compose, so its monitor must be captured instead.
     NoFrames,
     /// Trying again would fail the same way.
     Unsupported(String),
@@ -144,7 +146,7 @@ type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 type Audio = fn(&Arc<Live>) -> Option<audio::Capture>;
 type Writer = fn(&Snapshot, &Path) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
-/// The worker's sense of time: retries and save ticks fall due by it.
+/// The clock the worker uses to schedule retries and save ticks.
 type Clock = Box<dyn Fn() -> Instant + Send>;
 
 #[cfg(windows)]
@@ -152,7 +154,7 @@ const RECORDER: Recorder = crate::gpu::record;
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
-/// What the worker drives; tests stand in for any part of it.
+/// The services the worker depends on. Tests replace any of them with a stand-in.
 struct Services {
     record: Recorder,
     audio: Audio,
@@ -178,7 +180,7 @@ impl Services {
     }
 }
 
-/// Where the worker is; what it shows is built from this when it publishes.
+/// The worker's current phase. The published status is derived from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Starting,
@@ -189,7 +191,7 @@ enum Phase {
     Unsupported,
 }
 
-/// What the worker is doing, carrying what only that state has.
+/// The worker's state as published, carrying the data specific to each state.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub(crate) enum State {
     /// Capture is running and no frame has arrived yet.
@@ -197,21 +199,22 @@ pub(crate) enum State {
     Recording(Running),
     /// Full-screen mode, with no full-screen app to record.
     Waiting,
-    /// Capture stopped on request; what was buffered stays saveable until it resumes.
+    /// Capture was stopped on request. What was buffered can still be saved until capture
+    /// resumes.
     Paused,
     /// Capture failed and is tried again shortly.
     Retrying,
     /// Capture fails the same way each time with these settings.
     Unsupported,
-    /// Nothing is captured: before the worker first reports, or once it has shut down.
+    /// Nothing is captured, either before the worker first reports or once it has shut down.
     #[default]
     Idle,
-    /// The worker itself failed; nothing is recorded until the app starts again.
+    /// The worker itself failed. Nothing is recorded until the app is started again.
     Stopped,
 }
 
 impl State {
-    /// The capture session, while one runs.
+    /// Returns the capture session, while one is running.
     pub(crate) fn running(&self) -> Option<&Running> {
         match self {
             Self::Starting(running) | Self::Recording(running) => Some(running),
@@ -224,7 +227,7 @@ impl State {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Running {
     pub(crate) backend: Backend,
-    /// Frames encoded a second, once measured.
+    /// Frames encoded per second, once measured.
     pub(crate) encode_rate: Option<f64>,
 }
 
@@ -233,17 +236,18 @@ pub(crate) struct Running {
 pub(crate) struct Buffer {
     /// Known once the first frame arrives.
     pub(crate) stream: Option<Stream>,
-    /// What the buffer holds now.
+    /// What the buffer currently holds.
     pub(crate) held: Held,
-    /// Where it is kept.
+    /// The memory the buffer is stored in.
     pub(crate) memory: Memory,
 }
 
-/// Whether system sound goes into the buffer, while capture runs and the settings ask for it.
+/// Whether system sound is being recorded into the buffer, while capture runs and the settings
+/// enable it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
     Recording,
-    /// Sound capture could not start or has stopped; the log says why.
+    /// Sound capture could not start or has stopped. The log gives the reason.
     Failed,
 }
 
@@ -260,11 +264,11 @@ pub(crate) struct Bytes {
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Status {
     pub(crate) state: State,
-    /// The display or app recorded last; kept until another is chosen.
+    /// The display or app recorded most recently, kept until another is chosen.
     pub(crate) source: Option<String>,
     pub(crate) buffer: Option<Buffer>,
     pub(crate) sound: Option<Sound>,
-    /// The settings' bitrate, buffer length and the buffer size they come to.
+    /// The settings' bitrate and buffer length, and the buffer size they amount to.
     pub(crate) bitrate_mbps: u32,
     pub(crate) buffer_seconds: u32,
     pub(crate) buffer_capacity_bytes: u64,
@@ -273,7 +277,7 @@ pub(crate) struct Status {
     /// The last clip was saved without the sound that was buffered for it.
     pub(crate) clip_without_sound: bool,
     pub(crate) error: Option<String>,
-    /// A save was asked for before the buffer held anything.
+    /// A save was requested before the buffer held anything.
     pub(crate) nothing_to_save: bool,
 }
 
@@ -282,7 +286,7 @@ enum Command {
     Start(Config),
     Target(Target),
     Save,
-    /// Pause while capturing, resume while paused: the worker knows which it is.
+    /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
     Theme(Theme),
@@ -383,7 +387,7 @@ struct Session {
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<Ended>>,
-    /// `None` when sound is not asked for or its capture could not start.
+    /// `None` when sound is not requested or its capture could not start.
     audio: Option<audio::Capture>,
 }
 
@@ -394,8 +398,9 @@ struct Saving {
     next_tick: Instant,
 }
 
-/// Dropped as a capture or save thread's closure ends: marks it done and wakes the worker.
-/// `JoinHandle::is_finished` would not do, as it says no until the result is stored.
+/// Dropped when a capture or save thread's closure ends. Marks the thread done and wakes the
+/// worker. `JoinHandle::is_finished` is not enough, as it returns false until the result is
+/// stored.
 struct Ending {
     done: Arc<AtomicBool>,
     wake: Sender<Command>,
@@ -451,7 +456,7 @@ impl Ledger {
             .map_or(Ok(()), |store| store.save_config(config))
     }
 
-    /// Counts a replay buffer that is done with.
+    /// Adds a finished replay buffer to the totals.
     fn bank(&mut self, live: &Live) {
         let bytes = live.bytes();
         self.session_buffered = self.session_buffered.saturating_add(bytes);
@@ -490,7 +495,7 @@ struct Machine {
     output: Arc<Mutex<Status>>,
     phase: Phase,
     error: Option<String>,
-    /// A save was asked for before the buffer held anything; cleared when one starts.
+    /// A save was requested before the buffer held anything. Cleared when a save starts.
     nothing_to_save: bool,
     last_clip: Option<PathBuf>,
     clip_without_sound: bool,
@@ -611,7 +616,7 @@ impl Machine {
         self.begin();
     }
 
-    /// Tears the session down and builds it again with the same target.
+    /// Stops the session and starts it again with the same target.
     fn restart(&mut self) {
         log::info(text::RESTARTING);
         self.paused = false;
@@ -670,7 +675,7 @@ impl Machine {
             theme,
             ..self.config.clone()
         };
-        // The failure is reported; the look still changes for this run.
+        // The failure is reported, and the look still changes for this run.
         let _ = self.save_settings(&config);
         self.config = config;
     }
@@ -809,7 +814,7 @@ impl Machine {
             self.retry();
         }
 
-        // Before the tick, so no blip plays after the outcome.
+        // Checked before the tick, so no progress tone plays after the outcome.
         if let Some(saving) = self
             .saving
             .take_if(|saving| saving.done.load(Ordering::Acquire))
@@ -972,7 +977,8 @@ impl Machine {
             buffer: reading.held.map(|held| Buffer {
                 stream: reading.stream,
                 held,
-                // Nothing placed yet, or placed where asked: the setting; refused: RAM.
+                // The configured memory while nothing has been placed yet or packets are placed
+                // as configured, and RAM once the store has refused them.
                 memory: if held.frames == 0 || held.stored {
                     self.config.buffer_memory
                 } else {
@@ -1046,21 +1052,21 @@ impl Machine {
     }
 }
 
-/// Runs the worker; should it panic, says why on the Status tab and stops what it can.
+/// Runs the worker. If it panics, reports the reason on the Status tab and stops what it can.
 fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mutex<Status>) {
     let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| machine.run(commands))) else {
         return;
     };
     let message = text::worker_panicked(panic_message(&*payload)).to_string();
     log::error(&message);
-    // Stops capture and finishes a save if it can; a second panic is left at that.
+    // Stops capture and finishes a save if it can. A second panic is not handled further.
     let _ = panic::catch_unwind(AssertUnwindSafe(|| machine.shut_down()));
     let mut status = output.lock().unwrap_or_else(PoisonError::into_inner);
     status.state = State::Stopped;
     status.error = Some(message);
 }
 
-/// What a panicking thread said, when it said it with a string.
+/// Returns a panicking thread's message, when its payload is a string.
 fn panic_message(payload: &(dyn Any + Send)) -> &str {
     payload
         .downcast_ref::<&str>()

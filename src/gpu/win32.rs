@@ -1,7 +1,7 @@
 //! Small helpers for the fixed-size fields of Win32 structures.
 
-/// `size_of::<T>()` as the `u32` byte count a Win32 structure or call carries, checked to fit
-/// when compiled.
+/// `size_of::<T>()` as the `u32` byte count a Win32 structure or call carries, checked at
+/// compile time to fit.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the size is asserted to fit 32 bits at compile time"

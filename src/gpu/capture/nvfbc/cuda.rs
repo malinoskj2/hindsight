@@ -30,7 +30,7 @@ const MEBIBYTE: u32 = 1024 * 1024;
 pub(in crate::gpu::capture) struct Capture {
     create: nvfbc_ffi::CreateEx,
     key: Key,
-    /// Direct3D 9 adapter ordinal; the driver counts by it.
+    /// The Direct3D 9 adapter ordinal, which the driver counts by.
     adapter: u32,
     /// Current on this thread for the whole session.
     cuda: Arc<ContextHold>,
@@ -94,14 +94,14 @@ impl Capture {
     }
 
     fn open_session(&mut self) -> Result<Session, CaptureError> {
-        // Released by `Drop` should a later step fail.
+        // Released by `Drop` if a later step fails.
         let session = Session {
             object: self
                 .create_object()
                 .map_err(nvfbc_failed("create the NvFBC session"))?,
         };
         self.settle_context()?;
-        // Block rather than spin while a grab lands.
+        // Block rather than spin until the grab completes.
         self.cuda
             .driver()
             .block_on_synchronize()
@@ -131,8 +131,8 @@ impl Capture {
         Object::new(params.nvfbc, &self.library).ok_or(Status::UNSUPPORTED)
     }
 
-    /// Adopts a context of the driver's own the first time; after that the context must be the
-    /// one the buffers and the encoder are on.
+    /// Adopts the driver's own context the first time. After that, the context must be the one
+    /// the buffers and the encoder are on.
     fn settle_context(&mut self) -> Result<(), CaptureError> {
         let current = self
             .cuda
@@ -197,7 +197,7 @@ impl Capture {
         Ok(Frame::Unchanged)
     }
 
-    /// Resized also when the row pitch changed.
+    /// Grabs a frame into `slot`, reporting `Grabbed::Resized` also when the row pitch changed.
     fn grab(&mut self, slot: usize) -> Result<Grabbed, CaptureError> {
         let Some(session) = &self.session else {
             return Ok(Grabbed::Lost);
@@ -215,7 +215,7 @@ impl Capture {
         if !self.note_pitch(&info) {
             return Ok(Grabbed::Resized);
         }
-        // The grab only queues the copy; NVENC must not read the buffer before it lands.
+        // The grab only queues the copy. NVENC must not read the buffer before the copy completes.
         self.cuda
             .driver()
             .synchronize_context()
@@ -224,7 +224,8 @@ impl Capture {
         Ok(Grabbed::Frame)
     }
 
-    /// False once the pitch changes: the encoder must then start over.
+    /// Records the row pitch. Returns false once the pitch changes, because the encoder must then
+    /// start over.
     fn note_pitch(&mut self, info: &nvfbc_ffi::FrameGrabInfo) -> bool {
         // A driver that reports no padded width pads nothing.
         let buffer_width = if info.buffer_width == 0 {
@@ -288,7 +289,7 @@ impl Capture {
         true
     }
 
-    /// A grab into `slot`'s buffer, which noted the pitch.
+    /// Returns the frame for a grab into `slot`'s buffer, whose pitch `note_pitch` recorded.
     fn in_surface(&self, slot: usize) -> Result<Frame, CaptureError> {
         let pitch = self.pitch.ok_or(CaptureError::Restart(
             "NvFBC delivered a grab without its pitch",
@@ -316,8 +317,9 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // Buffers before the session, both while the context is still on this thread's stack;
-        // the hold releases the context after this, and the library goes last of all.
+        // The buffers are dropped before the session, both while the context is still on this
+        // thread's stack. The hold releases the context after this, and the library is dropped
+        // last of all.
         self.buffers.clear();
         self.session = None;
         let driver = self.cuda.driver();
@@ -339,7 +341,7 @@ impl Session {
         self.object.methods()
     }
 
-    /// For any display mode the adapter may switch to.
+    /// Returns the buffer size needed for any display mode the adapter may switch to.
     fn max_buffer_size(&self) -> Result<u32, Status> {
         let mut bytes = 0;
         // SAFETY: a live object; the out-parameter outlives the call.
@@ -368,7 +370,7 @@ impl Session {
         let mut info = nvfbc_ffi::FrameGrabInfo::zeroed();
         let mut params = ffi::GrabFrameParams::zeroed();
         params.version = ffi::GRAB_FRAME_PARAMS_VER;
-        // Not `CPU_SYNC`: the driver fails such grabs with `NVFBC_ERROR_NVAPI_FAILURE`;
+        // Not `CPU_SYNC`: the driver fails such grabs with `NVFBC_ERROR_NVAPI_FAILURE`, so
         // `Capture::grab` waits for the copy instead.
         params.flags = ffi::TOCUDA_NOWAIT
             | if cursor {

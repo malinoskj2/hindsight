@@ -1,4 +1,4 @@
-//! The executable; everything lives in the library.
+//! The executable. Everything else is in the library.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 

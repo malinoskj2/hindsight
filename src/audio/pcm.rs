@@ -31,8 +31,8 @@ impl Layout {
     }
 }
 
-/// Mono is doubled. `WaveFormat::layout` only lets one- or two-channel formats through; any
-/// channels past two would be dropped.
+/// Appends `data` to `output` as interleaved stereo. Mono is doubled. `WaveFormat::layout` only
+/// accepts one- or two-channel formats; any channels past two would be dropped.
 pub(super) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
     let channels = usize::from(layout.channels);
     match layout.sample {

@@ -31,7 +31,8 @@ use windows::{
 /// `DISPLAYCONFIG_SDR_WHITE_LEVEL` is in thousandths of 80 nits.
 const WHITE_LEVEL_UNIT: f32 = 1000.0;
 pub(super) const SCRGB_NITS: f32 = 80.0;
-/// `QueryDisplayConfig` attempts while the display topology keeps changing under it.
+/// The number of `QueryDisplayConfig` attempts made while the display topology keeps changing
+/// under it.
 const QUERY_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,8 +95,9 @@ pub(super) fn describe(monitor: HMONITOR) -> Option<Display> {
     output_of(monitor).map(|description| from_description(&description))
 }
 
-/// Skips the white-level look-up. A fresh DXGI factory each call: an older factory's outputs
-/// keep reporting the colour space they had then.
+/// Returns whether the monitor is in HDR, skipping the white-level look-up. A fresh DXGI factory
+/// is created on each call, because an older factory's outputs keep reporting the colour space
+/// they had when it was created.
 pub(super) fn is_in_hdr(monitor: HMONITOR) -> Option<bool> {
     output_of(monitor).map(|description| is_hdr(description.ColorSpace))
 }
@@ -126,7 +128,7 @@ fn outputs() -> windows::core::Result<Vec<DXGI_OUTPUT_DESC1>> {
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
                 Err(error) => return Err(error),
             };
-            // IDXGIOutput6 needs Windows 10 1803; an output without it counts as SDR.
+            // `IDXGIOutput6` needs Windows 10 1803. An output without it counts as SDR.
             if let Ok(output) = output.cast::<IDXGIOutput6>() {
                 // SAFETY: reads the description of a live output.
                 descriptions.push(unsafe { output.GetDesc1() }?);
@@ -155,7 +157,8 @@ fn sdr_white_level(name: &str) -> Option<f32> {
 }
 
 #[expect(unsafe_code, reason = "calls the display configuration API")]
-/// Asks again, a few times, when a display is plugged in between sizing and querying.
+/// Returns the active display paths, asking again a few times when a display is plugged in
+/// between sizing and querying.
 fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
     for _ in 0..QUERY_ATTEMPTS {
         let (mut path_count, mut mode_count) = (0, 0);

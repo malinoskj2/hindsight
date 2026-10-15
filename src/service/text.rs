@@ -5,7 +5,7 @@
 //! parentheses after the detail it explains, and no line ends in a full stop. A fragment that
 //! completes another line, such as the reason after "Capture stopped · ", starts in lower case.
 //! Paths show only the file name, since the folder is in the settings. Lines with nothing to
-//! fill in are constants; the others are formatted only when they are written.
+//! fill in are constants. The others are formatted only when they are written.
 
 use crate::{config::Config, replay::Stream};
 use std::{

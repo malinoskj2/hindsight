@@ -45,8 +45,9 @@ impl Mode {
     }
 }
 
-/// NvFBC needs NVIDIA's vendor key; `NvfbcCuda` grabs into CUDA memory the encoder reads in place
-/// and is offered only with the experiment switch set, since it costs twice NvFBC's CPU.
+/// The capture backend. NvFBC needs NVIDIA's vendor key. `NvfbcCuda` captures into CUDA memory
+/// that the encoder reads in place, and is offered only when the experiment switch is set, since
+/// it costs twice NvFBC's CPU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Backend {
@@ -59,14 +60,14 @@ pub(crate) enum Backend {
 }
 
 impl Backend {
-    // Cheapest for the game first.
+    // Ordered from the cheapest for the game.
     pub(crate) const ALL: [Self; 4] = [Self::Nvfbc, Self::NvfbcCuda, Self::Wgc, Self::Dxgi];
-    /// Set to anything to offer the CUDA backend in Settings.
+    /// The environment variable that, when set to anything, offers the CUDA backend in Settings.
     #[cfg(windows)]
     pub(crate) const EXPERIMENT_SWITCH: &str = "HINDSIGHT_CUDA_BACKEND";
 
-    /// The backends Settings lists: every one but the CUDA experiment, unless the switch is
-    /// set or the config already chose it.
+    /// Returns the backends Settings lists: every one except the CUDA experiment, unless the
+    /// switch is set or the config already chose it.
     #[cfg(windows)]
     pub(crate) fn offered(chosen: Self) -> Vec<Self> {
         let experiments = std::env::var_os(Self::EXPERIMENT_SWITCH).is_some();
@@ -169,8 +170,9 @@ impl Theme {
 
 display_by_name!(Mode, Backend, Codec, Memory, Theme);
 
-/// Built only from settings that passed [`Config::validate`] when read from disk; the Settings
-/// tab validates what it builds from the form the same way.
+/// The validated settings. A `Config` read from disk is built only from settings that passed
+/// [`Config::validate`], and the Settings tab validates what it builds from the form the same
+/// way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub(crate) struct Config {
@@ -185,12 +187,13 @@ pub(crate) struct Config {
     pub(crate) clip_directory: Option<PathBuf>,
     pub(crate) theme: Theme,
     pub(crate) audio: bool,
-    /// Drawn where the backend can; Desktop Duplication never draws it.
+    /// Whether the cursor is drawn, where the backend can draw it. Desktop Duplication never
+    /// draws it.
     pub(crate) cursor: bool,
     pub(crate) buffer_memory: Memory,
 }
 
-/// The settings as stored, before validation; missing ones take their defaults.
+/// The settings as stored, before validation. Missing settings take their defaults.
 #[derive(Deserialize)]
 #[serde(default)]
 struct RawConfig {
@@ -208,7 +211,7 @@ struct RawConfig {
     audio: bool,
     cursor: bool,
     buffer_memory: Memory,
-    /// Settings a newer version wrote; kept out of the way so a downgrade still starts.
+    /// Settings written by a newer version, collected here so a downgrade still starts.
     #[serde(flatten)]
     #[expect(
         clippy::zero_sized_map_values,
@@ -334,7 +337,7 @@ impl Config {
         Ok(())
     }
 
-    /// Saturates: the Settings tab estimates from unvalidated input.
+    /// Saturates on overflow, since the Settings tab estimates from unvalidated input.
     pub(crate) const fn bitrate(&self) -> u32 {
         self.bitrate_mbps.saturating_mul(BITS_PER_MEGABIT)
     }
@@ -383,14 +386,16 @@ fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<P
         .filter(|folder| !folder.as_os_str().is_empty()))
 }
 
-/// A folder in the user's Videos library, or in the temporary directory without one.
+/// Returns a folder in the user's Videos library, or in the temporary directory when there is
+/// no library.
 pub(crate) fn default_clip_directory() -> PathBuf {
     videos_directory()
         .unwrap_or_else(std::env::temp_dir)
         .join(CLIP_DIRECTORY)
 }
 
-/// The Videos library from the shell, which follows it when it is moved or redirected.
+/// Returns the Videos library as the shell reports it, which follows the library when it is
+/// moved or redirected.
 #[cfg(windows)]
 fn videos_directory() -> Option<PathBuf> {
     crate::sys::com::known_folder(&winsafe::co::KNOWNFOLDERID::Videos)

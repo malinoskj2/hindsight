@@ -75,9 +75,10 @@ pub(super) enum Surface {
 
 pub(super) enum EncoderDevice {
     Direct3D,
-    /// The source's context, held as long as the encoder keeps this: a primary context is
-    /// retained by the hold, one the NvFBC driver opened by the source's session. `ring`, when
-    /// given, takes the encoded frames in video memory: only a CUDA session can write there.
+    /// The source's CUDA context, held for as long as the encoder keeps this value. A primary
+    /// context is kept alive by the hold; a context the NvFBC driver opened is kept alive by the
+    /// source's session. When `ring` is given, the encoded frames are written into it in video
+    /// memory, which only a CUDA session can do.
     Cuda {
         hold: Arc<ContextHold>,
         ring: Option<CudaRing>,
@@ -88,8 +89,8 @@ pub(super) enum EncoderDevice {
 
 pub(super) enum Frame {
     Fresh,
-    /// Left in the source's own surface, numbered `index` among them; only after
-    /// [`Capture::hand_over_surfaces`].
+    /// The frame was left in the source's own surface, number `index` among them. Reported
+    /// only after [`Capture::hand_over_surfaces`].
     InSurface {
         index: usize,
         surface: Surface,
@@ -98,7 +99,8 @@ pub(super) enum Frame {
     Resized,
 }
 
-/// Where a source that copies frames puts them: the top-left `width` × `height` of `texture`.
+/// The destination of a source that copies frames: the top-left `width` × `height` region of
+/// `texture`.
 #[derive(Clone, Copy)]
 pub(super) struct CopyTarget<'a> {
     pub(super) device: &'a Device,
@@ -107,15 +109,16 @@ pub(super) struct CopyTarget<'a> {
     pub(super) height: u32,
 }
 
-/// What every backend does; the rest differs by backend and is on [`Capture`].
+/// The operations every backend supports. The rest differ by backend and are on [`Capture`].
 trait Source {
     fn size(&self) -> (u32, u32);
 
-    /// A window capture may never deliver a frame: exclusive full screen is not composed.
+    /// Whether this captures a window. A window capture may never deliver a frame, because an
+    /// exclusive full-screen window is not composed.
     fn captures_window(&self) -> bool;
 
-    /// Copies the newest frame into `target`; there is none when the encoder runs on CUDA or
-    /// reads the source's surfaces in place.
+    /// Copies the newest frame into `target`. There is no target when the encoder runs on CUDA
+    /// or reads the source's surfaces in place.
     fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError>;
 }
 
@@ -152,18 +155,19 @@ impl Capture {
         self.source().size()
     }
 
-    /// A window capture may never deliver a frame: exclusive full screen is not composed.
+    /// Whether this captures a window. A window capture may never deliver a frame, because an
+    /// exclusive full-screen window is not composed.
     pub(super) fn captures_window(&self) -> bool {
         self.source().captures_window()
     }
 
-    /// Copies the newest frame into `target`; there is none when the encoder runs on CUDA or
-    /// reads the source's surfaces in place.
+    /// Copies the newest frame into `target`. There is no target when the encoder runs on CUDA
+    /// or reads the source's surfaces in place.
     pub(super) fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
         self.source_mut().take(target)
     }
 
-    /// What the encoder must run on to read this capture's surfaces.
+    /// The device the encoder must run on to read this capture's surfaces.
     pub(super) fn encoder_device(&self) -> EncoderDevice {
         match &self.0 {
             ByBackend::Wgc(_) | ByBackend::Dxgi(_) => EncoderDevice::Direct3D,
@@ -172,7 +176,8 @@ impl Capture {
         }
     }
 
-    /// For YUV surfaces; every backend delivers BGRA, which NVENC converts with BT.709.
+    /// The colour matrix for YUV surfaces. Every backend delivers BGRA, which NVENC converts
+    /// with BT.709.
     #[expect(
         clippy::unused_self,
         reason = "a backend delivering YUV would answer for itself"
@@ -182,7 +187,7 @@ impl Capture {
     }
 
     /// Switches to leaving each picture in a surface of its own, reported as
-    /// [`Frame::InSurface`]; reports whether it did.
+    /// [`Frame::InSurface`]. Returns whether the switch was made.
     pub(super) fn hand_over_surfaces(&mut self) -> bool {
         match &mut self.0 {
             ByBackend::Wgc(capture) => capture.hand_over_surfaces(),
@@ -192,7 +197,8 @@ impl Capture {
         }
     }
 
-    /// The surface the next [`take`](Self::take) captures into; the encoder must be done with it.
+    /// The surface the next [`take`](Self::take) captures into. The encoder must be done with
+    /// it first.
     pub(super) fn next_surface(&self) -> Option<usize> {
         match &self.0 {
             ByBackend::Wgc(_) | ByBackend::Dxgi(_) => None,
@@ -201,7 +207,7 @@ impl Capture {
         }
     }
 
-    /// Hands back the surfaces for which `in_use` is false.
+    /// Releases the surfaces for which `in_use` is false.
     pub(super) fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
         match &mut self.0 {
             ByBackend::Wgc(capture) => capture.release_surfaces(in_use),
@@ -216,7 +222,7 @@ struct ReopenThrottle {
 }
 
 impl ReopenThrottle {
-    /// `Some(now)` when an attempt is due.
+    /// Returns `Some(now)` when an attempt is due.
     fn attempt(&self) -> Option<Instant> {
         let now = Instant::now();
         self.due.is_none_or(|due| now >= due).then_some(now)
@@ -267,7 +273,7 @@ pub(super) fn start(
 enum Colour {
     Sdr,
     ToneMapped,
-    /// 8-bit from a display in HDR: the backend cannot deliver more.
+    /// 8-bit colour from a display in HDR, because the backend cannot deliver more.
     Clipped,
 }
 
@@ -311,14 +317,14 @@ fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
 }
 
 /// A copying source reports [`EncoderDevice::Direct3D`], whose encoder always has an input to
-/// copy into; without one there is nothing to deliver to, and the session starts over.
+/// copy into. Without one there is nothing to deliver to, and the session is restarted.
 fn target_of(target: Option<CopyTarget<'_>>) -> Result<CopyTarget<'_>, CaptureError> {
     target.ok_or(CaptureError::Restart(
         "the encoder has no Direct3D input to copy the captured frame into",
     ))
 }
 
-/// Puts `source` into `target`, through the tone-map pass when there is one.
+/// Copies `source` into `target`, through the tone-map pass when there is one.
 fn deliver(
     tone_map: Option<&mut tonemap::ToneMapper>,
     source: &ID3D11Texture2D,
@@ -337,7 +343,8 @@ fn deliver(
     Ok(())
 }
 
-/// The monitor to record, and the window it stands in for when the target is one.
+/// The monitor to record and, when the target is a window, the window the monitor is recorded
+/// in place of.
 fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
     match *target {
         Target::Monitor { handle, .. } => (monitor(handle), None),

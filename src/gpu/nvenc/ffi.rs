@@ -1,5 +1,5 @@
-//! The parts of `nvEncodeAPI.h` (Video Codec SDK API 12.1, drivers 531 and newer) this program uses;
-//! every layout is checked at compile time against the 64-bit Windows header.
+//! The parts of `nvEncodeAPI.h` (Video Codec SDK API 12.1, drivers 531 and newer) this program
+//! uses. Every layout is checked at compile time against the 64-bit Windows header.
 
 use crate::gpu::ffi::raw_status;
 use bytemuck::Zeroable;
@@ -28,7 +28,7 @@ pub(super) const fn split_max_version(version: u32) -> (u32, u32) {
 const _: () = assert!(REQUIRED_MAX_VERSION == 0xC1);
 const _: () = assert!(matches!(split_max_version(0xC1), (12, 1)));
 
-/// `NVENCAPI_STRUCT_VERSION`; some structures also set bit 31, which the header does not name.
+/// `NVENCAPI_STRUCT_VERSION`. Some structures also set bit 31, which the header does not name.
 pub(super) const fn struct_version(version: u32) -> u32 {
     API_VERSION | (version << 16) | (0x7 << 28)
 }
@@ -74,7 +74,8 @@ pub(super) const INPUT_IMAGE: u32 = 0;
 pub(super) const OUTPUT_BITSTREAM: u32 = 2;
 /// `enableOutputInVidmem`: bit 9 of the bit field after `enablePTD` (nv-codec-headers n12.1.14.0).
 pub(super) const INITIALIZE_OUTPUT_IN_VIDMEM: u32 = 1 << 9;
-/// `sizeof(NV_ENC_ENCODE_OUT_PARAMS)`, written ahead of the bitstream in a video-memory output buffer.
+/// `sizeof(NV_ENC_ENCODE_OUT_PARAMS)`, written ahead of the bitstream in a video-memory output
+/// buffer.
 pub(super) const ENCODE_OUT_PARAMS_BYTES: usize = 256;
 /// `bitstreamSizeInBytes` in `NV_ENC_ENCODE_OUT_PARAMS`.
 pub(super) const ENCODE_OUT_PARAMS_SIZE_OFFSET: usize = 4;

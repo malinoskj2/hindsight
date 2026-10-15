@@ -31,8 +31,8 @@ pub(crate) enum Launch {
     Window { tray: bool },
 }
 
-/// Help, the version and usage errors go to a message box: the GUI subsystem has no console
-/// for clap to print to.
+/// Parses the command line. Help, the version and usage errors are shown in a message box,
+/// since the GUI subsystem has no console for clap to print to.
 pub(crate) fn dispatch() -> Result<Launch> {
     let arguments = match Arguments::try_parse() {
         Ok(arguments) => arguments,
@@ -54,13 +54,13 @@ pub(crate) fn dispatch() -> Result<Launch> {
     }
 }
 
-/// For an error that ends the process before any window exists.
+/// Shows an error that ends the process before any window exists.
 pub(crate) fn show_error(message: &str) {
     show(message, co::MB::ICONERROR);
 }
 
 fn show(message: &str, icon: co::MB) {
-    // Nothing is left to report a failure to.
+    // There is nowhere left to report a failure.
     let _ = w::HWND::NULL.MessageBox(message.trim_end(), APP_NAME, co::MB::OK | icon);
 }
 

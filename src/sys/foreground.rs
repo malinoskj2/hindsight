@@ -1,4 +1,5 @@
-//! Full-screen apps: windows whose client area covers their monitor, watched through event hooks.
+//! Full-screen app detection: windows whose client area covers their monitor, watched through
+//! event hooks.
 
 use super::callback::Slot;
 use crate::service::{MonitorHandle, Target, WindowHandle};
@@ -17,14 +18,15 @@ use winsafe::{self as w, co};
 
 /// Shell windows that fill the monitor: the desktop and its wallpaper hosts.
 const SHELL_CLASSES: [&str; 2] = ["Progman", "WorkerW"];
-/// The shell itself, whose windows cover the monitor only for switchers and overlays.
+/// The shell process, whose windows cover the monitor only for switchers and overlays.
 const SHELL_PROCESS: &str = "explorer.exe";
 
 thread_local! {
     static HANDLER: Slot<dyn Fn()> = const { Slot::new() };
 }
 
-/// The location hook catches a game going full screen while already in front.
+/// Hooks on foreground and location changes. The location hook detects a game that goes full
+/// screen while it is already the foreground window.
 pub(crate) struct ForegroundHook {
     _foreground: EventHook,
     _location: EventHook,
@@ -58,7 +60,7 @@ struct EventHook(HWINEVENTHOOK);
 
 impl EventHook {
     fn set(event: u32) -> Option<Self> {
-        // SAFETY: an out-of-context hook takes no module handle; the callback only reads
+        // SAFETY: an out-of-context hook takes no module handle, and the callback only reads
         // thread-local state.
         let hook = unsafe {
             SetWinEventHook(
@@ -77,7 +79,7 @@ impl EventHook {
 
 impl Drop for EventHook {
     fn drop(&mut self) {
-        // SAFETY: a valid hook this value owns, unhooked only here.
+        // SAFETY: the hook is valid and owned by this value, and is unhooked only here.
         let _ = unsafe { UnhookWinEvent(self.0) };
     }
 }
@@ -122,7 +124,8 @@ fn is_shell(window: &w::HWND) -> bool {
             .is_ok_and(|class| SHELL_CLASSES.contains(&class.as_str()))
 }
 
-/// Kept around but not shown: a suspended UWP app, or a window on another virtual desktop.
+/// Whether the window exists but is not shown, such as a suspended UWP app or a window on another
+/// virtual desktop.
 fn is_cloaked(window: &w::HWND) -> bool {
     matches!(
         window.DwmGetWindowAttribute(co::DWMWA::CLOAKED),

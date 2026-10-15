@@ -41,7 +41,7 @@ pub(crate) fn frames(mut stream: &[u8]) -> Vec<Arc<[u8]>> {
     frames
 }
 
-/// The sound of `input` as mono 16-bit samples, decoded by the ffmpeg on the path.
+/// Decodes `input` to mono 16-bit samples with the ffmpeg on the path.
 #[cfg_attr(
     all(not(windows), test),
     expect(dead_code, reason = "only the Windows encoder tests use it")
@@ -65,7 +65,7 @@ pub(crate) fn decode_mono(input: &Path) -> Vec<i16> {
         .collect()
 }
 
-/// The position of the loudest sample.
+/// Returns the position of the loudest sample.
 #[cfg_attr(
     all(not(windows), test),
     expect(dead_code, reason = "only the Windows encoder tests use it")

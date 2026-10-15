@@ -56,7 +56,7 @@ pub(crate) fn encode(_clip: &PcmClip) -> Result<AudioClip, EncodeError> {
     Err(EncodeError::Unsupported)
 }
 
-/// Never made off Windows.
+/// Never constructed off Windows.
 #[cfg(not(windows))]
 pub(crate) enum Capture {}
 

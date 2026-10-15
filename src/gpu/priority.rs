@@ -16,10 +16,11 @@ use windows::{
     core::{s, w},
 };
 
-/// `D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH` (`d3dkmthk.h`); needs no elevation.
+/// `D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH` (`d3dkmthk.h`). It needs no elevation.
 const SCHEDULING_HIGH: i32 = 4;
 
-/// `D3DKMTSetProcessSchedulingPriorityClass`; `gdi32.dll` exports it without an import library.
+/// `D3DKMTSetProcessSchedulingPriorityClass`, which `gdi32.dll` exports without an import
+/// library.
 type SetSchedulingPriorityClass = unsafe extern "system" fn(HANDLE, i32) -> NTSTATUS;
 
 pub(super) struct MultimediaThread(HANDLE);
@@ -27,7 +28,7 @@ pub(super) struct MultimediaThread(HANDLE);
 #[expect(unsafe_code, reason = "calls AvRevertMmThreadCharacteristics")]
 impl Drop for MultimediaThread {
     fn drop(&mut self) {
-        // SAFETY: reverts the registration this handle stands for.
+        // SAFETY: reverts the registration this handle represents.
         let _ = unsafe { AvRevertMmThreadCharacteristics(self.0) };
     }
 }
@@ -35,7 +36,7 @@ impl Drop for MultimediaThread {
 #[expect(unsafe_code, reason = "calls the MMCSS API")]
 pub(super) fn join_multimedia_class() -> windows::core::Result<MultimediaThread> {
     let mut index = 0;
-    // SAFETY: built-in task name; `index` is written on success.
+    // SAFETY: a built-in task name; `index` is written on success.
     let handle = unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &raw mut index) }?;
     let joined = MultimediaThread(handle);
     // SAFETY: the handle was just issued for this thread and is still registered.
@@ -76,10 +77,11 @@ pub(super) fn opt_out_of_throttling() -> windows::core::Result<()> {
 }
 
 #[expect(unsafe_code, reason = "calls D3DKMTSetProcessSchedulingPriorityClass")]
-/// High, not realtime: realtime would starve the game and the compositor of the GPU.
+/// Raises the process's GPU scheduling class to high, not realtime, because realtime would
+/// starve the game and the compositor of the GPU.
 pub(super) fn raise_gpu_class() -> windows::core::Result<()> {
     let gdi = Library::load(w!("gdi32.dll"))?;
-    // SAFETY: the export has this signature since Windows Vista.
+    // SAFETY: the export has had this signature since Windows Vista.
     let set_class = unsafe {
         gdi.export::<SetSchedulingPriorityClass>(s!("D3DKMTSetProcessSchedulingPriorityClass"))
     }

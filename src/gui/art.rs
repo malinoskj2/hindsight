@@ -3,7 +3,7 @@
 use super::layout::saturating_i32;
 use winsafe::{self as w, guard::DeleteObjectGuard};
 
-/// Premultiplied BGRA, as `AlphaBlend` expects.
+/// Bytes per pixel. Pixels are premultiplied BGRA, as `AlphaBlend` expects.
 const PIXEL: usize = 4;
 
 pub(super) struct Image {
@@ -179,7 +179,8 @@ fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -
     sum.map(|total| (total / weight.max(f32::EPSILON)).round() as u8)
 }
 
-/// Raw `AlphaBlend`: `winsafe`'s wrapper passes the blend settings by pointer.
+/// Calls `AlphaBlend` directly, because `winsafe`'s wrapper passes the blend settings by
+/// pointer.
 #[expect(unsafe_code, reason = "calls AlphaBlend")]
 fn alpha_blend(
     dest: &w::HDC,
@@ -200,7 +201,7 @@ fn alpha_blend(
         SourceConstantAlpha: opacity,
         AlphaFormat: SOURCE_ALPHA,
     };
-    // SAFETY: both DCs are live for the call; the bitmap is selected into `source`.
+    // SAFETY: both DCs are live for the call, and the bitmap is selected into `source`.
     let _ = unsafe {
         AlphaBlend(
             HDC(dest.ptr()),
@@ -218,7 +219,8 @@ fn alpha_blend(
     };
 }
 
-/// `AlphaBlend` honours per-pixel alpha only for a DIB section; `winsafe` has no wrapper.
+/// Creates a DIB section holding `pixels`. `AlphaBlend` honours per-pixel alpha only for a DIB
+/// section, and `winsafe` has no wrapper for `CreateDIBSection`.
 #[expect(unsafe_code, reason = "calls CreateDIBSection")]
 fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGuard<w::HBITMAP>> {
     use windows::Win32::Graphics::Gdi::{
@@ -233,7 +235,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         bmiHeader: BITMAPINFOHEADER {
             biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).ok()?,
             biWidth: width,
-            // Negative height: top-down rows.
+            // A negative height makes the rows run top to bottom.
             biHeight: -height,
             biPlanes: 1,
             biBitCount: 32,
@@ -243,7 +245,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
         ..Default::default()
     };
     let mut bits = std::ptr::null_mut();
-    // SAFETY: `info` describes a 32-bit bitmap; `bits` receives its pixel pointer.
+    // SAFETY: `info` describes a 32-bit bitmap, and `bits` receives its pixel pointer.
     let bitmap = unsafe {
         CreateDIBSection(
             None,
@@ -257,7 +259,7 @@ fn dib_section(width: i32, height: i32, pixels: &[u8]) -> Option<DeleteObjectGua
     .ok()?;
     // SAFETY: `bitmap` is the live handle `CreateDIBSection` just returned.
     let bitmap = unsafe { w::HBITMAP::from_ptr(bitmap.0) };
-    // SAFETY: the guard takes over the new bitmap handle, which nothing else frees.
+    // SAFETY: the guard takes ownership of the new bitmap handle, which nothing else frees.
     let bitmap = unsafe { DeleteObjectGuard::new(bitmap) };
     if bits.is_null() {
         return None;

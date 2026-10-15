@@ -7,7 +7,7 @@ const PREFIX: &str = "hindsight_";
 /// `YYYY-MM-DD_HH-MM-SS`, as `log::file_stamp` writes it.
 const STAMP_LENGTH: usize = 19;
 
-/// The local time a clip was saved and its attempt within that second; orders by both.
+/// The local time a clip was saved and its attempt within that second. Names order by both.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ClipName {
     stamp: String,
@@ -43,7 +43,7 @@ impl ClipName {
         }
     }
 
-    /// The name `file_name` gave, or `None` for any other file.
+    /// Parses a name that `file_name` produced, returning `None` for any other file.
     pub(crate) fn parse(file_name: &str) -> Option<Self> {
         let rest = file_name
             .strip_prefix(PREFIX)?

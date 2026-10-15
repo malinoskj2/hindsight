@@ -1,4 +1,5 @@
-//! Hardware encoding through NVENC (`nvEncodeAPI64.dll`): an asynchronous ring of slots fed straight from video memory.
+//! Hardware encoding through NVENC (`nvEncodeAPI64.dll`): an asynchronous ring of slots fed
+//! directly from video memory.
 
 use crate::{
     config::Codec,
@@ -43,13 +44,13 @@ use config::{codec_guid, configure, initialize_params};
 pub(super) use ffi::Status;
 use session::{Session, SessionDevice};
 
-/// Two suffice while the GPU keeps up; the third absorbs a frame NVENC finishes late.
+/// Two slots suffice while the GPU keeps up. The third absorbs a frame NVENC finishes late.
 const SLOTS: usize = 3;
 const ENCODE_TIMEOUT_MS: u32 = 2000;
-/// Bitstream bytes read back with a frame's header, enough to tell a keyframe.
+/// The number of bitstream bytes read back with a frame's header, enough to recognise a keyframe.
 const HEAD_BYTES: usize = 16 << 10;
 
-/// How NVENC lays a frame out in a video-memory output buffer.
+/// The layout of a frame in a video-memory output buffer.
 pub(super) const STAGING_LAYOUT: StagingLayout = StagingLayout {
     header_bytes: ffi::ENCODE_OUT_PARAMS_BYTES,
     size_offset: ffi::ENCODE_OUT_PARAMS_SIZE_OFFSET,
@@ -149,12 +150,12 @@ struct VideoOutput {
     mapped: ffi::Mapped,
 }
 
-/// Where each slot's frame is written, by slot.
+/// The output buffer each slot's frame is written to, indexed by slot.
 enum Outputs {
-    /// Buffers of the driver's, locked to read.
+    /// Buffers owned by the driver, which are locked to be read.
     Bitstreams(Vec<ffi::Bitstream>),
-    /// Buffers in video memory, which each frame is moved out of into the ring there; only a
-    /// CUDA session is given a ring.
+    /// Buffers in video memory, from which each frame is moved into the ring there. Only a CUDA
+    /// session is given a ring.
     VideoMemory {
         ring: CudaRing,
         buffers: Vec<VideoOutput>,
@@ -172,7 +173,7 @@ pub(super) struct Encoder {
     device_lock: ID3D11Multithread,
     stalled: bool,
     outputs: Outputs,
-    /// Declared last: everything registered with it goes first.
+    /// Declared last, so that everything registered with it is dropped first.
     session: Session,
 }
 
@@ -194,7 +195,7 @@ struct RegisteredSurface {
     registered: ffi::Registered,
 }
 
-/// The output this slot's frames go to is the slot's own in [`Outputs`].
+/// This slot's frames are written to the slot's own entry in [`Outputs`].
 struct Slot {
     texture: Option<ID3D11Texture2D>,
     registered: ffi::Registered,
@@ -320,7 +321,8 @@ impl Encoder {
         Ok(slot)
     }
 
-    /// The output of the next slot; `Drop` releases it should the slot itself fail.
+    /// Creates the output for the next slot. `Drop` releases it if creating the slot itself
+    /// fails.
     fn add_output(&mut self) -> Result<(), NvencError> {
         match &mut self.outputs {
             Outputs::Bitstreams(bitstreams) => bitstreams.push(self.session.create_bitstream()?),
@@ -366,7 +368,7 @@ impl Encoder {
         // SAFETY: the ring keeps the buffer allocated until it is dropped, after `Drop`
         // unregisters it.
         let registered = unsafe { session.register_resource(&mut params) }?;
-        // Mapped once: one frame at a time writes the buffer.
+        // Mapped once, since one frame at a time writes the buffer.
         // SAFETY: registered just above and not mapped yet.
         match unsafe { session.map_input(registered) } {
             Ok(map) => Ok(VideoOutput {
@@ -540,7 +542,8 @@ impl Encoder {
         self.submit_input(index, Picture::Fresh, Input::Surface(surface))
     }
 
-    /// False while NVENC is still reading the picture for the frame before: a texture is mapped for one frame at a time.
+    /// Returns `false` while NVENC is still reading the picture for the previous frame, because
+    /// a texture is mapped for one frame at a time.
     pub(super) fn repeat(&mut self, index: FrameIndex) -> Result<bool, NvencError> {
         let Some(latest) = self.latest else {
             return Ok(false);
@@ -649,7 +652,8 @@ impl Encoder {
             .take()
             .expect("a queued slot has a frame in flight");
 
-        // The device lock is let go before `output` runs, which takes the replay buffer's lock.
+        // The device lock is released before `output` runs, because `output` takes the replay
+        // buffer's lock.
         let result = match &mut self.outputs {
             Outputs::Bitstreams(bitstreams) => {
                 let bitstream = bitstreams[slot];
@@ -659,8 +663,8 @@ impl Encoder {
                 result
             }
             Outputs::VideoMemory { ring, buffers } => {
-                // Not under the device lock: the move is a synchronous copy on the GPU, and the
-                // capture threads would wait for it.
+                // Not under the device lock, because the move is a synchronous copy on the GPU
+                // and the capture threads would wait for it.
                 let result = ring
                     .take(buffers[slot].staging)
                     .map(|(slot, head)| (None, Payload::Stored { slot, head }))
@@ -710,10 +714,10 @@ impl Encoder {
         Ok((Some(picture_type), Payload::Memory(data)))
     }
 
-    /// `mapped` must have come from a map of this session's that has not been undone, and the
-    /// frame reading it must be done or never queued.
+    /// `mapped` must be from a mapping made by this session that has not been unmapped, and the
+    /// frame reading it must have completed or never have been queued.
     fn unmap(&self, mapped: ffi::Mapped) {
-        // SAFETY: as the callers see to above.
+        // SAFETY: the callers ensure the preconditions above.
         unsafe { self.session.unmap_input(mapped) };
     }
 
@@ -740,7 +744,7 @@ impl Encoder {
         }
     }
 
-    /// After every slot's frame is released.
+    /// Releases the outputs. Must be called after every slot's frame is released.
     fn release_outputs(&self) {
         match &self.outputs {
             Outputs::Bitstreams(bitstreams) => {
@@ -772,8 +776,8 @@ impl Encoder {
         if let Some(frame) = &slot.in_flight {
             self.unmap(frame.mapped);
         }
-        // SAFETY: the slot's event, still open; unregistering one that never was is reported,
-        // not fatal.
+        // SAFETY: the slot's event, still open. Unregistering one that was never registered is
+        // reported, not fatal.
         unsafe { self.session.unregister_event(*slot.event) };
         if !slot.registered.is_null() {
             // SAFETY: the slot's texture, registered by this session and unmapped above.

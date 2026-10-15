@@ -8,7 +8,8 @@ use std::{
 
 /// Drift allowed before the run is corrected: 4 ms.
 const TOLERANCE: Ticks = Ticks(CLOCK_RATE / 250);
-/// A packet stamped this far ahead has a broken timestamp; `catch_up` fills a real gap first.
+/// A packet stamped this far ahead has a broken timestamp, since `catch_up` fills a real gap
+/// first.
 const IMPLAUSIBLE_GAP: Ticks = Ticks(5 * CLOCK_RATE);
 
 /// A count or position of sample frames: one sample for each channel.
@@ -18,12 +19,13 @@ pub(super) struct Frames(pub(super) u64);
 impl Frames {
     pub(super) const ZERO: Self = Self(0);
 
-    /// How long this many frames last at `rate` frames a second, saturating.
+    /// Returns how long this many frames last at `rate` frames a second, saturating.
     pub(super) fn to_ticks(self, rate: NonZeroU32) -> Ticks {
         Ticks(ticks_of(self.0, rate.get()))
     }
 
-    /// Whole frames at `rate` a second in `ticks`, rounded down; none for a negative span.
+    /// Returns the whole frames at `rate` a second in `ticks`, rounded down, or none for a
+    /// negative span.
     pub(super) fn from_ticks(ticks: Ticks, rate: NonZeroU32) -> Self {
         Self(u64::try_from(samples_of(ticks.0, rate.get())).unwrap_or(0))
     }
@@ -108,7 +110,7 @@ impl Timeline {
         self.anchor.saturating_add(self.placed.to_ticks(self.rate))
     }
 
-    /// Places a packet of `frames` stamped at `time`, if it was.
+    /// Places a packet of `frames` frames stamped at `time`, if it was stamped.
     pub(super) fn place(&mut self, time: Option<Ticks>, frames: Frames) -> Placement {
         let offset = time.map_or(Ticks(0), |time| time.saturating_sub(self.next_time()));
         let placement = if offset > TOLERANCE && offset < IMPLAUSIBLE_GAP {
@@ -131,7 +133,7 @@ impl Timeline {
         placement
     }
 
-    /// Frames of silence that bring the run up to `time`.
+    /// Places and returns the frames of silence that bring the run up to `time`.
     pub(super) fn catch_up(&mut self, time: Ticks) -> Frames {
         let behind = time.saturating_sub(self.next_time());
         if behind <= Ticks(0) {

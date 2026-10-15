@@ -23,18 +23,19 @@ use windows::{
     core::{GUID, Interface, s, w},
 };
 
-/// An open encode session, the device it runs on and the library it lives in; `Drop` destroys
-/// it. Its methods are the only calls into NVENC.
+/// An open encode session, the device it runs on and the library it lives in. `Drop` destroys
+/// the session. Its methods are the only calls into NVENC.
 pub(super) struct Session {
     pub(super) api: Api,
     pub(super) handle: ffi::Handle,
-    /// Owned so it outlives the session: `Drop` destroys the handle before the fields go.
+    /// Owned so that it outlives the session: `Drop` destroys the handle before the fields are
+    /// dropped.
     pub(super) device: SessionDevice,
     /// Declared last so it is freed last.
     _library: Library,
 }
 
-/// What an encode session runs on: a reference of its own to the device or context.
+/// The device or context an encode session runs on, held by a reference of its own.
 pub(super) enum SessionDevice {
     Direct3D11(ID3D11Device),
     Direct3D9(IDirect3DDevice9Ex),
@@ -45,7 +46,8 @@ pub(super) enum SessionDevice {
 }
 
 impl SessionDevice {
-    /// The device type and pointer `nvEncOpenEncodeSessionEx` takes; valid while `self` lives.
+    /// The device type and pointer `nvEncOpenEncodeSessionEx` takes. The pointer is valid while
+    /// `self` lives.
     fn raw(&self) -> (u32, *mut c_void) {
         match self {
             Self::Direct3D11(device) => (ffi::DEVICE_TYPE_DIRECTX, device.as_raw()),
@@ -151,7 +153,7 @@ impl Session {
             _library: library,
         };
         // SAFETY: the session owns the device and its `Drop` destroys the handle before the
-        // device is released. A failed open may still hand back a handle, which `Drop` destroys.
+        // device is released. A failed open may still return a handle, which `Drop` destroys.
         let status = unsafe {
             (session.api.open_encode_session_ex)(&raw mut params, &raw mut session.handle)
         };
@@ -209,7 +211,7 @@ impl Session {
         Ok(preset.config)
     }
 
-    /// Points `params` at `config` for the call only; the driver copies both.
+    /// Points `params` at `config` for the duration of the call only. The driver copies both.
     pub(super) fn initialize(
         &self,
         mut params: ffi::InitializeParams,
@@ -262,7 +264,8 @@ impl Session {
         let mut map = ffi::MapInputResource::zeroed();
         map.version = ffi::MAP_INPUT_RESOURCE_VER;
         map.registered_resource = registered;
-        // SAFETY: an open session, a versioned structure, and a registration the caller vouches for.
+        // SAFETY: an open session, a versioned structure, and a registration the caller vouches
+        // for.
         self.check("nvEncMapInputResource", unsafe {
             (self.api.map_input_resource)(self.handle, &raw mut map)
         })?;
@@ -315,7 +318,7 @@ impl Session {
         let mut lock = ffi::LockBitstream::zeroed();
         lock.version = ffi::LOCK_BITSTREAM_VER;
         lock.output_bitstream = bitstream;
-        // The frame has completed; a lock that could wait still pays for it.
+        // The frame has completed, but a lock that is allowed to wait still costs more.
         lock.flags = ffi::LOCK_DO_NOT_WAIT;
         // SAFETY: a completed buffer of this session's, as the caller vouches; unlocked below.
         self.check("nvEncLockBitstream", unsafe {
@@ -420,7 +423,8 @@ impl Session {
         format!(" ({text})")
     }
 
-    /// Every buffer and registration of the session must be gone.
+    /// Destroys the session. Every buffer and registration of the session must have been
+    /// released first.
     pub(super) fn destroy(&mut self) {
         if self.handle.is_null() {
             return;

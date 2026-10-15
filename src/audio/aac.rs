@@ -24,16 +24,18 @@ use windows::{
     core::{GUID, Result},
 };
 
-/// 192 kb/s; the encoder accepts 12 000, 16 000, 20 000 and 24 000 bytes a second.
+/// 192 kb/s. The encoder accepts 12 000, 16 000, 20 000 and 24 000 bytes a second.
 const BYTES_PER_SECOND: u32 = 24_000;
 const AAC_LC_LEVEL_2: u32 = 0x29;
 const RAW_PAYLOAD: u32 = 0;
 const PCM_BITS: u32 = 16;
 /// `HEAACWAVEINFO` precedes the `AudioSpecificConfig` in the output type's user data.
 const WAVE_INFO_BYTES: usize = 12;
-/// Samples the encoder prepends to its input; Microsoft's prepends none (see `encoder_delay`).
+/// The number of samples the encoder prepends to its input. Microsoft's encoder prepends none
+/// (see `encoder_delay`).
 pub(super) const PRIMING: u32 = 0;
-/// Most input the encoder holds back before finishing a frame: lookahead plus a partial frame.
+/// The most input the encoder holds back before finishing a frame: the lookahead plus a partial
+/// frame.
 const HELD_BACK: u32 = 4 * FRAME_SAMPLES;
 /// 6144 bits per channel, two channels.
 const FRAME_BYTES_MAX: u32 = 2 * 6144 / 8;
@@ -43,7 +45,7 @@ const CLIP_BLOCK: u32 = 8 * FRAME_SAMPLES;
 struct MediaFoundation(());
 
 impl MediaFoundation {
-    /// COM must be initialised on the calling thread.
+    /// Starts Media Foundation. COM must be initialised on the calling thread.
     fn start() -> Result<Self> {
         // SAFETY: paired with the shutdown in `drop`.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) }?;
@@ -53,7 +55,7 @@ impl MediaFoundation {
 
 impl Drop for MediaFoundation {
     fn drop(&mut self) {
-        // SAFETY: matches the successful start that made `self`.
+        // SAFETY: paired with the successful start that created `self`.
         let _ = unsafe { MFShutdown() };
     }
 }
@@ -63,7 +65,7 @@ struct Encoder {
     rate: u32,
     channels: u16,
     config: Box<[u8]>,
-    /// Reused output sample, unless the encoder provides its own.
+    /// The output sample reused for every frame, or `None` when the encoder provides its own.
     output: Option<IMFSample>,
     fed: u64,
 }
@@ -86,7 +88,7 @@ impl Encoder {
         })
     }
 
-    /// The `AudioSpecificConfig` of the stream, for the MP4 file's `esds` box.
+    /// Returns the `AudioSpecificConfig` of the stream, for the MP4 file's `esds` box.
     fn config(&self) -> Box<[u8]> {
         self.config.clone()
     }
@@ -120,7 +122,7 @@ impl Encoder {
             "a memory buffer holds less than was asked for"
         );
         // SAFETY: the lock makes `data` writable for `capacity >= length` bytes until the unlock
-        // below; `pcm` is `length` bytes or more and is not memory the new buffer owns.
+        // below. `pcm` is at least `length` bytes and is not memory the new buffer owns.
         unsafe { std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, length as usize) };
         // SAFETY: releases the lock taken above; `data` is not used again.
         unsafe { buffer.Unlock() }?;
@@ -130,7 +132,7 @@ impl Encoder {
         let sample = unsafe { MFCreateSample() }?;
         // SAFETY: the sample takes its own reference to the unlocked buffer.
         unsafe { sample.AddBuffer(&buffer) }?;
-        // SAFETY: a plain value set on the sample `sample` owns a reference to.
+        // SAFETY: a plain value set on a sample that `sample` holds a reference to.
         unsafe { sample.SetSampleTime(time(self.fed)) }?;
         // SAFETY: as above.
         unsafe { sample.SetSampleDuration(time(self.fed + frames) - time(self.fed)) }?;
@@ -139,9 +141,9 @@ impl Encoder {
 
     fn next_frame(&self) -> Result<Option<Arc<[u8]>>> {
         if let Some(sample) = &self.output {
-            // SAFETY: an index the sample made in `open` holds: it has one buffer.
+            // SAFETY: the sample created in `open` has one buffer, so index 0 is valid.
             let buffer = unsafe { sample.GetBufferByIndex(0) }?;
-            // SAFETY: an empty length is within any buffer.
+            // SAFETY: a length of zero is within any buffer's capacity.
             unsafe { buffer.SetCurrentLength(0) }?;
         }
         let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
@@ -151,7 +153,7 @@ impl Encoder {
             pEvents: ManuallyDrop::new(None),
         }];
         let mut status = 0;
-        // SAFETY: one output buffer for the one stream; its sample, if any, has room for a frame.
+        // SAFETY: one output buffer for the one stream. Its sample, if any, has room for a frame.
         let result = unsafe {
             self.transform
                 .ProcessOutput(0, &mut buffers, &raw mut status)
@@ -168,7 +170,7 @@ impl Encoder {
     }
 }
 
-/// The encoder wants its output type set before its input type.
+/// Sets the encoder's output type and then its input type, the order the encoder requires.
 fn set_types(transform: &IMFTransform, rate: u32, channels: u16) -> Result<()> {
     let output_type = audio_type(&MFAudioFormat_AAC, rate, channels)?;
     set_u32(
@@ -204,7 +206,7 @@ fn set_guid(media_type: &IMFMediaType, key: &GUID, value: &GUID) -> Result<()> {
 }
 
 fn start_streaming(transform: &IMFTransform) -> Result<Option<IMFSample>> {
-    // SAFETY: stream 0 is the encoder's only output stream; the info is returned by value.
+    // SAFETY: stream 0 is the encoder's only output stream. The info is returned by value.
     let info = unsafe { transform.GetOutputStreamInfo(0) }?;
     // SAFETY: a message with no data, sent once the types are set.
     unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0) }?;
@@ -245,7 +247,7 @@ fn specific_config(transform: &IMFTransform) -> Result<Box<[u8]>> {
 }
 
 fn contents(sample: &IMFSample) -> Result<Arc<[u8]>> {
-    // SAFETY: the sample is live; the call returns a new reference to one buffer.
+    // SAFETY: the sample is live, and the call returns a new reference to one buffer.
     let buffer: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer() }?;
     let mut data = std::ptr::null_mut();
     let mut length = 0;
@@ -263,8 +265,9 @@ fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> EncodeErro
     move |error| EncodeError::Windows(step, error)
 }
 
-/// A fresh encoder started at the clip's first sample keeps its frames in step with the video;
-/// the input runs `HELD_BACK` past the clip's end so the encoder finishes the last frame.
+/// Encodes a clip's PCM as AAC frames. A fresh encoder started at the clip's first sample keeps
+/// its frames in step with the video. The input runs `HELD_BACK` past the clip's end so that the
+/// encoder finishes the last frame.
 pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
     let _com = Apartment::multi_threaded().map_err(failed("initialise COM"))?;
     let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;

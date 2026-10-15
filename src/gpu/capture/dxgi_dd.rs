@@ -1,4 +1,4 @@
-//! DXGI Desktop Duplication of a whole monitor on the encoding GPU, cursor not drawn; a
+//! DXGI Desktop Duplication of a whole monitor on the encoding GPU, with the cursor not drawn. A
 //! window target is recorded through the monitor it fills.
 
 use super::{
@@ -33,7 +33,8 @@ use windows::{
     core::{HRESULT, Interface},
 };
 
-/// Retried: secure desktop up, too many duplications, session switch, desktop still changing.
+/// Refusals that are retried: the secure desktop is up, too many duplications, a session switch,
+/// or the desktop is still changing.
 const PASSING_REFUSALS: [HRESULT; 4] = [
     E_ACCESSDENIED,
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
@@ -41,7 +42,7 @@ const PASSING_REFUSALS: [HRESULT; 4] = [
     DXGI_ERROR_ACCESS_LOST,
 ];
 
-/// Preferred first.
+/// The formats to request, preferred first.
 const SCRGB_FORMATS: [DXGI_FORMAT; 2] =
     [DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM];
 
@@ -109,7 +110,7 @@ impl Capture {
         if size(&description) != self.size || is_rotated(&description) {
             return Ok(Frame::Resized);
         }
-        // HDR toggled: restart the session.
+        // HDR was toggled, so the session restarts.
         if description.ModeDesc.Format != self.format {
             log::info("Display · colour format changed");
             return Ok(Frame::Resized);
@@ -207,7 +208,7 @@ fn find_output(device: &Device, monitor: HMONITOR) -> Result<IDXGIOutput1, Captu
     )))
 }
 
-/// The formats to ask for, when tone-mapping wants the HDR desktop as scRGB.
+/// The formats to request when tone-mapping requires the HDR desktop as scRGB.
 fn formats(tone_map: Option<&ToneMapper>) -> Option<&'static [DXGI_FORMAT]> {
     tone_map.map(|_| SCRGB_FORMATS.as_slice())
 }
@@ -237,7 +238,8 @@ fn described(duplication: IDXGIOutputDuplication) -> (IDXGIOutputDuplication, DX
     (duplication, description)
 }
 
-/// `DuplicateOutput1` refuses a thread that is not per-monitor DPI aware.
+/// Duplicates the output in one of `formats`. `DuplicateOutput1` refuses a thread that is not
+/// per-monitor DPI aware.
 fn duplicate_in(
     output: &IDXGIOutput1,
     device: &Device,
@@ -247,10 +249,10 @@ fn duplicate_in(
     // SAFETY: changes the calling thread's DPI awareness only, and is undone below.
     let previous =
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    // SAFETY: live output and device on its adapter; the format list outlives the call.
+    // SAFETY: a live output and a live device on its adapter. The format list outlives the call.
     let duplication = unsafe { output.DuplicateOutput1(&device.d3d, 0, formats) };
     if !previous.is_invalid() {
-        // SAFETY: puts back the thread's awareness from before.
+        // SAFETY: restores the thread's previous awareness.
         unsafe { SetThreadDpiAwarenessContext(previous) };
     }
     duplication

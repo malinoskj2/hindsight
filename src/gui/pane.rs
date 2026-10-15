@@ -1,4 +1,4 @@
-//! What every tab's page shares: the window drives them all through `Pane`.
+//! What every tab's page has in common. The window controls them all through `Pane`.
 
 use super::{
     layout::{self, Frame, Painted},
@@ -8,7 +8,7 @@ use winsafe::gui;
 
 /// The top of a page's first group frame.
 pub(super) const FIRST_FRAME: i32 = 6;
-/// From a group frame's top to its first row, below the title.
+/// The distance from a group frame's top to its first row, below the title.
 pub(super) const FIRST_ROW: i32 = 20;
 
 /// A tab's page, as the window sees it.
@@ -18,10 +18,10 @@ pub(super) trait Pane {
 
     fn page(&self) -> &gui::TabPage;
 
-    /// Runs once the window and its controls exist.
+    /// Called once the window and its controls exist.
     fn on_create(&self) {}
 
-    /// Follows the window growing by `dy` pixels for the pages' messages.
+    /// Called when the window grows by `dy` pixels to make room for the pages' messages.
     fn grow(&self, _dy: i32) {}
 
     /// The group frames, whose titles the classic look draws as labels.

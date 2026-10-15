@@ -1,4 +1,5 @@
-//! The replay buffer in GPU memory, on a Direct3D device of its own so saves never queue behind capture.
+//! The replay buffer in GPU memory, on a Direct3D device of its own so that saves never queue
+//! behind capture.
 
 use crate::{
     gpu::device::{Device, DeviceError, null_output},
@@ -164,7 +165,8 @@ impl Page for VramPage {
 }
 
 #[expect(unsafe_code, reason = "calls ID3D11DeviceContext::Map")]
-/// Polls with `DO_NOT_WAIT`: a waiting `Map` would hold the device lock against the capture thread's uploads.
+/// Polls with `DO_NOT_WAIT`, because a waiting `Map` would hold the device lock against the
+/// capture thread's uploads.
 fn map_when_ready(
     context: &ID3D11DeviceContext,
     staging: &ID3D11Buffer,

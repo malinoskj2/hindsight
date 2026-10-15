@@ -36,7 +36,7 @@ pub(super) const NAL_LENGTH_BYTES: u8 = 4;
 const LARGE_SIZE: u32 = 1;
 /// `mdat` with a 64-bit size, so clips over 4 GB need no special case.
 const MDAT_HEADER_BYTES: u64 = 16;
-/// What other muxers write beside the `isom` brand.
+/// The value other muxers write alongside the `isom` brand.
 const FILE_TYPE_MINOR_VERSION: u32 = 0x200;
 const UNDETERMINED_LANGUAGE: &str = "und";
 const DATA_REFERENCE: u16 = 1;
@@ -149,7 +149,7 @@ struct Layout {
 }
 
 impl Layout {
-    /// Video alone in one chunk, or video and sound alternating [`CHUNK_SECONDS`] each.
+    /// Returns video alone in one chunk, or video and sound alternating [`CHUNK_SECONDS`] each.
     fn of(track: &Track<'_>, sound: Option<&Sound<'_>>) -> Self {
         let Some(sound) = sound else {
             return Self {
@@ -251,8 +251,8 @@ fn interleave(video: Vec<(u64, Chunk)>, audio: Vec<(u64, Chunk)>) -> Vec<Chunk> 
     merged
 }
 
-/// Why a clip couldn't be written. A message names only what failed; a cause is its
-/// `source()`.
+/// The reason a clip could not be written. The message names only what failed, and the cause is
+/// its `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum MuxError {
     #[error("the replay buffer is empty")]
@@ -273,7 +273,8 @@ pub(crate) enum MuxError {
 
 pub(crate) type Visit<'a> = dyn FnMut(u64, bool, &[u8]) -> Result<(), MuxError> + 'a;
 
-/// A clip's packets, oldest first from a keyframe, visited twice: for the index, then the media.
+/// A clip's packets, oldest first starting from a keyframe, visited twice: once for the index,
+/// then for the media.
 pub(crate) trait Packets {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError>;
 }
@@ -329,7 +330,8 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     Ok(())
 }
 
-/// First pass: the decoder record from the first packet carrying one, and a sample per packet.
+/// The first pass. Returns the decoder record from the first packet carrying one, and a sample
+/// per packet.
 fn index<P: Packets + ?Sized>(
     codec: Codec,
     packets: &P,
@@ -354,7 +356,7 @@ fn index<P: Packets + ?Sized>(
     Ok((decoder, samples))
 }
 
-/// A skipped frame index lengthens the previous sample.
+/// Adds a sample. A skipped frame index lengthens the previous sample.
 fn add_sample(
     samples: &mut Vec<Sample>,
     codec: Codec,
@@ -720,7 +722,7 @@ fn sample_sizes(sizes: Vec<u32>) -> Stsz {
     }
 }
 
-/// The edit list skips the lead so the sound starts with the video; every AAC frame decodes on
+/// The edit list skips the lead so the sound starts with the video. Every AAC frame decodes on
 /// its own, so there is no `stss`.
 fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result<Trak, MuxError> {
     let clip = sound.clip;

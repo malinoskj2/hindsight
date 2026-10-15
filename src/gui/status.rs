@@ -46,7 +46,7 @@ mod rows {
     pub(super) const CONTROLS_HEIGHT: i32 = CONTROLS + BUTTON_HEIGHT + 8 - CONTROLS_FRAME;
 }
 
-/// What the Controls group's buttons ask for.
+/// The action each of the Controls group's buttons requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Control {
     Save,
@@ -355,7 +355,7 @@ impl ControlButtons {
                 text::CONTROL_PAUSE
             },
         );
-        // A stopped worker takes no more commands.
+        // A stopped worker accepts no more commands.
         let alive = status.state != State::Stopped;
         self.pause
             .hwnd()

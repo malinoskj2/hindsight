@@ -1,5 +1,5 @@
-//! The replay buffer in one unbuffered file on disk, written by a thread of its own so the
-//! capture thread never waits on the drive; reads lay the staged blocks over the file's bytes.
+//! The replay buffer in one unbuffered file on disk, written by its own thread so the capture
+//! thread never waits on the drive. Reads overlay the staged blocks on the file's bytes.
 
 use super::store::{
     CHUNK_BYTES, MEBIBYTE, PAGE_BYTES, Page, Pages, Slot, Store, StoreError, reserved_pages,
@@ -14,8 +14,8 @@ use std::{
 };
 use thiserror::Error;
 
-/// `FILE_FLAG_NO_BUFFERING` needs every offset, length and buffer aligned to the sector; 4 KiB
-/// is the largest in common use.
+/// `FILE_FLAG_NO_BUFFERING` requires every offset, length and buffer to be sector-aligned. 4 KiB
+/// is the largest sector size in common use.
 const SECTOR_BYTES: usize = 4096;
 const BLOCK_BYTES: usize = 1 << 20;
 const MAX_QUEUED_BYTES: usize = 64 << 20;
@@ -23,8 +23,8 @@ const SPARE_BLOCKS: usize = 2;
 const KEPT_FREE_BYTES: u64 = 1 << 30;
 const WRITER_THREAD: &str = "buffer writer";
 
-/// Why the disk store couldn't be made. A message names only the failed step; the cause is its
-/// `source()`.
+/// The reason the disk store could not be created. The message names only the failed step, and
+/// the cause is its `source()`.
 #[derive(Debug, Error)]
 pub(crate) enum DiskError {
     #[error("create the folder {}", path.display())]
@@ -57,7 +57,7 @@ pub(crate) enum DiskError {
     Writer(#[source] io::Error),
 }
 
-/// Sizes in bytes, all multiples of [`SECTOR_BYTES`]; tests shrink them.
+/// Sizes in bytes, all multiples of [`SECTOR_BYTES`]. Tests use smaller ones.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     page: usize,
@@ -76,7 +76,7 @@ const LAYOUT: Layout = Layout {
 pub(crate) struct DiskStore {
     shared: Arc<Shared>,
     pages: Pages<DiskPage>,
-    /// File offset of the next page made beyond the reserved ones.
+    /// The file offset of the next page created beyond the reserved ones.
     end: u64,
     #[cfg_attr(
         all(not(windows), test),
@@ -89,7 +89,8 @@ pub(crate) struct DiskStore {
 }
 
 impl DiskStore {
-    /// Reserves the file for `bytes` of packets plus a page, replacing a previous buffer's file.
+    /// Creates the store, reserving the file for `bytes` of packets plus a page and replacing a
+    /// previous buffer's file.
     #[cfg_attr(
         all(not(windows), test),
         expect(
@@ -107,7 +108,8 @@ impl DiskStore {
             path: folder.to_owned(),
             source,
         })?;
-        // Removed first so its room counts as free; a stuck file fails the create below instead.
+        // Removed first so its space counts as free. A file that cannot be removed fails the
+        // create below instead.
         let _ = fs::remove_file(path);
         let length = (pages as u64).saturating_mul(layout.page as u64);
         has_room(length, free_bytes(folder).map_err(DiskError::FreeSpace)?)?;
@@ -125,15 +127,16 @@ impl DiskStore {
             queued: Condvar::new(),
         });
         let writer = Arc::clone(&shared);
-        // Detached on purpose: the thread drains its queue and ends once the store closes, and
-        // the file lives until the pages a save may still be reading let go, so nothing joins.
+        // Detached on purpose. The thread drains its queue and exits once the store closes, and
+        // the file lives until the pages a save may still be reading are released, so nothing
+        // needs to join it.
         thread::Builder::new()
             .name(WRITER_THREAD.to_owned())
             .spawn(move || writer.write_blocks())
             .map_err(DiskError::Writer)?;
 
-        // `Pages` pops free pages from the back; reversed, the file fills from its start, so no
-        // write lands past unwritten space that Windows would zero-fill first.
+        // `Pages` pops free pages from the back. Reversed, the file fills from its start, so no
+        // write arrives past unwritten space that Windows would zero-fill first.
         let page_bytes = layout.page as u64;
         let reserved = (0..pages as u64)
             .rev()
@@ -178,7 +181,8 @@ impl Store for DiskStore {
         } = self;
         let page_bytes = shared.layout.page as u64;
         let (page, offset) = pages.place(data.len(), || {
-            // Past the file's end; the writer's first block there lengthens the file.
+            // This page is past the end of the file. The writer's first block there extends the
+            // file.
             let page = DiskPage {
                 shared: Arc::clone(shared),
                 base: *end,
@@ -192,7 +196,7 @@ impl Store for DiskStore {
 }
 
 impl Drop for DiskStore {
-    /// The file stays until the pages a save may still be reading let go of it.
+    /// The file remains until the pages a save may still be reading release it.
     fn drop(&mut self) {
         self.shared.close();
     }
@@ -224,7 +228,7 @@ struct Shared {
 #[derive(Default)]
 struct Staging {
     filling: Option<Block>,
-    /// Oldest first; a block leaves only once it is in the file.
+    /// Oldest first. A block is removed only once it is in the file.
     queue: VecDeque<Arc<Block>>,
     queued_bytes: usize,
     spare: Vec<Aligned>,
@@ -265,8 +269,8 @@ impl Block {
         taken
     }
 
-    /// The used bytes rounded up to a sector; the slack lies past the page's packets, so nothing
-    /// reads it.
+    /// Returns the used bytes rounded up to a sector. The slack lies past the page's packets, so
+    /// nothing reads it.
     fn sectors(&self) -> &[u8] {
         &self.memory.bytes()[..self.used.next_multiple_of(SECTOR_BYTES)]
     }
@@ -299,8 +303,8 @@ impl Shared {
         Ok(())
     }
 
-    /// A block leaves the queue only once it is in the file, so a read finds every byte in one
-    /// or the other.
+    /// Writes queued blocks to the file. A block leaves the queue only once it is in the file, so
+    /// a read finds every byte in one or the other.
     fn write_blocks(&self) {
         while let Some(block) = self.next_block() {
             let written = write_at(&self.file, block.sectors(), block.position);
@@ -381,7 +385,8 @@ impl Shared {
         Ok(())
     }
 
-    /// Queued blocks as they are; the one being filled copied, since it is still changing.
+    /// Returns the overlapping queued blocks as they are, and a copy of the one being filled,
+    /// since it is still changing.
     fn staged(&self, from: u64, to: u64) -> Vec<Staged> {
         let staging = self.staging();
         let mut staged: Vec<Staged> = staging
@@ -403,7 +408,7 @@ impl Shared {
 }
 
 impl Staging {
-    /// The oldest queued block, unless a test holds the writer back.
+    /// Returns the oldest queued block, unless a test holds the writer back.
     fn ready(&self) -> Option<&Arc<Block>> {
         #[cfg(test)]
         if self.held {
@@ -412,7 +417,8 @@ impl Staging {
         self.queue.front()
     }
 
-    /// A page's packets are contiguous, so a new block starts only where a page does.
+    /// Returns the block being filled at `position`. A page's packets are contiguous, so a new
+    /// block starts only where a page does.
     fn block_at(&mut self, position: u64, layout: &Layout) -> Result<&mut Block, StoreError> {
         let follows = self
             .filling
@@ -437,7 +443,8 @@ impl Staging {
             .expect("a block is being filled or was just started"))
     }
 
-    /// Refuses when the queue is full; the block stays put so reads still find its bytes.
+    /// Queues the block being filled. Refuses when the queue is full, and the block then stays
+    /// where it is so reads still find its bytes.
     fn queue_filling(&mut self, layout: &Layout) -> Result<(), StoreError> {
         let Some(block) = self.filling.take() else {
             return Ok(());
@@ -479,7 +486,8 @@ fn distance(from: u64, to: u64) -> usize {
     usize::try_from(to - from).expect("a block or a piece fits in memory")
 }
 
-/// Sector-aligned memory: a vector with a sector to spare, used from its first boundary on.
+/// Sector-aligned memory: a vector with a spare sector, used from its first sector boundary
+/// onwards.
 struct Aligned {
     memory: Vec<u8>,
     start: usize,
@@ -520,14 +528,16 @@ fn has_room(needed: u64, available: u64) -> Result<(), DiskError> {
     Ok(())
 }
 
-/// Makes a drive that refuses unbuffered transfers fail now, not once the buffer is in use.
+/// Makes a drive that refuses unbuffered transfers fail now rather than once the buffer is in
+/// use.
 fn try_unbuffered(file: &File) -> io::Result<()> {
     let mut sector = Aligned::new(SECTOR_BYTES);
     write_at(file, sector.bytes(), 0)?;
     read_at(file, sector.bytes_mut(), 0)
 }
 
-/// Past the file's end (a page not yet written) the bytes are zeros.
+/// Reads `buffer` from `position`. Bytes past the end of the file, in a page not yet written,
+/// read as zeros.
 fn read_at(file: &File, buffer: &mut [u8], position: u64) -> io::Result<()> {
     let mut done = 0;
     while done < buffer.len() {
@@ -557,8 +567,8 @@ fn write_at(file: &File, bytes: &[u8], position: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Only deletion is shared, so the next session's buffer can replace the file while a save
-/// still reads this one; `FILE_FLAG_WRITE_THROUGH` is left out on purpose.
+/// Opens the buffer file. Only deletion is shared, so the next session's buffer can replace the
+/// file while a save still reads this one. `FILE_FLAG_WRITE_THROUGH` is left out on purpose.
 #[cfg(windows)]
 fn open(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -575,7 +585,7 @@ fn open(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Tests only: unlinked at once, and there is no unbuffered mode to ask for.
+/// Used only by tests. The file is unlinked at once, and there is no unbuffered mode to request.
 #[cfg(not(windows))]
 fn open(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()

@@ -1,4 +1,4 @@
-//! By-hand measurement of what each NVENC call costs the calling thread per frame on Direct3D
+//! A manual measurement of what each NVENC call costs the calling thread per frame on Direct3D
 //! 11, 12 and 9Ex sessions: `cargo test --release d3d12_encode_cost -- --ignored --nocapture`.
 
 use super::{
@@ -267,7 +267,7 @@ fn timed<T>(costs: &mut Costs, call: usize, body: impl FnOnce() -> T) -> T {
     result
 }
 
-/// What the bench asks of a session that the encoder does not.
+/// The operations the bench needs from a session that the encoder does not.
 trait BenchSession {
     fn assert_ok(&self, call: &'static str, status: Status);
     fn initialize(&self, settings: Settings, asynchronous: bool) -> Result<(), String>;
@@ -311,7 +311,8 @@ impl BenchSession for Session {
         let mut params = initialize_params(settings);
         params.encode_config = &raw mut config;
         params.enable_encode_async = u32::from(asynchronous);
-        // A Direct3D 12 session must be told the input format up front; others ignore it.
+        // A Direct3D 12 session must be given the input format up front. Other sessions ignore
+        // it.
         params.buffer_format = ffi::BUFFER_FORMAT_ARGB;
         let initialize = self.api.initialize_encoder;
         // SAFETY: `params` and the configuration it points to live across the call.
@@ -395,7 +396,7 @@ enum Output {
         _buffer: ID3D12Resource,
         registered: ffi::Registered,
         mapped: Option<ffi::Mapped>,
-        /// Boxed: NVENC holds its address while the frame is in flight.
+        /// Boxed, because NVENC holds its address while the frame is in flight.
         resource: Box<ResourceD3D12>,
     },
 }

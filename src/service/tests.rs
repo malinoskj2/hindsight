@@ -68,7 +68,7 @@ fn closing(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {
 static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 static FAILED_SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
-// Each stand-in below runs until its test lets it go; one test uses each.
+// Each stand-in below runs until its test releases it. Each is used by one test.
 static GAME_CLOSES: AtomicBool = AtomicBool::new(false);
 static SLOW_WRITE_ENDS: AtomicBool = AtomicBool::new(false);
 static FAILING_WRITE_ENDS: AtomicBool = AtomicBool::new(false);
@@ -136,7 +136,7 @@ fn wait_for(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
     poll(worker, true, done)
 }
 
-/// Like `wait_for`, but never wakes the worker itself: what is awaited must.
+/// Like `wait_for`, but never wakes the worker itself. The awaited event must wake it.
 fn wait_unprompted(worker: &Worker, done: impl Fn(&Status) -> bool) -> Status {
     poll(worker, false, done)
 }
@@ -159,7 +159,7 @@ fn poll(worker: &Worker, prompt: bool, done: impl Fn(&Status) -> bool) -> Status
     }
 }
 
-/// A clock that moves only when the test moves it.
+/// A clock that advances only when the test advances it.
 struct ManualClock(Arc<Mutex<Instant>>);
 
 impl ManualClock {
@@ -377,7 +377,8 @@ fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
     let status = wait_for(&worker, |status| status.state == State::Retrying);
     assert!(status.error.is_some());
     worker.target(window(1));
-    // Handled in order, so the save shows the target was seen during the cool-down.
+    // Commands are handled in order, so the save confirms that the target was seen during the
+    // cool-down.
     worker.save();
     let status = wait_for(&worker, |status| status.nothing_to_save);
     assert_eq!(status.state, State::Retrying);
@@ -452,7 +453,7 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
 
 type Heard = Arc<Mutex<Vec<Tone>>>;
 
-/// The worker runs on `clock`; its tones are heard in order.
+/// Spawns a worker that runs on `clock` and records its tones in order.
 fn spawn_listening(
     record: Recorder,
     clock: &ManualClock,
@@ -474,7 +475,7 @@ fn tones(heard: &Heard) -> Vec<Tone> {
     heard.lock().unwrap().clone()
 }
 
-/// Lets a second pass on `clock` for each further blip expected, waiting for each to sound.
+/// Advances `clock` by a second for each further blip expected, waiting for each to sound.
 fn tick(worker: &Worker, clock: &ManualClock, heard: &Heard, blips: usize) {
     for heard_so_far in 2..=blips {
         clock.advance(PROGRESS_INTERVAL);
@@ -482,7 +483,7 @@ fn tick(worker: &Worker, clock: &ManualClock, heard: &Heard, blips: usize) {
     }
 }
 
-/// Lets time pass after the outcome; no tone may follow it.
+/// Lets time pass after the outcome and asserts that no tone follows it.
 fn assert_silent_after(worker: &Worker, clock: &ManualClock, heard: &Heard) {
     let before = tones(heard).len();
     clock.advance(2 * PROGRESS_INTERVAL);

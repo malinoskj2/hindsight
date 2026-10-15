@@ -1,7 +1,8 @@
-//! The window's look: classic leaves native drawing alone; a character theme paints over the same controls.
+//! The window's look. Classic leaves native drawing alone, and a character theme paints over the
+//! same controls.
 //!
-//! The colours live in `palette`, what a paint draws with in `cache`, and the painters in
-//! `paint`; `Skin` ties them to the current theme.
+//! The colours are in `palette`, the resources a paint draws with in `cache`, and the painters in
+//! `paint`. `Skin` ties them to the current theme.
 
 use self::{
     cache::{Ready, Resources},
@@ -29,7 +30,7 @@ const ART_WIDTH: i32 = 240;
 const ART_MARGIN: i32 = 8;
 const DECORATION_OPACITY: u8 = 166;
 
-/// What a label's text says; each look gives every tone a colour of its own.
+/// The kind of message a label's text conveys. Each look gives every tone a colour of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tone {
     Text,
@@ -94,8 +95,9 @@ impl Skin {
         if self.is_themed() { ART_WIDTH } else { 0 }
     }
 
-    /// Classic text takes the system's colour, as does every tone under high contrast: the
-    /// labels sit on the system's background, which such a theme may make black.
+    /// The colour for `tone`. Classic text uses the system's colour, as does every tone under
+    /// high contrast, because the labels sit on the system's background, which such a theme may
+    /// make black.
     pub(super) fn colour(&self, tone: Tone) -> w::COLORREF {
         if let Some(palette) = self.palette() {
             return colour(palette.tone(tone));
@@ -106,19 +108,19 @@ impl Skin {
         }
     }
 
-    /// Caption then text; `None` in classic.
+    /// The caption and text colours. `None` in classic.
     pub(super) fn title_bar_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
         self.palette()
             .map(|palette| (colour(palette.background), colour(palette.text)))
     }
 
-    /// Background then text; `None` in classic.
+    /// The background and text colours. `None` in classic.
     pub(super) fn list_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
         self.palette()
             .map(|palette| (colour(palette.panel), colour(palette.text)))
     }
 
-    /// For `WM_CTLCOLORSTATIC`, which hands the brush to the label by value.
+    /// The brush for `WM_CTLCOLORSTATIC`, which passes the brush to the label by value.
     #[expect(unsafe_code, reason = "copies a brush handle with raw_copy")]
     pub(super) fn label_brush(&self, surface: Surface) -> w::HBRUSH {
         match self.brush(surface) {
@@ -211,7 +213,7 @@ impl Skin {
         let Some(gdi) = resources.gdi(palette) else {
             return co::CDRF::DODEFAULT;
         };
-        // Behind the rounded corners: the panel the button sits on.
+        // The panel the button sits on shows behind the rounded corners.
         let _ = hdc.FillRect(draw.rc, gdi.brush(Fill::Panel));
         if !round_rect(hdc, draw.rc, gdi.pen(edge), gdi.brush(fill)) {
             return co::CDRF::DODEFAULT;
@@ -240,7 +242,7 @@ impl Skin {
         let Some(gdi) = resources.gdi(palette) else {
             return;
         };
-        // The pages paint the display area themselves; keep out of it.
+        // The pages paint the display area themselves, so it is excluded here.
         let pages = window::display_rect(hwnd, client);
         buffered(&paint, (client.right, client.bottom), pages, |target| {
             paint_tab_strip(target, palette, gdi, tab, client);
@@ -251,7 +253,7 @@ impl Skin {
         palette(self.theme())
     }
 
-    /// The surface's brush, borrowed from the skin's resources; `None` in classic.
+    /// The surface's brush, borrowed from the skin's resources. `None` in classic.
     fn brush(&self, surface: Surface) -> Option<Ref<'_, w::HBRUSH>> {
         let palette = self.palette()?;
         self.0.resources.borrow_mut().ensure_gdi(palette);

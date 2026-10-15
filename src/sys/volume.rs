@@ -2,7 +2,8 @@
 
 use std::{io, path::Path};
 
-/// Free bytes for this user (quotas apply) on the drive holding `directory`, which must exist.
+/// Returns the free bytes available to this user (quotas apply) on the drive that holds
+/// `directory`, which must exist.
 pub(crate) fn free_bytes(directory: &Path) -> io::Result<u64> {
     let mut free = 0;
     winsafe::GetDiskFreeSpaceEx(

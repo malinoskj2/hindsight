@@ -1,6 +1,6 @@
 //! Annex B streams, the form NVENC writes H.264 and HEVC in: NAL units separated by start codes.
 
-/// The three-byte start code; a four-byte one has a zero byte in front.
+/// The three-byte start code. A four-byte start code has a zero byte in front.
 const START_CODE: [u8; 3] = [0, 0, 1];
 const EMULATION_PREVENTION: u8 = 3;
 
@@ -19,7 +19,7 @@ pub(super) fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-/// The first unit of each of the `kinds`, when the stream carries them all.
+/// Returns the first unit of each of the `kinds`, when the stream carries them all.
 pub(super) fn find_units<const N: usize>(
     stream: &[u8],
     nal_type: fn(&[u8]) -> u8,

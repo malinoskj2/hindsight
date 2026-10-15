@@ -1,5 +1,5 @@
-//! Windows Graphics Capture of a monitor or a window; once handed over, NVENC reads the pool's
-//! buffers in place, and a display in HDR is tone-mapped from FP16 instead.
+//! Windows Graphics Capture of a monitor or a window. Once handed over, NVENC reads the pool's
+//! buffers in place. A display in HDR is tone-mapped from FP16 instead.
 
 use super::{
     CaptureError, CopyTarget, Frame, Source, Surface, deliver, display, failed, monitor,
@@ -43,7 +43,7 @@ use windows::{
 const POOL_BUFFERS: i32 = 2;
 /// As many as the encoder has frames in flight.
 const HELD_BUFFERS: i32 = 3;
-/// A pool handing out more has replaced its buffers, which are then copied instead.
+/// A pool that hands out more surfaces has replaced its buffers, which are then copied instead.
 const MAX_SURFACES: usize = 8;
 const HDR_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -63,13 +63,14 @@ pub(super) struct Capture {
     tone_map: Option<ToneMapper>,
     monitor: HMONITOR,
     next_hdr_check: Instant,
-    /// The apartment the capture objects live in; declared last so they all go first.
+    /// The apartment the capture objects live in. Declared last so that they are all dropped
+    /// first.
     _apartment: Apartment,
 }
 
 impl Capture {
-    /// Frames are limited to twice per `period`: a limit of one period skips every other
-    /// refresh when the rates do not divide evenly.
+    /// Starts a capture. Frames are limited to twice per `period`, because a limit of one period
+    /// skips every other refresh when the rates do not divide evenly.
     pub(super) fn start(
         device: &Device,
         period: Duration,
@@ -153,7 +154,7 @@ impl Source for Capture {
                 surface: Surface::Texture(texture),
             });
         }
-        // Not handed over (always so in HDR), or the pool replaced its buffers.
+        // Either not handed over (always the case in HDR), or the pool replaced its buffers.
         let copied = deliver(self.tone_map.as_mut(), &texture, target);
         let _ = frame.Close();
         copied
@@ -191,7 +192,8 @@ impl Capture {
 }
 
 impl Capture {
-    /// An SDR capture never checks: a display entering HDR is recorded clipped.
+    /// Returns whether the display has left HDR. An SDR capture never checks, so a display
+    /// entering HDR is recorded clipped.
     fn hdr_turned_off(&mut self) -> bool {
         if self.tone_map.is_none() {
             return false;
@@ -232,8 +234,8 @@ impl Drop for Capture {
     }
 }
 
-/// The multithreaded apartment, which is what `RoInitialize(RO_INIT_MULTITHREADED)` sets up,
-/// until the returned guard is dropped on this thread.
+/// Enters the multithreaded apartment, which is what `RoInitialize(RO_INIT_MULTITHREADED)` sets
+/// up, until the returned guard is dropped on this thread.
 fn prepare_thread() -> Result<Apartment, CaptureError> {
     let apartment =
         Apartment::multi_threaded().map_err(failed("start WinRT on the capture thread"))?;
@@ -294,7 +296,7 @@ fn start_session(
     let session = pool
         .CreateCaptureSession(item)
         .map_err(failed("create the capture session"))?;
-    // Each needs a newer Windows than capture itself; without it the default stays.
+    // Each setting needs a newer Windows than capture itself. Without it, the default stays.
     let _ = session.SetIsCursorCaptureEnabled(cursor);
     let _ = session.SetIsBorderRequired(false);
     let _ = session.SetMinUpdateInterval(TimeSpan {

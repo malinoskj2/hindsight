@@ -12,12 +12,12 @@ pub(crate) const CLOCK_RATE: i64 = 10_000_000;
 pub(crate) const FRAME_SAMPLES: u32 = 1024;
 const SECONDS_BEFORE_VIDEO: u64 = 10;
 
-/// Clock ticks in `samples` at `rate` a second, saturating.
+/// Returns the clock ticks in `samples` at `rate` per second, saturating.
 pub(crate) fn ticks_of(samples: impl Into<i128>, rate: u32) -> i64 {
     saturate(samples.into() * i128::from(CLOCK_RATE) / i128::from(rate))
 }
 
-/// Samples at `rate` a second in `ticks`, rounded down, saturating.
+/// Returns the samples at `rate` per second in `ticks`, rounded down, saturating.
 pub(crate) fn samples_of(ticks: i64, rate: u32) -> i64 {
     saturate((i128::from(ticks) * i128::from(rate)).div_euclid(i128::from(CLOCK_RATE)))
 }
@@ -41,7 +41,8 @@ pub(crate) struct AudioFormat {
 }
 
 impl AudioFormat {
-    /// Encoder output sample playing at `time`; negative before the stream began.
+    /// Returns the encoder output sample playing at `time`, which is negative before the stream
+    /// began.
     fn sample_at(&self, time: i64) -> i64 {
         samples_of(time.saturating_sub(self.anchor), self.sample_rate.get())
             .saturating_add(i64::from(self.priming))
@@ -54,7 +55,8 @@ impl AudioFormat {
             .saturating_add(ticks_of(input, self.sample_rate.get()))
     }
 
-    /// The frame before the one playing at `start`; the decoder needs it to rebuild that one.
+    /// Returns the frame before the one playing at `start`. The decoder needs it to reconstruct
+    /// that frame.
     fn first_frame(&self, start: i64) -> i64 {
         self.sample_at(start)
             .div_euclid(i64::from(FRAME_SAMPLES))
@@ -92,7 +94,7 @@ impl Chunk {
     }
 }
 
-/// Oldest first; gaps where nothing was captured read as silence.
+/// Captured chunks, oldest first. Gaps where nothing was captured read as silence.
 #[derive(Default)]
 pub(crate) struct AudioRing {
     chunks: VecDeque<Chunk>,
@@ -182,7 +184,7 @@ pub(crate) struct PcmClip {
     /// Negative when the video starts before the sound did.
     pub(crate) start: i64,
     pub(crate) frames: usize,
-    /// Samples of the first frames that play before the video; the edit list skips them.
+    /// Samples of the first frames that play before the video. The edit list skips them.
     pub(crate) lead: u32,
     chunks: Vec<Chunk>,
 }
@@ -214,7 +216,7 @@ pub(crate) struct AudioClip {
     /// The `AudioSpecificConfig` the `esds` box carries.
     pub(crate) config: Box<[u8]>,
     pub(crate) frames: Vec<Arc<[u8]>>,
-    /// Samples of the first frames that play before the video; the edit list skips them.
+    /// Samples of the first frames that play before the video. The edit list skips them.
     pub(crate) lead: u32,
 }
 

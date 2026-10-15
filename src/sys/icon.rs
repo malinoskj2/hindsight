@@ -31,7 +31,7 @@ pub(crate) fn write_all(assets: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Straight-alpha RGBA rows from the top-left.
+/// A decoded picture: straight-alpha RGBA rows, starting at the top-left.
 struct Picture {
     width: u32,
     height: u32,
@@ -62,7 +62,8 @@ impl Picture {
         })
     }
 
-    /// BMP entries rather than PNG, even at 256 pixels, so every icon reader understands them.
+    /// Encodes the icon with BMP entries rather than PNG, even at 256 pixels, so that every icon
+    /// reader can decode them.
     fn ico(&self) -> Vec<u8> {
         let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
         for size in ICO_SIZES {
@@ -78,7 +79,8 @@ impl Picture {
         bytes
     }
 
-    /// Area-averaged in premultiplied colour, so transparent surround never bleeds in.
+    /// Resamples to `size` by area averaging in premultiplied colour, so that transparent
+    /// surroundings never bleed into the result.
     fn resampled(&self, size: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity((size * size * 4) as usize);
         for y in 0..size {
@@ -117,7 +119,7 @@ impl Picture {
     }
 }
 
-/// The source rows or columns that make up destination `index` of `size`.
+/// The range of source rows or columns that map to destination `index` of `size`.
 fn span(index: u32, size: u32, source: u32) -> (u32, u32) {
     let start = index * source / size;
     let end = ((index + 1) * source / size).max(start + 1).min(source);

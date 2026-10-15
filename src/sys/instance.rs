@@ -1,4 +1,5 @@
-//! One copy at a time: a later launch hands itself to the running copy's window and exits.
+//! Single-instance enforcement: a later launch asks the running copy's window to show itself and
+//! exits.
 
 use std::{thread, time::Duration};
 use winsafe::{self as w, co};
@@ -8,7 +9,7 @@ const WAIT: Duration = Duration::from_millis(100);
 const ATTEMPTS: u32 = 50;
 
 #[expect(unsafe_code, reason = "builds a WM constant from a raw value")]
-// SAFETY: `WM` is a plain newtype over the message number; this one is in the app range.
+// SAFETY: `WM` is a plain newtype over the message number, and this one is in the app range.
 pub(crate) const SHOW_MESSAGE: co::WM = unsafe { co::WM::from_raw(co::WM::APP.raw() + 1) };
 
 pub(crate) fn show_running() -> bool {
@@ -26,7 +27,7 @@ pub(crate) fn show_running() -> bool {
 
 #[expect(unsafe_code, reason = "calls PostMessage")]
 fn bring_forward(window: &w::HWND) -> bool {
-    // This process has the focus, so it may hand it to the other copy.
+    // This process has the focus, so it may pass it to the other copy.
     let (_, process) = window.GetWindowThreadProcessId();
     let _ = w::AllowSetForegroundWindow(Some(process));
     // SAFETY: the message carries no pointers.
