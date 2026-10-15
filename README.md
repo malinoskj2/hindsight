@@ -45,6 +45,10 @@ Run as administrator for the highest GPU priority. To check for yourself, compar
 - AMD GPU support
 - Linux support
 
+## Contributing
+
+Bug reports and pull requests are welcome, and you do not need to know Rust or GPU programming to help. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 [BSD 2-Clause](LICENSE).
