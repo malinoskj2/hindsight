@@ -23,7 +23,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 
 ## Get started
 
-1. Download **`hindsight-setup-x64.exe`** from the Releases page and run it.
+1. Download **`hindsight-setup-x64.exe`** from the [Releases page](https://github.com/malinoskj2/hindsight/releases) and run it.
 2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
 3. Press **Alt+F10** (or the hotkey you set) to save a clip.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
