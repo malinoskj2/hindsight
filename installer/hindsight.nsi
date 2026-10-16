@@ -1,6 +1,16 @@
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
+
+# The version comes from Cargo.toml, passed in by scripts\build-windows.ps1, so that the installer
+# cannot drift from the program it installs.
+!ifndef VERSION
+  !error "VERSION is not defined; build with scripts\build-windows.ps1, which passes /DVERSION from Cargo.toml"
+!endif
+!ifndef VERSION_NUMERIC
+  !error "VERSION_NUMERIC is not defined; build with scripts\build-windows.ps1, which passes /DVERSION_NUMERIC from Cargo.toml"
+!endif
+
 Name "hindsight"
 OutFile "..\dist\hindsight-setup-x64.exe"
 InstallDir "$PROGRAMFILES64\hindsight"
@@ -20,6 +30,14 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+
+# The installer's own file properties.
+VIProductVersion "${VERSION_NUMERIC}"
+VIAddVersionKey "ProductName" "hindsight"
+VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileDescription" "hindsight installer"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026, Jesse Malinosky"
 
 # The installer is elevated; start the app as the logged-on user so it sees that user's
 # desktop and tray.
@@ -50,7 +68,7 @@ Section "hindsight"
 
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayIcon" "$INSTDIR\hindsight.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayName" "hindsight"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayVersion" "0.1.0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "NoRepair" 1

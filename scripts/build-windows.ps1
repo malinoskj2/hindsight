@@ -2,6 +2,17 @@ param([switch]$SkipInstaller)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
+# The installer takes its version from Cargo.toml, as the program does, so the two cannot drift.
+$version = $null
+$inPackage = $false
+foreach ($line in Get-Content Cargo.toml) {
+    if ($line -match '^\[') { $inPackage = ($line.Trim() -eq '[package]'); continue }
+    if ($inPackage -and $line -match '^version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+}
+if (!$version) { throw 'Could not read the version from [package] in Cargo.toml' }
+# A Windows version resource is four numbers, so a pre-release suffix is dropped and a zero added.
+$versionNumeric = ($version -split '[-+]')[0] + '.0'
+
 cargo build --locked --release --target x86_64-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
 
@@ -44,8 +55,9 @@ if (!$SkipInstaller) {
     }
 
     Write-Host "Using NSIS compiler: $compiler"
+    Write-Host "Building the installer for hindsight $version"
 
-    & $compiler /WX installer\hindsight.nsi
+    & $compiler /WX "/DVERSION=$version" "/DVERSION_NUMERIC=$versionNumeric" installer\hindsight.nsi
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
 }
 
