@@ -1,6 +1,6 @@
 //! The Direct3D 11 device that capture and NVENC share, created on the NVIDIA adapter.
 
-use crate::gpu::win32::utf16_until_nul;
+use crate::sys::win32::utf16_until_nul;
 use thiserror::Error;
 use windows::{
     Win32::{

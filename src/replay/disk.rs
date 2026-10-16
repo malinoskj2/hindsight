@@ -426,21 +426,20 @@ impl Staging {
             .is_some_and(|block| block.end() == position);
         if !follows {
             self.queue_filling(layout)?;
-            debug_assert!(position.is_multiple_of(SECTOR_BYTES as u64));
-            let memory = self
-                .spare
-                .pop()
-                .unwrap_or_else(|| Aligned::new(layout.block));
-            self.filling = Some(Block {
-                position,
-                memory,
-                used: 0,
-            });
         }
-        Ok(self
-            .filling
-            .as_mut()
-            .expect("a block is being filled or was just started"))
+        // After `queue_filling` nothing is being filled, so a block that does not follow starts
+        // here.
+        Ok(self.filling.get_or_insert_with(|| {
+            debug_assert!(position.is_multiple_of(SECTOR_BYTES as u64));
+            Block {
+                position,
+                memory: self
+                    .spare
+                    .pop()
+                    .unwrap_or_else(|| Aligned::new(layout.block)),
+                used: 0,
+            }
+        }))
     }
 
     /// Queues the block being filled. Refuses when the queue is full, and the block then stays

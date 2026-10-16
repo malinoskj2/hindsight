@@ -12,7 +12,6 @@ mod pacer;
 mod pipeline;
 mod priority;
 mod vram;
-mod win32;
 
 pub(crate) use pipeline::record;
 

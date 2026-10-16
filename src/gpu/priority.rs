@@ -1,6 +1,6 @@
 //! Thread, process and GPU scheduling priority for the capture thread.
 
-use crate::gpu::{ffi::Library, win32::cb_size};
+use crate::{gpu::ffi::Library, sys::win32::cb_size};
 use windows::{
     Win32::{
         Foundation::{HANDLE, NTSTATUS},

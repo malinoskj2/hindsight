@@ -8,7 +8,7 @@ use super::{
     CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
     is_window_closed, monitor_of,
 };
-use crate::{gpu::device::Device, log, service::Target};
+use crate::{gpu::device::Device, log, service::Target, sys::win32::cb_size};
 use std::{
     ffi::c_void,
     ptr::{self, NonNull},
@@ -502,7 +502,7 @@ fn find_adapter(
 
 fn display_size(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<(u32, u32), CaptureError> {
     let mut mode = D3DDISPLAYMODEEX {
-        Size: u32::try_from(size_of::<D3DDISPLAYMODEEX>()).expect("a display mode is a few bytes"),
+        Size: cb_size::<D3DDISPLAYMODEEX>(),
         ..Default::default()
     };
     let mut rotation = D3DDISPLAYROTATION::default();
@@ -633,8 +633,7 @@ fn output_buffers(slots: &[Slot; SLOTS]) -> [ffi::OutputBuffer; SLOTS] {
 
 fn is_attached(monitor: HMONITOR) -> bool {
     let mut info = MONITORINFO {
-        cbSize: u32::try_from(size_of::<MONITORINFO>())
-            .expect("monitor information is a few bytes"),
+        cbSize: cb_size::<MONITORINFO>(),
         ..Default::default()
     };
     // SAFETY: GetMonitorInfoW accepts any handle and fails for one that is gone.

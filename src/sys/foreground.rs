@@ -1,7 +1,10 @@
 //! Full-screen app detection: windows whose client area covers their monitor, watched through
 //! event hooks.
 
-use super::callback::Slot;
+use super::{
+    callback::Slot,
+    win32::{cb_size, cb_size_u16},
+};
 use crate::service::{MonitorHandle, Target, WindowHandle};
 use std::{path::Path, rc::Rc};
 use windows::{
@@ -173,10 +176,9 @@ fn covered_size(window: &w::HWND, monitor: &w::HMONITOR) -> Option<(u32, u32)> {
 /// stood on its side. `false` when the orientation cannot be read.
 fn is_rotated(monitor: &w::HMONITOR) -> bool {
     let mut info = MONITORINFOEXW::default();
-    info.monitorInfo.cbSize =
-        u32::try_from(size_of::<MONITORINFOEXW>()).expect("the monitor info is a few bytes");
+    info.monitorInfo.cbSize = cb_size::<MONITORINFOEXW>();
     let mut mode = DEVMODEW {
-        dmSize: u16::try_from(size_of::<DEVMODEW>()).expect("a display mode is a few bytes"),
+        dmSize: cb_size_u16::<DEVMODEW>(),
         ..Default::default()
     };
     // SAFETY: `info` is a MONITORINFOEXW and its size field says so.

@@ -3,8 +3,7 @@
 use super::{
     layout::{
         self, BUTTON_HEIGHT, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE, Painted,
-        TintedLabel, VALUE_WIDTH, VALUE_X, button, hidden_label, label, path_label, saturating_i32,
-        skin_button,
+        TintedLabel, VALUE_WIDTH, VALUE_X, button, hidden_label, label, path_label, skin_button,
     },
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
@@ -306,28 +305,26 @@ struct ControlButtons {
 
 impl ControlButtons {
     fn new(page: &gui::TabPage, skin: &Skin) -> Self {
-        let mut captions = [
+        let mut x = INNER_X;
+        let [save, pause, restart, open_clip, open_folder] = [
             text::CONTROL_SAVE,
             text::CONTROL_PAUSE,
             text::CONTROL_RESTART,
             text::CONTROL_OPEN_CLIP,
             text::CONTROL_OPEN_FOLDER,
         ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, caption)| {
-            let x = INNER_X + saturating_i32(index) * (CONTROL_WIDTH + CONTROL_GAP);
+        .map(|caption| {
             let button = button(page, caption, x, rows::CONTROLS, CONTROL_WIDTH);
             skin_button(&button, skin);
+            x += CONTROL_WIDTH + CONTROL_GAP;
             button
         });
-        let mut next = || captions.next().expect("five captions");
         Self {
-            save: next(),
-            pause: next(),
-            restart: next(),
-            open_clip: next(),
-            open_folder: next(),
+            save,
+            pause,
+            restart,
+            open_clip,
+            open_folder,
         }
     }
 

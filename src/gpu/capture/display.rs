@@ -1,6 +1,6 @@
 //! How a monitor is driven: HDR, colour space, bit depth, peak luminance and SDR white level.
 
-use crate::gpu::win32::{cb_size, utf16_until_nul};
+use crate::sys::win32::{cb_size, utf16_until_nul};
 use std::{borrow::Cow, fmt};
 use windows::{
     Win32::{

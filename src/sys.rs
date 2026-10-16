@@ -33,5 +33,7 @@ pub(crate) mod tray;
 #[cfg(windows)]
 pub(crate) mod volume;
 #[cfg(windows)]
+pub(crate) mod win32;
+#[cfg(windows)]
 #[expect(unsafe_code, reason = "calls DWM and sends raw window messages")]
 pub(crate) mod window;

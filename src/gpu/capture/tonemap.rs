@@ -2,9 +2,9 @@
 //! sRGB. SDR white maps to 1.0, a Reinhard roll-off applies above a knee, and the display's peak
 //! reaches 1.0.
 
-use crate::gpu::{
-    device::{Device, Locked, null_output},
-    win32::cb_size,
+use crate::{
+    gpu::device::{Device, Locked, null_output},
+    sys::win32::cb_size,
 };
 use std::ffi::c_void;
 use windows::{

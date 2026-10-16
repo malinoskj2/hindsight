@@ -26,7 +26,7 @@ pub(crate) const fn resource(theme: Theme) -> u16 {
 pub(crate) fn write_all(assets: &Path) -> io::Result<()> {
     for IconEntry { logo, ico, .. } in ICONS {
         let picture = Picture::decode(&fs::read(assets.join(logo))?)?;
-        fs::write(assets.join(ico), picture.ico())?;
+        fs::write(assets.join(ico), picture.ico()?)?;
     }
     Ok(())
 }
@@ -64,19 +64,15 @@ impl Picture {
 
     /// Encodes the icon with BMP entries rather than PNG, even at 256 pixels, so that every icon
     /// reader can decode them.
-    fn ico(&self) -> Vec<u8> {
+    fn ico(&self) -> io::Result<Vec<u8>> {
         let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
         for size in ICO_SIZES {
             let image = ico::IconImage::from_rgba_data(size, size, self.resampled(size));
-            let entry =
-                ico::IconDirEntry::encode_as_bmp(&image).expect("the icon encodes as a BMP");
-            directory.add_entry(entry);
+            directory.add_entry(ico::IconDirEntry::encode_as_bmp(&image)?);
         }
         let mut bytes = Vec::new();
-        directory
-            .write(&mut bytes)
-            .expect("writing to memory cannot fail");
-        bytes
+        directory.write(&mut bytes)?;
+        Ok(bytes)
     }
 
     /// Resamples to `size` by area averaging in premultiplied colour, so that transparent
@@ -196,7 +192,7 @@ mod tests {
             let byte = |value: u32| u8::try_from(value).unwrap();
             [byte(x * 30), byte(y * 30), 0, 255 - byte(x * 7)]
         });
-        let directory = ico::IconDir::read(io::Cursor::new(source.ico())).unwrap();
+        let directory = ico::IconDir::read(io::Cursor::new(source.ico().unwrap())).unwrap();
         let sizes: Vec<u32> = directory
             .entries()
             .iter()
@@ -220,7 +216,7 @@ mod tests {
         for IconEntry { logo, ico, .. } in ICONS {
             let picture = Picture::decode(&fs::read(assets.join(logo)).unwrap()).unwrap();
             assert!(
-                picture.ico() == fs::read(assets.join(ico)).unwrap(),
+                picture.ico().unwrap() == fs::read(assets.join(ico)).unwrap(),
                 "regenerate the icons with `hindsight icon assets`"
             );
         }

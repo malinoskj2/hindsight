@@ -105,6 +105,8 @@ pub(super) enum NvencError {
     Cuda(&'static str, super::cuda::CudaError),
     #[error("move a frame into the replay buffer in GPU memory")]
     Ring(#[source] crate::replay::StoreError),
+    #[error("the {0}-byte output buffer is larger than NVENC can register")]
+    OutputTooLarge(usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -359,7 +361,7 @@ impl Encoder {
         params.version = ffi::REGISTER_RESOURCE_VER;
         params.resource_type = ffi::INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER;
         // A buffer of bytes is registered as one row of them, as NVIDIA's sample does.
-        params.width = u32::try_from(bytes).expect("an output buffer fits 32 bits");
+        params.width = u32::try_from(bytes).map_err(|_| NvencError::OutputTooLarge(bytes))?;
         params.height = 1;
         params.pitch = params.width;
         params.resource_to_register = pointer.as_api_pointer();

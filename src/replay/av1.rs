@@ -133,7 +133,7 @@ fn leb128(data: &[u8]) -> Option<(usize, usize)> {
 
 fn write_leb128(output: &mut Vec<u8>, mut value: usize) {
     loop {
-        let byte = u8::try_from(value & 0x7F).expect("a 7-bit value fits a byte");
+        let byte = value.to_le_bytes()[0] & 0x7F;
         value >>= 7;
         if value == 0 {
             output.push(byte);

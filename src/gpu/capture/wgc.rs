@@ -52,6 +52,7 @@ pub(super) struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     size: SizeInt32,
+    pixels: (u32, u32),
     captures_window: bool,
     closed: Arc<AtomicBool>,
     closed_token: i64,
@@ -81,6 +82,7 @@ impl Capture {
         let apartment = prepare_thread()?;
         let item = capture_item(target)?;
         let size = item.Size().map_err(failed("read the capture size"))?;
+        let pixels = pixel_size(size)?;
         let (closed, closed_token) = watch_closed(&item)?;
         let direct3d = winrt_device(device)?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -97,6 +99,7 @@ impl Capture {
             pool,
             session,
             size,
+            pixels,
             captures_window: matches!(target, Target::Window { .. }),
             closed,
             closed_token,
@@ -114,8 +117,7 @@ impl Capture {
 
 impl Source for Capture {
     fn size(&self) -> (u32, u32) {
-        let pixels = |length| u32::try_from(length).expect("a capture size is never negative");
-        (pixels(self.size.Width), pixels(self.size.Height))
+        self.pixels
     }
 
     fn captures_window(&self) -> bool {
@@ -324,6 +326,17 @@ fn frame_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D, Capt
         // SAFETY: the surface of a live frame wraps a Direct3D 11 texture.
         .and_then(|access| unsafe { access.GetInterface() })
         .map_err(failed("read the captured frame"))
+}
+
+/// The capture size in pixels. Windows reports it signed.
+fn pixel_size(size: SizeInt32) -> Result<(u32, u32), CaptureError> {
+    match (u32::try_from(size.Width), u32::try_from(size.Height)) {
+        (Ok(width), Ok(height)) => Ok((width, height)),
+        _ => Err(CaptureError::Unsupported(format!(
+            "Windows reported a capture size of {} by {}",
+            size.Width, size.Height
+        ))),
+    }
 }
 
 fn pixel_format(tone_map: Option<&ToneMapper>) -> DirectXPixelFormat {
