@@ -219,7 +219,6 @@ pub(crate) enum State {
 }
 
 impl State {
-    /// Returns the capture session, while one is running.
     pub(crate) fn running(&self) -> Option<&Running> {
         match self {
             Self::Starting(running) | Self::Recording(running) => Some(running),
@@ -228,7 +227,6 @@ impl State {
     }
 }
 
-/// A capture session that is running.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Running {
     pub(crate) backend: Backend,
@@ -236,14 +234,11 @@ pub(crate) struct Running {
     pub(crate) encode_rate: Option<f64>,
 }
 
-/// The replay buffer, while there is one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Buffer {
     /// Known once the first frame arrives.
     pub(crate) stream: Option<Stream>,
-    /// What the buffer currently holds.
     pub(crate) held: Held,
-    /// The memory the buffer is stored in.
     pub(crate) memory: Memory,
 }
 

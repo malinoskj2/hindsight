@@ -274,7 +274,6 @@ impl Live {
         )
     }
 
-    /// Returns what the buffer currently holds.
     pub(crate) fn held(&self) -> Held {
         let ring = self.ring();
         Held {
@@ -435,7 +434,6 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
     }
 }
 
-/// A clip written to disk.
 #[derive(Debug)]
 pub(crate) struct Saved {
     pub(crate) path: PathBuf,

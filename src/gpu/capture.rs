@@ -122,7 +122,6 @@ trait Source {
     fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError>;
 }
 
-/// A capture by one of the backends.
 pub(super) struct Capture(ByBackend);
 
 enum ByBackend {

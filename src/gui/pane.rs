@@ -13,7 +13,6 @@ pub(super) const FIRST_ROW: i32 = 20;
 
 /// A tab's page, as the window sees it.
 pub(super) trait Pane {
-    /// The tab's caption.
     fn title(&self) -> &'static str;
 
     fn page(&self) -> &gui::TabPage;

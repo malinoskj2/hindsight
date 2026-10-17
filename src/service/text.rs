@@ -22,8 +22,6 @@ fn file_name(path: &Path) -> impl Display {
     path.file_name().unwrap_or(path.as_os_str()).display()
 }
 
-// The settings.
-
 pub(super) fn settings_applied(config: &Config) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
@@ -44,8 +42,6 @@ pub(super) fn settings_applied(config: &Config) -> impl Display {
 pub(super) fn save_settings_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Settings · not saved ({error})"))
 }
-
-// The session.
 
 pub(super) const RESTARTING: &str = "Restarting capture";
 pub(super) const PAUSED: &str = "Paused · the buffer stays saveable";
@@ -127,8 +123,6 @@ pub(super) fn capture_thread_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "capture thread did not start ({error})"))
 }
 
-// Saving.
-
 pub(crate) const NOTHING_TO_SAVE: &str = "Nothing to save yet · capture has not started";
 pub(super) const ALREADY_SAVING: &str = "Save · already in progress";
 
@@ -157,8 +151,6 @@ pub(super) fn background_save_failed(error: impl Display) -> impl Display {
         )
     })
 }
-
-// The totals.
 
 pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {

@@ -115,7 +115,6 @@ pub(super) struct Settings {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) frame_rate: u32,
-    /// Bits per second.
     pub(super) bitrate_bps: u32,
     pub(super) matrix: Matrix,
 }
