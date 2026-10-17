@@ -45,11 +45,12 @@ jobs:
         with:
           toolchain: 1.99.0
       # The Chocolatey feed fails intermittently; retry, and fail here rather than in the build.
+      # NSIS is pinned so the installer compiler only changes on purpose; bump the version here.
       - name: Install NSIS
         shell: pwsh
         run: |
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            choco install nsis -y --no-progress
+            choco install nsis --version 3.13.0 -y --no-progress
             if ($LASTEXITCODE -eq 0) { break }
             if ($attempt -lt 3) { Start-Sleep -Seconds 30 }
           }

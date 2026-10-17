@@ -1,6 +1,7 @@
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "LogicLib.nsh"
 
 # The version comes from Cargo.toml, passed in by scripts\build-windows.ps1, so that the installer
 # cannot drift from the program it installs.
@@ -77,9 +78,48 @@ SectionEnd
 Function un.onInit
   SetRegView 64
   SetShellVarContext all
-  MessageBox MB_OKCANCEL "Quit hindsight from its tray menu before uninstalling; save any replay you want to keep first." IDOK ready
+  MessageBox MB_OKCANCEL "Quit hindsight from its tray menu before uninstalling; save any replay you want to keep first.$\r$\n$\r$\nUninstalling also removes hindsight's settings. Saved clips stay." /SD IDOK IDOK ready
   Abort
   ready:
+FunctionEnd
+
+# hindsight keeps per-user state outside $INSTDIR: its "Start with Windows" value in the user's
+# Run key, and its settings, totals, log and buffer in that user's %LOCALAPPDATA%\Hindsight.
+# The uninstaller is elevated, so HKCU and $LOCALAPPDATA here can belong to the administrator who
+# approved the prompt rather than to the user who runs hindsight. Every logged-on user's hive is
+# loaded under HKU, so this walks those instead and cleans each one; a user who is not logged on
+# keeps a dead Run value until they next open Settings. Saved clips are the user's and stay.
+Function un.RemoveUserState
+  StrCpy $0 0
+  ${Do}
+    EnumRegKey $1 HKU "" $0
+    ${If} $1 == ""
+      ${ExitDo}
+    ${EndIf}
+    IntOp $0 $0 + 1
+    StrCpy $2 $1 9
+    StrCpy $3 $1 "" -8
+    ${If} $2 == "S-1-5-21-"
+    ${AndIf} $3 != "_Classes"
+      DeleteRegValue HKU "$1\Software\Microsoft\Windows\CurrentVersion\Run" "hindsight"
+      ReadRegStr $4 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$1" "ProfileImagePath"
+      ${If} $4 != ""
+        # The user's Local AppData folder, which is usually "%USERPROFILE%\AppData\Local" and
+        # must be expanded against that user's profile, not this process's environment.
+        ReadRegStr $5 HKU "$1\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "Local AppData"
+        StrCpy $6 $5 13
+        ${If} $6 == "%USERPROFILE%"
+          StrCpy $5 $5 "" 13
+          StrCpy $5 "$4$5"
+        ${ElseIf} $5 == ""
+          StrCpy $5 "$4\AppData\Local"
+        ${EndIf}
+        ${If} $5 != ""
+          RMDir /r "$5\Hindsight"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  ${Loop}
 FunctionEnd
 
 Section "Uninstall"
@@ -93,5 +133,6 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
+  Call un.RemoveUserState
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight"
 SectionEnd
