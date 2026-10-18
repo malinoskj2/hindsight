@@ -1,0 +1,106 @@
+:root {
+  --paper: #f5f2eb;
+  --paper-bright: #fbf9f4;
+  --paper-deep: #e9e3d6;
+  --ink: #1c1a16;
+  --ink-soft: #57524a;
+  --ink-faint: #8a8377;
+  --rule: #d8d0c0;
+  --rule-strong: #c4baa6;
+  --accent: #c2410c;
+
+  --serif: "Newsreader Variable", "Iowan Old Style", Georgia, serif;
+  --sans: "IBM Plex Sans Variable", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 1.5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--paper);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .24 0 0 0 0 .2 0 0 0 0 .14 0 0 0 .26 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E"),
+    radial-gradient(ellipse 70% 50% at 15% 0%, rgb(255 255 255 / 0.7), transparent),
+    radial-gradient(ellipse 60% 60% at 100% 100%, rgb(214 200 172 / 0.28), transparent);
+  background-attachment: scroll, fixed, fixed;
+  color: var(--ink);
+  font: 400 1rem/1.5 var(--sans);
+}
+
+#app {
+  width: min(100% - 2rem, 72rem);
+  margin-inline: auto;
+}
+
+@media (width >= 40rem) {
+  #app {
+    width: min(100% - 4rem, 72rem);
+  }
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--ink-faint);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+}
+
+em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+img {
+  max-width: 100%;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper-bright);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}
