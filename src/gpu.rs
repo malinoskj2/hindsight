@@ -46,6 +46,23 @@ pub(crate) fn adapter() -> Result<Adapter, ProbeError> {
     Ok(Adapter { name, driver })
 }
 
+/// The NVIDIA GPU's room for the buffer and whether NvFBC can see a display on it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Capacity {
+    pub(crate) video_memory: u64,
+    pub(crate) drives_display: bool,
+}
+
+/// Returns the NVIDIA GPU's dedicated memory and whether a display is attached to it,
+/// determined without creating a device.
+pub(crate) fn capacity() -> Result<Capacity, ProbeError> {
+    let (video_memory, drives_display) = device::nvidia_capacity().map_err(ProbeFailure::Device)?;
+    Ok(Capacity {
+        video_memory,
+        drives_display,
+    })
+}
+
 /// Returns the codecs the NVIDIA GPU's encoder supports.
 pub(crate) fn supported_codecs() -> Result<Vec<Codec>, ProbeError> {
     let device = device::Device::create().map_err(ProbeFailure::Device)?;

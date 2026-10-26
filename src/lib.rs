@@ -143,10 +143,32 @@ fn log_panics() {
 fn startup() -> Result<(service::Worker, config::Config)> {
     let store = storage::Store::open().context("open application state")?;
     mirror_log();
-    let config = store.load_config().context("load configuration")?;
+    let defaults = config::Config::for_machine(machine());
+    log::info(format!(
+        "Defaults · buffer {} · {}",
+        defaults.buffer_memory.place(),
+        defaults.backend
+    ));
+    let config = store.load_config(&defaults).context("load configuration")?;
     let worker =
         service::Worker::spawn(store, config.clone()).context("start the recording worker")?;
     Ok((worker, config))
+}
+
+/// Reads what the defaults depend on. A part that cannot be read is logged and left unknown.
+#[cfg(windows)]
+fn machine() -> config::Machine {
+    let memory = sys::memory::installed()
+        .inspect_err(|error| log::warning(format!("Installed memory · unknown · {error}")))
+        .ok();
+    let gpu = gpu::capacity()
+        .inspect_err(|error| log::warning(format!("GPU memory · unknown · {error}")))
+        .ok();
+    config::Machine {
+        memory,
+        video_memory: gpu.map(|gpu| gpu.video_memory),
+        nvidia_drives_display: gpu.map(|gpu| gpu.drives_display),
+    }
 }
 
 #[cfg(windows)]

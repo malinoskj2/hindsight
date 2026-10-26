@@ -14,6 +14,12 @@ pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
 const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
 const CLIP_DIRECTORY: &str = "hindsight";
+/// Installed memory from which the buffer defaults to RAM. Games of this generation want 8 to
+/// 16 GB of their own.
+const RAM_BUFFER_MEMORY: u64 = 32 << 30;
+/// Video memory from which the buffer defaults to VRAM. A 12 GB card reports a little under
+/// 12 GiB; on a card with 8 GB, a buffer pushes the game's textures out.
+const VRAM_BUFFER_MEMORY: u64 = 11 << 30;
 
 macro_rules! display_by_name {
     ($($choice:ty),*) => {$(
@@ -176,6 +182,42 @@ impl Theme {
 
 display_by_name!(Mode, Backend, Codec, Memory, Theme);
 
+/// The machine, as far as the defaults depend on it. Each part is `None` when it could not be
+/// read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Machine {
+    /// Installed system memory, in bytes.
+    pub(crate) memory: Option<u64>,
+    /// The NVIDIA GPU's dedicated memory, in bytes.
+    pub(crate) video_memory: Option<u64>,
+    pub(crate) nvidia_drives_display: Option<bool>,
+}
+
+impl Machine {
+    /// NvFBC and Desktop Duplication see only displays attached to the NVIDIA GPU, which a laptop
+    /// whose display hangs off the integrated GPU has none of.
+    fn backend(self) -> Backend {
+        if self.nvidia_drives_display == Some(false) {
+            Backend::Wgc
+        } else {
+            Backend::Nvfbc
+        }
+    }
+
+    fn buffer_memory(self) -> Memory {
+        if self.memory.is_some_and(|bytes| bytes >= RAM_BUFFER_MEMORY) {
+            Memory::Ram
+        } else if self
+            .video_memory
+            .is_some_and(|bytes| bytes >= VRAM_BUFFER_MEMORY)
+        {
+            Memory::Vram
+        } else {
+            Memory::Disk
+        }
+    }
+}
+
 /// The validated settings. A `Config` read from disk is built only from settings that passed
 /// [`Config::validate`], and the Settings tab validates what it builds from the form the same
 /// way.
@@ -325,6 +367,15 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Returns the defaults for the settings that depend on the machine.
+    pub(crate) fn for_machine(machine: Machine) -> Self {
+        Self {
+            backend: machine.backend(),
+            buffer_memory: machine.buffer_memory(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if !(MIN_BUFFER_SECONDS..=MAX_BUFFER_SECONDS).contains(&self.buffer_seconds) {
             return Err(ConfigError::Buffer);
@@ -518,6 +569,45 @@ mod tests {
             error.starts_with(&ConfigError::FrameRate.to_string()),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_buffer_defaults_to_ram_then_vram_then_disk_as_the_machine_has_room() {
+        const GIB: u64 = 1 << 30;
+        let buffer = |memory, video_memory| {
+            Config::for_machine(Machine {
+                memory,
+                video_memory,
+                nvidia_drives_display: Some(true),
+            })
+            .buffer_memory
+        };
+
+        assert_eq!(buffer(Some(32 * GIB), Some(8 * GIB)), Memory::Ram);
+        assert_eq!(buffer(Some(64 * GIB), None), Memory::Ram);
+        assert_eq!(
+            buffer(Some(16 * GIB), Some(12 * GIB - (200 << 20))),
+            Memory::Vram
+        );
+        assert_eq!(buffer(None, Some(24 * GIB)), Memory::Vram);
+        assert_eq!(buffer(Some(16 * GIB), Some(8 * GIB)), Memory::Disk);
+        assert_eq!(buffer(Some(32 * GIB - 1), Some(10 * GIB)), Memory::Disk);
+        assert_eq!(buffer(None, None), Memory::Disk);
+    }
+
+    #[test]
+    fn the_backend_defaults_to_nvfbc_unless_no_display_hangs_off_the_nvidia_gpu() {
+        let backend = |nvidia_drives_display| {
+            Config::for_machine(Machine {
+                nvidia_drives_display,
+                ..Machine::default()
+            })
+            .backend
+        };
+
+        assert_eq!(backend(Some(true)), Backend::Nvfbc);
+        assert_eq!(backend(None), Backend::Nvfbc);
+        assert_eq!(backend(Some(false)), Backend::Wgc);
     }
 
     #[test]

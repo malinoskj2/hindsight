@@ -450,10 +450,10 @@ impl Ledger {
         self.totals
     }
 
-    fn save_config(&self, config: &Config) -> Result<(), StorageError> {
+    fn save_config(&self, previous: &Config, config: &Config) -> Result<(), StorageError> {
         self.store
             .as_ref()
-            .map_or(Ok(()), |store| store.save_config(config))
+            .map_or(Ok(()), |store| store.save_config(previous, config))
     }
 
     /// Adds a finished replay buffer to the totals.
@@ -713,7 +713,7 @@ impl Machine {
     /// Reports a failure on the Status tab as well as returning it.
     fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
         self.ledger
-            .save_config(config)
+            .save_config(&self.config, config)
             .inspect_err(|error| self.report_error(text::save_settings_failed(log::chain(error))))
     }
 

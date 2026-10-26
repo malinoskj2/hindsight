@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Map, Value};
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
@@ -47,12 +48,34 @@ impl Store {
         Ok(Self { root, _lock: lock })
     }
 
-    pub(crate) fn load_config(&self) -> Result<Config, StorageError> {
-        Ok(self.read(CONFIG_FILE)?.unwrap_or_default())
+    /// Returns the settings the user chose, with `defaults` for the rest.
+    pub(crate) fn load_config(&self, defaults: &Config) -> Result<Config, StorageError> {
+        let mut settings = settings(defaults)?;
+        settings.extend(self.chosen_settings()?);
+        Ok(serde_json::from_value(Value::Object(settings))?)
     }
 
-    pub(crate) fn save_config(&self, config: &Config) -> Result<(), StorageError> {
-        self.write(CONFIG_FILE, config)
+    /// Writes the settings that `config` changes from `previous`, keeping those chosen before. A
+    /// setting the user never changed is left out, so it keeps following the machine's defaults.
+    pub(crate) fn save_config(
+        &self,
+        previous: &Config,
+        config: &Config,
+    ) -> Result<(), StorageError> {
+        let previous = settings(previous)?;
+        let current = settings(config)?;
+        let mut chosen = self.chosen_settings()?;
+        chosen.retain(|name, _| current.contains_key(name));
+        for (name, value) in current {
+            if previous.get(&name) != Some(&value) {
+                chosen.insert(name, value);
+            }
+        }
+        self.write(CONFIG_FILE, &chosen)
+    }
+
+    fn chosen_settings(&self) -> Result<Map<String, Value>, StorageError> {
+        Ok(self.read(CONFIG_FILE)?.unwrap_or_default())
     }
 
     pub(crate) fn load_totals(&self) -> Result<Totals, StorageError> {
@@ -113,6 +136,13 @@ pub(crate) fn buffer_file() -> PathBuf {
     state_directory().join(BUFFER_FILE)
 }
 
+fn settings(config: &Config) -> Result<Map<String, Value>, StorageError> {
+    match serde_json::to_value(config)? {
+        Value::Object(settings) => Ok(settings),
+        _ => unreachable!("a config serializes as an object"),
+    }
+}
+
 fn lock_instance(root: &Path) -> Result<File, StorageError> {
     let lock = OpenOptions::new()
         .create(true)
@@ -163,6 +193,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Backend, Memory, Theme};
     use std::assert_matches;
 
     #[test]
@@ -200,22 +231,114 @@ mod tests {
             Store::at(directory.path().to_owned()),
             Err(StorageError::Locked)
         );
-        assert_eq!(store.load_config().unwrap(), Config::default());
+        assert_eq!(
+            store.load_config(&Config::default()).unwrap(),
+            Config::default()
+        );
 
         let config = Config {
             buffer_seconds: 90,
             ..Config::default()
         };
-        store.save_config(&config).unwrap();
+        store.save_config(&Config::default(), &config).unwrap();
 
         drop(store);
         assert_eq!(
             Store::at(directory.path().to_owned())
                 .unwrap()
-                .load_config()
+                .load_config(&Config::default())
                 .unwrap(),
             config
         );
+    }
+
+    #[test]
+    fn settings_never_changed_follow_the_defaults_and_chosen_ones_stay() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        let small = Config {
+            buffer_memory: Memory::Disk,
+            ..Config::default()
+        };
+        let large = Config {
+            buffer_memory: Memory::Ram,
+            backend: Backend::Wgc,
+            ..Config::default()
+        };
+
+        let first = store.load_config(&small).unwrap();
+        assert_eq!(first, small);
+        let longer = Config {
+            buffer_seconds: 120,
+            ..first.clone()
+        };
+        store.save_config(&first, &longer).unwrap();
+        store
+            .save_config(
+                &longer,
+                &Config {
+                    theme: Theme::Nova,
+                    ..longer.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_config(&large).unwrap(),
+            Config {
+                buffer_seconds: 120,
+                theme: Theme::Nova,
+                ..large.clone()
+            }
+        );
+
+        let vram = Config {
+            buffer_memory: Memory::Vram,
+            ..small.clone()
+        };
+        store.save_config(&small, &vram).unwrap();
+        store
+            .save_config(
+                &vram,
+                &Config {
+                    buffer_memory: Memory::Disk,
+                    ..vram.clone()
+                },
+            )
+            .unwrap();
+        let loaded = store.load_config(&large).unwrap();
+        assert_eq!(
+            loaded.buffer_memory,
+            Memory::Disk,
+            "chosen, then chosen back"
+        );
+        assert_eq!(loaded.backend, Backend::Wgc);
+        assert_eq!(loaded.buffer_seconds, 120);
+    }
+
+    #[test]
+    fn settings_a_newer_version_wrote_are_dropped_on_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            br#"{"frame_rate":30,"from_the_future":1}"#,
+        )
+        .unwrap();
+        let config = store.load_config(&Config::default()).unwrap();
+        assert_eq!(config.frame_rate, 30);
+
+        store
+            .save_config(
+                &config,
+                &Config {
+                    audio: false,
+                    ..config.clone()
+                },
+            )
+            .unwrap();
+        let saved: Value =
+            serde_json::from_slice(&fs::read(directory.path().join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({"frame_rate": 30, "audio": false}));
     }
 
     #[test]
@@ -223,7 +346,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::at(directory.path().to_owned()).unwrap();
         fs::write(directory.path().join(CONFIG_FILE), b"broken").unwrap();
-        assert_matches!(store.load_config(), Err(StorageError::Json(_)));
+        assert_matches!(
+            store.load_config(&Config::default()),
+            Err(StorageError::Json(_))
+        );
+        fs::write(directory.path().join(CONFIG_FILE), br#"{"frame_rate":999}"#).unwrap();
+        assert_matches!(
+            store.load_config(&Config::default()),
+            Err(StorageError::Json(_))
+        );
     }
 
     #[test]

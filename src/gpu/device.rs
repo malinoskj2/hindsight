@@ -44,7 +44,8 @@ pub(super) struct Device {
 #[expect(unsafe_code, reason = "calls the Direct3D 11 immediate context")]
 impl Device {
     pub(super) fn create() -> Result<Self, DeviceError> {
-        let (adapter, name) = nvidia_adapter()?;
+        let (adapter, description) = nvidia_adapter()?;
+        let name = adapter_name(&description);
         let created = |error| DeviceError::Create(name.clone(), error);
         let (d3d, context) = create_device(&adapter).map_err(created)?;
         // The capture frame pool works on the device from its own threads.
@@ -146,7 +147,7 @@ impl Drop for Locked<'_> {
 }
 
 #[expect(unsafe_code, reason = "calls DXGI to find the adapter")]
-fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
+fn nvidia_adapter() -> Result<(IDXGIAdapter1, DXGI_ADAPTER_DESC1), DeviceError> {
     // SAFETY: creates a factory; no other preconditions.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(DeviceError::Enumerate)?;
     for index in 0.. {
@@ -159,7 +160,7 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
         // SAFETY: reads the description of a live adapter.
         let description = unsafe { adapter.GetDesc1() }.map_err(DeviceError::Enumerate)?;
         if is_nvidia_hardware(&description) {
-            return Ok((adapter, adapter_name(&description)));
+            return Ok((adapter, description));
         }
     }
     Err(DeviceError::NoNvidiaAdapter)
@@ -169,10 +170,27 @@ fn nvidia_adapter() -> Result<(IDXGIAdapter1, String), DeviceError> {
 /// device. The version is `None` when the driver does not report one.
 #[expect(unsafe_code, reason = "calls IDXGIAdapter::CheckInterfaceSupport")]
 pub(super) fn describe_nvidia_adapter() -> Result<(String, Option<String>), DeviceError> {
-    let (adapter, name) = nvidia_adapter()?;
+    let (adapter, description) = nvidia_adapter()?;
     // SAFETY: a plain query on a live adapter; the GUID outlives the call.
     let version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) };
-    Ok((name, version.ok().map(nvidia_driver_version)))
+    Ok((
+        adapter_name(&description),
+        version.ok().map(nvidia_driver_version),
+    ))
+}
+
+/// Returns the NVIDIA adapter's dedicated memory in bytes and whether a display is attached to
+/// it, determined without creating a device.
+#[expect(unsafe_code, reason = "calls IDXGIAdapter::EnumOutputs")]
+pub(super) fn nvidia_capacity() -> Result<(u64, bool), DeviceError> {
+    let (adapter, description) = nvidia_adapter()?;
+    // SAFETY: enumeration ends with DXGI_ERROR_NOT_FOUND.
+    let drives_display = match unsafe { adapter.EnumOutputs(0) } {
+        Ok(_) => true,
+        Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => false,
+        Err(error) => return Err(DeviceError::Enumerate(error)),
+    };
+    Ok((description.DedicatedVideoMemory as u64, drives_display))
 }
 
 /// Formats the user-mode driver version `32.0.15.8157` as NVIDIA publishes it, `581.57`: the

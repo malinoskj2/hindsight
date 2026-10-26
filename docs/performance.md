@@ -8,7 +8,8 @@ better than any absolute figure would.
 
 ## The short version
 
-1. Keep the **NVIDIA NvFBC** backend, the default. It costs the game least.
+1. Keep the **NVIDIA NvFBC** backend, the default when a display is attached to the NVIDIA GPU. It
+   costs the game least.
 2. Record at the frame rate you need for the clips you keep, not the game's. 60 fps costs about
    a third of what 240 fps does.
 3. Use **AV1** if it is offered (RTX 40 series or newer), HEVC otherwise, H.264 only when clips
@@ -77,7 +78,7 @@ It has to live somewhere, and the right place depends on what the game needs of 
 
 | Buffer in | Cost | Takes |
 |---|---|---|
-| RAM (default) | none | the buffer's size in system memory |
+| RAM | none | the buffer's size in system memory |
 | VRAM | a little more CPU than RAM, under a tenth of the capture's own; the game nothing | the buffer's size in the card's memory, held for as long as recording runs |
 | Disk | the same CPU and game cost as RAM | about 120 MB of RAM and a file of the buffer's size on the drive; writes the bitrate continuously, 45 GB an hour at 100 Mb/s |
 
@@ -96,7 +97,9 @@ Choose by what is left over after the game:
   cheap one less, and a hard drive may fall behind (the buffer then goes back to RAM, and the log
   says so). It needs the buffer's size plus 1 GB free on the system drive.
 
-When the buffer cannot be reserved where you asked, hindsight falls back to RAM and logs why.
+Until you choose a place, the buffer follows the machine: RAM with 32 GB or more installed, VRAM
+on a card with 12 GB or more, Disk otherwise. When the buffer cannot be reserved where you asked,
+hindsight falls back to RAM and logs why.
 
 ### By machine
 
