@@ -8,11 +8,15 @@
   <img src="assets/logo/monochrome-with-text.png" alt="hindsight" width="520">
 </p>
 
-**The lowest-overhead instant replay for Windows: captured and encoded on the GPU, no overlay, no launcher, no bloat.**
+**Save clips of your game after they happen.**
+
+hindsight quietly records your game in the background, keeping only the last few moments. When something worth keeping happens, press **Alt+F10** and what you just played is saved as a video. You never have to remember to hit record first.
+
+It does the same job as NVIDIA's Instant Replay (part of ShadowPlay) with less overhead: captured and encoded on the GPU, no overlay, no launcher, no bloat.
 
 - **A tray icon and one small window.** No overlay, no account, no launcher.
 - **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game.
-- **Buffer in RAM, VRAM or on disk**, your choice.
+- **Keep anywhere from 5 seconds to 10 minutes**, buffered in RAM, VRAM or on disk.
 - **H.264, HEVC or AV1** at up to 240 fps, with system sound and, if you like, your microphone as AAC.
 
 <p align="center">
@@ -25,7 +29,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 
 1. Download **`hindsight-setup-x64.exe`** from the [Releases page](https://github.com/malinoskj2/hindsight/releases) and run it.
 2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
-3. Press **Alt+F10** (or the hotkey you set) to save a clip.
+3. Play. When something happens that you want to keep, press **Alt+F10** (or the hotkey you set) to save what just happened as a clip.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
 ## How it stays light

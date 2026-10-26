@@ -18,8 +18,8 @@ export const features = [
     body: "Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game.",
   },
   {
-    title: "Buffer in RAM, VRAM or on disk.",
-    body: "Keep the replay wherever your machine has room to spare.",
+    title: "Keep 5 seconds to 10 minutes.",
+    body: "Hold the recent gameplay in RAM, VRAM or on disk, wherever your machine has room to spare.",
   },
   {
     title: "H.264, HEVC or AV1 at up to 240 fps.",

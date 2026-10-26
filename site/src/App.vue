@@ -40,13 +40,18 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
     <section class="hero" aria-labelledby="hero-title">
       <div class="pitch">
         <img class="wordmark" :src="wordmark" alt="hindsight" width="520" height="183" />
-        <h1 id="hero-title" class="headline">
-          The lowest&#8209;overhead instant replay for Windows.
-        </h1>
-        <p class="lede">
-          Captured and encoded on the GPU. No overlay, no launcher, no account. Press
-          <KeyCombo :keys="hotkey" /> to keep what just happened.
-        </p>
+        <h1 id="hero-title" class="headline">Save clips of your game after they happen.</h1>
+        <div class="lede">
+          <p>
+            hindsight quietly records your game, keeping only the last few moments. When something
+            worth keeping happens, press <KeyCombo :keys="hotkey" /> and what you just played is
+            saved as a video. No need to hit record first.
+          </p>
+          <p>
+            Like NVIDIA's Instant Replay, with less overhead: captured and encoded on the GPU. No
+            overlay, no launcher, no account.
+          </p>
+        </div>
         <DownloadCard :release="release" />
       </div>
 
@@ -88,7 +93,10 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
         </li>
         <li>
           <h3>Press <KeyCombo :keys="hotkey" /> to save a clip.</h3>
-          <p>Change the hotkey, codec, frame rate and buffer in the Settings tab.</p>
+          <p>
+            It saves what you just played. Change how much it keeps, the hotkey, codec and frame
+            rate in the Settings tab.
+          </p>
         </li>
       </ol>
     </PageSection>
@@ -282,6 +290,14 @@ nav a:hover {
   color: var(--ink-soft);
   font-size: 1.12rem;
   line-height: 1.65;
+}
+
+.lede p {
+  margin: 0 0 0.75rem;
+}
+
+.lede p:last-child {
+  margin-bottom: 0;
 }
 
 .shot {
