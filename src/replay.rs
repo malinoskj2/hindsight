@@ -25,9 +25,9 @@ mod ring;
 mod store;
 
 pub(crate) use audio::{
-    AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, samples_of, ticks_of,
+    AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, Source, samples_of, ticks_of,
 };
-use audio::{AudioRing, tick_time};
+use audio::{AudioRings, tick_time};
 pub(crate) use clip_name::ClipName;
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
@@ -104,7 +104,7 @@ pub(crate) struct Live {
     on_stream: OnceLock<Box<dyn Fn() + Send + Sync>>,
     origin: OnceLock<i64>,
     audio: OnceLock<Arc<AudioFormat>>,
-    sound: Mutex<AudioRing>,
+    sound: Mutex<AudioRings>,
     /// The logical processor of the capture thread, or `u32::MAX` until it has reported one.
     #[cfg_attr(
         all(not(windows), test),
@@ -156,7 +156,7 @@ impl Live {
             on_stream: OnceLock::new(),
             origin: OnceLock::new(),
             audio: OnceLock::new(),
-            sound: Mutex::new(AudioRing::default()),
+            sound: Mutex::new(AudioRings::new()),
             capture_processor: AtomicU32::new(u32::MAX),
         }
     }
@@ -246,14 +246,15 @@ impl Live {
         set_once(&self.audio, Arc::new(format), "audio format");
     }
 
-    pub(crate) fn push_audio(&self, start: u64, data: Arc<[i16]>) {
+    pub(crate) fn push_audio(&self, source: Source, start: u64, data: Arc<[i16]>) {
         let Some(format) = self.audio.get() else {
             return;
         };
         let video_start = self.video_time(self.counters.oldest.load(Ordering::Relaxed));
         let mut sound = self.sound();
-        sound.push(format, start, data);
-        sound.trim(format, video_start);
+        let ring = sound.ring(source);
+        ring.push(format, start, data);
+        ring.trim(format, video_start);
     }
 
     fn video_time(&self, index: u64) -> Option<i64> {
@@ -312,7 +313,7 @@ impl Live {
         self.ring.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn sound(&self) -> MutexGuard<'_, AudioRing> {
+    fn sound(&self) -> MutexGuard<'_, AudioRings> {
         self.sound.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

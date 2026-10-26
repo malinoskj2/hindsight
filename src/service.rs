@@ -1,7 +1,7 @@
 //! The recording worker: keeps one capture session running and saves clips from its buffer.
 
 use crate::{
-    audio,
+    audio::{self, Sources},
     config::{Backend, Config, Memory, Mode, Theme},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
@@ -148,7 +148,7 @@ pub(crate) enum Ended {
 }
 
 type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
-type Audio = fn(&Arc<Live>) -> Option<audio::Capture>;
+type Audio = fn(&Arc<Live>, Sources) -> Option<audio::Capture>;
 type Writer = fn(&Snapshot, &Path) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
 /// The clock the worker uses to schedule retries and save ticks.
@@ -242,8 +242,8 @@ pub(crate) struct Buffer {
     pub(crate) memory: Memory,
 }
 
-/// Whether system sound is being recorded into the buffer, while capture runs and the settings
-/// enable it.
+/// Whether sound is being recorded into the buffer, while capture runs and the settings enable
+/// system sound or the microphone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
     Recording,
@@ -735,10 +735,10 @@ impl Machine {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let audio = self
-            .config
-            .audio
-            .then(|| (self.services.audio)(&live))
+        let sources = sources(&self.config);
+        let audio = sources
+            .any()
+            .then(|| (self.services.audio)(&live, sources))
             .flatten();
         let (done, ending) = self.ending();
         let spawned = self.spawn_capture(&target, &live, &stop, ending);
@@ -1036,7 +1036,10 @@ impl Machine {
     }
 
     fn sound(&self) -> Option<Sound> {
-        let session = self.session.as_ref().filter(|_| self.config.audio)?;
+        let session = self
+            .session
+            .as_ref()
+            .filter(|_| sources(&self.config).any())?;
         Some(match &session.audio {
             Some(capture) if !capture.has_stopped() => Sound::Recording,
             _ => Sound::Failed,
@@ -1091,6 +1094,13 @@ impl Machine {
 }
 
 /// Runs the worker. If it panics, reports the reason on the Status tab and stops what it can.
+const fn sources(config: &Config) -> Sources {
+    Sources {
+        system: config.audio,
+        microphone: config.microphone,
+    }
+}
+
 fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mutex<Status>) {
     let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| machine.run(commands))) else {
         return;

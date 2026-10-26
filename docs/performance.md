@@ -16,7 +16,8 @@ better than any absolute figure would.
    must play everywhere. They all cost the same CPU; they differ in picture per bit.
 4. Keep the buffer in **RAM** if the machine has the room; otherwise **VRAM** if the card has the
    room, otherwise **Disk** on an SSD.
-5. Turn **Record system sound** off if you never use the sound.
+5. Turn **Record system sound** off if you never use the sound, and leave **Record the microphone**
+   off unless you want your voice in the clips.
 
 ## Recording and encoding: quality against cost
 
@@ -55,6 +56,10 @@ Settings tab shows the figure for what you enter.
 **Record system sound** costs less than a fifth of the video capture's CPU while recording: the
 sound is kept raw and encoded to AAC only when a clip is saved. It takes about 57 MB of RAM for
 5 minutes, always in RAM whichever memory holds the video. Turn it off if you never use the sound.
+
+**Record the microphone** records the default recording device, read on the same thread as the
+system sound and kept raw the same way, in mono: about 29 MB of RAM for 5 minutes. It is mixed into
+the clip's one sound track when the clip is saved, so recording it adds no encoding while you play.
 
 **Record the mouse cursor** makes no measurable difference either way.
 

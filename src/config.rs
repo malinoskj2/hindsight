@@ -234,7 +234,10 @@ pub(crate) struct Config {
     /// `None` for the default folder.
     pub(crate) clip_directory: Option<PathBuf>,
     pub(crate) theme: Theme,
+    /// Whether the system's sound is recorded.
     pub(crate) audio: bool,
+    /// Whether the default microphone is recorded, mixed into the clip's sound.
+    pub(crate) microphone: bool,
     /// Whether the cursor is drawn, where the backend can draw it. Desktop Duplication never
     /// draws it.
     pub(crate) cursor: bool,
@@ -257,6 +260,7 @@ struct RawConfig {
     clip_directory: Option<PathBuf>,
     theme: Theme,
     audio: bool,
+    microphone: bool,
     cursor: bool,
     buffer_memory: Memory,
     /// Settings written by a newer version, collected here so a downgrade still starts.
@@ -281,6 +285,7 @@ impl Default for RawConfig {
             clip_directory,
             theme,
             audio,
+            microphone,
             cursor,
             buffer_memory,
         } = Config::default();
@@ -295,6 +300,7 @@ impl Default for RawConfig {
             clip_directory,
             theme,
             audio,
+            microphone,
             cursor,
             buffer_memory,
             unknown: BTreeMap::new(),
@@ -317,6 +323,7 @@ impl TryFrom<RawConfig> for Config {
             clip_directory,
             theme,
             audio,
+            microphone,
             cursor,
             buffer_memory,
             unknown,
@@ -339,6 +346,7 @@ impl TryFrom<RawConfig> for Config {
             clip_directory,
             theme,
             audio,
+            microphone,
             cursor,
             buffer_memory,
         };
@@ -360,6 +368,7 @@ impl Default for Config {
             clip_directory: None,
             theme: Theme::Classic,
             audio: true,
+            microphone: false,
             cursor: false,
             buffer_memory: Memory::Ram,
         }
@@ -483,6 +492,8 @@ mod tests {
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
         assert!(!parse(r#"{"audio":false}"#).unwrap().audio);
+        assert!(!config.microphone);
+        assert!(parse(r#"{"microphone":true}"#).unwrap().microphone);
         assert!(!config.cursor);
         assert!(parse(r#"{"cursor":true}"#).unwrap().cursor);
         assert_eq!(config.buffer_memory, Memory::Ram);

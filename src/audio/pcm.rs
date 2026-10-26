@@ -1,4 +1,7 @@
-//! Converts WASAPI's float or 16-bit samples to the interleaved 16-bit stereo the encoder takes.
+//! Converts WASAPI's float or 16-bit samples to the interleaved 16-bit stereo the encoder takes,
+//! or to 16-bit mono.
+
+use std::num::NonZeroU16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Sample {
@@ -31,34 +34,58 @@ impl Layout {
     }
 }
 
-/// Appends `data` to `output` as interleaved stereo. Mono is doubled. `WaveFormat::layout` only
-/// accepts one- or two-channel formats; any channels past two would be dropped.
-pub(super) fn append_stereo(output: &mut Vec<i16>, data: &[u8], layout: Layout) {
-    let channels = usize::from(layout.channels);
-    match layout.sample {
-        Sample::Float => append(output, data.as_chunks::<4>().0, channels, |bytes| {
-            from_float(f32::from_le_bytes(bytes))
-        }),
-        Sample::Int16 => append(
-            output,
-            data.as_chunks::<2>().0,
-            channels,
-            i16::from_le_bytes,
-        ),
-    }
+/// The channels a track keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Channels {
+    Mono,
+    Stereo,
 }
 
-fn append<const N: usize>(
-    output: &mut Vec<i16>,
-    samples: &[[u8; N]],
-    channels: usize,
-    convert: impl Fn([u8; N]) -> i16,
-) {
-    output.reserve(samples.len() / channels * 2);
-    for frame in samples.chunks_exact(channels) {
-        let left = convert(frame[0]);
-        let right = frame.get(1).map_or(left, |&right| convert(right));
-        output.extend([left, right]);
+impl Channels {
+    pub(super) const fn count(self) -> NonZeroU16 {
+        match self {
+            Self::Mono => NonZeroU16::new(1).unwrap(),
+            Self::Stereo => NonZeroU16::new(2).unwrap(),
+        }
+    }
+
+    /// Appends `data` to `output` in these channels. Mono input is doubled for stereo, and stereo
+    /// averaged for mono. `WaveFormat::layout` only accepts one- or two-channel formats; any
+    /// channels past two would be dropped.
+    pub(super) fn append(self, output: &mut Vec<i16>, data: &[u8], layout: Layout) {
+        let channels = usize::from(layout.channels);
+        match layout.sample {
+            Sample::Float => {
+                self.append_frames(output, data.as_chunks::<4>().0, channels, |bytes| {
+                    from_float(f32::from_le_bytes(bytes))
+                });
+            }
+            Sample::Int16 => self.append_frames(
+                output,
+                data.as_chunks::<2>().0,
+                channels,
+                i16::from_le_bytes,
+            ),
+        }
+    }
+
+    fn append_frames<const N: usize>(
+        self,
+        output: &mut Vec<i16>,
+        samples: &[[u8; N]],
+        channels: usize,
+        convert: impl Fn([u8; N]) -> i16,
+    ) {
+        let frames = samples.chunks_exact(channels);
+        output.reserve(frames.len() * usize::from(self.count().get()));
+        for frame in frames {
+            let left = convert(frame[0]);
+            let right = frame.get(1).map_or(left, |&right| convert(right));
+            match self {
+                Self::Mono => output.push(left.midpoint(right)),
+                Self::Stereo => output.extend([left, right]),
+            }
+        }
     }
 }
 
@@ -90,7 +117,7 @@ mod tests {
             sample: Sample::Float,
             channels: 2,
         };
-        append_stereo(
+        Channels::Stereo.append(
             &mut output,
             &floats(&[0.0, 0.5, -1.0, 1.0, 2.0, f32::NAN]),
             layout,
@@ -105,7 +132,7 @@ mod tests {
             sample: Sample::Int16,
             channels: 1,
         };
-        append_stereo(&mut output, &[1, 0, 0xFF, 0xFF], mono);
+        Channels::Stereo.append(&mut output, &[1, 0, 0xFF, 0xFF], mono);
         assert_eq!(output, [1, 1, -1, -1]);
 
         output.clear();
@@ -113,7 +140,30 @@ mod tests {
             sample: Sample::Int16,
             channels: 3,
         };
-        append_stereo(&mut output, &[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0], surround);
+        Channels::Stereo.append(&mut output, &[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0], surround);
         assert_eq!(output, [1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn stereo_is_averaged_for_mono_and_mono_kept() {
+        let mut output = Vec::new();
+        let stereo = Layout {
+            sample: Sample::Float,
+            channels: 2,
+        };
+        Channels::Mono.append(
+            &mut output,
+            &floats(&[0.5, 0.0, 1.0, 1.0, -1.0, 0.0]),
+            stereo,
+        );
+        assert_eq!(output, [8192, 32_767, -16_384]);
+
+        output.clear();
+        let mono = Layout {
+            sample: Sample::Int16,
+            channels: 1,
+        };
+        Channels::Mono.append(&mut output, &[1, 0, 0xFF, 0xFF], mono);
+        assert_eq!(output, [1, -1]);
     }
 }
