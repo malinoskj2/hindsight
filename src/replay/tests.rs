@@ -344,13 +344,14 @@ fn real_encoder_output_muxes_with_sound() {
     live.set_audio(AudioFormat {
         sample_rate: audio::tests::RATE,
         channels: audio::tests::STEREO,
+        microphone_channels: audio::tests::MONO,
         anchor: 0,
         priming: FRAME_SAMPLES,
     });
     for packet in encoded_fixture(Codec::H264) {
         live.push(packet, Picture::Fresh);
     }
-    live.push_audio(0, audio::tests::numbered(0, 120_000));
+    live.push_audio(Source::System, 0, audio::tests::numbered(0, 120_000));
 
     let clip = live.clip().unwrap();
     assert_eq!(clip.packets.len(), 45);
@@ -434,6 +435,7 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
     live.set_audio(AudioFormat {
         sample_rate: audio::tests::RATE,
         channels: audio::tests::STEREO,
+        microphone_channels: audio::tests::MONO,
         anchor: 0,
         priming: 0,
     });
@@ -443,7 +445,11 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
         live.push(h264_packet(index, 0), Picture::Fresh);
         let now = tick_time(0, 30, index);
         while i64::try_from((next_sample + read) * 10_000_000 / 48_000).unwrap() <= now {
-            live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
+            live.push_audio(
+                Source::System,
+                next_sample,
+                audio::tests::numbered(next_sample, read),
+            );
             next_sample += read;
         }
     }
@@ -460,9 +466,16 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
     audio.read(239_000, &mut samples);
     assert_eq!(samples, [0; 4]);
 
-    live.push_audio(next_sample, audio::tests::numbered(next_sample, read));
+    live.push_audio(
+        Source::System,
+        next_sample,
+        audio::tests::numbered(next_sample, read),
+    );
     let format = live.audio.get().unwrap();
-    assert_eq!(live.sound().runs(format)[0].0, 139 * 1024);
+    assert_eq!(
+        live.sound().ring(Source::System).runs(format)[0].0,
+        139 * 1024
+    );
 }
 
 #[cfg(windows)]
@@ -476,7 +489,7 @@ fn push_sound(live: &Live, start: u64, end: u64, sample: impl Fn(u64) -> i16) {
                 [value, value]
             })
             .collect();
-        live.push_audio(at, data);
+        live.push_audio(Source::System, at, data);
         at = next;
     }
 }
@@ -488,6 +501,7 @@ fn live_with_a_click() -> Live {
     live.set_audio(AudioFormat {
         sample_rate: audio::tests::RATE,
         channels: audio::tests::STEREO,
+        microphone_channels: audio::tests::MONO,
         anchor: CLOCK_RATE / 3,
         priming: 0,
     });
@@ -581,6 +595,7 @@ fn encodes_five_minutes_of_sound() {
     live.set_audio(AudioFormat {
         sample_rate: audio::tests::RATE,
         channels: audio::tests::STEREO,
+        microphone_channels: audio::tests::MONO,
         anchor: 0,
         priming: 0,
     });

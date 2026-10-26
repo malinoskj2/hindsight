@@ -115,7 +115,7 @@ fn steady_until_closed(config: &Config, live: &Live, stop: &AtomicBool) {
 fn services(record: Recorder, retry_interval: Duration) -> Services {
     Services {
         record,
-        audio: |_| None,
+        audio: |_, _| None,
         write: replay::save,
         chime: Box::new(|_| {}),
         retry_interval,
@@ -673,6 +673,17 @@ fn sound_that_could_not_start_is_reported_only_when_asked_for() {
         Some(Sound::Failed),
         "the stand-in starts no sound"
     );
+
+    let microphone = Config {
+        audio: false,
+        microphone: true,
+        ..desktop()
+    };
+    let worker = spawn(steady, RETRY_INTERVAL, None, microphone);
+    let status = wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    assert_eq!(status.sound, Some(Sound::Failed));
 
     let quiet = Config {
         audio: false,

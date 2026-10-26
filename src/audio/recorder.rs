@@ -1,15 +1,15 @@
-//! The session's audio thread. It reads the loopback capture on a timer, keeps the sound on the
+//! The session's audio thread. It reads each source's capture on a timer, keeps the sound on the
 //! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
-    CHANNELS, SAMPLE_RATE, aac,
-    loopback::{self, Devices, Loopback, OpenError, Packet, Signal, Wake, Watch},
-    pcm::{self, Layout},
+    CHANNELS, SAMPLE_RATE, Sources, aac,
+    pcm::{Channels, Layout},
     timeline::{Frames, Ticks, Timeline},
+    wasapi::{self, Devices, OpenError, Packet, Signal, Wake, Watch},
 };
 use crate::{
     log,
-    replay::{AudioFormat, CLOCK_RATE, Live},
+    replay::{AudioFormat, CLOCK_RATE, Live, Source},
     sys::{self, clock, com::Apartment},
 };
 use std::{
@@ -18,7 +18,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use windows::Win32::{Foundation::HANDLE, Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED};
+use windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED;
 
 /// Each read takes six 10 ms engine packets. The 200 ms capture buffer absorbs a late read.
 const READ_INTERVAL: Duration = Duration::from_millis(60);
@@ -64,7 +64,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
         .unwrap_or("no message")
 }
 
-pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
+pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
     let stop = match Signal::latch() {
         Ok(signal) => Arc::new(signal),
         Err(error) => {
@@ -75,7 +75,7 @@ pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
     let (live, signal) = (Arc::clone(live), Arc::clone(&stop));
     match thread::Builder::new()
         .name("audio".to_owned())
-        .spawn(move || record(&live, &signal))
+        .spawn(move || record(&live, sources, &signal))
     {
         Ok(join) => Some(Capture {
             stop,
@@ -90,26 +90,54 @@ pub(crate) fn start(live: &Arc<Live>) -> Option<Capture> {
     }
 }
 
-fn record(live: &Live, stop: &Signal) {
-    let Some(mut pipeline) = Pipeline::open(live) else {
+/// The channels each source is kept in. The microphone is kept in mono, which halves its memory.
+const fn kept_in(source: Source) -> Channels {
+    match source {
+        Source::System => Channels::Stereo,
+        Source::Microphone => Channels::Mono,
+    }
+}
+
+/// The name log lines give a source, and the name of its device.
+const fn names(source: Source) -> (&'static str, &'static str) {
+    match source {
+        Source::System => ("Sound", "output device"),
+        Source::Microphone => ("Microphone", "microphone"),
+    }
+}
+
+fn record(live: &Live, sources: Sources, stop: &Signal) {
+    let Some(mut pipeline) = Pipeline::open(live, sources) else {
         return;
     };
     let Pipeline {
-        track,
-        device,
+        inputs,
+        watch,
         devices,
         ..
     } = &mut pipeline;
+    let unchanged = if watch.is_some() {
+        Defaults::Unchanged
+    } else {
+        Defaults::Unwatched
+    };
     let mut placed = false;
-    let mut changed = false;
+    let mut defaults = unchanged;
     loop {
         if !placed && let Some(capture) = live.capture_processor() {
             sys::thread::keep_off(capture);
             placed = true;
         }
-        device.update(devices, changed);
+        for input in inputs.iter_mut() {
+            input.device.update(devices, defaults);
+        }
+        let interval = inputs
+            .iter()
+            .map(|input| input.device.interval())
+            .min()
+            .unwrap_or(WAKE_INTERVAL);
         // A failed wait would fail again at once, so stopping is preferable to spinning on it.
-        let wake = match loopback::wait(stop, device.wake(), device.interval()) {
+        let wake = match wasapi::wait(stop, watch.as_ref().map(Watch::event), interval) {
             Ok(Wake::Stop) => break,
             Ok(wake) => wake,
             Err(error) => {
@@ -117,32 +145,49 @@ fn record(live: &Live, stop: &Signal) {
                 break;
             }
         };
-        changed = matches!(wake, Wake::Changed);
-        if let Err(error) = device.read(track) {
-            device.lost(&error);
+        defaults = match wake {
+            Wake::Changed => Defaults::Changed,
+            Wake::Stop | Wake::Read => unchanged,
+        };
+        let settled = Ticks(clock::now()).saturating_sub(SILENCE_LAG);
+        for input in inputs.iter_mut() {
+            input.read(settled);
         }
-        track.catch_up(Ticks(clock::now()).saturating_sub(SILENCE_LAG));
-        track.flush();
     }
     log::info("Sound · stopped");
 }
 
-/// Fields drop in this order: the open device, its watch and the device list release their COM
+/// Fields drop in this order: the open streams, the watch and the device list release their COM
 /// objects before COM shuts down.
 struct Pipeline<'a> {
-    track: Track<'a>,
-    device: Device,
+    inputs: Vec<Input<'a>>,
+    watch: Option<Watch>,
     devices: Devices,
     _com: Apartment,
 }
 
 impl<'a> Pipeline<'a> {
-    fn open(live: &'a Live) -> Option<Self> {
+    fn open(live: &'a Live, sources: Sources) -> Option<Self> {
         let com = started(Apartment::multi_threaded(), "COM unavailable")?;
         let devices = started(Devices::new(), "devices not listed")?;
+        let anchor = clock::now();
+        live.set_audio(AudioFormat {
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS,
+            microphone_channels: kept_in(Source::Microphone).count(),
+            anchor,
+            priming: aac::PRIMING,
+        });
+        let inputs = sources
+            .iter()
+            .map(|source| Input {
+                track: Track::new(live, source, Ticks(anchor)),
+                device: Device::new(source),
+            })
+            .collect();
         Some(Self {
-            track: Track::open(live),
-            device: Device::new(watch_default(&devices)),
+            inputs,
+            watch: watch_defaults(&devices),
             devices,
             _com: com,
         })
@@ -155,7 +200,7 @@ fn started<T>(result: windows::core::Result<T>, what: &str) -> Option<T> {
         .ok()
 }
 
-fn watch_default(devices: &Devices) -> Option<Watch> {
+fn watch_defaults(devices: &Devices) -> Option<Watch> {
     devices
         .watch()
         .inspect_err(|error| {
@@ -167,16 +212,43 @@ fn watch_default(devices: &Devices) -> Option<Watch> {
         .ok()
 }
 
+/// What is known of the default devices since the last update.
+#[derive(Clone, Copy)]
+enum Defaults {
+    /// The watch reported that a default device changed, perhaps another source's.
+    Changed,
+    Unchanged,
+    /// Nothing reports changes, so the defaults are checked on a timer.
+    Unwatched,
+}
+
+/// One source: its device and the track its sound is kept on.
+struct Input<'a> {
+    track: Track<'a>,
+    device: Device,
+}
+
+impl Input<'_> {
+    /// Reads what the device captured, and passes the track on up to `settled`, before which
+    /// whatever was not captured is silence.
+    fn read(&mut self, settled: Ticks) {
+        if let Err(error) = self.device.read(&mut self.track) {
+            self.device.lost(&error);
+        }
+        self.track.catch_up(settled);
+        self.track.flush();
+    }
+}
+
 struct Device {
+    source: Source,
     state: DeviceState,
-    /// `None` means the default device is polled.
-    watch: Option<Watch>,
     /// When to next check the default device or try to open one. `None` means now.
     due: Option<Instant>,
 }
 
 enum DeviceState {
-    Open(Loopback),
+    Open(wasapi::Stream),
     Closed {
         /// A device was open before, so opening one is logged as a return.
         opened_before: bool,
@@ -194,13 +266,13 @@ impl DeviceState {
 }
 
 impl Device {
-    const fn new(watch: Option<Watch>) -> Self {
+    const fn new(source: Source) -> Self {
         Self {
+            source,
             state: DeviceState::Closed {
                 opened_before: false,
                 reported: false,
             },
-            watch,
             due: None,
         }
     }
@@ -212,37 +284,41 @@ impl Device {
         }
     }
 
-    fn wake(&self) -> Option<HANDLE> {
-        self.watch.as_ref().map(Watch::event)
-    }
-
-    /// `changed` is true when the watch reported a new default output since the last update.
-    fn update(&mut self, devices: &Devices, changed: bool) {
+    fn update(&mut self, devices: &Devices, defaults: Defaults) {
         let now = Instant::now();
-        if changed {
-            self.switch(devices, now);
+        if let Defaults::Changed = defaults {
+            self.follow_default(devices, now);
             return;
         }
         if self.due.is_some_and(|due| now < due) {
             return;
         }
-        let DeviceState::Open(open) = &self.state else {
+        match (&self.state, defaults) {
+            (DeviceState::Closed { .. }, _) => self.open(devices, now),
+            (DeviceState::Open(_), Defaults::Unwatched) => self.follow_default(devices, now),
+            (DeviceState::Open(_), Defaults::Changed | Defaults::Unchanged) => {
+                self.due = Some(now + DEFAULT_CHECK_INTERVAL);
+            }
+        }
+    }
+
+    /// Switches to the default device if it is no longer the one open.
+    fn follow_default(&mut self, devices: &Devices, now: Instant) {
+        let DeviceState::Open(stream) = &self.state else {
             self.open(devices, now);
             return;
         };
-        if self.watch.is_none() && devices.default_id().is_some_and(|id| id != open.id()) {
-            self.switch(devices, now);
+        if devices
+            .default_id(self.source)
+            .is_some_and(|id| id != stream.id())
+        {
+            let (label, device) = names(self.source);
+            log::info(format!("{label} · default {device} changed · switching"));
+            self.state = DeviceState::CLOSED_AFTER_OPEN;
+            self.open(devices, now);
             return;
         }
         self.due = Some(now + DEFAULT_CHECK_INTERVAL);
-    }
-
-    fn switch(&mut self, devices: &Devices, now: Instant) {
-        if let DeviceState::Open(_) = self.state {
-            log::info("Sound · default output changed · switching");
-            self.state = DeviceState::CLOSED_AFTER_OPEN;
-        }
-        self.open(devices, now);
     }
 
     fn open(&mut self, devices: &Devices, now: Instant) {
@@ -253,24 +329,25 @@ impl Device {
         else {
             return;
         };
-        match devices.open() {
-            Ok(loopback) => {
+        let (label, device) = names(self.source);
+        match devices.open(self.source) {
+            Ok(stream) => {
                 log::info(format!(
-                    "Sound · {}{}",
-                    loopback.name(),
+                    "{label} · {}{}",
+                    stream.name(),
                     if *opened_before { " · again" } else { "" }
                 ));
-                self.state = DeviceState::Open(loopback);
+                self.state = DeviceState::Open(stream);
                 self.due = Some(now + DEFAULT_CHECK_INTERVAL);
             }
             Err(error) => {
                 if !*reported {
                     match &error {
                         OpenError::NoDevice => {
-                            log::info("Sound · no output device · silence until one appears");
+                            log::info(format!("{label} · no {device} · silence until one appears"));
                         }
                         OpenError::Windows(_, cause) => log::warning(format!(
-                            "Sound · cannot capture ({error}: {cause}) · retrying every second"
+                            "{label} · cannot capture ({error}: {cause}) · retrying every second"
                         )),
                     }
                     *reported = true;
@@ -281,21 +358,22 @@ impl Device {
     }
 
     fn lost(&mut self, error: &windows::core::Error) {
+        let (label, device) = names(self.source);
         if error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
-            log::info("Sound · output device went away · reopening");
+            log::info(format!("{label} · {device} went away · reopening"));
         } else {
-            log::warning(format!("Sound · capture failed ({error}) · reopening"));
+            log::warning(format!("{label} · capture failed ({error}) · reopening"));
         }
         self.state = DeviceState::CLOSED_AFTER_OPEN;
         self.due = None;
     }
 
     fn read(&mut self, track: &mut Track<'_>) -> windows::core::Result<()> {
-        let DeviceState::Open(loopback) = &mut self.state else {
+        let DeviceState::Open(stream) = &mut self.state else {
             return Ok(());
         };
-        let layout = loopback.layout();
-        loopback.read(|packet| {
+        let layout = stream.layout();
+        stream.read(|packet| {
             track.packet(packet, layout);
             Ok(())
         })
@@ -304,42 +382,33 @@ impl Device {
 
 /// The destination the track passes finished runs of sound to: the live buffer, or a test's list.
 trait Sink {
-    /// Interleaved samples starting at frame `start`.
-    fn push_audio(&self, start: u64, data: Arc<[i16]>);
+    /// Interleaved samples of `source` starting at frame `start`.
+    fn push_audio(&self, source: Source, start: u64, data: Arc<[i16]>);
 }
 
 impl Sink for Live {
-    fn push_audio(&self, start: u64, data: Arc<[i16]>) {
-        Live::push_audio(self, start, data);
+    fn push_audio(&self, source: Source, start: u64, data: Arc<[i16]>) {
+        Live::push_audio(self, source, start, data);
     }
 }
 
 struct Track<'a> {
     sink: &'a dyn Sink,
+    source: Source,
     timeline: Timeline,
     /// Number of the next frame, silence included.
     next: Frames,
-    /// Interleaved samples, `CHANNELS` to a frame, not yet passed to the buffer.
+    /// Interleaved samples, in the channels the source is kept in, not yet passed to the buffer.
     pending: Vec<i16>,
     /// Number of the first frame in `pending`.
     pending_start: Frames,
 }
 
 impl<'a> Track<'a> {
-    fn open(live: &'a Live) -> Self {
-        let anchor = clock::now();
-        live.set_audio(AudioFormat {
-            sample_rate: SAMPLE_RATE,
-            channels: CHANNELS,
-            anchor,
-            priming: aac::PRIMING,
-        });
-        Self::new(live, Ticks(anchor))
-    }
-
-    fn new(sink: &'a dyn Sink, anchor: Ticks) -> Self {
+    fn new(sink: &'a dyn Sink, source: Source, anchor: Ticks) -> Self {
         Self {
             sink,
+            source,
             timeline: Timeline::new(SAMPLE_RATE, anchor),
             next: Frames::ZERO,
             pending: Vec::new(),
@@ -358,9 +427,11 @@ impl<'a> Track<'a> {
         if self.pending.is_empty() {
             self.pending_start = self.next;
         }
-        let length = self.pending.len() + count(kept).saturating_mul(usize::from(CHANNELS.get()));
+        let channels = kept_in(self.source);
+        let length =
+            self.pending.len() + count(kept).saturating_mul(usize::from(channels.count().get()));
         let dropped_bytes = count(placement.overlap).saturating_mul(layout.frame_bytes());
-        pcm::append_stereo(
+        channels.append(
             &mut self.pending,
             &data[dropped_bytes.min(data.len())..],
             layout,
@@ -384,8 +455,11 @@ impl<'a> Track<'a> {
 
     fn flush(&mut self) {
         if !self.pending.is_empty() {
-            self.sink
-                .push_audio(self.pending_start.0, Arc::from(&self.pending[..]));
+            self.sink.push_audio(
+                self.source,
+                self.pending_start.0,
+                Arc::from(&self.pending[..]),
+            );
             self.pending.clear();
         }
     }
@@ -398,7 +472,7 @@ fn count(frames: Frames) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::pcm, *};
     use crate::{
         config::Codec,
         replay::{Matrix, Packet, Picture, Stream},
@@ -416,7 +490,7 @@ mod tests {
     struct Runs(RefCell<Vec<(u64, Vec<i16>)>>);
 
     impl Sink for Runs {
-        fn push_audio(&self, start: u64, data: Arc<[i16]>) {
+        fn push_audio(&self, _source: Source, start: u64, data: Arc<[i16]>) {
             self.0.borrow_mut().push((start, data.to_vec()));
         }
     }
@@ -448,7 +522,7 @@ mod tests {
 
     fn feed(track: &mut Track<'_>, time: i64, frames: u32, data: Option<&[u8]>) {
         track.packet(
-            &loopback::Packet {
+            &wasapi::Packet {
                 data,
                 frames,
                 time: Some(Ticks(time)),
@@ -460,7 +534,7 @@ mod tests {
     #[test]
     fn packets_on_time_are_handed_over_as_one_run() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 480, Some(&numbered(0, 480)));
         feed(&mut track, TEN_MS, 480, Some(&numbered(480, 480)));
         assert!(runs.0.borrow().is_empty());
@@ -473,7 +547,7 @@ mod tests {
     #[test]
     fn a_gap_in_the_stamps_is_left_between_two_runs() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 480, Some(&numbered(0, 480)));
         feed(&mut track, 5 * TEN_MS, 480, Some(&numbered(480, 480)));
         track.flush();
@@ -483,7 +557,7 @@ mod tests {
     #[test]
     fn a_silent_packet_is_left_as_a_gap() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 480, Some(&numbered(0, 480)));
         feed(&mut track, TEN_MS, 480, None);
         feed(&mut track, 2 * TEN_MS, 480, Some(&numbered(960, 480)));
@@ -495,7 +569,7 @@ mod tests {
     #[test]
     fn frames_overlapping_ones_placed_are_dropped_from_the_front() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 4800, Some(&numbered(0, 4800)));
         feed(
             &mut track,
@@ -514,7 +588,7 @@ mod tests {
     #[test]
     fn a_packet_short_of_data_is_padded_to_the_frames_it_claims() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 480, Some(&numbered(1, 100)));
         feed(&mut track, TEN_MS, 480, Some(&numbered(1, 480)));
         track.flush();
@@ -528,7 +602,7 @@ mod tests {
     #[test]
     fn catching_up_hands_over_the_run_and_leaves_silence_behind_it() {
         let runs = Runs::default();
-        let mut track = Track::new(&runs, Ticks(0));
+        let mut track = Track::new(&runs, Source::System, Ticks(0));
         feed(&mut track, 0, 480, Some(&numbered(0, 480)));
         track.catch_up(Ticks(TEN_MS / 2));
         assert!(runs.0.borrow().is_empty(), "nothing is missing yet");
@@ -540,7 +614,30 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "records the machine's sound for ten seconds"]
+    fn the_microphone_track_keeps_one_channel() {
+        let runs = Runs::default();
+        let mut track = Track::new(&runs, Source::Microphone, Ticks(0));
+        let stereo: Vec<u8> = [100_i16, 300, -100, -300]
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        feed(&mut track, 0, 480, Some(&stereo));
+        feed(&mut track, TEN_MS, 480, Some(&numbered(0, 100)));
+        track.flush();
+        let runs = runs.0.borrow();
+        let [(start, samples)] = &runs[..] else {
+            panic!("expected one run");
+        };
+        assert_eq!(*start, 0);
+        assert_eq!(samples.len(), 960);
+        assert_eq!(samples[..2], [200, -200]);
+        assert!(samples[2..480].iter().all(|&sample| sample == 0));
+        assert_eq!(samples[480 + 99], 99);
+        assert!(samples[480 + 100..].iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
+    #[ignore = "records the machine's sound and microphone for ten seconds"]
     fn records_the_system_sound() {
         let live = Arc::new(Live::new(1_000));
         live.set_stream(Stream {
@@ -557,7 +654,11 @@ mod tests {
             data: Box::new([0]),
         };
         live.push(packet(0), Picture::Fresh);
-        let capture = start(&live).unwrap();
+        let sources = Sources {
+            system: true,
+            microphone: true,
+        };
+        let capture = start(&live, sources).unwrap();
         thread::sleep(Duration::from_secs(10));
         live.push(packet(599), Picture::Fresh);
         drop(capture);

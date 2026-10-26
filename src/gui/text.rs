@@ -64,6 +64,7 @@ pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
 pub(super) const BROWSE: &str = "Browse…";
 pub(super) const AUDIO: &str = "Record system sound";
+pub(super) const MICROPHONE: &str = "Record the microphone";
 pub(super) const CURSOR: &str = "Record the mouse cursor";
 pub(super) const MEMORY: &str = "Buffer in";
 pub(super) const APPLY: &str = "Apply";

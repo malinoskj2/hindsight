@@ -35,6 +35,8 @@ const CHOICE_WIDTH: i32 = 190;
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
 /// The same width from the second column.
 const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
+/// The width of a check box in the second column, which has no caption beside it.
+const CHECK_COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X);
 const ERROR_X: i32 = BUTTON_WIDTH + 8;
 const BROWSE_WIDTH: i32 = 76;
 const BROWSE_GAP: i32 = 6;
@@ -335,6 +337,7 @@ impl SettingsPage {
             hotkey: hotkey.trim().parse()?,
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
+            microphone: recording.microphone.is_checked(),
             cursor: recording.cursor.is_checked(),
             buffer_memory: chosen(&recording.memory, &Memory::ALL),
             theme: chosen(&self.0.general.theme, &Theme::ALL),
@@ -353,6 +356,7 @@ struct RecordingControls {
     browse: gui::Button,
     memory: gui::ComboBox,
     audio: gui::CheckBox,
+    microphone: gui::CheckBox,
     cursor: gui::CheckBox,
     estimate: TintedLabel,
     apply: gui::Button,
@@ -389,8 +393,30 @@ impl RecordingControls {
             &Memory::ALL.map(Memory::name),
             index_of(&Memory::ALL, config.buffer_memory),
         );
-        let audio = check_box(page, text::AUDIO, rows::AUDIO, config.audio);
-        let cursor = check_box(page, text::CURSOR, rows::CURSOR, config.cursor);
+        let audio = check_box(
+            page,
+            text::AUDIO,
+            INNER_X,
+            rows::AUDIO,
+            COLUMN_X - INNER_X,
+            config.audio,
+        );
+        let microphone = check_box(
+            page,
+            text::MICROPHONE,
+            COLUMN_X,
+            rows::AUDIO,
+            CHECK_COLUMN_WIDTH,
+            config.microphone,
+        );
+        let cursor = check_box(
+            page,
+            text::CURSOR,
+            INNER_X,
+            rows::CURSOR,
+            INNER_WIDTH,
+            config.cursor,
+        );
         let estimate = TintedLabel::new(
             label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1),
             Tone::Muted,
@@ -416,6 +442,7 @@ impl RecordingControls {
             browse,
             memory,
             audio,
+            microphone,
             cursor,
             estimate,
             apply,
@@ -498,7 +525,9 @@ impl GeneralControls {
         let start_with_windows = check_box(
             page,
             text::START_WITH_WINDOWS,
+            INNER_X,
             rows::START_WITH_WINDOWS,
+            INNER_WIDTH,
             start_with_windows,
         );
         let error = TintedLabel::new(
@@ -573,13 +602,20 @@ fn number_field(
     (edit, spin)
 }
 
-fn check_box(page: &gui::TabPage, caption: &str, y: i32, checked: bool) -> gui::CheckBox {
+fn check_box(
+    page: &gui::TabPage,
+    caption: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    checked: bool,
+) -> gui::CheckBox {
     gui::CheckBox::new(
         page,
         gui::CheckBoxOpts {
             text: caption,
-            position: gui::dpi(INNER_X, y),
-            size: gui::dpi(INNER_WIDTH, LINE),
+            position: gui::dpi(x, y),
+            size: gui::dpi(width, LINE),
             check_state: if checked {
                 co::BST::CHECKED
             } else {

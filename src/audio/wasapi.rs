@@ -1,9 +1,11 @@
-//! WASAPI loopback capture of the default output device, read on a timer a few packets at a time.
+//! WASAPI capture of the default output device, by loopback, and of the default microphone, read
+//! on a timer a few packets at a time.
 
 use super::{
     pcm::{Layout, Sample},
     timeline::Ticks,
 };
+use crate::replay::Source;
 use listener::Listener;
 use std::{ptr, sync::Arc, time::Duration};
 use task_mem::CoTaskMem;
@@ -18,10 +20,10 @@ use windows::{
                 AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                 AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                DEVICE_STATE, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IMMDevice,
-                IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-                MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole,
-                eRender,
+                DEVICE_STATE, EDataFlow, ERole, IAudioCaptureClient, IAudioClient,
+                IAudioSessionControl, IAudioSessionControl2, IMMDevice, IMMDeviceEnumerator,
+                IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
+                WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
             },
             MediaFoundation::{MFAudioFormat_Float, MFAudioFormat_PCM},
         },
@@ -33,7 +35,7 @@ use windows::{
             Threading::WaitForMultipleObjects,
         },
     },
-    core::{GUID, HRESULT, PCWSTR, implement},
+    core::{GUID, HRESULT, Interface, PCWSTR, implement},
 };
 use winsafe::{HEVENT, guard::CloseHandleGuard};
 
@@ -82,7 +84,7 @@ impl Signal {
 
 pub(super) enum Wake {
     Stop,
-    /// The default output device changed.
+    /// The default output device or microphone changed.
     Changed,
     /// The timeout elapsed, so it is time to read.
     Read,
@@ -119,7 +121,7 @@ pub(super) fn wait(
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum OpenError {
-    #[error("there is no audio output device")]
+    #[error("there is no default device")]
     NoDevice,
     #[error("could not {0}")]
     Windows(&'static str, #[source] windows::core::Error),
@@ -127,6 +129,22 @@ pub(super) enum OpenError {
 
 fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> OpenError {
     move |error| OpenError::Windows(step, error)
+}
+
+/// The endpoint each source is captured from: what an output device plays is captured by
+/// loopback.
+const fn flow(source: Source) -> EDataFlow {
+    match source {
+        Source::System => eRender,
+        Source::Microphone => eCapture,
+    }
+}
+
+const fn fallback_name(source: Source) -> &'static str {
+    match source {
+        Source::System => "the default output",
+        Source::Microphone => "the default microphone",
+    }
 }
 
 pub(super) struct Devices(IMMDeviceEnumerator);
@@ -137,37 +155,43 @@ impl Devices {
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map(Self)
     }
 
-    fn default_output(&self) -> Result<IMMDevice, OpenError> {
+    fn default_device(&self, source: Source) -> Result<IMMDevice, OpenError> {
         // SAFETY: a query of the live enumerator.
-        unsafe { self.0.GetDefaultAudioEndpoint(eRender, eConsole) }
+        unsafe { self.0.GetDefaultAudioEndpoint(flow(source), eConsole) }
             .map_err(|_| OpenError::NoDevice)
     }
 
-    pub(super) fn default_id(&self) -> Option<String> {
-        self.default_output().ok().and_then(|device| id(&device))
+    pub(super) fn default_id(&self, source: Source) -> Option<String> {
+        self.default_device(source)
+            .ok()
+            .and_then(|device| id(&device))
     }
 
-    pub(super) fn open(&self) -> Result<Loopback, OpenError> {
-        let device = self.default_output()?;
+    pub(super) fn open(&self, source: Source) -> Result<Stream, OpenError> {
+        let device = self.default_device(source)?;
         // SAFETY: activates an audio client on the live device.
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(failed("activate the audio client"))?;
-        let layout = initialize(&client)?;
+        let layout = initialize(&client, source)?;
         // SAFETY: the client is initialised, which a capture service requires. The call returns a
         // new reference.
         let capture: IAudioCaptureClient =
             unsafe { client.GetService() }.map_err(failed("get the capture client"))?;
+        if source == Source::Microphone {
+            keep_others_loud(&client)?;
+        }
         // SAFETY: the client is initialised, which starting requires.
         unsafe { client.Start() }.map_err(failed("start the audio capture"))?;
-        Ok(Loopback {
+        Ok(Stream {
             client,
             capture,
             layout,
             id: id(&device).unwrap_or_default(),
-            name: friendly_name(&device).unwrap_or_else(|| "the default output".to_owned()),
+            name: friendly_name(&device).unwrap_or_else(|| fallback_name(source).to_owned()),
         })
     }
 
+    /// Watches both the default output device and the default microphone.
     pub(super) fn watch(&self) -> windows::core::Result<Watch> {
         let changed = Arc::new(Signal::pulse()?);
         let listener: IMMNotificationClient = Listener(Arc::clone(&changed)).into();
@@ -188,8 +212,8 @@ pub(super) struct Watch {
 }
 
 impl Watch {
-    /// Returns the event set when the default output changes. `wait` reports it as
-    /// `Wake::Changed`.
+    /// Returns the event set when the default output device or microphone changes. `wait`
+    /// reports it as `Wake::Changed`.
     pub(super) fn event(&self) -> HANDLE {
         self.changed.handle()
     }
@@ -215,7 +239,7 @@ mod listener {
 
     use super::{
         DEVICE_STATE, EDataFlow, ERole, IMMNotificationClient, IMMNotificationClient_Impl, PCWSTR,
-        PROPERTYKEY, Signal, eConsole, eRender, implement,
+        PROPERTYKEY, Signal, eCapture, eConsole, eRender, implement,
     };
     use std::sync::Arc;
 
@@ -254,7 +278,7 @@ mod listener {
             role: ERole,
             _id: &PCWSTR,
         ) -> windows::core::Result<()> {
-            if flow == eRender && role == eConsole {
+            if (flow == eRender || flow == eCapture) && role == eConsole {
                 self.0.set();
             }
             Ok(())
@@ -342,8 +366,11 @@ mod task_mem {
     }
 }
 
-fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
-    let flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+fn initialize(client: &IAudioClient, source: Source) -> Result<Layout, OpenError> {
+    let flags = match source {
+        Source::System => AUDCLNT_STREAMFLAGS_LOOPBACK,
+        Source::Microphone => 0,
+    };
     // SAFETY: a query of the live client.
     let mix = unsafe { client.GetMixFormat() }.map_err(failed("read the audio format"))?;
     // SAFETY: GetMixFormat allocates the format with `CoTaskMemAlloc` for the caller to free,
@@ -364,6 +391,20 @@ fn initialize(client: &IAudioClient) -> Result<Layout, OpenError> {
         sample: Sample::Float,
         channels: super::CHANNELS.get(),
     })
+}
+
+/// Opts the client's session out of Windows' ducking, which would otherwise turn the game down
+/// while the microphone is open on the default communications device.
+fn keep_others_loud(client: &IAudioClient) -> Result<(), OpenError> {
+    // SAFETY: the client is initialised, which a session service requires. The call returns a new
+    // reference.
+    let session: IAudioSessionControl =
+        unsafe { client.GetService() }.map_err(failed("get the audio session"))?;
+    let session: IAudioSessionControl2 = session
+        .cast()
+        .map_err(failed("get the audio session's ducking control"))?;
+    // SAFETY: a plain setting of the live session, made before the stream starts.
+    unsafe { session.SetDuckingPreference(true) }.map_err(failed("opt out of ducking"))
 }
 
 fn initialize_as(client: &IAudioClient, format: &WaveFormat, flags: u32) -> Result<(), OpenError> {
@@ -489,7 +530,8 @@ pub(super) struct Packet<'a> {
     pub(super) time: Option<Ticks>,
 }
 
-pub(super) struct Loopback {
+/// A started capture stream of one device.
+pub(super) struct Stream {
     client: IAudioClient,
     capture: IAudioCaptureClient,
     layout: Layout,
@@ -497,7 +539,7 @@ pub(super) struct Loopback {
     name: String,
 }
 
-impl Loopback {
+impl Stream {
     pub(super) const fn layout(&self) -> Layout {
         self.layout
     }
@@ -551,7 +593,7 @@ impl Loopback {
     }
 }
 
-impl Drop for Loopback {
+impl Drop for Stream {
     fn drop(&mut self) {
         // SAFETY: stops the client before it is released.
         let _ = unsafe { self.client.Stop() };
