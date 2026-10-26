@@ -18,6 +18,9 @@ pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod instance;
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "calls GetPhysicallyInstalledSystemMemory")]
+pub(crate) mod memory;
+#[cfg(windows)]
 pub(crate) mod release;
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls the shell and GDI")]

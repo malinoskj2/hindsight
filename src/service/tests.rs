@@ -479,7 +479,7 @@ fn applying_settings_persists_them_and_restarts() {
 
     let saved = Store::at(directory.path().join("state"))
         .unwrap()
-        .load_config()
+        .load_config(&config_in(directory.path()))
         .unwrap();
     assert_eq!(saved, config);
 }
@@ -504,7 +504,7 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
     assert!(status.state.running().is_some(), "the session carries on");
     drop(worker);
 
-    let saved = Store::at(state).unwrap().load_config().unwrap();
+    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
     assert_eq!(
         saved,
         Config {
