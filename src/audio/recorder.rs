@@ -11,7 +11,7 @@ use super::{
 use crate::{
     config::DeviceId,
     log,
-    replay::{AudioFormat, CLOCK_RATE, Live, Source, SourceFormat},
+    replay::{AudioFormat, CLOCK_RATE, Live, PerSource, Source, SourceFormat},
     sys::{self, clock, com::Apartment},
 };
 use std::{
@@ -37,7 +37,8 @@ const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Capture {
     stop: Arc<Signal>,
-    stand_ins: Arc<StandInFlags>,
+    /// The audio thread's [`StandIns`], for the worker to read.
+    stand_ins: Arc<PerSource<AtomicBool>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -48,34 +49,7 @@ impl Capture {
     }
 
     pub(crate) fn stand_ins(&self) -> StandIns {
-        self.stand_ins.read()
-    }
-}
-
-/// The audio thread's [`StandIns`], for the worker to read.
-#[derive(Default)]
-struct StandInFlags {
-    system: AtomicBool,
-    microphone: AtomicBool,
-}
-
-impl StandInFlags {
-    const fn flag(&self, source: Source) -> &AtomicBool {
-        match source {
-            Source::System => &self.system,
-            Source::Microphone => &self.microphone,
-        }
-    }
-
-    fn set(&self, source: Source, standing_in: bool) {
-        self.flag(source).store(standing_in, Ordering::Relaxed);
-    }
-
-    fn read(&self) -> StandIns {
-        StandIns {
-            system: self.system.load(Ordering::Relaxed),
-            microphone: self.microphone.load(Ordering::Relaxed),
-        }
+        self.stand_ins.map(|flag| flag.load(Ordering::Relaxed))
     }
 }
 
@@ -110,7 +84,7 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
             return None;
         }
     };
-    let stand_ins = Arc::new(StandInFlags::default());
+    let stand_ins = Arc::new(PerSource::<AtomicBool>::default());
     let (live, signal, flags) = (Arc::clone(live), Arc::clone(&stop), Arc::clone(&stand_ins));
     match thread::Builder::new()
         .name("audio".to_owned())
@@ -147,7 +121,7 @@ const fn names(source: Source) -> (&'static str, &'static str) {
     }
 }
 
-fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlags) {
+fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &PerSource<AtomicBool>) {
     let Some(mut pipeline) = Pipeline::open(live, sources) else {
         return;
     };
@@ -171,7 +145,9 @@ fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlag
         }
         for input in inputs.iter_mut() {
             input.device.update(devices, changes);
-            stand_ins.set(input.device.source, input.device.standing_in());
+            stand_ins
+                .get(input.device.source)
+                .store(input.device.standing_in(), Ordering::Relaxed);
         }
         let interval = inputs
             .iter()
@@ -216,8 +192,8 @@ impl<'a> Pipeline<'a> {
         live.set_audio(AudioFormat {
             sample_rate: SAMPLE_RATE,
             sources: sources
-                .iter()
-                .map(|source| SourceFormat {
+                .recorded()
+                .map(|(source, _)| SourceFormat {
                     source,
                     channels: kept_in(source).count(),
                 })
@@ -226,10 +202,10 @@ impl<'a> Pipeline<'a> {
             priming: aac::PRIMING,
         });
         let inputs = sources
-            .iter()
-            .map(|source| Input {
+            .recorded()
+            .map(|(source, device)| Input {
                 track: Track::new(live, source, Ticks(anchor)),
-                device: Device::new(source, sources.device(source).cloned()),
+                device: Device::new(source, device.chosen().cloned()),
             })
             .collect();
         Some(Self {
@@ -550,7 +526,10 @@ fn count(frames: Frames) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::pcm, *};
+    use super::{
+        super::{DeviceChoice, pcm},
+        *,
+    };
     use crate::{
         config::Codec,
         replay::{Matrix, Packet, Picture, Stream},
@@ -732,12 +711,10 @@ mod tests {
             data: Box::new([0]),
         };
         live.push(packet(0), Picture::Fresh);
-        let sources = Sources {
-            system: true,
-            microphone: true,
-            system_device: None,
-            microphone_device: None,
-        };
+        let sources = Sources(PerSource {
+            system: Some(DeviceChoice::Default),
+            microphone: Some(DeviceChoice::Default),
+        });
         let capture = start(&live, sources).unwrap();
         thread::sleep(Duration::from_secs(10));
         live.push(packet(599), Picture::Fresh);

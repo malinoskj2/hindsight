@@ -29,7 +29,8 @@ mod ring;
 mod store;
 
 pub(crate) use audio::{
-    AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, Source, samples_of, ticks_of,
+    AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, PerSource, Source, samples_of,
+    ticks_of,
 };
 use audio::{AudioRings, tick_time};
 #[cfg(windows)]

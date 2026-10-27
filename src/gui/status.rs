@@ -420,7 +420,7 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
         ])
         .chain(
             stand_ins
-                .sources()
+                .flagged()
                 .map(|source| Some(text::device_missing(source))),
         )
         .chain([status

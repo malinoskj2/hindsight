@@ -948,7 +948,7 @@ impl Machine {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let sources = sources(&self.config);
+        let sources = Sources::of(&self.config);
         let audio = sources
             .any()
             .then(|| (self.services.audio)(&live, sources))
@@ -1294,7 +1294,7 @@ impl Machine {
         let session = self
             .session
             .as_ref()
-            .filter(|_| sources(&self.config).any())?;
+            .filter(|_| Sources::of(&self.config).any())?;
         Some(match &session.audio {
             Some(capture) if !capture.has_stopped() => Sound::Recording(capture.stand_ins()),
             _ => Sound::Failed,
@@ -1357,15 +1357,6 @@ fn run_in_background() {
     }
     if let Err(error) = sys::thread::prefer_efficiency() {
         log::warning(text::efficiency_refused(error));
-    }
-}
-
-fn sources(config: &Config) -> Sources {
-    Sources {
-        system: config.audio,
-        microphone: config.microphone,
-        system_device: config.system_device.clone(),
-        microphone_device: config.microphone_device.clone(),
     }
 }
 
