@@ -1,5 +1,5 @@
 //! The global hotkeys that save a clip and take a screenshot, written as text such as
-//! `Alt+F1`.
+//! `Alt+F7`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, ops::BitOr, str::FromStr};
@@ -42,7 +42,7 @@ const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
 
 #[derive(Debug, Error)]
 pub(crate) enum ParseError {
-    #[error("enter a hotkey such as Alt+F1")]
+    #[error("enter a hotkey such as Alt+F7")]
     Empty,
     #[error("\"{0}\" is not a key the hotkey can use")]
     UnknownKey(String),
@@ -52,7 +52,7 @@ pub(crate) enum ParseError {
     NeedsModifier(String),
 }
 
-/// A hotkey, serialised and displayed as text, so the settings file contains `"Alt+F1"`.
+/// A hotkey, serialised and displayed as text, so the settings file contains `"Alt+F7"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hotkey {
     modifiers: u16,
@@ -80,15 +80,15 @@ impl BitOr for Modifiers {
 }
 
 impl Hotkey {
-    /// The NVIDIA overlay's own defaults for its screenshot and photo mode are also Alt+F1 and
-    /// Alt+F2.
+    /// Alt+F7 and Alt+F8 stay clear of the NVIDIA overlay's Alt+F1, F2, F3, F9, F10 and F12, and
+    /// of F12, which `RegisterHotKey` reserves for debuggers.
     pub(crate) const DEFAULT: Self = Self {
         modifiers: MOD_ALT,
-        key: VK_F1,
+        key: VK_F1 + 6,
     };
     pub(crate) const DEFAULT_SCREENSHOT: Self = Self {
         modifiers: MOD_ALT,
-        key: VK_F1 + 1,
+        key: VK_F1 + 7,
     };
 
     /// Returns the hotkey a hotkey field enters when `key`, a virtual-key code, is pressed with
@@ -354,9 +354,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_hotkeys_are_alt_f1_and_alt_f2() {
-        assert_eq!(Hotkey::DEFAULT.to_string(), "Alt+F1");
-        assert_eq!(Hotkey::DEFAULT_SCREENSHOT.to_string(), "Alt+F2");
+    fn the_default_hotkeys_are_alt_f7_and_alt_f8() {
+        assert_eq!(Hotkey::DEFAULT.to_string(), "Alt+F7");
+        assert_eq!(Hotkey::DEFAULT_SCREENSHOT.to_string(), "Alt+F8");
     }
 
     #[cfg(windows)]
