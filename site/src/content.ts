@@ -97,6 +97,12 @@ export const settingGroups = [
         body: "Click a field and press the keys, or type them, such as Alt+F10.",
       },
       {
+        id: "mode",
+        fields: ["Record"],
+        title: "Record full-screen apps, the default.",
+        body: "Nothing runs while none is in front. The other choice records the whole primary monitor all the time.",
+      },
+      {
         id: "backend",
         fields: ["Backend"],
         title: "Keep the NVIDIA NvFBC backend.",
