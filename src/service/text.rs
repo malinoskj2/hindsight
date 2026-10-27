@@ -7,7 +7,7 @@
 //! Paths show only the file name, since the folder is in the settings. Lines with nothing to
 //! fill in are constants. The others are formatted only when they are written.
 
-use super::Target;
+use super::{ProblemKind, Target};
 use crate::{
     config::{Backend, Config},
     replay::Stream,
@@ -40,7 +40,7 @@ pub(super) fn settings_applied(config: &Config) -> impl Display {
     })
 }
 
-pub(super) fn save_settings_failed(error: impl Display) -> impl Display {
+fn save_settings_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Settings · not saved ({error})"))
 }
 
@@ -139,7 +139,18 @@ pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Saved without sound · {error}"))
 }
 
-pub(super) fn save_failed(error: impl Display) -> impl Display {
+/// The log line for a problem.
+pub(super) fn problem(kind: ProblemKind, cause: &str) -> String {
+    match kind {
+        ProblemKind::ClipNotSaved => save_failed(cause).to_string(),
+        ProblemKind::ScreenshotNotSaved => screenshot_failed(cause).to_string(),
+        ProblemKind::CaptureFailed => session_failed(cause).to_string(),
+        ProblemKind::SettingsNotSaved => save_settings_failed(cause).to_string(),
+        ProblemKind::AppNotRecorded | ProblemKind::WorkerStopped => cause.to_owned(),
+    }
+}
+
+fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Save failed · {error}"))
 }
 
@@ -151,7 +162,7 @@ pub(super) fn screenshot_saved(path: &Path) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Screenshot · {}", file_name(path)))
 }
 
-pub(super) fn screenshot_failed(error: impl Display) -> impl Display {
+fn screenshot_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Screenshot failed · {error}"))
 }
 

@@ -289,9 +289,30 @@ pub(crate) struct Status {
     pub(crate) last_clip: Option<PathBuf>,
     /// The last clip was saved without the sound that was buffered for it.
     pub(crate) clip_without_sound: bool,
-    pub(crate) error: Option<String>,
+    /// What went wrong last, until the same work next succeeds.
+    pub(crate) problem: Option<Problem>,
     /// A save was requested before the buffer held anything.
     pub(crate) nothing_to_save: bool,
+}
+
+/// Something that failed, as the Status tab reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Problem {
+    pub(crate) kind: ProblemKind,
+    /// The local time it failed, as `HH:MM`.
+    pub(crate) at: String,
+    /// Why, as the log records it.
+    pub(crate) cause: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProblemKind {
+    ClipNotSaved,
+    ScreenshotNotSaved,
+    CaptureFailed,
+    AppNotRecorded,
+    SettingsNotSaved,
+    WorkerStopped,
 }
 
 #[derive(Debug)]
@@ -540,7 +561,7 @@ struct Machine {
     config: Config,
     output: Arc<Mutex<Status>>,
     phase: Phase,
-    error: Option<String>,
+    problem: Option<Problem>,
     /// A save was requested before the buffer held anything. Cleared when a save starts.
     nothing_to_save: bool,
     last_clip: Option<PathBuf>,
@@ -574,7 +595,7 @@ impl Machine {
             config,
             output,
             phase: Phase::Starting,
-            error: None,
+            problem: None,
             nothing_to_save: false,
             last_clip: None,
             clip_without_sound: false,
@@ -679,7 +700,7 @@ impl Machine {
         self.retry_at = None;
         self.stop_session();
         self.phase = Phase::Paused;
-        self.error = None;
+        self.problem = None;
     }
 
     fn resume(&mut self) {
@@ -729,7 +750,7 @@ impl Machine {
         if self.session.is_some() {
             log::warning(message);
         } else {
-            self.report_error(message);
+            self.report(ProblemKind::AppNotRecorded, message);
             self.phase = Phase::Waiting;
         }
         self.passed_over = Some(target);
@@ -760,7 +781,7 @@ impl Machine {
                 });
                 self.nothing_to_save = false;
             }
-            Err(error) => self.report_failed_save(text::save_failed(error)),
+            Err(error) => self.report_failed_save(ProblemKind::ClipNotSaved, error),
         }
     }
 
@@ -825,7 +846,7 @@ impl Machine {
         match writing.join.join() {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
-                self.error = None;
+                self.problem = None;
                 (self.services.chime)(Tone::Saved);
             }
             Ok(Err(error)) => self.report_failed_shot(log::chain(&error)),
@@ -836,7 +857,7 @@ impl Machine {
     }
 
     fn report_failed_shot(&mut self, error: impl Display) {
-        self.report_failed_save(text::screenshot_failed(error));
+        self.report_failed_save(ProblemKind::ScreenshotNotSaved, error);
     }
 
     /// Saves a change to a setting that leaves recording alone.
@@ -850,7 +871,7 @@ impl Machine {
     fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
         self.ledger
             .save_config(&self.config, config)
-            .inspect_err(|error| self.report_error(text::save_settings_failed(log::chain(error))))
+            .inspect_err(|error| self.report(ProblemKind::SettingsNotSaved, log::chain(error)))
     }
 
     fn begin(&mut self) {
@@ -861,7 +882,7 @@ impl Machine {
             Mode::Fullscreen => {
                 self.target = None;
                 self.phase = Phase::Waiting;
-                self.error = None;
+                self.problem = None;
             }
         }
     }
@@ -892,7 +913,7 @@ impl Machine {
                 });
                 self.live = Some(live);
                 self.phase = Phase::Starting;
-                self.error = None;
+                self.problem = None;
             }
             Err(error) => self.fail(text::capture_thread_failed(error)),
         }
@@ -967,15 +988,19 @@ impl Machine {
     }
 
     fn fail(&mut self, error: impl Display) {
-        self.report_error(text::session_failed(error));
+        self.report(ProblemKind::CaptureFailed, error);
         self.phase = Phase::Retrying;
         self.retry_at = Some(self.now() + self.services.retry_interval);
     }
 
-    fn report_error(&mut self, message: impl Display) {
-        let message = message.to_string();
-        log::error(&message);
-        self.error = Some(message);
+    fn report(&mut self, kind: ProblemKind, cause: impl Display) {
+        let cause = cause.to_string();
+        log::error(text::problem(kind, &cause));
+        self.problem = Some(Problem {
+            kind,
+            at: log::clock(),
+            cause,
+        });
     }
 
     fn poll(&mut self) {
@@ -1032,7 +1057,7 @@ impl Machine {
                 }
             }
             Ok(Ok(Ended::Unsupported(reason))) => {
-                self.report_error(text::session_failed(reason));
+                self.report(ProblemKind::CaptureFailed, reason);
                 self.phase = Phase::Unsupported;
             }
             Ok(Err(error)) => self.fail(format_args!("{error:#}")),
@@ -1102,10 +1127,13 @@ impl Machine {
     fn finish_save(&mut self, saving: Saving) {
         match saving.join.join() {
             Ok(Ok(saved)) => self.clip_saved(saving.seconds, saved),
-            Ok(Err(error)) => self.report_failed_save(text::save_failed(log::chain(&error))),
-            Err(payload) => self.report_failed_save(text::save_failed(text::save_panicked(
-                panic_message(&*payload),
-            ))),
+            Ok(Err(error)) => {
+                self.report_failed_save(ProblemKind::ClipNotSaved, log::chain(&error));
+            }
+            Err(payload) => self.report_failed_save(
+                ProblemKind::ClipNotSaved,
+                text::save_panicked(panic_message(&*payload)),
+            ),
         }
     }
 
@@ -1117,12 +1145,12 @@ impl Machine {
         self.clip_without_sound = saved.sound_error.is_some();
         self.ledger.add_saved(&saved.path);
         self.last_clip = Some(saved.path);
-        self.error = None;
+        self.problem = None;
         (self.services.chime)(Tone::Saved);
     }
 
-    fn report_failed_save(&mut self, message: impl Display) {
-        self.report_error(message);
+    fn report_failed_save(&mut self, kind: ProblemKind, cause: impl Display) {
+        self.report(kind, cause);
         (self.services.chime)(Tone::Failed);
     }
 
@@ -1190,7 +1218,7 @@ impl Machine {
             bytes: self.count_bytes(reading.live_bytes),
             last_clip: self.last_clip.clone(),
             clip_without_sound: self.clip_without_sound,
-            error: self.error.clone(),
+            problem: self.problem.clone(),
             nothing_to_save: self.nothing_to_save,
         }
     }
@@ -1271,7 +1299,11 @@ fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mute
     let _ = panic::catch_unwind(AssertUnwindSafe(|| machine.shut_down()));
     let mut status = output.lock().unwrap_or_else(PoisonError::into_inner);
     status.state = State::Stopped;
-    status.error = Some(message);
+    status.problem = Some(Problem {
+        kind: ProblemKind::WorkerStopped,
+        at: log::clock(),
+        cause: message,
+    });
 }
 
 /// Returns a panicking thread's message, when its payload is a string.

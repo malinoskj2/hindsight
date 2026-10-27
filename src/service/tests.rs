@@ -267,7 +267,7 @@ fn desktop_mode_records_and_saves_a_clip() {
 fn a_thread_that_ends_wakes_the_worker_without_a_refresh() {
     let worker = spawn(closing, RETRY_INTERVAL, None, desktop());
     let status = wait_unprompted(&worker, |status| status.state == State::Retrying);
-    assert!(status.error.unwrap().contains(text::DISPLAY_GONE));
+    assert!(status.problem.unwrap().cause.contains(text::DISPLAY_GONE));
 
     let directory = tempfile::tempdir().unwrap();
     let worker = spawn(steady, RETRY_INTERVAL, None, config_in(directory.path()));
@@ -335,7 +335,7 @@ fn a_failed_session_is_retried() {
     let worker = spawn(failing, Duration::from_millis(50), None, desktop());
 
     let status = wait_for(&worker, |status| status.state == State::Retrying);
-    assert!(status.error.unwrap().contains("no capture device"));
+    assert!(status.problem.unwrap().cause.contains("no capture device"));
 
     worker.save();
     wait_for(&worker, |status| status.nothing_to_save);
@@ -346,7 +346,7 @@ fn an_unsupported_configuration_is_not_retried() {
     let worker = spawn(unsupported, Duration::from_millis(10), None, desktop());
 
     let status = wait_for(&worker, |status| status.state == State::Unsupported);
-    assert!(status.error.unwrap().contains("AV1"));
+    assert!(status.problem.unwrap().cause.contains("AV1"));
     assert!(status.state.running().is_none());
     thread::sleep(Duration::from_millis(100));
     assert_eq!(worker.status().state, State::Unsupported);
@@ -447,7 +447,7 @@ fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
 
     worker.target(window(1));
     let status = wait_for(&worker, |status| status.state == State::Retrying);
-    assert!(status.error.is_some());
+    assert!(status.problem.is_some());
     worker.target(window(1));
     // Commands are handled in order, so the save confirms that the target was seen during the
     // cool-down.
@@ -488,9 +488,15 @@ fn full_screen_mode_passes_over_an_app_it_cannot_record_and_waits_for_the_next()
     wait_for(&worker, |status| status.state == State::Waiting);
 
     worker.target(window(3));
-    let status = wait_for(&worker, |status| status.error.is_some());
+    let status = wait_for(&worker, |status| status.problem.is_some());
     assert_eq!(status.state, State::Waiting);
-    assert!(status.error.unwrap().contains("game3.exe not recorded"));
+    assert!(
+        status
+            .problem
+            .unwrap()
+            .cause
+            .contains("game3.exe not recorded")
+    );
     worker.target(window(3));
     worker.save();
     wait_for(&worker, |status| status.nothing_to_save);
@@ -501,7 +507,7 @@ fn full_screen_mode_passes_over_an_app_it_cannot_record_and_waits_for_the_next()
         matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
     });
     assert_eq!(status.source.as_deref(), Some("game2.exe"));
-    assert!(status.error.is_none());
+    assert!(status.problem.is_none());
 
     let rotated = Target::Window {
         window: WindowHandle::new(4).unwrap(),
@@ -767,8 +773,11 @@ fn a_failed_save_sounds_failed_and_stops_ticking() {
     wait_for(&worker, |_| !tones(&heard).is_empty());
     tick(&worker, &clock, &heard, 2);
     FAILING_WRITE_ENDS.store(true, Ordering::Relaxed);
-    let status = wait_for(&worker, |status| status.error.is_some());
-    assert!(status.error.unwrap().contains("the disk is full"));
+    let status = wait_for(&worker, |status| status.problem.is_some());
+    let problem = status.problem.unwrap();
+    assert_eq!(problem.kind, ProblemKind::ClipNotSaved);
+    assert!(problem.cause.contains("the disk is full"));
+    assert_eq!(problem.at.len(), "14:03".len());
     assert!(status.last_clip.is_none());
     assert_eq!(
         tones(&heard),
@@ -814,7 +823,7 @@ fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
         files_in(&directory.path().join("videos")),
         Vec::<PathBuf>::new()
     );
-    assert!(worker.status().error.is_none());
+    assert!(worker.status().problem.is_none());
 
     worker.screenshot();
     wait_for(&worker, |_| tones(&heard).len() == 2);
@@ -847,11 +856,12 @@ fn a_screenshot_capture_stops_before_taking_is_reported_and_can_be_asked_again()
 
     worker.screenshot();
     worker.toggle_pause();
-    let status = wait_for(&worker, |status| status.error.is_some());
+    let status = wait_for(&worker, |status| status.problem.is_some());
+    let problem = status.problem.unwrap();
+    assert_eq!(problem.kind, ProblemKind::ScreenshotNotSaved);
     assert!(
-        status
-            .error
-            .unwrap()
+        problem
+            .cause
             .contains("capture stopped before taking the picture")
     );
     assert_eq!(tones(&heard), [Tone::Failed]);
@@ -870,7 +880,7 @@ fn panicking(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> 
 fn a_capture_panic_is_reported_with_its_message_and_retried() {
     let worker = spawn(panicking, RETRY_INTERVAL, None, desktop());
     let status = wait_for(&worker, |status| status.state == State::Retrying);
-    assert!(status.error.unwrap().contains("the GPU melted"));
+    assert!(status.problem.unwrap().cause.contains("the GPU melted"));
 }
 
 #[test]
@@ -884,7 +894,13 @@ fn a_worker_that_panics_shows_it_has_stopped() {
 
     worker.save();
     let status = wait_for(&worker, |status| status.state == State::Stopped);
-    assert!(status.error.unwrap().contains("the speaker caught fire"));
+    assert!(
+        status
+            .problem
+            .unwrap()
+            .cause
+            .contains("the speaker caught fire")
+    );
     worker.save();
     assert_eq!(worker.status().state, State::Stopped);
 }
@@ -954,6 +970,6 @@ fn a_clip_saved_without_its_sound_says_so_on_the_status() {
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
     assert!(status.clip_without_sound);
-    assert!(status.error.is_none(), "{:?}", status.error);
+    assert!(status.problem.is_none(), "{:?}", status.problem);
     assert_eq!(tones(&heard).last(), Some(&Tone::Saved));
 }

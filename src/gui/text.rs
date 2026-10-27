@@ -5,7 +5,7 @@ use crate::{
     config::{Codec, Memory},
     gpu::{Adapter, ProbeError},
     replay::Stream,
-    service::{State, Status},
+    service::{Problem, ProblemKind, State, Status},
     sys::release::Release,
 };
 use std::{fmt::Display, path::Path};
@@ -115,6 +115,24 @@ pub(super) const FOREGROUND_WATCH_FAILED: &str =
 pub(super) const STARTUP_FAILED_TITLE: &str = "hindsight could not start";
 pub(super) const STARTUP_FAILED_HELP: &str =
     "Close this window, resolve the error, then launch again.";
+
+pub(super) fn problem_headline(problem: &Problem) -> String {
+    let failed = match problem.kind {
+        ProblemKind::ClipNotSaved => "Clip not saved",
+        ProblemKind::ScreenshotNotSaved => "Screenshot not saved",
+        ProblemKind::CaptureFailed => "Capture failed",
+        ProblemKind::AppNotRecorded => "App not recorded",
+        ProblemKind::SettingsNotSaved => "Settings not saved",
+        ProblemKind::WorkerStopped => "Recording stopped",
+    };
+    format!("●  {failed} at {}", problem.at)
+}
+
+/// The cause as a sentence.
+pub(super) fn problem_cause(problem: &Problem) -> String {
+    let cause = capitalised(problem.cause.trim_end_matches('.'));
+    format!("{cause}.")
+}
 
 pub(super) fn tray_unavailable(error: impl Display) -> String {
     format!("Tray · unavailable ({error}) · closing the window quits")

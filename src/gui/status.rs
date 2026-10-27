@@ -9,11 +9,15 @@ use super::{
     text,
     theme::{Skin, Tone},
 };
+#[cfg(test)]
+use crate::service::{Problem, ProblemKind};
 use crate::service::{Sound, State, Status};
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
-const NOTICE_EXTRA: i32 = 2 * LINE + 4;
+/// A problem's headline and a cause of up to two lines.
+const NOTICE_LINES: i32 = 3;
+const NOTICE_EXTRA: i32 = NOTICE_LINES * LINE + 4;
 const ROW_PITCH: i32 = 20;
 const CONTROL_COUNT: i32 = 5;
 const CONTROL_GAP: i32 = 6;
@@ -191,11 +195,14 @@ impl StatusPage {
     }
 
     fn show_notices(&self, status: &Status, window_notices: [Option<&str>; 2]) -> bool {
-        self.0.recording.notice.set_tone(if status.error.is_some() {
-            Tone::Error
-        } else {
-            Tone::Warning
-        });
+        self.0
+            .recording
+            .notice
+            .set_tone(if status.problem.is_some() {
+                Tone::Error
+            } else {
+                Tone::Warning
+            });
         let notice = notice_text(status, window_notices);
         self.0.recording_group.set_message(
             &self.0.frames,
@@ -225,7 +232,7 @@ impl RecordingLabels {
             encoder: Row::text(page, text::ENCODER, rows::ENCODER).value,
             rates: Row::text(page, text::FRAME_RATE, rows::RATES).value,
             notice: TintedLabel::new(
-                hidden_label(page, INNER_X, rows::NOTICE, INNER_WIDTH, 2),
+                hidden_label(page, INNER_X, rows::NOTICE, INNER_WIDTH, NOTICE_LINES),
                 Tone::Warning,
             ),
         }
@@ -391,20 +398,27 @@ impl Row {
     }
 }
 
+/// A problem comes first, as a headline saying what failed and when, with its cause below.
 fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
-    let notices: Vec<&str> = window_notices
+    let problem = status.problem.as_ref().map(|problem| {
+        [
+            text::problem_headline(problem),
+            text::problem_cause(problem),
+        ]
+    });
+    let notices = window_notices.into_iter().chain([
+        status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
+        (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
+        status
+            .clip_without_sound
+            .then_some(text::CLIP_WITHOUT_SOUND),
+    ]);
+    problem
         .into_iter()
-        .chain([
-            status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
-            (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
-            status
-                .clip_without_sound
-                .then_some(text::CLIP_WITHOUT_SOUND),
-            status.error.as_deref(),
-        ])
         .flatten()
-        .collect();
-    notices.join("\r\n")
+        .chain(notices.flatten().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 fn row_caption(page: &gui::TabPage, caption: &str, y: i32) -> gui::Label {
@@ -459,15 +473,22 @@ mod tests {
     fn the_notice_line_lists_what_there_is_one_per_line() {
         let mut status = Status::default();
         assert_eq!(notice_text(&status, [None, None]), "");
-        status.error = Some("capture failed".to_owned());
-        assert_eq!(notice_text(&status, [None, None]), "capture failed");
+        status.problem = Some(Problem {
+            kind: ProblemKind::ClipNotSaved,
+            at: "14:03".to_owned(),
+            cause: "the disk is full".to_owned(),
+        });
+        assert_eq!(
+            notice_text(&status, [None, None]),
+            "●  Clip not saved at 14:03\r\nThe disk is full."
+        );
         status.nothing_to_save = true;
         status.sound = Some(Sound::Failed);
         status.clip_without_sound = true;
         assert_eq!(
             notice_text(&status, [Some("hotkey taken"), Some("no tray")]),
             format!(
-                "hotkey taken\r\nno tray\r\n{}\r\n{}\r\n{}\r\ncapture failed",
+                "●  Clip not saved at 14:03\r\nThe disk is full.\r\nhotkey taken\r\nno tray\r\n{}\r\n{}\r\n{}",
                 text::NOTHING_TO_SAVE,
                 text::SOUND_FAILED,
                 text::CLIP_WITHOUT_SOUND,
