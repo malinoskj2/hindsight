@@ -9,7 +9,7 @@ pub(crate) mod com;
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "calls SetWinEventHook, UnhookWinEvent and EnumDisplaySettingsW"
+    reason = "calls SetWinEventHook, UnhookWinEvent and EnumDisplaySettingsW, and wraps raw handles"
 )]
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
@@ -33,6 +33,7 @@ pub(crate) mod startup;
 pub(crate) mod thread;
 #[cfg(windows)]
 pub(crate) mod tray;
+pub(crate) mod view;
 #[cfg(windows)]
 pub(crate) mod volume;
 #[cfg(windows)]

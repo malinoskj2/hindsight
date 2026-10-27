@@ -6,7 +6,7 @@ mod ffi;
 
 use super::{
     CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
-    is_window_closed, monitor_of,
+    monitor_of,
 };
 use crate::{gpu::device::Device, log, service::Target, sys::win32::cb_size};
 use std::{
@@ -56,7 +56,6 @@ pub(super) struct Capture {
     handed_over: bool,
     size: (u32, u32),
     monitor: HMONITOR,
-    window: Option<HWND>,
     reopen: ReopenThrottle,
     cursor: bool,
     /// Declared last: `create` points into it. Each session holds it too.
@@ -77,7 +76,6 @@ impl Capture {
             d3d9,
             size,
             monitor,
-            window,
         } = prepare_capture(device, target, "NVIDIA NvFBC")?;
         let d3d9_device = create_device(&d3d9, adapter)?;
         let slots = [
@@ -97,7 +95,6 @@ impl Capture {
             handed_over: false,
             size,
             monitor,
-            window,
             reopen: ReopenThrottle::default(),
             cursor,
             library,
@@ -168,9 +165,6 @@ impl Source for Capture {
     }
 
     fn take(&mut self, _target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
-        if is_window_closed(self.window) {
-            return Err(CaptureError::Closed);
-        }
         if !self.handed_over {
             // A Direct3D 9 surface cannot be copied into a Direct3D 11 texture.
             return Err(CaptureError::Unsupported(
@@ -195,6 +189,10 @@ impl Source for Capture {
                 surface: Surface::Direct3D9(self.slots[index].surface.clone()),
             }),
         )
+    }
+
+    fn hold(&mut self) {
+        self.pending = None;
     }
 }
 
@@ -223,7 +221,6 @@ struct Prepared {
     d3d9: IDirect3D9Ex,
     size: (u32, u32),
     monitor: HMONITOR,
-    window: Option<HWND>,
 }
 
 /// Finds the monitor on the encoding GPU, loads the library and turns NvFBC on if necessary.
@@ -232,7 +229,7 @@ fn prepare_capture(
     target: &Target,
     backend: &str,
 ) -> Result<Prepared, CaptureError> {
-    let (monitor, window) = monitor_of(target);
+    let monitor = monitor_of(target);
     let key = saved_key();
 
     // SAFETY: creates the Direct3D 9Ex object; no other preconditions.
@@ -257,7 +254,6 @@ fn prepare_capture(
         d3d9,
         size,
         monitor,
-        window,
     })
 }
 

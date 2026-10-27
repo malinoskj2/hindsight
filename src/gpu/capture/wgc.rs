@@ -114,7 +114,7 @@ impl Capture {
             surfaces: Vec::new(),
             held: Vec::new(),
             tone_map,
-            monitor: monitor_of(target).0,
+            monitor: monitor_of(target),
             next_hdr_check: Instant::now() + HDR_CHECK_INTERVAL,
             _apartment: apartment,
         })
@@ -168,6 +168,12 @@ impl Source for Capture {
         copied
             .map(|()| Frame::Fresh)
             .map_err(failed("tone-map the HDR frame"))
+    }
+
+    fn hold(&mut self) {
+        if let Some(frame) = newest_frame(&self.pool) {
+            let _ = frame.Close();
+        }
     }
 }
 
@@ -266,7 +272,7 @@ fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {
             ..
         } => {
             // SAFETY: a stale handle makes the call fail, not misbehave.
-            unsafe { interop.CreateForMonitor(monitor_of(target).0) }
+            unsafe { interop.CreateForMonitor(monitor_of(target)) }
                 .map_err(failed("capture the monitor"))
         }
         Target::Window {

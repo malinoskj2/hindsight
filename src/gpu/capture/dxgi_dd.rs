@@ -2,8 +2,8 @@
 //! window target is recorded through the monitor it fills.
 
 use super::{
-    CaptureError, CopyTarget, Frame, ReopenThrottle, Source, deliver, failed, is_window_closed,
-    monitor_of, tonemap::ToneMapper,
+    CaptureError, CopyTarget, Frame, ReopenThrottle, Source, deliver, failed, monitor_of,
+    tonemap::ToneMapper,
 };
 use crate::{
     gpu::device::{Device, null_output},
@@ -13,7 +13,7 @@ use crate::{
 use std::time::Instant;
 use windows::{
     Win32::{
-        Foundation::{E_ACCESSDENIED, HWND},
+        Foundation::E_ACCESSDENIED,
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
@@ -50,7 +50,6 @@ pub(super) struct Capture {
     output: IDXGIOutput1,
     duplication: Option<IDXGIOutputDuplication>,
     size: (u32, u32),
-    window: Option<HWND>,
     /// A fresh duplication's first frame is always new.
     primed: bool,
     reopen: ReopenThrottle,
@@ -71,8 +70,7 @@ impl Capture {
         target: &Target,
         tone_map: Option<ToneMapper>,
     ) -> Result<Self, CaptureError> {
-        let (monitor, window) = monitor_of(target);
-        let output = find_output(device, monitor)?;
+        let output = find_output(device, monitor_of(target))?;
         let (duplication, description) = duplicate(&output, device, formats(tone_map.as_ref()))
             .map_err(first_duplication_failed)?;
         if is_rotated(&description) {
@@ -86,7 +84,6 @@ impl Capture {
             output,
             duplication: Some(duplication),
             size: size(&description),
-            window,
             primed: false,
             reopen: ReopenThrottle::default(),
             tone_map,
@@ -142,9 +139,6 @@ impl Source for Capture {
     }
 
     fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
-        if is_window_closed(self.window) {
-            return Err(CaptureError::Closed);
-        }
         let target = super::target_of(target)?;
 
         let Some(duplication) = &self.duplication else {

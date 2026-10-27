@@ -1,12 +1,13 @@
 //! Full-screen app detection: windows whose client area covers their monitor, watched through
-//! event hooks.
+//! event hooks. Once an app is recorded, whether it is still in front of its monitor.
 
 use super::{
     callback::Slot,
+    view::Sighting,
     win32::{cb_size, cb_size_u16},
 };
 use crate::service::{MonitorHandle, Target, Through, WindowHandle};
-use std::{path::Path, rc::Rc};
+use std::{ffi::c_void, path::Path, rc::Rc};
 use windows::{
     Win32::{
         Foundation::HWND,
@@ -133,6 +134,76 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
         rotated: is_rotated(&monitor),
         through: Through::Window,
     })
+}
+
+/// A recorded app's window, looked at on the capture thread to tell whether its monitor still
+/// shows it.
+pub(crate) struct AppWindow {
+    window: w::HWND,
+    process: u32,
+    /// `None` when the bounds cannot be read, so that any other app's window in front counts as
+    /// covering the monitor.
+    monitor: Option<w::RECT>,
+}
+
+impl AppWindow {
+    pub(crate) fn new(window: WindowHandle, monitor: MonitorHandle) -> Self {
+        // SAFETY: a window handle is not owned, and a stale one makes each call fail, not
+        // misbehave.
+        let window = unsafe { w::HWND::from_ptr(window.get() as *mut c_void) };
+        // SAFETY: as above, for a monitor handle.
+        let monitor = unsafe { w::HMONITOR::from_ptr(monitor.get() as *mut c_void) };
+        let (_, process) = window.GetWindowThreadProcessId();
+        Self {
+            window,
+            process,
+            monitor: monitor.GetMonitorInfo().ok().map(|info| info.rcMonitor),
+        }
+    }
+
+    /// Called every frame, so the usual case, the app in front, is settled before the costlier
+    /// checks.
+    pub(crate) fn sight(&self) -> Sighting {
+        if !self.window.IsWindow() {
+            return Sighting::Closed;
+        }
+        if self.window.IsIconic() || !self.window.IsWindowVisible() {
+            return Sighting::Hidden;
+        }
+        let Some(front) = w::HWND::GetForegroundWindow() else {
+            return Sighting::Unsettled;
+        };
+        // The app's own dialogs and launcher count as the app.
+        if front.GetWindowThreadProcessId().1 == self.process {
+            return Sighting::Uncovered;
+        }
+        if is_cloaked(&self.window) {
+            return Sighting::Hidden;
+        }
+        if self.is_covered_by(&front) {
+            Sighting::Covered
+        } else {
+            Sighting::Uncovered
+        }
+    }
+
+    /// Whether `front` overlaps the app's monitor. The desktop spans every monitor, so it always
+    /// does.
+    fn is_covered_by(&self, front: &w::HWND) -> bool {
+        let Some(monitor) = self.monitor else {
+            return true;
+        };
+        // A window's own rectangle takes in its invisible resize borders, which reach onto the
+        // next monitor when it is maximized.
+        let bounds = match front.DwmGetWindowAttribute(co::DWMWA::EXTENDED_FRAME_BOUNDS) {
+            Ok(w::DwmAttr::ExtendedFrameBounds(bounds)) => bounds,
+            _ => match front.GetWindowRect() {
+                Ok(bounds) => bounds,
+                Err(_) => return true,
+            },
+        };
+        w::IntersectRect(bounds, monitor).is_ok()
+    }
 }
 
 fn is_shell(window: &w::HWND) -> bool {

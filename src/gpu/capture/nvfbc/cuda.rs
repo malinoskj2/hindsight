@@ -10,8 +10,7 @@ use super::{
 use crate::{
     gpu::{
         capture::{
-            CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface,
-            failed, is_window_closed,
+            CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
         },
         cuda::{Context, ContextHold, CudaError, Device as CudaDevice, DeviceBuffer, Driver},
         device::Device,
@@ -22,7 +21,7 @@ use crate::{
 use bytemuck::Zeroable;
 use nvfbc_ffi::Status;
 use std::{marker::PhantomData, sync::Arc};
-use windows::Win32::{Foundation::HWND, Graphics::Gdi::HMONITOR};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 
 const BYTES_PER_PIXEL: u32 = 4;
 const MEBIBYTE: u32 = 1024 * 1024;
@@ -42,7 +41,6 @@ pub(in crate::gpu::capture) struct Capture {
     handed_over: bool,
     size: (u32, u32),
     monitor: HMONITOR,
-    window: Option<HWND>,
     reopen: ReopenThrottle,
     cursor: bool,
     /// The context is current on the thread that started the capture, and the context stack is
@@ -67,7 +65,6 @@ impl Capture {
             d3d9: _,
             size,
             monitor,
-            window,
         } = prepare_capture(device, target, "NVIDIA NvFBC to CUDA")?;
         let cuda = Arc::new(open_primary_context(device)?);
 
@@ -83,7 +80,6 @@ impl Capture {
             handed_over: false,
             size,
             monitor,
-            window,
             reopen: ReopenThrottle::default(),
             cursor,
             _thread: PhantomData,
@@ -258,9 +254,6 @@ impl Source for Capture {
     }
 
     fn take(&mut self, _target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
-        if is_window_closed(self.window) {
-            return Err(CaptureError::Closed);
-        }
         if !self.handed_over {
             // CUDA memory cannot be copied into a Direct3D texture here.
             return Err(CaptureError::Unsupported(
