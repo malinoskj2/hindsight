@@ -121,7 +121,7 @@ fn chunk_runs(stsc: &Stsc) -> Vec<(u32, u32)> {
         .collect()
 }
 
-fn stream(codec: Codec) -> Stream {
+pub(in crate::replay) fn stream(codec: Codec) -> Stream {
     Stream {
         codec,
         width: 1920,
@@ -131,7 +131,7 @@ fn stream(codec: Codec) -> Stream {
     }
 }
 
-fn packet(codec: Codec, index: u64, keyframe: bool) -> Arc<Packet> {
+pub(in crate::replay) fn packet(codec: Codec, index: u64, keyframe: bool) -> Arc<Packet> {
     let data = match (codec, keyframe) {
         (Codec::H264, true) => h264::tests::keyframe(),
         (Codec::H264, false) => h264::tests::inter_frame(),

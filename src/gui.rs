@@ -328,6 +328,11 @@ impl Main {
         self.0
             .settings
             .on_update_checks_toggled(move |check| this.on_update_checks_toggled(check));
+
+        let this = self.clone();
+        self.0
+            .settings
+            .on_more_options_toggled(move |open| this.on_more_options_toggled(open));
     }
 
     fn update_events(&self) {
@@ -355,6 +360,7 @@ impl Main {
         for pane in self.panes() {
             pane.on_create();
         }
+        self.fit_window();
         self.show_initial_startup_error();
         self.register_configured_hotkeys();
         self.watch_foreground_changes();
@@ -547,6 +553,12 @@ impl Main {
     fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
         self.0.config.borrow_mut().close_to_tray = close_to_tray;
         self.0.worker.set_close_to_tray(close_to_tray);
+    }
+
+    fn on_more_options_toggled(&self, open: bool) {
+        self.0.config.borrow_mut().more_options = open;
+        self.0.worker.set_more_options(open);
+        self.fit_window();
     }
 
     fn on_update_checks_toggled(&self, check: bool) {

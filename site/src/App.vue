@@ -131,9 +131,11 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
           v-for="(group, groupIndex) in settingGroups"
           :key="group.name"
           class="setting-group"
-          :aria-labelledby="`settings-${group.name.toLowerCase()}`"
+          :aria-labelledby="`settings-${group.name.toLowerCase().replaceAll(' ', '-')}`"
         >
-          <h3 :id="`settings-${group.name.toLowerCase()}`" class="group-name">{{ group.name }}</h3>
+          <h3 :id="`settings-${group.name.toLowerCase().replaceAll(' ', '-')}`" class="group-name">
+            {{ group.name }}
+          </h3>
           <ol class="setting-list" :start="settingStarts[groupIndex]">
             <li v-for="setting in group.settings" :key="setting.id" class="setting">
               <p class="fields">

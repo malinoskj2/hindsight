@@ -4,7 +4,7 @@ use super::{
     hotkey_field::{self, Capture},
     layout::{
         self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE,
-        Painted, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
+        Painted, TintedLabel, button, hidden_label, label, saturating_i32, shift_by, skin_button,
     },
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
@@ -12,8 +12,9 @@ use super::{
 };
 use crate::{
     config::{
-        self, Backend, Codec, Config, ConfigError, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS,
-        MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode, Theme,
+        self, Backend, Codec, Config, ConfigError, Container, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS,
+        MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode,
+        ScreenshotFormat, Theme,
     },
     log,
     sys::{
@@ -21,7 +22,7 @@ use crate::{
         shell, startup,
     },
 };
-use std::{path::PathBuf, rc::Rc};
+use std::{cell::Cell, path::PathBuf, rc::Rc};
 use thiserror::Error;
 use winsafe::{co, gui, prelude::*};
 
@@ -45,22 +46,31 @@ const FOLDER_WIDTH: i32 = FULL_WIDTH - BROWSE_WIDTH - BROWSE_GAP;
 const BROWSE_X: i32 = INNER_X + INNER_WIDTH - BROWSE_WIDTH;
 const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
+/// How much taller the window is with More options open: its rows push the page past the
+/// height the other tabs need.
+const MORE_OPTIONS_EXTRA: i32 =
+    rows::GENERAL_FRAME + rows::GENERAL_HEIGHT - (layout::FILL_Y + layout::FILL_HEIGHT);
 
+/// The rows as laid out with More options open. Closed, its rows are hidden and everything
+/// below them moves up by [`rows::MORE_OPTIONS_HEIGHT`].
 mod rows {
     use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_FRAME, FIRST_ROW, LINE};
 
     pub(super) const RECORDING_FRAME: i32 = FIRST_FRAME;
     pub(super) const REPLAY_LENGTH: i32 = RECORDING_FRAME + FIRST_ROW;
-    pub(super) const ENCODING: i32 = REPLAY_LENGTH + FIELD_PITCH;
-    pub(super) const HOTKEY: i32 = ENCODING + FIELD_PITCH;
+    pub(super) const HOTKEY: i32 = REPLAY_LENGTH + FIELD_PITCH;
     pub(super) const MODE: i32 = HOTKEY + FIELD_PITCH;
-    pub(super) const BACKEND: i32 = MODE + FIELD_PITCH;
-    pub(super) const FOLDER: i32 = BACKEND + FIELD_PITCH;
-    pub(super) const MEMORY: i32 = FOLDER + FIELD_PITCH;
-    pub(super) const AUDIO: i32 = MEMORY + FIELD_PITCH;
+    pub(super) const FOLDER: i32 = MODE + FIELD_PITCH;
+    pub(super) const AUDIO: i32 = FOLDER + FIELD_PITCH;
     pub(super) const CURSOR: i32 = AUDIO + CHECK_PITCH;
-    pub(super) const ESTIMATE: i32 = CURSOR + CHECK_PITCH + 4;
-    pub(super) const APPLY: i32 = ESTIMATE + LINE;
+    pub(super) const MORE_OPTIONS: i32 = CURSOR + CHECK_PITCH + 2;
+    pub(super) const ENCODING: i32 = MORE_OPTIONS + BUTTON_HEIGHT + 8;
+    pub(super) const BACKEND: i32 = ENCODING + FIELD_PITCH;
+    pub(super) const MEMORY: i32 = BACKEND + FIELD_PITCH;
+    pub(super) const FORMATS: i32 = MEMORY + FIELD_PITCH;
+    pub(super) const ESTIMATE: i32 = FORMATS + FIELD_PITCH;
+    pub(super) const APPLY: i32 = ESTIMATE + LINE + 4;
+    pub(super) const MORE_OPTIONS_HEIGHT: i32 = APPLY - ENCODING;
     pub(super) const RECORDING_HEIGHT: i32 = APPLY + BUTTON_HEIGHT + 14 - RECORDING_FRAME;
     pub(super) const GENERAL_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
     pub(super) const THEME: i32 = GENERAL_FRAME + FIRST_ROW;
@@ -96,6 +106,10 @@ struct Inner {
     general: GeneralControls,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
+    /// Whether More options is open. The controls are created open.
+    more_options: Cell<bool>,
+    /// Whether More options opens once the controls exist, as the settings left it.
+    open_at_start: bool,
 }
 
 impl Painted for Inner {
@@ -126,6 +140,7 @@ impl Pane for SettingsPage {
         layout::fit_titles(&self.0.frames);
         self.update_estimate();
         self.update_cursor_choice();
+        self.show_more_options(self.0.open_at_start);
     }
 
     fn frames(&self) -> &[Frame] {
@@ -166,6 +181,8 @@ impl SettingsPage {
             recording,
             general,
             codecs: codecs.to_vec(),
+            more_options: Cell::new(true),
+            open_at_start: config.more_options,
         });
         pane::paint(&inner.page, skin, Rc::clone(&inner));
         let page = Self(inner);
@@ -176,7 +193,58 @@ impl SettingsPage {
     }
 
     pub(super) fn extra(&self) -> i32 {
-        self.0.general_group.extra()
+        let more_options = if self.0.more_options.get() {
+            MORE_OPTIONS_EXTRA
+        } else {
+            0
+        };
+        self.0.general_group.extra() + more_options
+    }
+
+    /// `toggled` is called with whether More options is now open, once the page has moved.
+    pub(super) fn on_more_options_toggled(&self, toggled: impl Fn(bool) + 'static) {
+        let page = self.clone();
+        self.0.recording.more_options.on().bn_clicked(move || {
+            let open = !page.0.more_options.get();
+            page.show_more_options(open);
+            toggled(open);
+            Ok(())
+        });
+    }
+
+    /// Shows or hides More options' rows, moving everything below them.
+    fn show_more_options(&self, open: bool) {
+        if self.0.more_options.replace(open) == open {
+            return;
+        }
+        let recording = &self.0.recording;
+        for control in &recording.advanced {
+            layout::show(&**control, open);
+        }
+        let delta = gui::dpi_y(if open {
+            rows::MORE_OPTIONS_HEIGHT
+        } else {
+            -rows::MORE_OPTIONS_HEIGHT
+        });
+        let below = recording.below.iter().chain(&self.0.general.controls);
+        for control in below {
+            shift_by(control.hwnd(), delta);
+        }
+        if let [recording_frame, rest @ ..] = &self.0.frames[..] {
+            recording_frame.grow(delta);
+            for frame in rest {
+                frame.shift(delta);
+            }
+        }
+        layout::set_text(
+            &recording.more_options,
+            if open {
+                text::FEWER_OPTIONS
+            } else {
+                text::MORE_OPTIONS
+            },
+        );
+        let _ = self.0.page.hwnd().InvalidateRect(None, true);
     }
 
     pub(super) fn on_apply(&self, apply: impl Fn() + 'static) {
@@ -280,25 +348,35 @@ impl SettingsPage {
             });
         }
         let page = self.clone();
-        self.0.recording.memory.on().cbn_sel_change(move || {
-            page.update_estimate();
-            Ok(())
-        });
+        self.0
+            .recording
+            .choices
+            .memory
+            .on()
+            .cbn_sel_change(move || {
+                page.update_estimate();
+                Ok(())
+            });
     }
 
     fn backend_events(&self) {
         let page = self.clone();
-        self.0.recording.backend.on().cbn_sel_change(move || {
-            page.update_cursor_choice();
-            Ok(())
-        });
+        self.0
+            .recording
+            .choices
+            .backend
+            .on()
+            .cbn_sel_change(move || {
+                page.update_cursor_choice();
+                Ok(())
+            });
     }
 
     /// DXGI Desktop Duplication cannot draw the cursor, so the cursor choice is disabled while
     /// that backend is selected.
     fn update_cursor_choice(&self) {
         let recording = &self.0.recording;
-        let backend = chosen(&recording.backend, &recording.backends);
+        let backend = chosen(&recording.choices.backend, &recording.choices.backends);
         recording
             .cursor
             .hwnd()
@@ -334,7 +412,7 @@ impl SettingsPage {
             .and_then(|(buffer_seconds, bitrate_mbps)| {
                 estimate_bytes(buffer_seconds, bitrate_mbps).map(|bytes| (bytes, bitrate_mbps))
             });
-        let memory = chosen(&recording.memory, &Memory::ALL);
+        let memory = chosen(&recording.choices.memory, &Memory::ALL);
         recording
             .estimate
             .set_text(&estimate.map_or_else(String::new, |(bytes, bitrate_mbps)| {
@@ -376,7 +454,7 @@ impl SettingsPage {
         let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
             mode: chosen(&recording.mode, &Mode::ALL),
-            backend: chosen(&recording.backend, &recording.backends),
+            backend: chosen(&recording.choices.backend, &recording.choices.backends),
             codec: chosen(&encoding.codec, &self.0.codecs),
             frame_rate: required(&encoding.frame_rate)?,
             buffer_seconds: required(&encoding.buffer_seconds)?,
@@ -390,55 +468,55 @@ impl SettingsPage {
             audio: recording.audio.is_checked(),
             microphone: recording.microphone.is_checked(),
             cursor: recording.cursor.is_checked(),
-            buffer_memory: chosen(&recording.memory, &Memory::ALL),
+            buffer_memory: chosen(&recording.choices.memory, &Memory::ALL),
             theme: chosen(&self.0.general.theme, &Theme::ALL),
             close_to_tray: self.0.general.close_to_tray.is_checked(),
             check_for_updates: self.0.general.check_for_updates.is_checked(),
+            container: chosen(&recording.choices.container, &Container::ALL),
+            screenshot_format: chosen(&recording.choices.screenshot_format, &ScreenshotFormat::ALL),
+            more_options: self.0.more_options.get(),
         })
     }
 }
+
+/// A control that More options shows or that moves when it opens.
+type Control = Box<dyn GuiWindow>;
 
 struct RecordingControls {
     encoding: EncodingFields,
     hotkey: gui::Edit,
     screenshot_hotkey: gui::Edit,
     mode: gui::ComboBox,
-    backend: gui::ComboBox,
-    /// The backends offered, in the order of the backend list's items.
-    backends: Vec<Backend>,
+    choices: AdvancedChoices,
     folder: gui::Edit,
     browse: gui::Button,
-    memory: gui::ComboBox,
     audio: gui::CheckBox,
     microphone: gui::CheckBox,
     cursor: gui::CheckBox,
+    more_options: gui::Button,
     estimate: TintedLabel,
     apply: gui::Button,
     error: TintedLabel,
+    /// More options' rows, captions included.
+    advanced: Vec<Control>,
+    /// The controls under More options' rows.
+    below: Vec<Control>,
 }
 
 impl RecordingControls {
     fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec], skin: &Skin) -> Self {
-        let encoding = EncodingFields::new(page, config, codecs);
-        let hotkey = text_field(
+        let (encoding, mut advanced) = EncodingFields::new(page, config, codecs);
+        let [hotkey, screenshot_hotkey] = hotkey_fields(page, config);
+        let (mode, _) = choice_field(
             page,
-            text::HOTKEY,
-            rows::HOTKEY,
-            HOTKEY_WIDTH,
-            &config.hotkey.to_string(),
+            text::MODE,
+            INNER_X,
+            rows::MODE,
+            CHOICE_WIDTH,
+            &Mode::ALL.map(Mode::name),
+            index_of(&Mode::ALL, config.mode),
         );
-        hotkey_field::capture(&hotkey);
-        let screenshot_hotkey = text_field_at(
-            page,
-            text::SCREENSHOT_HOTKEY,
-            COLUMN_X,
-            rows::HOTKEY,
-            HOTKEY_WIDTH,
-            &config.screenshot_hotkey.to_string(),
-        );
-        hotkey_field::capture(&screenshot_hotkey);
-        let backends = Backend::offered(config.backend);
-        let (mode, backend) = source_fields(page, config, &backends);
+        let choices = AdvancedChoices::new(page, config);
         let folder = text_field(
             page,
             text::FOLDER,
@@ -448,15 +526,6 @@ impl RecordingControls {
         );
         let browse = button(page, text::BROWSE, BROWSE_X, rows::FOLDER, BROWSE_WIDTH);
         skin_button(&browse, skin);
-        let memory = choice_field(
-            page,
-            text::MEMORY,
-            INNER_X,
-            rows::MEMORY,
-            CHOICE_WIDTH,
-            &Memory::ALL.map(Memory::name),
-            index_of(&Memory::ALL, config.buffer_memory),
-        );
         let audio = check_box(
             page,
             text::AUDIO,
@@ -481,6 +550,14 @@ impl RecordingControls {
             INNER_WIDTH,
             config.cursor,
         );
+        let more_options = button(
+            page,
+            text::FEWER_OPTIONS,
+            INNER_X,
+            rows::MORE_OPTIONS,
+            BUTTON_WIDTH,
+        );
+        skin_button(&more_options, skin);
         let estimate = TintedLabel::new(
             label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1),
             Tone::Muted,
@@ -496,23 +573,135 @@ impl RecordingControls {
             2,
         );
         let error = TintedLabel::new(error, Tone::Error);
+        advanced.extend(choices.controls());
+        advanced.push(Box::new(estimate.label().clone()));
+        let below: Vec<Control> = vec![Box::new(apply.clone()), Box::new(error.label().clone())];
         Self {
             encoding,
             hotkey,
             screenshot_hotkey,
             mode,
-            backend,
-            backends,
+            choices,
             folder,
             browse,
-            memory,
             audio,
             microphone,
             cursor,
+            more_options,
             estimate,
             apply,
             error,
+            advanced,
+            below,
         }
+    }
+}
+
+/// The save and screenshot hotkeys, each taking a pressed combination.
+fn hotkey_fields(page: &gui::TabPage, config: &Config) -> [gui::Edit; 2] {
+    let hotkey = text_field(
+        page,
+        text::HOTKEY,
+        rows::HOTKEY,
+        HOTKEY_WIDTH,
+        &config.hotkey.to_string(),
+    );
+    let screenshot_hotkey = text_field_at(
+        page,
+        text::SCREENSHOT_HOTKEY,
+        COLUMN_X,
+        rows::HOTKEY,
+        HOTKEY_WIDTH,
+        &config.screenshot_hotkey.to_string(),
+    );
+    for field in [&hotkey, &screenshot_hotkey] {
+        hotkey_field::capture(field);
+    }
+    [hotkey, screenshot_hotkey]
+}
+
+/// The lists under More options besides the codec.
+struct AdvancedChoices {
+    backend: gui::ComboBox,
+    /// The backends offered, in the order of the backend list's items.
+    backends: Vec<Backend>,
+    memory: gui::ComboBox,
+    container: gui::ComboBox,
+    screenshot_format: gui::ComboBox,
+    captions: [gui::Label; 4],
+}
+
+impl AdvancedChoices {
+    fn new(page: &gui::TabPage, config: &Config) -> Self {
+        let backends = Backend::offered(config.backend);
+        let (backend, backend_caption) = choice_field(
+            page,
+            text::BACKEND,
+            INNER_X,
+            rows::BACKEND,
+            FULL_WIDTH,
+            &backends
+                .iter()
+                .map(|backend| backend.name())
+                .collect::<Vec<_>>(),
+            index_of(&backends, config.backend),
+        );
+        let (memory, memory_caption) = choice_field(
+            page,
+            text::MEMORY,
+            INNER_X,
+            rows::MEMORY,
+            CHOICE_WIDTH,
+            &Memory::ALL.map(Memory::name),
+            index_of(&Memory::ALL, config.buffer_memory),
+        );
+        let (container, container_caption) = choice_field(
+            page,
+            text::CONTAINER,
+            INNER_X,
+            rows::FORMATS,
+            CODEC_WIDTH,
+            &Container::ALL.map(Container::name),
+            index_of(&Container::ALL, config.container),
+        );
+        let (screenshot_format, screenshot_format_caption) = choice_field(
+            page,
+            text::SCREENSHOT_FORMAT,
+            COLUMN_X,
+            rows::FORMATS,
+            CODEC_WIDTH,
+            &ScreenshotFormat::ALL.map(ScreenshotFormat::name),
+            index_of(&ScreenshotFormat::ALL, config.screenshot_format),
+        );
+        Self {
+            backend,
+            backends,
+            memory,
+            container,
+            screenshot_format,
+            captions: [
+                backend_caption,
+                memory_caption,
+                container_caption,
+                screenshot_format_caption,
+            ],
+        }
+    }
+
+    fn controls(&self) -> impl Iterator<Item = Control> {
+        [
+            &self.backend,
+            &self.memory,
+            &self.container,
+            &self.screenshot_format,
+        ]
+        .map(|field| Box::new(field.clone()) as Control)
+        .into_iter()
+        .chain(
+            self.captions
+                .clone()
+                .map(|caption| Box::new(caption) as Control),
+        )
     }
 }
 
@@ -525,8 +714,9 @@ struct EncodingFields {
 }
 
 impl EncodingFields {
-    fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec]) -> Self {
-        let (buffer_seconds, buffer_spin) = number_field(
+    /// Also returns the fields under More options: bitrate and codec.
+    fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec]) -> (Self, Vec<Control>) {
+        let (buffer_seconds, buffer_spin, _) = number_field(
             page,
             text::REPLAY_LENGTH,
             INNER_X,
@@ -534,39 +724,47 @@ impl EncodingFields {
             (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
             config.buffer_seconds,
         );
-        let (bitrate, bitrate_spin) = number_field(
+        let (frame_rate, frame_rate_spin, _) = number_field(
             page,
-            text::BITRATE,
+            text::FRAME_RATE,
             COLUMN_X,
             rows::REPLAY_LENGTH,
+            (MIN_FRAME_RATE, MAX_FRAME_RATE),
+            config.frame_rate,
+        );
+        let (bitrate, bitrate_spin, bitrate_caption) = number_field(
+            page,
+            text::BITRATE,
+            INNER_X,
+            rows::ENCODING,
             (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
             config.bitrate_mbps,
         );
         let names = codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>();
-        let codec = choice_field(
+        let (codec, codec_caption) = choice_field(
             page,
             text::CODEC,
-            INNER_X,
+            COLUMN_X,
             rows::ENCODING,
             CODEC_WIDTH,
             &names,
             index_of(codecs, config.codec).or(Some(0)),
         );
-        let (frame_rate, frame_rate_spin) = number_field(
-            page,
-            text::FRAME_RATE,
-            COLUMN_X,
-            rows::ENCODING,
-            (MIN_FRAME_RATE, MAX_FRAME_RATE),
-            config.frame_rate,
-        );
-        Self {
+        let advanced: Vec<Control> = vec![
+            Box::new(bitrate.clone()),
+            Box::new(bitrate_spin.clone()),
+            Box::new(bitrate_caption),
+            Box::new(codec.clone()),
+            Box::new(codec_caption),
+        ];
+        let fields = Self {
             buffer_seconds,
             bitrate,
             codec,
             frame_rate,
             _spins: [buffer_spin, bitrate_spin, frame_rate_spin],
-        }
+        };
+        (fields, advanced)
     }
 }
 
@@ -576,11 +774,13 @@ struct GeneralControls {
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
     error: TintedLabel,
+    /// Every control in the group, which moves with it when More options opens or closes.
+    controls: Vec<Control>,
 }
 
 impl GeneralControls {
     fn new(page: &gui::TabPage, config: &Config, start_with_windows: bool) -> Self {
-        let theme = choice_field(
+        let (theme, theme_caption) = choice_field(
             page,
             text::THEME,
             INNER_X,
@@ -617,12 +817,21 @@ impl GeneralControls {
             hidden_label(page, INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1),
             Tone::Error,
         );
+        let controls: Vec<Control> = vec![
+            Box::new(theme.clone()),
+            Box::new(theme_caption),
+            Box::new(start_with_windows.clone()),
+            Box::new(close_to_tray.clone()),
+            Box::new(check_for_updates.clone()),
+            Box::new(error.label().clone()),
+        ];
         Self {
             theme,
             start_with_windows,
             close_to_tray,
             check_for_updates,
             error,
+            controls,
         }
     }
 }
@@ -635,9 +844,9 @@ fn choice_field(
     width: i32,
     items: &[&str],
     selected: Option<u32>,
-) -> gui::ComboBox {
-    field_caption(page, caption, x, y);
-    gui::ComboBox::new(
+) -> (gui::ComboBox, gui::Label) {
+    let caption = field_caption(page, caption, x, y);
+    let field = gui::ComboBox::new(
         page,
         gui::ComboBoxOpts {
             position: gui::dpi(x + FIELD_OFFSET, y),
@@ -646,7 +855,8 @@ fn choice_field(
             selected_item: selected,
             ..Default::default()
         },
-    )
+    );
+    (field, caption)
 }
 
 fn number_field(
@@ -656,8 +866,8 @@ fn number_field(
     y: i32,
     (minimum, maximum): (u32, u32),
     value: u32,
-) -> (gui::Edit, gui::UpDown) {
-    field_caption(page, caption, x, y);
+) -> (gui::Edit, gui::UpDown, gui::Label) {
+    let caption = field_caption(page, caption, x, y);
     let initial = value.to_string();
     let edit = gui::Edit::new(
         page,
@@ -684,7 +894,7 @@ fn number_field(
             ..Default::default()
         },
     );
-    (edit, spin)
+    (edit, spin, caption)
 }
 
 fn check_box(
@@ -723,7 +933,7 @@ fn text_field_at(
     width: i32,
     value: &str,
 ) -> gui::Edit {
-    field_caption(page, caption, x, y);
+    let _caption = field_caption(page, caption, x, y);
     gui::Edit::new(
         page,
         gui::EditOpts {
@@ -736,35 +946,6 @@ fn text_field_at(
     )
 }
 
-fn source_fields(
-    page: &gui::TabPage,
-    config: &Config,
-    backends: &[Backend],
-) -> (gui::ComboBox, gui::ComboBox) {
-    let mode = choice_field(
-        page,
-        text::MODE,
-        INNER_X,
-        rows::MODE,
-        CHOICE_WIDTH,
-        &Mode::ALL.map(Mode::name),
-        index_of(&Mode::ALL, config.mode),
-    );
-    let backend = choice_field(
-        page,
-        text::BACKEND,
-        INNER_X,
-        rows::BACKEND,
-        FULL_WIDTH,
-        &backends
-            .iter()
-            .map(|backend| backend.name())
-            .collect::<Vec<_>>(),
-        index_of(backends, config.backend),
-    );
-    (mode, backend)
-}
-
 /// Also logs the warning, because the label is seen only once the tab is.
 fn codec_warning(config: &Config, codecs: &[Codec]) -> String {
     if codecs.contains(&config.codec) {
@@ -775,8 +956,8 @@ fn codec_warning(config: &Config, codecs: &[Codec]) -> String {
     warning
 }
 
-fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) {
-    let _caption = label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1);
+fn field_caption(page: &gui::TabPage, caption: &str, x: i32, y: i32) -> gui::Label {
+    label(page, caption, x, y + 4, FIELD_OFFSET - 4, 1)
 }
 
 /// Returns `None` for the default folder, so that a default folder that later moves is followed.
@@ -857,25 +1038,29 @@ mod tests {
         assert_eq!(
             [
                 rows::REPLAY_LENGTH,
-                rows::ENCODING,
                 rows::HOTKEY,
                 rows::MODE,
-                rows::BACKEND,
                 rows::FOLDER,
-                rows::MEMORY,
                 rows::AUDIO,
                 rows::CURSOR,
+                rows::MORE_OPTIONS,
+            ],
+            [26, 54, 82, 110, 138, 160, 184]
+        );
+        assert_eq!(
+            [
+                rows::ENCODING,
+                rows::BACKEND,
+                rows::MEMORY,
+                rows::FORMATS,
                 rows::ESTIMATE,
                 rows::APPLY,
+                rows::MORE_OPTIONS_HEIGHT,
             ],
-            [26, 54, 82, 110, 138, 166, 194, 222, 244, 270, 288]
+            [216, 244, 272, 300, 328, 350, 134]
         );
-        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 320));
-        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (326, 94));
-        assert_eq!(
-            rows::GENERAL_FRAME + rows::GENERAL_HEIGHT,
-            layout::FILL_Y + layout::FILL_HEIGHT
-        );
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 382));
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (388, 94));
         assert_eq!(
             [
                 rows::THEME,
@@ -883,8 +1068,17 @@ mod tests {
                 rows::CLOSE_TO_TRAY,
                 rows::STARTUP_ERROR
             ],
-            [346, 374, 396, 418]
+            [408, 436, 458, 480]
         );
+    }
+
+    #[test]
+    fn closed_the_page_fits_the_window_and_open_it_grows_the_window_to_fit() {
+        let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
+        let fill = layout::FILL_Y + layout::FILL_HEIGHT;
+        assert!(bottom - rows::MORE_OPTIONS_HEIGHT <= fill);
+        assert_eq!(MORE_OPTIONS_EXTRA, 62);
+        assert_eq!(bottom, fill + MORE_OPTIONS_EXTRA);
     }
 
     #[test]

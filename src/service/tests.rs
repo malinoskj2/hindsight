@@ -610,6 +610,31 @@ fn turning_off_closing_to_the_tray_is_saved() {
 }
 
 #[test]
+fn opening_more_options_is_saved() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let config = config_in(directory.path());
+    let worker = spawn(
+        steady,
+        RETRY_INTERVAL,
+        Some(Store::at(state.clone()).unwrap()),
+        config.clone(),
+    );
+
+    worker.set_more_options(true);
+    drop(worker);
+
+    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
+    assert_eq!(
+        saved,
+        Config {
+            more_options: true,
+            ..config
+        }
+    );
+}
+
+#[test]
 fn turning_off_update_checks_is_saved() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");
@@ -675,24 +700,32 @@ fn assert_silent_after(worker: &Worker, clock: &ManualClock, heard: &Heard) {
     assert_eq!(tones(heard).len(), before, "{:?}", tones(heard));
 }
 
-fn slow_write(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
+fn slow_write(
+    snapshot: &Snapshot,
+    directory: &Path,
+    container: Container,
+) -> Result<Saved, SaveError> {
     hold_until(&SLOW_WRITE_ENDS, &AtomicBool::new(false));
-    replay::save(snapshot, directory)
+    replay::save(snapshot, directory, container)
 }
 
 /// Saves the video as `replay::save` does, but as if the buffered sound could not be encoded.
-fn silent_write(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
+fn silent_write(
+    snapshot: &Snapshot,
+    directory: &Path,
+    container: Container,
+) -> Result<Saved, SaveError> {
     #[cfg(windows)]
     let error = EncodeError::Short { made: 0, needed: 1 };
     #[cfg(not(windows))]
     let error = EncodeError::Unsupported;
     Ok(Saved {
         sound_error: Some(error),
-        ..replay::save(snapshot, directory)?
+        ..replay::save(snapshot, directory, container)?
     })
 }
 
-fn failing_write(_: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
+fn failing_write(_: &Snapshot, directory: &Path, _: Container) -> Result<Saved, SaveError> {
     hold_until(&FAILING_WRITE_ENDS, &AtomicBool::new(false));
     Err(SaveError::Io {
         step: "create",

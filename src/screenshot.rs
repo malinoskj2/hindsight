@@ -1,4 +1,7 @@
-use crate::replay::{self, SaveError};
+use crate::{
+    config::ScreenshotFormat,
+    replay::{self, SaveError},
+};
 use std::{
     error::Error,
     fmt,
@@ -12,8 +15,11 @@ use std::{
 };
 use thiserror::Error;
 
-const EXTENSION: &str = "png";
 const BYTES_PER_PIXEL: usize = 4;
+const JPEG_QUALITY: u8 = 92;
+const AVIF_QUALITY: f32 = 80.0;
+/// The fastest of ravif's speeds: about two seconds of one core for a 1440p picture.
+const AVIF_SPEED: u8 = 10;
 const WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 /// A picture as the encoder receives it: 8-bit BGRA rows, top to bottom, with no padding.
@@ -190,25 +196,44 @@ pub(crate) enum ScreenshotError {
     Encode {
         path: PathBuf,
         #[source]
-        source: png::EncodingError,
+        source: EncodeError,
     },
 }
 
-/// Reads the picture back and writes it to `directory` as `hindsight_<date>_<time>.png`.
+#[derive(Debug, Error)]
+pub(crate) enum EncodeError {
+    #[error(transparent)]
+    Png(#[from] png::EncodingError),
+    #[error(transparent)]
+    Jpeg(#[from] jpeg_encoder::EncodingError),
+    #[error(transparent)]
+    Webp(#[from] image_webp::EncodingError),
+    #[error(transparent)]
+    Avif(#[from] ravif::Error),
+    #[error(transparent)]
+    Write(#[from] std::io::Error),
+    #[error("a JPEG holds at most 65535×65535 pixels, not {width}×{height}")]
+    TooLargeForJpeg { width: u32, height: u32 },
+}
+
+/// Reads the picture back and writes it to `directory` as `hindsight_<date>_<time>` in
+/// `format`.
 pub(crate) fn save(
     readback: Box<dyn Readback>,
     directory: &Path,
+    format: ScreenshotFormat,
 ) -> Result<PathBuf, ScreenshotError> {
     let still = readback.finish()?;
-    let (path, ()) =
-        replay::save_file(directory, EXTENSION, |partial| write_file(&still, partial))?;
+    let (path, ()) = replay::save_file(directory, format.extension(), |partial| {
+        write_file(&still, partial, format)
+    })?;
     Ok(path)
 }
 
-fn write_file(still: &Still, path: &Path) -> Result<(), ScreenshotError> {
+fn write_file(still: &Still, path: &Path, format: ScreenshotFormat) -> Result<(), ScreenshotError> {
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    encode(still, &mut output).map_err(|source| ScreenshotError::Encode {
+    encode(still, &mut output, format).map_err(|source| ScreenshotError::Encode {
         path: path.to_owned(),
         source,
     })?;
@@ -216,16 +241,60 @@ fn write_file(still: &Still, path: &Path) -> Result<(), ScreenshotError> {
     Ok(())
 }
 
-/// The picture is sRGB: an HDR display's is tone-mapped to it before the encoder sees it.
-fn encode(still: &Still, output: impl Write) -> Result<(), png::EncodingError> {
-    let mut encoder = png::Encoder::new(output, still.width, still.height);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&still.rgb())?;
-    writer.finish()
+/// The picture is sRGB: an HDR display's is tone-mapped to it before the encoder sees it. PNG
+/// and WebP are lossless.
+fn encode(
+    still: &Still,
+    mut output: impl Write,
+    format: ScreenshotFormat,
+) -> Result<(), EncodeError> {
+    let rgb = still.rgb();
+    match format {
+        ScreenshotFormat::Png => {
+            let mut encoder = png::Encoder::new(output, still.width, still.height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&rgb)?;
+            writer.finish()?;
+        }
+        ScreenshotFormat::Jpeg => {
+            let too_large = || EncodeError::TooLargeForJpeg {
+                width: still.width,
+                height: still.height,
+            };
+            let width = u16::try_from(still.width).map_err(|_| too_large())?;
+            let height = u16::try_from(still.height).map_err(|_| too_large())?;
+            jpeg_encoder::Encoder::new(&mut output, JPEG_QUALITY).encode(
+                &rgb,
+                width,
+                height,
+                jpeg_encoder::ColorType::Rgb,
+            )?;
+        }
+        ScreenshotFormat::Webp => image_webp::WebPEncoder::new(&mut output).encode(
+            &rgb,
+            still.width,
+            still.height,
+            image_webp::ColorType::Rgb8,
+        )?,
+        ScreenshotFormat::Avif => {
+            let (pixels, _) = rgb.as_chunks::<3>();
+            let pixels: Vec<ravif::RGB8> = pixels
+                .iter()
+                .map(|&[red, green, blue]| ravif::RGB8::new(red, green, blue))
+                .collect();
+            let image = ravif::Img::new(&pixels[..], still.width as usize, still.height as usize);
+            let encoded = ravif::Encoder::new()
+                .with_quality(AVIF_QUALITY)
+                .with_speed(AVIF_SPEED)
+                .encode_rgb(image)?;
+            output.write_all(&encoded.avif_file)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -269,9 +338,9 @@ mod tests {
         let folder = directory.path().join("screenshots");
         let still = Still::from_pitched(2, 2, 12, &PITCHED).unwrap();
 
-        let first = save(Box::new(still), &folder).unwrap();
+        let first = save(Box::new(still), &folder, ScreenshotFormat::Png).unwrap();
         let still = Still::from_pitched(2, 2, 12, &PITCHED).unwrap();
-        let second = save(Box::new(still), &folder).unwrap();
+        let second = save(Box::new(still), &folder, ScreenshotFormat::Png).unwrap();
 
         assert_ne!(first, second);
         assert!(first.starts_with(&folder));
@@ -290,6 +359,41 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_webp_and_avif_screenshots_carry_their_own_signatures() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("screenshots");
+        for (format, extension, signature) in [
+            (ScreenshotFormat::Jpeg, "jpg", &b"\xFF\xD8\xFF"[..]),
+            (ScreenshotFormat::Webp, "webp", &b"RIFF"[..]),
+            (ScreenshotFormat::Avif, "avif", &b"\0\0\0"[..]),
+        ] {
+            let still = Still::from_pitched(2, 2, 12, &PITCHED).unwrap();
+            let path = save(Box::new(still), &folder, format).unwrap();
+            assert_eq!(path.extension().unwrap(), extension);
+            let bytes = fs::read(&path).unwrap();
+            assert!(bytes.starts_with(signature), "{format}");
+        }
+        let webp = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "webp")
+            })
+            .unwrap();
+        assert_eq!(&fs::read(webp).unwrap()[8..12], b"WEBP");
+        let avif = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "avif")
+            })
+            .unwrap();
+        assert_eq!(&fs::read(avif).unwrap()[4..12], b"ftypavif");
+    }
+
+    #[test]
     fn a_failed_readback_writes_nothing() {
         #[derive(Debug)]
         struct Lost;
@@ -304,7 +408,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let folder = directory.path().join("screenshots");
 
-        let error = save(Box::new(Lost), &folder).unwrap_err();
+        let error = save(Box::new(Lost), &folder, ScreenshotFormat::Png).unwrap_err();
 
         assert_eq!(
             error.to_string(),

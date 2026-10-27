@@ -640,12 +640,9 @@ struct Clip {
 impl Clip {
     fn new(path: PathBuf, size: u64) -> Option<Self> {
         let file_name = path.file_name()?.to_str()?;
-        if !file_name
+        file_name
             .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(ClipName::EXTENSION))
-        {
-            return None;
-        }
+            .and_then(|(_, extension)| config::Container::of_extension(extension))?;
         let name = ClipName::parse(file_name);
         Some(Self { path, name, size })
     }
@@ -749,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn only_video_files_are_clips_and_a_hand_named_one_is_captioned_by_its_name() {
+    fn only_mp4_and_mkv_files_are_clips_and_a_hand_named_one_is_captioned_by_its_name() {
         assert!(Clip::new(PathBuf::from(r"D:\Clips\notes.txt"), 1).is_none());
         assert!(
             Clip::new(
@@ -763,6 +760,8 @@ mod tests {
         assert_eq!(named.caption(), "Boss fight.MP4 2\u{a0}MB");
         let recorded = clip("hindsight_2026-10-12_21-14-05.mp4");
         assert_eq!(recorded.caption(), "2026-10-12 21:14:05 0\u{a0}MB");
+        let matroska = clip("hindsight_2026-10-12_21-14-06.mkv");
+        assert_eq!(matroska.caption(), "2026-10-12 21:14:06 0\u{a0}MB");
     }
 
     #[test]
@@ -773,7 +772,7 @@ mod tests {
             clip("alpha.mp4"),
             clip("hindsight_2026-10-12_21-14-05-2.mp4"),
             clip("hindsight_2026-10-11_23-59-59.mp4"),
-            clip("hindsight_2026-10-12_09-00-00.mp4"),
+            clip("hindsight_2026-10-12_09-00-00.mkv"),
         ];
         newest_first(&mut clips);
         let names: Vec<String> = clips.iter().map(Clip::file_name).collect();
@@ -782,7 +781,7 @@ mod tests {
             [
                 "hindsight_2026-10-12_21-14-05-2.mp4",
                 "hindsight_2026-10-12_21-14-05.mp4",
-                "hindsight_2026-10-12_09-00-00.mp4",
+                "hindsight_2026-10-12_09-00-00.mkv",
                 "hindsight_2026-10-11_23-59-59.mp4",
                 "zebra.mp4",
                 "alpha.mp4",

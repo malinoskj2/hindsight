@@ -186,7 +186,83 @@ impl Theme {
     }
 }
 
-display_by_name!(Mode, Backend, Codec, Memory, Theme);
+/// The file format clips are saved in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Container {
+    #[default]
+    Mp4,
+    Mkv,
+}
+
+impl Container {
+    pub(crate) const ALL: [Self; 2] = [Self::Mp4, Self::Mkv];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Mp4 => "MP4",
+            Self::Mkv => "MKV",
+        }
+    }
+
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+        }
+    }
+
+    /// The container a file name's extension names, in any case.
+    pub(crate) fn of_extension(extension: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|container| extension.eq_ignore_ascii_case(container.extension()))
+    }
+}
+
+/// The file format screenshots are saved in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ScreenshotFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Webp,
+    Avif,
+}
+
+impl ScreenshotFormat {
+    #[cfg(windows)]
+    pub(crate) const ALL: [Self; 4] = [Self::Png, Self::Jpeg, Self::Webp, Self::Avif];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Webp => "WebP",
+            Self::Avif => "AVIF",
+        }
+    }
+
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Avif => "avif",
+        }
+    }
+}
+
+display_by_name!(
+    Mode,
+    Backend,
+    Codec,
+    Memory,
+    Theme,
+    Container,
+    ScreenshotFormat
+);
 
 /// The machine, as far as the defaults depend on it. Each part is `None` when it could not be
 /// read.
@@ -258,6 +334,10 @@ pub(crate) struct Config {
     pub(crate) close_to_tray: bool,
     /// Whether hindsight looks for a newer release when it starts and once a day.
     pub(crate) check_for_updates: bool,
+    pub(crate) container: Container,
+    pub(crate) screenshot_format: ScreenshotFormat,
+    /// Whether Settings shows the options under More options.
+    pub(crate) more_options: bool,
 }
 
 /// The settings as stored, before validation. Missing settings take their defaults.
@@ -286,6 +366,9 @@ struct RawConfig {
     buffer_memory: Memory,
     close_to_tray: bool,
     check_for_updates: bool,
+    container: Container,
+    screenshot_format: ScreenshotFormat,
+    more_options: bool,
     /// Settings written by a newer version, collected here so a downgrade still starts.
     #[serde(flatten)]
     #[expect(
@@ -314,6 +397,9 @@ impl Default for RawConfig {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            container,
+            screenshot_format,
+            more_options,
         } = Config::default();
         Self {
             mode,
@@ -332,6 +418,9 @@ impl Default for RawConfig {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            container,
+            screenshot_format,
+            more_options,
             unknown: BTreeMap::new(),
         }
     }
@@ -358,6 +447,9 @@ impl TryFrom<RawConfig> for Config {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            container,
+            screenshot_format,
+            more_options,
             unknown,
         } = raw;
         if !unknown.is_empty() {
@@ -384,6 +476,9 @@ impl TryFrom<RawConfig> for Config {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            container,
+            screenshot_format,
+            more_options,
         };
         config.validate()?;
         Ok(config)
@@ -409,6 +504,9 @@ impl Default for Config {
             buffer_memory: Memory::Ram,
             close_to_tray: true,
             check_for_updates: true,
+            container: Container::Mp4,
+            screenshot_format: ScreenshotFormat::Png,
+            more_options: false,
         }
     }
 }
@@ -817,6 +915,27 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains(r#""check_for_updates":false"#), "{json}");
         assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn files_default_to_mp4_and_png_with_more_options_closed() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        let old = parse(r#"{"buffer_seconds":120}"#).unwrap();
+        assert_eq!(old.container, Container::Mp4);
+        assert_eq!(old.screenshot_format, ScreenshotFormat::Png);
+        assert!(!old.more_options);
+        let config = Config {
+            container: Container::Mkv,
+            screenshot_format: ScreenshotFormat::Webp,
+            more_options: true,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""container":"mkv""#), "{json}");
+        assert!(json.contains(r#""screenshot_format":"webp""#), "{json}");
+        assert_eq!(parse(&json).unwrap(), config);
+        assert!(parse(r#"{"container":"avi"}"#).is_err());
     }
 
     #[test]

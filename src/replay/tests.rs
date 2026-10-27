@@ -121,7 +121,9 @@ fn a_buffer_in_a_store_saves_the_same_clip() {
         assert!(!kinds[0], "the oldest packets are in the store");
 
         let directory = tempfile::tempdir().unwrap();
-        let path = save(&snapshot, directory.path()).unwrap().path;
+        let path = save(&snapshot, directory.path(), Container::Mp4)
+            .unwrap()
+            .path;
         assert_eq!(fs::read(path).unwrap(), expected, "pieces of {piece}");
 
         let from_store = snapshot.clip().unwrap();
@@ -167,13 +169,13 @@ fn a_buffer_on_disk_saves_the_same_clip() {
     assert!(control.queued() > 0);
 
     let clips = tempfile::tempdir().unwrap();
-    let path = save(&snapshot, clips.path()).unwrap().path;
+    let path = save(&snapshot, clips.path(), Container::Mp4).unwrap().path;
     assert_eq!(fs::read(&path).unwrap(), expected, "from staging");
     fs::remove_file(path).unwrap();
 
     control.hold(false);
     control.settle();
-    let path = save(&snapshot, clips.path()).unwrap().path;
+    let path = save(&snapshot, clips.path(), Container::Mp4).unwrap().path;
     assert_eq!(fs::read(path).unwrap(), expected, "from the file");
 }
 
@@ -192,7 +194,7 @@ fn a_save_from_a_store_holds_a_few_packets_not_the_clip() {
     let directory = tempfile::tempdir().unwrap();
 
     let saving = heap::peak_during(|| {
-        save(&snapshot, directory.path()).unwrap();
+        save(&snapshot, directory.path(), Container::Mp4).unwrap();
     });
     assert!(
         saving < WRITE_BUFFER_BYTES + 2 * FRAME_BYTES + (256 << 10),
@@ -212,7 +214,7 @@ fn keyframes_are_recognised_for_every_codec() {
     assert!(!is_keyframe(Codec::Av1, &av1::tests::inter_frame()));
 }
 
-fn encoded_fixture(codec: Codec) -> Vec<Packet> {
+pub(in crate::replay) fn encoded_fixture(codec: Codec) -> Vec<Packet> {
     let units: Vec<&[u8]> = match codec {
         Codec::H264 => {
             annexb::access_units(include_bytes!("../../tests/fixtures/h264.264"), |unit| {
@@ -537,7 +539,12 @@ fn a_saved_clip_encodes_its_sound_in_line_with_the_video() {
     );
 
     let directory = tempfile::tempdir().unwrap();
-    let file = fs::read(save(&snapshot, directory.path()).unwrap().path).unwrap();
+    let file = fs::read(
+        save(&snapshot, directory.path(), Container::Mp4)
+            .unwrap()
+            .path,
+    )
+    .unwrap();
     let (moov, _) = mp4::tests::index(&file);
     let [_, sound] = &moov.trak[..] else {
         panic!("expected two tracks");
@@ -568,7 +575,9 @@ fn the_click_plays_in_time_with_the_video() {
     let live = live_with_a_click();
     let snapshot = snapshot_with_sound(&live).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let clip = save(&snapshot, directory.path()).unwrap().path;
+    let clip = save(&snapshot, directory.path(), Container::Mp4)
+        .unwrap()
+        .path;
     let decoded = crate::audio::testing::decode_mono(&clip);
     let peak = crate::audio::testing::peak(&decoded);
     println!(
@@ -637,8 +646,8 @@ fn saves_complete_files_under_unique_names() {
     let snapshot = live_with(40).snapshot().unwrap();
     let target = directory.path().join("clips");
 
-    let first = save(&snapshot, &target).unwrap().path;
-    let second = save(&snapshot, &target).unwrap().path;
+    let first = save(&snapshot, &target, Container::Mp4).unwrap().path;
+    let second = save(&snapshot, &target, Container::Mp4).unwrap().path;
 
     assert_ne!(first, second);
     assert!(
@@ -659,12 +668,14 @@ fn saves_complete_files_under_unique_names() {
 fn a_name_another_file_holds_is_skipped_not_replaced() {
     let directory = tempfile::tempdir().unwrap();
     let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
-    let taken = directory.path().join(name.file_name(ClipName::EXTENSION));
+    let taken = directory
+        .path()
+        .join(name.file_name(Container::Mp4.extension()));
     fs::write(&taken, b"theirs").unwrap();
     let partial = directory.path().join("clip.partial");
     fs::write(&partial, b"ours").unwrap();
 
-    let path = claim_name(directory.path(), name, ClipName::EXTENSION, &partial).unwrap();
+    let path = claim_name(directory.path(), name, Container::Mp4.extension(), &partial).unwrap();
 
     assert_eq!(
         path,
@@ -685,7 +696,7 @@ fn a_failed_save_leaves_no_partial_file() {
     };
 
     assert_matches!(
-        save(&snapshot, directory.path()),
+        save(&snapshot, directory.path(), Container::Mp4),
         Err(SaveError::Mux(MuxError::NoSequenceHeader))
     );
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
