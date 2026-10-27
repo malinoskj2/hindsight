@@ -60,6 +60,16 @@ jobs:
             exit 1
           }
 
+          # The release notes are the build commit's CHANGELOG.md section for this version, the
+          # same notes the build embeds in the app.
+          notes=$(gh api "repos/$GH_REPO/contents/CHANGELOG.md?ref=$build_sha" \
+            -H "Accept: application/vnd.github.raw" \
+            | awk -v version="$cargo_version" '
+                { sub(/\r$/, "") }
+                /^## / { if (found) ended = 1; split(substr($0, 4), words, " "); found = !ended && words[1] == version; next }
+                found && (started || NF) { started = 1; print }')
+          [[ -n "$notes" ]] || { echo "CHANGELOG.md at $build_sha has no section for $cargo_version" >&2; exit 1; }
+
           gh run download "$BUILD_RUN_ID" --name hindsight-windows-x64 --dir release
           for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt; do
             gh attestation verify "release/$asset" --repo "$GH_REPO" \
@@ -69,6 +79,7 @@ jobs:
 
           echo "sha=$build_sha" >> "$GITHUB_OUTPUT"
           {
+            printf '%s\n\n' "$notes"
             echo "Built from commit $build_sha."
             echo
             echo "Build: https://github.com/$GH_REPO/actions/runs/$BUILD_RUN_ID"

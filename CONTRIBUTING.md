@@ -46,6 +46,16 @@ set HINDSIGHT_UPDATE_FROM=0.1.0
 The About tab then offers the latest release, and Update reinstalls it. The copy the installer
 starts afterwards does not inherit the variable.
 
+## The changelog
+
+[CHANGELOG.md](CHANGELOG.md) has a section for each version, headed with the version alone, such
+as `## 0.2.1`. Each change is a `- ` line of its own, written for the people who use hindsight
+rather than as a list of commits. A change worth noticing adds a line to the next version's
+section.
+
+Before tagging a release, check that the section for the version in `Cargo.toml` is complete.
+The release workflow uses it as the release's notes on GitHub, and stops if it is missing.
+
 ## Before you open a pull request
 
 CI runs these, so running them first saves a round trip:
