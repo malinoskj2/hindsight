@@ -161,10 +161,7 @@ pub(crate) fn buffer_file() -> PathBuf {
 }
 
 fn settings(config: &Config) -> Result<Map<String, Value>, StorageError> {
-    match serde_json::to_value(config)? {
-        Value::Object(settings) => Ok(settings),
-        _ => unreachable!("a config serializes as an object"),
-    }
+    Ok(serde_json::from_value(serde_json::to_value(config)?)?)
 }
 
 fn lock_instance(root: &Path) -> Result<File, StorageError> {
