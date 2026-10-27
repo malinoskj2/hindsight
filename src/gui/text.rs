@@ -59,6 +59,7 @@ pub(super) const FRAME_RATE: &str = "Frame rate";
 pub(super) const REPLAY_LENGTH: &str = "Replay length (s)";
 pub(super) const BITRATE: &str = "Bitrate (Mbps)";
 pub(super) const HOTKEY: &str = "Save hotkey";
+pub(super) const SCREENSHOT_HOTKEY: &str = "Screenshot key";
 pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";

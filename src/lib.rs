@@ -1,5 +1,5 @@
 //! hindsight keeps the last moments of a game in a replay buffer, captured and encoded on the
-//! GPU, and saves them as a clip when the hotkey is pressed.
+//! GPU, and saves them as a clip when the hotkey is pressed. Another hotkey saves a screenshot.
 //!
 //! Off Windows, `run` only returns an error, so outside tests the portable modules are expected
 //! to be dead code. Their test build still checks for dead code, exempting only the items that
@@ -47,6 +47,14 @@ mod log;
     )
 )]
 mod replay;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
+mod screenshot;
 #[cfg_attr(
     all(not(windows), not(test)),
     expect(

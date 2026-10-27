@@ -11,6 +11,7 @@ mod nvenc;
 mod pacer;
 mod pipeline;
 mod priority;
+mod still;
 mod vram;
 
 pub(crate) use pipeline::record;

@@ -19,6 +19,7 @@ const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
 const CLIP_DIRECTORY: &str = "hindsight";
 const VIDEO_DIRECTORY: &str = "videos";
+const SCREENSHOT_DIRECTORY: &str = "screenshots";
 /// Installed memory from which the buffer defaults to RAM. Games of this generation want 8 to
 /// 16 GB of their own.
 const RAM_BUFFER_MEMORY: u64 = 32 << 30;
@@ -240,6 +241,8 @@ pub(crate) struct Config {
     pub(crate) frame_rate: u32,
     pub(crate) bitrate_mbps: u32,
     pub(crate) hotkey: Hotkey,
+    /// Never the same as `hotkey`.
+    pub(crate) screenshot_hotkey: Hotkey,
     /// `None` for the default folder.
     pub(crate) clip_directory: Option<PathBuf>,
     pub(crate) theme: Theme,
@@ -270,6 +273,7 @@ struct RawConfig {
     frame_rate: u32,
     bitrate_mbps: u32,
     hotkey: Hotkey,
+    screenshot_hotkey: Hotkey,
     /// Older files wrote the default folder as an empty string.
     #[serde(deserialize_with = "folder_or_none")]
     clip_directory: Option<PathBuf>,
@@ -298,6 +302,7 @@ impl Default for RawConfig {
             frame_rate,
             bitrate_mbps,
             hotkey,
+            screenshot_hotkey,
             clip_directory,
             theme,
             audio,
@@ -314,6 +319,7 @@ impl Default for RawConfig {
             frame_rate,
             bitrate_mbps,
             hotkey,
+            screenshot_hotkey,
             clip_directory,
             theme,
             audio,
@@ -338,6 +344,7 @@ impl TryFrom<RawConfig> for Config {
             frame_rate,
             bitrate_mbps,
             hotkey,
+            screenshot_hotkey,
             clip_directory,
             theme,
             audio,
@@ -362,6 +369,7 @@ impl TryFrom<RawConfig> for Config {
             frame_rate,
             bitrate_mbps,
             hotkey,
+            screenshot_hotkey: apart_from(hotkey, screenshot_hotkey),
             clip_directory,
             theme,
             audio,
@@ -385,6 +393,7 @@ impl Default for Config {
             frame_rate: 60,
             bitrate_mbps: 50,
             hotkey: Hotkey::DEFAULT,
+            screenshot_hotkey: Hotkey::DEFAULT_SCREENSHOT,
             clip_directory: None,
             theme: Theme::Classic,
             audio: true,
@@ -416,6 +425,9 @@ impl Config {
         if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
             return Err(ConfigError::Bitrate);
         }
+        if self.screenshot_hotkey == self.hotkey {
+            return Err(ConfigError::SameHotkeys);
+        }
         if let Some(folder) = &self.clip_directory
             && !folder.is_absolute()
         {
@@ -443,6 +455,10 @@ impl Config {
         self.clip_directory().join(VIDEO_DIRECTORY)
     }
 
+    pub(crate) fn screenshot_directory(&self) -> PathBuf {
+        self.clip_directory().join(SCREENSHOT_DIRECTORY)
+    }
+
     pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
         self.buffer_seconds as u64 * self.bitrate() as u64 / BITS_PER_BYTE
     }
@@ -468,6 +484,8 @@ pub(crate) enum ConfigError {
         MAX_BITRATE_MBPS
     )]
     Bitrate,
+    #[error("the screenshot hotkey must differ from the save hotkey")]
+    SameHotkeys,
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
     ClipDirectory,
 }
@@ -479,6 +497,23 @@ pub(crate) fn video_directories(clip_directory: &Path) -> [PathBuf; 2] {
         clip_directory.join(VIDEO_DIRECTORY),
         clip_directory.to_path_buf(),
     ]
+}
+
+/// Settings from before screenshots may have chosen the screenshot hotkey's default for saving,
+/// so a screenshot hotkey equal to the save hotkey gives way to a default that differs.
+fn apart_from(save: Hotkey, screenshot: Hotkey) -> Hotkey {
+    if screenshot != save {
+        return screenshot;
+    }
+    let instead = if save == Hotkey::DEFAULT_SCREENSHOT {
+        Hotkey::DEFAULT
+    } else {
+        Hotkey::DEFAULT_SCREENSHOT
+    };
+    log::warning(format!(
+        "Settings · screenshot hotkey {screenshot} is the save hotkey · {instead} instead"
+    ));
+    instead
 }
 
 fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
@@ -522,6 +557,7 @@ mod tests {
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.frame_rate, 60);
         assert_eq!(config.hotkey.to_string(), "Alt+F10");
+        assert_eq!(config.screenshot_hotkey.to_string(), "Alt+F11");
         assert_eq!(config.theme, Theme::Classic);
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
@@ -582,6 +618,16 @@ mod tests {
         assert!(json.contains(r#""hotkey":"Ctrl+Shift+S""#), "{json}");
         assert_eq!(parse(&json).unwrap(), config);
 
+        let config = parse(r#"{"screenshot_hotkey":"PrintScreen"}"#).unwrap();
+        assert_eq!(config.screenshot_hotkey.to_string(), "PrintScreen");
+        assert!(parse(r#"{"screenshot_hotkey":"Hyper+F1"}"#).is_err());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains(r#""screenshot_hotkey":"PrintScreen""#),
+            "{json}"
+        );
+        assert_eq!(parse(&json).unwrap(), config);
+
         assert_eq!(
             parse(r#"{"clip_directory":""}"#).unwrap().clip_directory,
             None
@@ -595,6 +641,38 @@ mod tests {
         assert_eq!(config.clip_directory, Some(folder));
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn a_save_hotkey_chosen_before_screenshots_moves_the_screenshot_hotkey_aside() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json).unwrap();
+        let hotkeys = |config: Config| {
+            (
+                config.hotkey.to_string(),
+                config.screenshot_hotkey.to_string(),
+            )
+        };
+
+        assert_eq!(
+            hotkeys(parse(r#"{"hotkey":"Alt+F11"}"#)),
+            ("Alt+F11".to_owned(), "Alt+F10".to_owned())
+        );
+        assert_eq!(
+            hotkeys(parse(
+                r#"{"hotkey":"Alt+F11","screenshot_hotkey":"Alt+F11"}"#
+            )),
+            ("Alt+F11".to_owned(), "Alt+F10".to_owned())
+        );
+        assert_eq!(
+            hotkeys(parse(r#"{"hotkey":"Ctrl+S","screenshot_hotkey":"Ctrl+S"}"#)),
+            ("Ctrl+S".to_owned(), "Alt+F11".to_owned())
+        );
+        assert_eq!(
+            hotkeys(parse(
+                r#"{"hotkey":"Alt+F11","screenshot_hotkey":"Ctrl+P"}"#
+            )),
+            ("Alt+F11".to_owned(), "Ctrl+P".to_owned())
+        );
     }
 
     #[test]
@@ -731,6 +809,10 @@ mod tests {
         assert_matches!(config.validate(), Err(ConfigError::Bitrate));
         config.bitrate_mbps = 50;
 
+        config.screenshot_hotkey = config.hotkey;
+        assert_matches!(config.validate(), Err(ConfigError::SameHotkeys));
+        config.screenshot_hotkey = Hotkey::DEFAULT_SCREENSHOT;
+
         config.clip_directory = Some(PathBuf::from(r"Clips\here"));
         assert_matches!(config.validate(), Err(ConfigError::ClipDirectory));
         config.clip_directory = Some(absolute_folder());
@@ -781,13 +863,17 @@ mod tests {
     }
 
     #[test]
-    fn videos_have_a_folder_in_the_clip_folder() {
+    fn videos_and_screenshots_each_have_a_folder_in_the_clip_folder() {
         let config = Config {
             clip_directory: Some(absolute_folder()),
             ..Config::default()
         };
 
         assert_eq!(config.video_directory(), absolute_folder().join("videos"));
+        assert_eq!(
+            config.screenshot_directory(),
+            absolute_folder().join("screenshots")
+        );
         assert_eq!(
             video_directories(&config.clip_directory()),
             [config.video_directory(), absolute_folder()]

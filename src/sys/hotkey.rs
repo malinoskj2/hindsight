@@ -1,4 +1,5 @@
-//! The global hotkey that saves a clip, written as text such as `Alt+F10`.
+//! The global hotkeys that save a clip and take a screenshot, written as text such as
+//! `Alt+F10`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, ops::BitOr, str::FromStr};
@@ -82,6 +83,11 @@ impl Hotkey {
     pub(crate) const DEFAULT: Self = Self {
         modifiers: MOD_ALT,
         key: VK_F1 + 9,
+    };
+    /// Beside the save hotkey, and free of the NVIDIA overlay's own Alt+F1 to Alt+F3.
+    pub(crate) const DEFAULT_SCREENSHOT: Self = Self {
+        modifiers: MOD_ALT,
+        key: VK_F1 + 10,
     };
 
     /// Returns the hotkey a hotkey field enters when `key`, a virtual-key code, is pressed with
@@ -235,7 +241,7 @@ const fn is_numpad_digit(key: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use native::{RegisterError, SAVE_HOTKEY_ID, register, unregister};
+pub(crate) use native::{Action, RegisterError, register, unregister};
 
 #[cfg(windows)]
 mod native {
@@ -243,7 +249,37 @@ mod native {
     use thiserror::Error;
     use winsafe::{self as w, co};
 
-    pub(crate) const SAVE_HOTKEY_ID: i32 = 1;
+    /// What a hotkey does. Each is registered under an ID of its own.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Action {
+        Save,
+        Screenshot,
+    }
+
+    impl Action {
+        pub(crate) const ALL: [Self; 2] = [Self::Save, Self::Screenshot];
+
+        pub(super) const fn id(self) -> i32 {
+            match self {
+                Self::Save => 1,
+                Self::Screenshot => 2,
+            }
+        }
+
+        /// The action registered under the ID a `WM_HOTKEY` message carries.
+        pub(crate) fn from_id(id: usize) -> Option<Self> {
+            Self::ALL
+                .into_iter()
+                .find(|action| usize::try_from(action.id()) == Ok(id))
+        }
+
+        pub(crate) const fn index(self) -> usize {
+            match self {
+                Self::Save => 0,
+                Self::Screenshot => 1,
+            }
+        }
+    }
 
     #[derive(Debug, Error)]
     pub(crate) enum RegisterError {
@@ -253,11 +289,15 @@ mod native {
         System(Hotkey, co::ERROR),
     }
 
-    pub(crate) fn register(window: &w::HWND, hotkey: Hotkey) -> Result<(), RegisterError> {
+    pub(crate) fn register(
+        window: &w::HWND,
+        action: Action,
+        hotkey: Hotkey,
+    ) -> Result<(), RegisterError> {
         let (modifiers, key) = system_codes(hotkey);
-        let _ = window.UnregisterHotKey(SAVE_HOTKEY_ID);
+        let _ = window.UnregisterHotKey(action.id());
         window
-            .RegisterHotKey(SAVE_HOTKEY_ID, modifiers, key)
+            .RegisterHotKey(action.id(), modifiers, key)
             .map_err(|error| {
                 if error == co::ERROR::HOTKEY_ALREADY_REGISTERED {
                     RegisterError::Taken(hotkey)
@@ -267,8 +307,8 @@ mod native {
             })
     }
 
-    pub(crate) fn unregister(window: &w::HWND) {
-        let _ = window.UnregisterHotKey(SAVE_HOTKEY_ID);
+    pub(crate) fn unregister(window: &w::HWND, action: Action) {
+        let _ = window.UnregisterHotKey(action.id());
     }
 
     #[expect(unsafe_code, reason = "builds winsafe's MOD and VK from raw values")]
@@ -310,6 +350,26 @@ mod tests {
         assert_eq!(parse("Ctrl+PageDown").unwrap().key, 0x22);
         assert_eq!(parse("F24").unwrap().key, VK_F1 + 23);
         assert_eq!(parse("Pause").unwrap().modifiers, 0);
+    }
+
+    #[test]
+    fn the_default_hotkeys_are_alt_f10_and_alt_f11() {
+        assert_eq!(Hotkey::DEFAULT.to_string(), "Alt+F10");
+        assert_eq!(Hotkey::DEFAULT_SCREENSHOT.to_string(), "Alt+F11");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn each_action_is_found_again_by_its_own_id() {
+        for action in Action::ALL {
+            assert_ne!(action.id(), 0);
+            assert_eq!(
+                Action::from_id(usize::try_from(action.id()).unwrap()),
+                Some(action)
+            );
+            assert_eq!(Action::ALL[action.index()], action);
+        }
+        assert_eq!(Action::from_id(0), None);
     }
 
     #[test]

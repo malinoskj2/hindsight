@@ -1,7 +1,12 @@
 //! The rolling buffers of encoded video and captured sound a recording session shares with
 //! the rest of the application, and saving them to an MP4 file.
 
-use crate::{audio::EncodeError, config::Codec, log};
+use crate::{
+    audio::EncodeError,
+    config::Codec,
+    log,
+    screenshot::{self, Reply},
+};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter},
@@ -114,6 +119,7 @@ pub(crate) struct Live {
         )
     )]
     capture_processor: AtomicU32,
+    stills: screenshot::Requests,
 }
 
 /// Counts of the frames pushed, read without taking the ring's lock.
@@ -158,6 +164,7 @@ impl Live {
             audio: OnceLock::new(),
             sound: Mutex::new(AudioRings::new()),
             capture_processor: AtomicU32::new(u32::MAX),
+            stills: screenshot::Requests::default(),
         }
     }
 
@@ -178,6 +185,21 @@ impl Live {
     pub(crate) fn capture_processor(&self) -> Option<u32> {
         let processor = self.capture_processor.load(Ordering::Relaxed);
         (processor != u32::MAX).then_some(processor)
+    }
+
+    /// Asks the capture thread for the picture it last gave the encoder.
+    pub(crate) fn request_still(&self, reply: Reply) {
+        self.stills.ask(reply);
+    }
+
+    /// Cheap enough to call every frame: a single atomic load while nothing is asked.
+    pub(crate) fn take_still_request(&self) -> Option<Reply> {
+        self.stills.take()
+    }
+
+    /// Answers a request the capture thread did not take as abandoned.
+    pub(crate) fn withdraw_still(&self) {
+        drop(self.stills.withdraw());
     }
 
     /// Runs `callback` on the capture thread once the stream is recorded.

@@ -1,10 +1,12 @@
-//! The recording worker: keeps one capture session running and saves clips from its buffer.
+//! The recording worker: keeps one capture session running, saves clips from its buffer and
+//! screenshots of what it captures.
 
 use crate::{
     audio::{self, Sources},
     config::{Backend, Config, Memory, Mode, Theme},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
+    screenshot::{self, Readback, Reply, ScreenshotError, Taken},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -297,6 +299,9 @@ enum Command {
     Start(Config),
     Target(Target),
     Save,
+    Screenshot,
+    /// The capture thread's answer to a screenshot request.
+    Captured(Taken),
     /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
@@ -359,6 +364,10 @@ impl Worker {
         self.request(Command::Save);
     }
 
+    pub(crate) fn screenshot(&self) {
+        self.request(Command::Screenshot);
+    }
+
     pub(crate) fn toggle_pause(&self) {
         self.request(Command::TogglePause);
     }
@@ -412,6 +421,17 @@ struct Saving {
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<Saved, SaveError>>,
     next_tick: Instant,
+}
+
+/// A screenshot under way: asked of the capture thread, then written on a thread of its own.
+enum Shot {
+    Asked,
+    Writing(Writing),
+}
+
+struct Writing {
+    done: Arc<AtomicBool>,
+    join: JoinHandle<Result<PathBuf, ScreenshotError>>,
 }
 
 /// Dropped when a capture or save thread's closure ends. Marks the thread done and wakes the
@@ -525,6 +545,7 @@ struct Machine {
     paused: bool,
     retry_at: Option<Instant>,
     saving: Option<Saving>,
+    shot: Option<Shot>,
     sample: Option<Sample>,
     wake: Sender<Command>,
 }
@@ -555,6 +576,7 @@ impl Machine {
             paused: false,
             retry_at: None,
             saving: None,
+            shot: None,
             sample: None,
             wake,
         }
@@ -568,6 +590,8 @@ impl Machine {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
+                Ok(Command::Screenshot) => self.screenshot(),
+                Ok(Command::Captured(taken)) => self.captured(taken),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
                 Ok(Command::Theme(theme)) => self.remember(Config {
@@ -603,6 +627,9 @@ impl Machine {
         self.stop_session();
         if let Some(saving) = self.saving.take() {
             self.finish_save(saving);
+        }
+        if let Some(Shot::Writing(writing)) = self.shot.take() {
+            self.finish_shot(writing);
         }
         self.bank_live();
         self.publish();
@@ -719,6 +746,80 @@ impl Machine {
         }
     }
 
+    fn screenshot(&mut self) {
+        if self.shot.is_some() {
+            log::info(text::ALREADY_SHOOTING);
+            return;
+        }
+        let capturing = self.session.is_some();
+        let Some(live) = self
+            .live
+            .as_ref()
+            .filter(|live| capturing && live.stream().is_some())
+        else {
+            log::warning(text::NOTHING_TO_SHOOT);
+            (self.services.chime)(Tone::Failed);
+            return;
+        };
+        let wake = self.wake.clone();
+        live.request_still(Reply::new(move |taken| {
+            let _ = wake.send(Command::Captured(taken));
+        }));
+        self.shot = Some(Shot::Asked);
+    }
+
+    fn captured(&mut self, taken: Taken) {
+        self.shot = None;
+        let readback = match taken {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.report_failed_shot(log::chain(&error));
+                return;
+            }
+        };
+        let (done, ending) = self.ending();
+        match self.spawn_shot(readback, ending) {
+            Ok(join) => self.shot = Some(Shot::Writing(Writing { done, join })),
+            Err(error) => self.report_failed_shot(error),
+        }
+    }
+
+    fn spawn_shot(
+        &self,
+        readback: Box<dyn Readback>,
+        ending: Ending,
+    ) -> io::Result<JoinHandle<Result<PathBuf, ScreenshotError>>> {
+        let directory = self.config.screenshot_directory();
+        thread::Builder::new()
+            .name("screenshot".to_owned())
+            .spawn(move || {
+                let _ending = ending;
+                #[cfg(windows)]
+                if let Err(error) = sys::thread::enter_background_mode() {
+                    log::warning(text::background_save_failed(error));
+                }
+                screenshot::save(readback, &directory)
+            })
+    }
+
+    fn finish_shot(&mut self, writing: Writing) {
+        match writing.join.join() {
+            Ok(Ok(path)) => {
+                log::info(text::screenshot_saved(&path));
+                self.error = None;
+                (self.services.chime)(Tone::Saved);
+            }
+            Ok(Err(error)) => self.report_failed_shot(log::chain(&error)),
+            Err(payload) => {
+                self.report_failed_shot(text::screenshot_panicked(panic_message(&*payload)));
+            }
+        }
+    }
+
+    fn report_failed_shot(&mut self, error: impl Display) {
+        self.report_failed_save(text::screenshot_failed(error));
+    }
+
     /// Saves a change to a setting that leaves recording alone.
     fn remember(&mut self, config: Config) {
         // The failure is reported, and the change still holds for this run.
@@ -828,12 +929,21 @@ impl Machine {
             return;
         };
         session.stop.store(true, Ordering::Relaxed);
-        match session.join.join() {
+        let outcome = session.join.join();
+        self.withdraw_still();
+        match outcome {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => log::error(text::session_failed(format_args!("{error:#}"))),
             Err(payload) => log::error(text::session_failed(text::capture_panicked(
                 panic_message(&*payload),
             ))),
+        }
+    }
+
+    /// Once the capture thread has ended, a screenshot it never took is answered as abandoned.
+    fn withdraw_still(&self) {
+        if let Some(live) = &self.live {
+            live.withdraw_still();
         }
     }
 
@@ -854,7 +964,9 @@ impl Machine {
             .session
             .take_if(|session| session.done.load(Ordering::Acquire))
         {
-            self.session_ended(session.join.join());
+            let outcome = session.join.join();
+            self.withdraw_still();
+            self.session_ended(outcome);
         }
 
         if self.retry_at.is_some_and(|due| self.now() >= due) {
@@ -869,6 +981,12 @@ impl Machine {
             self.finish_save(saving);
         }
         self.tick_save();
+
+        if let Some(Shot::Writing(writing)) = self.shot.take_if(
+            |shot| matches!(shot, Shot::Writing(writing) if writing.done.load(Ordering::Acquire)),
+        ) {
+            self.finish_shot(writing);
+        }
     }
 
     fn session_ended(&mut self, outcome: thread::Result<Result<Ended>>) {

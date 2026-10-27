@@ -17,7 +17,7 @@ use crate::{
     service::{Target, Worker},
     sys::{
         foreground::{self, ForegroundHook},
-        hotkey::{self, Hotkey, RegisterError},
+        hotkey::{self, Action, RegisterError},
         icon, instance, shell, startup,
         tray::{Tray, TrayAction},
         window,
@@ -81,7 +81,8 @@ struct Inner {
     /// The full-screen app seen most recently, offered to the worker once it has stayed in front.
     pending_target: RefCell<Option<Target>>,
     quitting: Cell<bool>,
-    hotkey_error: RefCell<Option<String>>,
+    /// Indexed by [`Action::index`].
+    hotkey_errors: RefCell<[Option<String>; 2]>,
     tray_error: OnceCell<String>,
     initial_startup_error: Cell<Option<String>>,
     /// The height the pages have grown by to show their messages.
@@ -135,7 +136,7 @@ impl Main {
             foreground_hook: RefCell::default(),
             pending_target: RefCell::default(),
             quitting: Cell::new(false),
-            hotkey_error: RefCell::default(),
+            hotkey_errors: RefCell::default(),
             tray_error: OnceCell::new(),
             initial_startup_error: Cell::new(startup_error),
             extra: Cell::new(0),
@@ -302,7 +303,7 @@ impl Main {
             pane.on_create();
         }
         self.show_initial_startup_error();
-        self.register_configured_hotkey();
+        self.register_configured_hotkeys();
         self.watch_foreground_changes();
         self.add_tray_icon();
         self.refresh();
@@ -358,8 +359,10 @@ impl Main {
     }
 
     fn on_hotkey(&self, id: usize) {
-        if usize::try_from(hotkey::SAVE_HOTKEY_ID) == Ok(id) {
-            self.save();
+        match Action::from_id(id) {
+            Some(Action::Save) => self.save(),
+            Some(Action::Screenshot) => self.0.worker.screenshot(),
+            None => {}
         }
     }
 
@@ -457,13 +460,16 @@ impl Main {
                 return;
             }
         };
-        if let Err(error) = self.switch_hotkey(config.hotkey) {
+        if let Err(error) = self.switch_hotkeys(&config) {
             let error = SettingsError::from(error);
             self.0.settings.show_settings_error(Some(&error));
             return;
         }
         self.0.settings.show_settings_error(None);
         self.0.settings.show_hotkey(&config.hotkey.to_string());
+        self.0
+            .settings
+            .show_screenshot_hotkey(&config.screenshot_hotkey.to_string());
         *self.0.config.borrow_mut() = config.clone();
         self.0.worker.start(config);
         self.watch_foreground();
@@ -521,46 +527,71 @@ impl Main {
         resize_width_by(self.0.main_window.hwnd(), delta);
     }
 
-    /// Sets the hotkey aside while a hotkey field has the keyboard, so pressing it there enters it
-    /// instead of saving a clip.
+    /// Sets the hotkeys aside while a hotkey field has the keyboard, so pressing either there
+    /// enters it instead of saving a clip or a screenshot.
     fn on_hotkey_capture(&self, capture: Capture) {
         match capture {
-            Capture::Began => hotkey::unregister(self.0.main_window.hwnd()),
-            Capture::Ended => self.register_configured_hotkey(),
+            Capture::Began => {
+                for action in Action::ALL {
+                    hotkey::unregister(self.0.main_window.hwnd(), action);
+                }
+            }
+            Capture::Ended => self.register_configured_hotkeys(),
         }
     }
 
-    fn switch_hotkey(&self, hotkey: Hotkey) -> Result<(), RegisterError> {
-        let result = self.register_hotkey(hotkey);
+    /// Switches to `config`'s hotkeys when both can be registered, and back to the configured
+    /// ones otherwise.
+    fn switch_hotkeys(&self, config: &Config) -> Result<(), RegisterError> {
+        let [save, screenshot] = self.register_hotkeys(config);
+        let result = save.and(screenshot);
         if result.is_err() {
-            self.register_configured_hotkey();
+            self.register_configured_hotkeys();
         }
         result
     }
 
-    fn register_configured_hotkey(&self) {
-        let configured = self.0.config.borrow().hotkey;
-        let _ = self.register_hotkey(configured);
+    fn register_configured_hotkeys(&self) {
+        let configured = self.0.config.borrow().clone();
+        let _ = self.register_hotkeys(&configured);
     }
 
-    fn register_hotkey(&self, hotkey: Hotkey) -> Result<(), RegisterError> {
-        let result = hotkey::register(self.0.main_window.hwnd(), hotkey);
-        self.note_hotkey_error(result.as_ref().err().map(ToString::to_string));
+    /// Both are unregistered first, so that hotkeys trading places do not refuse each other.
+    fn register_hotkeys(&self, config: &Config) -> [Result<(), RegisterError>; 2] {
+        for action in Action::ALL {
+            hotkey::unregister(self.0.main_window.hwnd(), action);
+        }
+        Action::ALL.map(|action| self.register_hotkey(action, config))
+    }
+
+    fn register_hotkey(&self, action: Action, config: &Config) -> Result<(), RegisterError> {
+        let hotkey = match action {
+            Action::Save => config.hotkey,
+            Action::Screenshot => config.screenshot_hotkey,
+        };
+        let result = hotkey::register(self.0.main_window.hwnd(), action, hotkey);
+        self.note_hotkey_error(action, result.as_ref().err().map(ToString::to_string));
         result
     }
 
     /// Records a hotkey error, which is shown on the Status page until the hotkey is registered.
-    fn note_hotkey_error(&self, error: Option<String>) {
+    fn note_hotkey_error(&self, action: Action, error: Option<String>) {
         if let Some(error) = &error {
             log::warning(error);
         }
-        *self.0.hotkey_error.borrow_mut() = error;
+        self.0.hotkey_errors.borrow_mut()[action.index()] = error;
+    }
+
+    fn hotkey_error(&self) -> Option<String> {
+        let errors = self.0.hotkey_errors.borrow();
+        let shown: Vec<&str> = errors.iter().flatten().map(String::as_str).collect();
+        (!shown.is_empty()).then(|| shown.join("\r\n"))
     }
 
     fn refresh(&self) {
         let status = self.0.worker.status();
         let folder = self.0.config.borrow().clip_directory();
-        let hotkey_error = self.0.hotkey_error.borrow().clone();
+        let hotkey_error = self.hotkey_error();
         let window_notices = [
             hotkey_error.as_deref(),
             self.0.tray_error.get().map(String::as_str),
