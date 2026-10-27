@@ -327,6 +327,27 @@ impl Machine {
     }
 }
 
+/// A setting that applies at once, without restarting capture, so it is saved on its own while
+/// recording carries on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Preference {
+    Theme(Theme),
+    CloseToTray(bool),
+    CheckForUpdates(bool),
+    MoreOptions(bool),
+}
+
+impl Preference {
+    pub(crate) fn apply_to(self, config: &mut Config) {
+        match self {
+            Self::Theme(theme) => config.theme = theme,
+            Self::CloseToTray(close_to_tray) => config.close_to_tray = close_to_tray,
+            Self::CheckForUpdates(check) => config.check_for_updates = check,
+            Self::MoreOptions(open) => config.more_options = open,
+        }
+    }
+}
+
 /// The validated settings. A `Config` read from disk is built only from settings that passed
 /// [`Config::validate`], and the Settings tab validates what it builds from the form the same
 /// way.

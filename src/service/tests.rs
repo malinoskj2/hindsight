@@ -3,6 +3,7 @@
 use super::*;
 use crate::{
     audio::EncodeError,
+    config::Theme,
     replay::{Matrix, Packet, Picture},
 };
 use std::sync::atomic::AtomicUsize;
@@ -600,7 +601,7 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
     );
     wait_for(&worker, |status| status.bytes.session_written > 0);
 
-    worker.set_theme(Theme::Nova);
+    worker.remember(Preference::Theme(Theme::Nova));
     let status = wait_for(&worker, |status| {
         matches!(status.state, State::Recording(_))
     });
@@ -638,78 +639,30 @@ fn the_version_seen_is_recorded() {
 }
 
 #[test]
-fn turning_off_closing_to_the_tray_is_saved() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("state");
-    let config = config_in(directory.path());
-    let worker = spawn(
-        steady,
-        RETRY_INTERVAL,
-        Some(Store::at(state.clone()).unwrap()),
-        config.clone(),
-    );
+fn each_setting_that_applies_at_once_is_saved() {
+    for preference in [
+        Preference::CloseToTray(false),
+        Preference::MoreOptions(true),
+        Preference::CheckForUpdates(false),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let config = config_in(directory.path());
+        let worker = spawn(
+            steady,
+            RETRY_INTERVAL,
+            Some(Store::at(state.clone()).unwrap()),
+            config.clone(),
+        );
 
-    worker.set_close_to_tray(false);
-    drop(worker);
+        worker.remember(preference);
+        drop(worker);
 
-    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
-    assert_eq!(
-        saved,
-        Config {
-            close_to_tray: false,
-            ..config
-        }
-    );
-}
-
-#[test]
-fn opening_more_options_is_saved() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("state");
-    let config = config_in(directory.path());
-    let worker = spawn(
-        steady,
-        RETRY_INTERVAL,
-        Some(Store::at(state.clone()).unwrap()),
-        config.clone(),
-    );
-
-    worker.set_more_options(true);
-    drop(worker);
-
-    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
-    assert_eq!(
-        saved,
-        Config {
-            more_options: true,
-            ..config
-        }
-    );
-}
-
-#[test]
-fn turning_off_update_checks_is_saved() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("state");
-    let config = config_in(directory.path());
-    let worker = spawn(
-        steady,
-        RETRY_INTERVAL,
-        Some(Store::at(state.clone()).unwrap()),
-        config.clone(),
-    );
-
-    worker.set_check_for_updates(false);
-    drop(worker);
-
-    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
-    assert_eq!(
-        saved,
-        Config {
-            check_for_updates: false,
-            ..config
-        }
-    );
+        let saved = Store::at(state).unwrap().load_config(&config).unwrap();
+        let mut expected = config;
+        preference.apply_to(&mut expected);
+        assert_eq!(saved, expected, "{preference:?}");
+    }
 }
 
 type Heard = Arc<Mutex<Vec<Tone>>>;

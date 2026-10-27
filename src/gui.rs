@@ -13,7 +13,7 @@ use self::{
 };
 use crate::{
     APP_NAME,
-    config::{Codec, Config, Mode, Theme},
+    config::{Codec, Config, Mode, Preference, Theme},
     gpu, log,
     service::{Target, Worker},
     sys::{
@@ -588,28 +588,31 @@ impl Main {
         if delta != 0 {
             self.widen(delta);
         }
-        self.0.config.borrow_mut().theme = theme;
-        self.0.worker.set_theme(theme);
+        self.remember(Preference::Theme(theme));
         self.apply_look();
     }
 
     fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
-        self.0.config.borrow_mut().close_to_tray = close_to_tray;
-        self.0.worker.set_close_to_tray(close_to_tray);
+        self.remember(Preference::CloseToTray(close_to_tray));
     }
 
     fn on_more_options_toggled(&self, open: bool) {
-        self.0.config.borrow_mut().more_options = open;
-        self.0.worker.set_more_options(open);
+        self.remember(Preference::MoreOptions(open));
         self.fit_window();
     }
 
     fn on_update_checks_toggled(&self, check: bool) {
-        self.0.config.borrow_mut().check_for_updates = check;
-        self.0.worker.set_check_for_updates(check);
+        self.remember(Preference::CheckForUpdates(check));
         if check && matches!(*self.0.update_state.borrow(), State::Unchecked) {
             self.check_for_updates();
         }
+    }
+
+    /// Applies a setting that leaves recording alone to the window's copy of the settings and
+    /// has the worker save it.
+    fn remember(&self, preference: Preference) {
+        preference.apply_to(&mut self.0.config.borrow_mut());
+        self.0.worker.remember(preference);
     }
 
     /// Checks a minute after starting, if checks are on, and then once a day while hindsight

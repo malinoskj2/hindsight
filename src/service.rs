@@ -3,7 +3,7 @@
 
 use crate::{
     audio::{self, Sources, StandIns},
-    config::{Backend, Config, Container, Memory, Mode, Theme},
+    config::{Backend, Config, Container, Memory, Mode, Preference},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
     screenshot::{self, Grab, Grabber, Readback, Reply, ScreenshotError, Still, StillError, Taken},
@@ -361,10 +361,8 @@ enum Command {
     /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
-    Theme(Theme),
-    CloseToTray(bool),
-    CheckForUpdates(bool),
-    MoreOptions(bool),
+    /// Saves a setting that leaves recording alone.
+    Remember(Preference),
     /// Records the version as the last one that ran.
     VersionSeen(Version),
     Wake,
@@ -436,20 +434,8 @@ impl Worker {
         self.request(Command::Restart);
     }
 
-    pub(crate) fn set_theme(&self, theme: Theme) {
-        self.request(Command::Theme(theme));
-    }
-
-    pub(crate) fn set_close_to_tray(&self, close_to_tray: bool) {
-        self.request(Command::CloseToTray(close_to_tray));
-    }
-
-    pub(crate) fn set_check_for_updates(&self, check_for_updates: bool) {
-        self.request(Command::CheckForUpdates(check_for_updates));
-    }
-
-    pub(crate) fn set_more_options(&self, more_options: bool) {
-        self.request(Command::MoreOptions(more_options));
+    pub(crate) fn remember(&self, preference: Preference) {
+        self.request(Command::Remember(preference));
     }
 
     pub(crate) fn record_version(&self, version: Version) {
@@ -690,22 +676,7 @@ impl Machine {
                 Ok(Command::Captured { taken, monitor }) => self.captured(taken, monitor),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
-                Ok(Command::Theme(theme)) => self.remember(Config {
-                    theme,
-                    ..self.config.clone()
-                }),
-                Ok(Command::CloseToTray(close_to_tray)) => self.remember(Config {
-                    close_to_tray,
-                    ..self.config.clone()
-                }),
-                Ok(Command::CheckForUpdates(check_for_updates)) => self.remember(Config {
-                    check_for_updates,
-                    ..self.config.clone()
-                }),
-                Ok(Command::MoreOptions(more_options)) => self.remember(Config {
-                    more_options,
-                    ..self.config.clone()
-                }),
+                Ok(Command::Remember(preference)) => self.remember(preference),
                 Ok(Command::VersionSeen(version)) => self.ledger.save_last_version(&version),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -943,8 +914,9 @@ impl Machine {
         self.report_failed_save(ProblemKind::ScreenshotNotSaved, error);
     }
 
-    /// Saves a change to a setting that leaves recording alone.
-    fn remember(&mut self, config: Config) {
+    fn remember(&mut self, preference: Preference) {
+        let mut config = self.config.clone();
+        preference.apply_to(&mut config);
         // The failure is reported, and the change still holds for this run.
         let _ = self.save_settings(&config);
         self.config = config;
