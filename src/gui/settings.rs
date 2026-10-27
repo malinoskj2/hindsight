@@ -229,6 +229,14 @@ impl SettingsPage {
         });
     }
 
+    pub(super) fn on_update_checks_toggled(&self, toggled: impl Fn(bool) + 'static) {
+        let check_for_updates = self.0.general.check_for_updates.clone();
+        self.0.general.check_for_updates.on().bn_clicked(move || {
+            toggled(check_for_updates.is_checked());
+            Ok(())
+        });
+    }
+
     /// Returns the configuration as entered, after validating it.
     pub(super) fn configuration(&self) -> Result<Config, SettingsError> {
         let config = self.entered()?;
@@ -385,6 +393,7 @@ impl SettingsPage {
             buffer_memory: chosen(&recording.memory, &Memory::ALL),
             theme: chosen(&self.0.general.theme, &Theme::ALL),
             close_to_tray: self.0.general.close_to_tray.is_checked(),
+            check_for_updates: self.0.general.check_for_updates.is_checked(),
         })
     }
 }
@@ -565,6 +574,7 @@ struct GeneralControls {
     theme: gui::ComboBox,
     start_with_windows: gui::CheckBox,
     close_to_tray: gui::CheckBox,
+    check_for_updates: gui::CheckBox,
     error: TintedLabel,
 }
 
@@ -592,8 +602,16 @@ impl GeneralControls {
             text::CLOSE_TO_TRAY,
             INNER_X,
             rows::CLOSE_TO_TRAY,
-            INNER_WIDTH,
+            COLUMN_X - INNER_X,
             config.close_to_tray,
+        );
+        let check_for_updates = check_box(
+            page,
+            text::CHECK_FOR_UPDATES,
+            COLUMN_X,
+            rows::CLOSE_TO_TRAY,
+            CHECK_COLUMN_WIDTH,
+            config.check_for_updates,
         );
         let error = TintedLabel::new(
             hidden_label(page, INNER_X, rows::STARTUP_ERROR, INNER_WIDTH, 1),
@@ -603,6 +621,7 @@ impl GeneralControls {
             theme,
             start_with_windows,
             close_to_tray,
+            check_for_updates,
             error,
         }
     }

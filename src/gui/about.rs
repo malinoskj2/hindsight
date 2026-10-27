@@ -1,5 +1,5 @@
-//! The About tab: a description of hindsight, the build and system details for a bug report, and
-//! links.
+//! The About tab: a description of hindsight, the build and system details for a bug report,
+//! links, and updates.
 
 use super::{
     layout::{
@@ -14,8 +14,9 @@ use crate::{
     config::Theme,
     gpu, log, storage,
     sys::{icon, release, shell},
+    update::{Installation, State},
 };
-use std::{cell::RefCell, iter, path::Path, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc};
 use winsafe::{self as w, co, guard::DestroyIconGuard, gui, prelude::*};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -46,6 +47,10 @@ mod rows {
     pub(super) const LINKS_FRAME: i32 = DETAILS_FRAME + DETAILS_HEIGHT + 6;
     pub(super) const LINKS: i32 = LINKS_FRAME + FIRST_ROW - 2;
     pub(super) const LINKS_HEIGHT: i32 = LINKS + BUTTON_HEIGHT + 8 - LINKS_FRAME;
+    pub(super) const UPDATES_FRAME: i32 = LINKS_FRAME + LINKS_HEIGHT + 6;
+    pub(super) const UPDATE_STATE: i32 = UPDATES_FRAME + FIRST_ROW;
+    pub(super) const UPDATE_BUTTONS: i32 = UPDATE_STATE + 2 * LINE + 4;
+    pub(super) const UPDATES_HEIGHT: i32 = UPDATE_BUTTONS + BUTTON_HEIGHT + 8 - UPDATES_FRAME;
 }
 
 const DETAIL_ROWS: [i32; 4] = [rows::BUILD, rows::COMPILER, rows::WINDOWS, rows::GPU];
@@ -58,6 +63,14 @@ enum Link {
     LogFolder,
 }
 
+/// What each of the Updates group's buttons asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UpdateAction {
+    Check,
+    Install,
+    Notes,
+}
+
 #[derive(Clone)]
 pub(super) struct AboutPage(Rc<Inner>);
 
@@ -66,6 +79,8 @@ struct Inner {
     frames: Vec<Frame>,
     description: TintedLabel,
     buttons: Vec<(gui::Button, Link)>,
+    update_state: TintedLabel,
+    update_buttons: Vec<(gui::Button, UpdateAction)>,
 }
 
 impl Painted for Inner {
@@ -74,7 +89,7 @@ impl Painted for Inner {
     }
 
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
-        iter::once(&self.description)
+        [&self.description, &self.update_state].into_iter()
     }
 }
 
@@ -118,6 +133,12 @@ impl AboutPage {
                 rows::LINKS_FRAME,
                 rows::LINKS_HEIGHT,
             ),
+            Frame::new(
+                &page,
+                text::GROUP_UPDATES,
+                rows::UPDATES_FRAME,
+                rows::UPDATES_HEIGHT,
+            ),
         ];
         logo(&page, skin);
         let _ = label(
@@ -144,16 +165,70 @@ impl AboutPage {
             let _ = label(&page, &value, VALUE_X, y, VALUE_WIDTH, 1);
         }
         let buttons = buttons(&page, skin);
+        let update_state = TintedLabel::new(
+            label(
+                &page,
+                text::UPDATE_UNCHECKED,
+                INNER_X,
+                rows::UPDATE_STATE,
+                INNER_WIDTH,
+                2,
+            ),
+            Tone::Muted,
+        );
+        let update_buttons = update_buttons(&page, skin);
         let inner = Rc::new(Inner {
             page,
             frames,
             description,
             buttons,
+            update_state,
+            update_buttons,
         });
         pane::paint(&inner.page, skin, Rc::clone(&inner));
         let this = Self(inner);
         this.handle_clicks();
         this
+    }
+
+    pub(super) fn on_update_action(&self, act: impl Fn(UpdateAction) + Clone + 'static) {
+        for (button, action) in &self.0.update_buttons {
+            let action = *action;
+            let act = act.clone();
+            button.on().bn_clicked(move || {
+                act(action);
+                Ok(())
+            });
+        }
+    }
+
+    pub(super) fn show_update(&self, state: &State, installation: &Installation) {
+        let (message, tone) = match state {
+            State::Unchecked => (text::UPDATE_UNCHECKED.to_owned(), Tone::Muted),
+            State::Checking => (text::UPDATE_CHECKING.to_owned(), Tone::Muted),
+            State::Current => (text::UPDATE_CURRENT.to_owned(), Tone::Muted),
+            State::Available(release) => (text::update_available(release.version()), Tone::Good),
+            State::Downloading(release) => {
+                (text::update_downloading(release.version()), Tone::Muted)
+            }
+            State::CheckFailed(reason) => (text::update_check_failed(reason), Tone::Error),
+            State::UpdateFailed(_, reason) => (text::update_failed(reason), Tone::Error),
+        };
+        self.0.update_state.set_tone(tone);
+        self.0.update_state.set_text(&message);
+        let busy = matches!(state, State::Checking | State::Downloading(_));
+        let offered = matches!(state, State::Available(_) | State::UpdateFailed(..));
+        for (button, action) in &self.0.update_buttons {
+            let enabled = match action {
+                UpdateAction::Check => !busy,
+                UpdateAction::Install => offered,
+                UpdateAction::Notes => state.release().is_some(),
+            };
+            button.hwnd().EnableWindow(enabled);
+            if *action == UpdateAction::Install {
+                layout::set_text(button, install_caption(installation));
+            }
+        }
     }
 
     fn handle_clicks(&self) {
@@ -193,6 +268,31 @@ fn buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, Link)> {
         (button, link)
     })
     .collect()
+}
+
+fn update_buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, UpdateAction)> {
+    [
+        (text::UPDATE_CHECK, UpdateAction::Check),
+        (text::UPDATE_INSTALL, UpdateAction::Install),
+        (text::UPDATE_NOTES, UpdateAction::Notes),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (caption, action))| {
+        let x = INNER_X + saturating_i32(index) * (BUTTON_WIDTH + BUTTON_GAP);
+        let button = button(page, caption, x, rows::UPDATE_BUTTONS, BUTTON_WIDTH);
+        skin_button(&button, skin);
+        (button, action)
+    })
+    .collect()
+}
+
+/// The portable copy is not updated in place, so its button opens the release instead.
+fn install_caption(installation: &Installation) -> &'static str {
+    match installation {
+        Installation::Installed(_) => text::UPDATE_INSTALL,
+        Installation::Portable => text::UPDATE_DOWNLOAD,
+    }
 }
 
 fn follow(link: Link) {
@@ -275,7 +375,7 @@ fn draw_icon(hdc: &w::HDC, icon: &w::HICON, size: i32) {
     };
 }
 
-fn open_link(url: &str) {
+pub(super) fn open_link(url: &str) {
     if let Err(error) = shell::open(Path::new(url)) {
         log::warning(text::link_open_failed(url, error));
     }
@@ -325,8 +425,19 @@ mod tests {
             [rows::LINKS_FRAME, rows::LINKS, rows::LINKS_HEIGHT],
             [198, 216, 50]
         );
+        assert_eq!(
+            [
+                rows::UPDATES_FRAME,
+                rows::UPDATE_STATE,
+                rows::UPDATE_BUTTONS,
+                rows::UPDATES_HEIGHT
+            ],
+            [254, 274, 314, 92]
+        );
         const {
-            assert!(rows::LINKS_FRAME + rows::LINKS_HEIGHT <= layout::FILL_Y + layout::FILL_HEIGHT);
+            assert!(
+                rows::UPDATES_FRAME + rows::UPDATES_HEIGHT <= layout::FILL_Y + layout::FILL_HEIGHT
+            );
             assert!(3 * BUTTON_WIDTH + 2 * BUTTON_GAP <= INNER_WIDTH);
         }
     }

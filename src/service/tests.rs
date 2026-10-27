@@ -609,6 +609,31 @@ fn turning_off_closing_to_the_tray_is_saved() {
     );
 }
 
+#[test]
+fn turning_off_update_checks_is_saved() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let config = config_in(directory.path());
+    let worker = spawn(
+        steady,
+        RETRY_INTERVAL,
+        Some(Store::at(state.clone()).unwrap()),
+        config.clone(),
+    );
+
+    worker.set_check_for_updates(false);
+    drop(worker);
+
+    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
+    assert_eq!(
+        saved,
+        Config {
+            check_for_updates: false,
+            ..config
+        }
+    );
+}
+
 type Heard = Arc<Mutex<Vec<Tone>>>;
 
 /// Spawns a worker that runs on `clock` and records its tones in order.

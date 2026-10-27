@@ -77,6 +77,22 @@ pub(crate) struct OpenError(usize);
 #[error("the shell could not start Explorer (code {0})")]
 pub(crate) struct RevealError(usize);
 
+/// Whether a program asked to run as administrator was started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Elevation {
+    Started,
+    /// The user said no at the UAC prompt.
+    Declined,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ElevateError {
+    #[error("the path is not valid Unicode")]
+    Path,
+    #[error("the shell could not start the program")]
+    Start(#[source] co::ERROR),
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum RecycleError {
     #[error("the path is not a full one, so the file could not be restored")]
@@ -170,6 +186,32 @@ pub(crate) fn open(path: &Path) -> Result<(), OpenError> {
 pub(crate) fn reveal(path: &Path) -> Result<(), RevealError> {
     let parameters = HSTRING::from(select_argument(path));
     execute(&HSTRING::from("explorer.exe"), Some(&parameters)).map_err(RevealError)
+}
+
+/// Starts `program` as administrator, which shows the UAC prompt, and returns once it has
+/// started or the prompt was declined.
+pub(crate) fn run_elevated(program: &Path, parameters: &str) -> Result<Elevation, ElevateError> {
+    let program = program.to_str().ok_or(ElevateError::Path)?;
+    let started = w::ShellExecuteEx(&w::SHELLEXECUTEINFO {
+        // Without NOASYNC the shell may still be starting it when this process exits.
+        mask: co::SEE_MASK::NOASYNC | co::SEE_MASK::FLAG_NO_UI,
+        hwnd: None,
+        verb: Some("runas"),
+        file: program,
+        parameters: Some(parameters),
+        directory: None,
+        show: co::SW::SHOWNORMAL,
+        id_list: None,
+        class: None,
+        hkey_class: None,
+        hot_key: None,
+        hicon_hmonitor: w::IcoMon::None,
+    });
+    match started {
+        Ok(()) => Ok(Elevation::Started),
+        Err(co::ERROR::CANCELLED) => Ok(Elevation::Declined),
+        Err(error) => Err(ElevateError::Start(error)),
+    }
 }
 
 pub(crate) fn recycle(path: &Path, owner: &w::HWND) -> Result<(), RecycleError> {

@@ -79,6 +79,14 @@ mod storage;
     )
 )]
 mod sys;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
+mod update;
 
 #[cfg(windows)]
 pub(crate) const APP_NAME: &str = "hindsight";

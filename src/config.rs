@@ -256,6 +256,8 @@ pub(crate) struct Config {
     pub(crate) buffer_memory: Memory,
     /// Whether closing the window leaves hindsight running in the tray, rather than quitting.
     pub(crate) close_to_tray: bool,
+    /// Whether hindsight looks for a newer release when it starts and once a day.
+    pub(crate) check_for_updates: bool,
 }
 
 /// The settings as stored, before validation. Missing settings take their defaults.
@@ -283,6 +285,7 @@ struct RawConfig {
     cursor: bool,
     buffer_memory: Memory,
     close_to_tray: bool,
+    check_for_updates: bool,
     /// Settings written by a newer version, collected here so a downgrade still starts.
     #[serde(flatten)]
     #[expect(
@@ -310,6 +313,7 @@ impl Default for RawConfig {
             cursor,
             buffer_memory,
             close_to_tray,
+            check_for_updates,
         } = Config::default();
         Self {
             mode,
@@ -327,6 +331,7 @@ impl Default for RawConfig {
             cursor,
             buffer_memory,
             close_to_tray,
+            check_for_updates,
             unknown: BTreeMap::new(),
         }
     }
@@ -352,6 +357,7 @@ impl TryFrom<RawConfig> for Config {
             cursor,
             buffer_memory,
             close_to_tray,
+            check_for_updates,
             unknown,
         } = raw;
         if !unknown.is_empty() {
@@ -377,6 +383,7 @@ impl TryFrom<RawConfig> for Config {
             cursor,
             buffer_memory,
             close_to_tray,
+            check_for_updates,
         };
         config.validate()?;
         Ok(config)
@@ -401,6 +408,7 @@ impl Default for Config {
             cursor: false,
             buffer_memory: Memory::Ram,
             close_to_tray: true,
+            check_for_updates: true,
         }
     }
 }
@@ -789,6 +797,25 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains(r#""close_to_tray":false"#), "{json}");
+        assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn checking_for_updates_stays_on_unless_turned_off() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        assert!(Config::default().check_for_updates);
+        assert!(
+            parse(r#"{"buffer_seconds":120}"#)
+                .unwrap()
+                .check_for_updates
+        );
+        let config = Config {
+            check_for_updates: false,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""check_for_updates":false"#), "{json}");
         assert_eq!(parse(&json).unwrap(), config);
     }
 
