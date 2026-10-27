@@ -18,7 +18,7 @@ const nav = [
   { href: repository, label: "GitHub" },
 ] as const;
 
-const hotkey = ["Alt", "F1"] as const;
+const hotkey = ["Alt", "F7"] as const;
 
 const settingStarts = settingGroups.map(
   (_, index) =>
