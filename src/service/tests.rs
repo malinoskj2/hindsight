@@ -799,6 +799,14 @@ fn failing_write(_: &Snapshot, directory: &Path, _: Container) -> Result<Saved, 
     })
 }
 
+fn refusing_write(_: &Snapshot, directory: &Path, _: Container) -> Result<Saved, SaveError> {
+    Err(SaveError::Io {
+        step: "create",
+        path: directory.to_owned(),
+        source: io::Error::other("the disk is full"),
+    })
+}
+
 #[test]
 fn a_slow_save_ticks_each_second_then_sounds_saved_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -937,6 +945,41 @@ fn a_screenshot_while_nothing_records_grabs_the_monitor_in_front() {
     shoot(&worker, &heard, on_monitor(9));
     assert_eq!(tones(&heard), [Tone::Saved]);
     assert_eq!(screenshot_sizes(directory.path()), [(12, 1)]);
+    let status = wait_for(&worker, |status| status.last_screenshot.is_some());
+    assert_eq!(
+        status.problem.map(|problem| problem.kind),
+        Some(ProblemKind::CaptureFailed),
+        "the screenshot leaves the capture problem"
+    );
+}
+
+#[test]
+fn a_success_clears_only_a_problem_of_its_own_kind() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) =
+        spawn_listening(steady, &clock, refusing_write, config_in(directory.path()));
+    wait_for(&worker, |status| status.bytes.session_written > 0);
+
+    worker.save();
+    let status = wait_for(&worker, |status| status.problem.is_some());
+    assert_eq!(status.problem.unwrap().kind, ProblemKind::ClipNotSaved);
+
+    shoot(&worker, &heard, PRIMARY);
+    let status = wait_for(&worker, |status| status.last_screenshot.is_some());
+    assert_eq!(
+        status.problem.map(|problem| problem.kind),
+        Some(ProblemKind::ClipNotSaved),
+        "the screenshot leaves the clip's problem"
+    );
+
+    worker.toggle_pause();
+    let status = wait_for(&worker, |status| status.state == State::Paused);
+    assert_eq!(
+        status.problem.map(|problem| problem.kind),
+        Some(ProblemKind::ClipNotSaved),
+        "stopping capture leaves the clip's problem"
+    );
 }
 
 #[test]

@@ -34,6 +34,8 @@ const RATE_SPAN: Duration = Duration::from_secs(10);
 const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+/// The problems that starting or stopping capture resolves.
+const CAPTURE_PROBLEMS: &[ProblemKind] = &[ProblemKind::CaptureFailed, ProblemKind::AppNotRecorded];
 
 /// A monitor's OS handle, which is never null. It is carried as an integer so the worker stays
 /// portable.
@@ -764,7 +766,7 @@ impl Machine {
         self.retry_at = None;
         self.stop_session();
         self.phase = Phase::Paused;
-        self.problem = None;
+        self.resolve(CAPTURE_PROBLEMS);
     }
 
     fn resume(&mut self) {
@@ -927,7 +929,7 @@ impl Machine {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
                 self.last_screenshot = Some(path);
-                self.problem = None;
+                self.resolve(&[ProblemKind::ScreenshotNotSaved]);
                 (self.services.chime)(Tone::Saved);
             }
             Ok(Err(error)) => self.report_failed_shot(log::chain(&error)),
@@ -952,6 +954,7 @@ impl Machine {
     fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
         self.ledger
             .save_config(&self.config, config)
+            .inspect(|()| self.resolve(&[ProblemKind::SettingsNotSaved]))
             .inspect_err(|error| self.report(ProblemKind::SettingsNotSaved, log::chain(error)))
     }
 
@@ -963,7 +966,7 @@ impl Machine {
             Mode::Fullscreen => {
                 self.target = None;
                 self.phase = Phase::Waiting;
-                self.problem = None;
+                self.resolve(CAPTURE_PROBLEMS);
             }
         }
     }
@@ -994,7 +997,7 @@ impl Machine {
                 });
                 self.live = Some(live);
                 self.phase = Phase::Starting;
-                self.problem = None;
+                self.resolve(CAPTURE_PROBLEMS);
             }
             Err(error) => self.fail(text::capture_thread_failed(error)),
         }
@@ -1072,6 +1075,18 @@ impl Machine {
         self.report(ProblemKind::CaptureFailed, error);
         self.phase = Phase::Retrying;
         self.retry_at = Some(self.now() + self.services.retry_interval);
+    }
+
+    /// Clears the problem shown when it is one of `kinds`, whose work has just succeeded. A
+    /// problem of another kind stays until its own work does.
+    fn resolve(&mut self, kinds: &[ProblemKind]) {
+        if self
+            .problem
+            .as_ref()
+            .is_some_and(|problem| kinds.contains(&problem.kind))
+        {
+            self.problem = None;
+        }
     }
 
     fn report(&mut self, kind: ProblemKind, cause: impl Display) {
@@ -1224,7 +1239,7 @@ impl Machine {
         self.clip_without_sound = saved.sound_error.is_some();
         self.ledger.add_saved(&saved.path);
         self.last_clip = Some(saved.path);
-        self.problem = None;
+        self.resolve(&[ProblemKind::ClipNotSaved]);
         (self.services.chime)(Tone::Saved);
     }
 
