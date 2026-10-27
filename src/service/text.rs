@@ -154,9 +154,16 @@ fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Save failed · {error}"))
 }
 
-pub(super) const NOTHING_TO_SHOOT: &str =
-    "Screenshot · nothing to take yet · capture has not started";
 pub(super) const ALREADY_SHOOTING: &str = "Screenshot · already in progress";
+
+pub(super) fn grabbing_instead(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Screenshot · not taken from the recording ({error}) · capturing the monitor"
+        )
+    })
+}
 
 pub(super) fn screenshot_saved(path: &Path) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Screenshot · {}", file_name(path)))

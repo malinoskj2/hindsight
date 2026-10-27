@@ -6,7 +6,7 @@ use crate::{
     config::{Backend, Config, Container, Memory, Mode, Theme},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
-    screenshot::{self, Readback, Reply, ScreenshotError, Taken},
+    screenshot::{self, Grab, Grabber, Readback, Reply, ScreenshotError, Still, StillError, Taken},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
 };
@@ -121,6 +121,16 @@ impl PartialEq for Target {
 
 impl Eq for Target {}
 
+/// What is in front when a screenshot is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Front {
+    /// `None` when no window is in front.
+    pub(crate) window: Option<WindowHandle>,
+    /// The monitor the window in front is on. `None` is the primary monitor, as for
+    /// [`Target::Monitor`].
+    pub(crate) monitor: Option<MonitorHandle>,
+}
+
 impl Target {
     pub(crate) fn primary_monitor() -> Self {
         Self::Monitor {
@@ -132,6 +142,15 @@ impl Target {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Monitor { name, .. } | Self::Window { name, .. } => name,
+        }
+    }
+
+    /// Whether a recording of this target is all of `front`'s monitor as it shows now: the
+    /// monitor itself, or an app, which covers its monitor, while it is in front.
+    fn shows(&self, front: Front) -> bool {
+        match self {
+            Self::Monitor { handle, .. } => *handle == front.monitor,
+            Self::Window { window, .. } => front.window == Some(*window),
         }
     }
 
@@ -172,9 +191,15 @@ const RECORDER: Recorder = crate::gpu::record;
 #[cfg(not(windows))]
 const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows");
 
+#[cfg(windows)]
+const GRABBER: Grabber = crate::gpu::grab;
+#[cfg(not(windows))]
+const GRABBER: Grabber = |_| Err(StillError::Grab("capture requires Windows".into()));
+
 /// The services the worker depends on. Tests replace any of them with a stand-in.
 struct Services {
     record: Recorder,
+    grab: Grabber,
     audio: Audio,
     write: Writer,
     chime: Chime,
@@ -187,6 +212,7 @@ impl Services {
         let sounds = sys::sound::start();
         Self {
             record: RECORDER,
+            grab: GRABBER,
             audio: audio::start,
             write: replay::save,
             chime: Box::new(move |tone| {
@@ -321,9 +347,13 @@ enum Command {
     Start(Config),
     Target(Target),
     Save,
-    Screenshot,
-    /// The capture thread's answer to a screenshot request.
-    Captured(Taken),
+    Screenshot(Front),
+    /// The capture thread's answer to a screenshot request. Without a picture, `monitor` is
+    /// grabbed instead.
+    Captured {
+        taken: Taken,
+        monitor: Option<MonitorHandle>,
+    },
     /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
@@ -388,8 +418,8 @@ impl Worker {
         self.request(Command::Save);
     }
 
-    pub(crate) fn screenshot(&self) {
-        self.request(Command::Screenshot);
+    pub(crate) fn screenshot(&self, front: Front) {
+        self.request(Command::Screenshot(front));
     }
 
     pub(crate) fn toggle_pause(&self) {
@@ -455,7 +485,8 @@ struct Saving {
     next_tick: Instant,
 }
 
-/// A screenshot under way: asked of the capture thread, then written on a thread of its own.
+/// A screenshot under way: asked of the capture thread, then written on a thread of its own,
+/// which grabs the monitor itself when no recording shows it.
 enum Shot {
     Asked,
     Writing(Writing),
@@ -464,6 +495,19 @@ enum Shot {
 struct Writing {
     done: Arc<AtomicBool>,
     join: JoinHandle<Result<PathBuf, ScreenshotError>>,
+}
+
+/// A grab of a monitor, taken on the screenshot thread when it reads the picture back.
+#[derive(Debug)]
+struct Grabbing {
+    grab: Grab,
+    grabber: Grabber,
+}
+
+impl Readback for Grabbing {
+    fn finish(self: Box<Self>) -> Result<Still, StillError> {
+        (self.grabber)(&self.grab)
+    }
 }
 
 /// Dropped when a capture or save thread's closure ends. Marks the thread done and wakes the
@@ -624,8 +668,8 @@ impl Machine {
                 Ok(Command::Start(config)) => self.apply(config),
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
-                Ok(Command::Screenshot) => self.screenshot(),
-                Ok(Command::Captured(taken)) => self.captured(taken),
+                Ok(Command::Screenshot(front)) => self.screenshot(front),
+                Ok(Command::Captured { taken, monitor }) => self.captured(taken, monitor),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
                 Ok(Command::Theme(theme)) => self.remember(Config {
@@ -788,37 +832,55 @@ impl Machine {
         }
     }
 
-    fn screenshot(&mut self) {
+    fn screenshot(&mut self, front: Front) {
         if self.shot.is_some() {
             log::info(text::ALREADY_SHOOTING);
             return;
         }
-        let capturing = self.session.is_some();
-        let Some(live) = self
-            .live
-            .as_ref()
-            .filter(|live| capturing && live.stream().is_some())
-        else {
-            log::warning(text::NOTHING_TO_SHOOT);
-            (self.services.chime)(Tone::Failed);
+        let Some(live) = self.recording_of(front) else {
+            self.write_shot(self.grab(front.monitor));
             return;
         };
         let wake = self.wake.clone();
+        let monitor = front.monitor;
         live.request_still(Reply::new(move |taken| {
-            let _ = wake.send(Command::Captured(taken));
+            let _ = wake.send(Command::Captured { taken, monitor });
         }));
         self.shot = Some(Shot::Asked);
     }
 
-    fn captured(&mut self, taken: Taken) {
+    /// The recording, when it has a picture and that picture is all of `front`'s monitor.
+    fn recording_of(&self, front: Front) -> Option<&Live> {
+        self.session.as_ref()?;
+        self.target.as_ref().filter(|target| target.shows(front))?;
+        self.live.as_deref().filter(|live| live.stream().is_some())
+    }
+
+    fn grab(&self, monitor: Option<MonitorHandle>) -> Box<dyn Readback> {
+        Box::new(Grabbing {
+            grab: Grab {
+                monitor,
+                backend: self.config.backend,
+                cursor: self.config.cursor,
+            },
+            grabber: self.services.grab,
+        })
+    }
+
+    /// A picture the capture thread could not give is grabbed from the monitor instead.
+    fn captured(&mut self, taken: Taken, monitor: Option<MonitorHandle>) {
         self.shot = None;
         let readback = match taken {
             Ok(readback) => readback,
             Err(error) => {
-                self.report_failed_shot(log::chain(&error));
-                return;
+                log::warning(text::grabbing_instead(log::chain(&error)));
+                self.grab(monitor)
             }
         };
+        self.write_shot(readback);
+    }
+
+    fn write_shot(&mut self, readback: Box<dyn Readback>) {
         let (done, ending) = self.ending();
         match self.spawn_shot(readback, ending) {
             Ok(join) => self.shot = Some(Shot::Writing(Writing { done, join })),

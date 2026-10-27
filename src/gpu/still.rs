@@ -1,12 +1,19 @@
 use crate::{
+    config::Backend,
     gpu::{
-        capture::Surface,
+        capture::{self, CopyTarget, Frame, Surface},
         cuda::{CudaError, DeviceBuffer},
         device::{Device, Locked, null_output},
     },
-    screenshot::{Readback, Still, StillError, pitched_span},
+    log,
+    screenshot::{Grab, Readback, Still, StillError, pitched_span},
+    service::Target,
 };
-use std::{error::Error, ptr, slice, thread, time::Duration};
+use std::{
+    error::Error,
+    ptr, slice, thread,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         Foundation::RECT,
@@ -16,17 +23,26 @@ use windows::{
                 D3DPOOL_SYSTEMMEM, D3DTEXF_NONE, IDirect3DDevice9, IDirect3DSurface9,
             },
             Direct3D11::{
-                D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ,
-                D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-                ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+                D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT,
+                D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11DeviceContext, ID3D11Multithread,
+                ID3D11Texture2D,
             },
-            Dxgi::{Common::DXGI_SAMPLE_DESC, DXGI_ERROR_WAS_STILL_DRAWING},
+            Dxgi::{
+                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                DXGI_ERROR_WAS_STILL_DRAWING,
+            },
         },
     },
     core::Interface,
 };
 
 const POLL: Duration = Duration::from_millis(1);
+/// How long a new capture may take to deliver its first picture.
+const FIRST_PICTURE: Duration = Duration::from_secs(1);
+/// The update interval asked of Windows Graphics Capture. A grab takes one picture, so it only
+/// bounds how soon the first arrives.
+const GRAB_PERIOD: Duration = Duration::from_millis(16);
 
 type Cause = Box<dyn Error + Send + Sync>;
 
@@ -56,6 +72,109 @@ fn start(
         }
     };
     Ok(copy)
+}
+
+/// Captures one picture of a whole monitor on the calling thread, on a device of its own,
+/// tone-mapped on an HDR display as clips are.
+pub(crate) fn grab(grab: &Grab) -> Result<Still, StillError> {
+    let device = Device::create().map_err(grab_failed)?;
+    let target = Target::Monitor {
+        handle: grab.monitor,
+        name: "the monitor in front".to_owned(),
+    };
+    let mut capture = start_grab(grab, &device, &target)?;
+    let (width, height) = capture.size();
+    let picture = picture_texture(&device, width, height).map_err(grab_failed)?;
+    take_first(
+        &mut capture,
+        CopyTarget {
+            device: &device,
+            texture: &picture,
+            width,
+            height,
+        },
+    )?;
+    drop(capture);
+    let copy = TextureCopy::start(&device, &picture, width, height).map_err(copy_failed)?;
+    Box::new(copy).finish()
+}
+
+/// Desktop Duplication when it is the backend chosen, and Windows Graphics Capture otherwise,
+/// since NvFBC clips HDR and costs more to open for one picture. Each falls back on the other.
+const fn grab_backends(chosen: Backend) -> [Backend; 2] {
+    match chosen {
+        Backend::Dxgi => [Backend::Dxgi, Backend::Wgc],
+        Backend::Wgc | Backend::Nvfbc | Backend::NvfbcCuda => [Backend::Wgc, Backend::Dxgi],
+    }
+}
+
+fn start_grab(
+    grab: &Grab,
+    device: &Device,
+    target: &Target,
+) -> Result<capture::Capture, StillError> {
+    let [first, second] = grab_backends(grab.backend);
+    capture::start(first, device, GRAB_PERIOD, target, grab.cursor)
+        .or_else(|error| {
+            log::warning(format!(
+                "Screenshot · {first} unavailable ({error}) · trying {second}"
+            ));
+            capture::start(second, device, GRAB_PERIOD, target, grab.cursor)
+        })
+        .map_err(grab_failed)
+}
+
+fn take_first(capture: &mut capture::Capture, target: CopyTarget<'_>) -> Result<(), StillError> {
+    let deadline = Instant::now() + FIRST_PICTURE;
+    loop {
+        match capture.take(Some(target)).map_err(grab_failed)? {
+            Frame::Fresh => return Ok(()),
+            Frame::Unchanged if Instant::now() < deadline => thread::sleep(POLL),
+            Frame::Unchanged | Frame::Resized | Frame::InSurface { .. } => {
+                return Err(StillError::NoPicture);
+            }
+        }
+    }
+}
+
+/// A texture in the encoder's input format, which the capture copies or tone-maps into.
+#[expect(unsafe_code, reason = "calls ID3D11Device::CreateTexture2D")]
+fn picture_texture(
+    device: &Device,
+    width: u32,
+    height: u32,
+) -> windows::core::Result<ID3D11Texture2D> {
+    let description = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0.cast_unsigned(),
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    // SAFETY: a plain texture description without initial data; the out-parameter is live.
+    unsafe {
+        device
+            .d3d
+            .CreateTexture2D(&raw const description, None, Some(&raw mut texture))
+    }?;
+    texture.ok_or_else(null_output)
+}
+
+fn grab_failed(error: impl Error + Send + Sync + 'static) -> StillError {
+    StillError::Grab(Box::new(error))
+}
+
+fn copy_failed(error: impl Error + Send + Sync + 'static) -> StillError {
+    StillError::Copy(Box::new(error))
 }
 
 fn read_failed(error: impl Error + Send + Sync + 'static) -> StillError {
@@ -338,5 +457,18 @@ impl Readback for CudaCopy {
                 height: self.height,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_grab_prefers_the_chosen_backend_unless_it_is_nvfbc() {
+        assert_eq!(grab_backends(Backend::Dxgi), [Backend::Dxgi, Backend::Wgc]);
+        for backend in [Backend::Wgc, Backend::Nvfbc, Backend::NvfbcCuda] {
+            assert_eq!(grab_backends(backend), [Backend::Wgc, Backend::Dxgi]);
+        }
     }
 }
