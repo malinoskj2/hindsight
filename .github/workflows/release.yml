@@ -79,6 +79,26 @@ jobs:
             echo '```'
           } > release-notes.md
 
+      # The app installs an update only when this signature verifies against the public key it
+      # carries, and only for the installer and version named in the trusted comment.
+      - name: Sign the installer for in-app updates
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBLIC_KEY: RWS8QHCApYhZBeuje7KwHPxzYQvonUdt6eOwQGpVK2M4ZB8xsX+hCSrA
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$MINISIGN_SECRET_KEY" ]] || { echo "The MINISIGN_SECRET_KEY secret is not set" >&2; exit 1; }
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends minisign
+
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          minisign -S -s "$key" -m release/hindsight-setup-x64.exe \
+            -t "hindsight-setup-x64.exe ${RELEASE_TAG#v}"
+          minisign -V -P "$MINISIGN_PUBLIC_KEY" -m release/hindsight-setup-x64.exe
+
       - name: Tag the build commit and create a draft
         env:
           BUILD_SHA: ${{ steps.build.outputs.sha }}
@@ -91,6 +111,7 @@ jobs:
 
           gh release create "$RELEASE_TAG" \
             release/hindsight-setup-x64.exe \
+            release/hindsight-setup-x64.exe.minisig \
             release/hindsight-windows-x64.zip \
             release/SHA256SUMS.txt \
             --verify-tag --draft --title "hindsight $RELEASE_TAG" \
