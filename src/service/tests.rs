@@ -752,7 +752,10 @@ fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
     let shots = files_in(&directory.path().join("screenshots"));
     assert_eq!(shots.len(), 1, "{shots:?}");
     assert_eq!(shots[0].extension().unwrap(), "png");
-    assert!(files_in(&directory.path().join("videos")).is_empty());
+    assert_eq!(
+        files_in(&directory.path().join("videos")),
+        Vec::<PathBuf>::new()
+    );
     assert!(worker.status().error.is_none());
 
     worker.screenshot();
