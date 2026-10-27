@@ -58,8 +58,8 @@ sound is kept raw and encoded to AAC only when a clip is saved. It takes about 5
 5 minutes, always in RAM whichever memory holds the video. Turn it off if you never use the sound.
 
 **Record the microphone** records the default recording device, read on the same thread as the
-system sound and kept raw the same way, in mono: about 29 MB of RAM for 5 minutes. It is mixed into
-the clip's one sound track when the clip is saved, so recording it adds no encoding while you play.
+system sound and kept raw the same way, in mono: about 29 MB of RAM for 5 minutes. It is encoded to
+a second sound track when the clip is saved, so recording it adds no encoding while you play.
 
 **Record the mouse cursor** makes no measurable difference either way.
 

@@ -334,7 +334,7 @@ pub(crate) struct Config {
     pub(crate) theme: Theme,
     /// Whether the system's sound is recorded.
     pub(crate) audio: bool,
-    /// Whether the default microphone is recorded, mixed into the clip's sound.
+    /// Whether the default microphone is recorded, on a sound track of its own.
     pub(crate) microphone: bool,
     /// Whether the cursor is drawn, where the backend can draw it. Desktop Duplication never
     /// draws it.

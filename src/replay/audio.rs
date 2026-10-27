@@ -1,6 +1,6 @@
 //! The system's sound and the microphone as 16-bit PCM, numbered on the video's QPC clock, kept
 //! as long as the video ring keeps its packets and cut to the video's first and last frame when a
-//! clip is saved. Each source has a ring of its own; a clip mixes them as it is read.
+//! clip is saved. Each source has a ring of its own and becomes a track of its own in the clip.
 
 use std::{
     collections::VecDeque,
@@ -40,12 +40,29 @@ pub(crate) enum Source {
     Microphone,
 }
 
+impl Source {
+    /// The name of the source's track in a clip, which players list.
+    pub(crate) const fn track_name(self) -> &'static str {
+        match self {
+            Self::System => "System sound",
+            Self::Microphone => "Microphone",
+        }
+    }
+}
+
+/// A source the session records, and the channels it is kept and encoded in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TrackFormat {
+    pub(crate) source: Source,
+    pub(crate) channels: NonZeroU16,
+}
+
 #[derive(Debug)]
 pub(crate) struct AudioFormat {
     pub(crate) sample_rate: NonZeroU32,
-    /// The channels of the system sound, and of the clip's sound.
-    pub(crate) channels: NonZeroU16,
-    pub(crate) microphone_channels: NonZeroU16,
+    /// The sources recorded, each a track of the clip in this order. System sound comes first, so
+    /// that it is the track players choose.
+    pub(crate) tracks: Vec<TrackFormat>,
     /// Clock time of input sample 0.
     pub(crate) anchor: i64,
     /// Samples the AAC encoder puts in front of its input.
@@ -78,20 +95,6 @@ impl AudioFormat {
     fn frame_input(first: i64) -> i64 {
         first.saturating_mul(i64::from(FRAME_SAMPLES))
     }
-
-    fn channels(&self) -> usize {
-        usize::from(self.channels.get())
-    }
-
-    fn channels_of(&self, source: Source) -> usize {
-        usize::from(
-            match source {
-                Source::System => self.channels,
-                Source::Microphone => self.microphone_channels,
-            }
-            .get(),
-        )
-    }
 }
 
 /// Trimming advances `offset` instead of copying.
@@ -116,44 +119,45 @@ impl Chunk {
     }
 }
 
-/// The rings of both sources.
-pub(crate) struct AudioRings {
-    system: AudioRing,
-    microphone: AudioRing,
-}
+/// A ring for each source recorded, in the order of the clip's tracks.
+pub(crate) struct AudioRings(Vec<AudioRing>);
 
 impl AudioRings {
+    /// No rings, before the sound's format is known.
     pub(crate) const fn new() -> Self {
-        Self {
-            system: AudioRing::new(Source::System),
-            microphone: AudioRing::new(Source::Microphone),
-        }
+        Self(Vec::new())
     }
 
-    pub(crate) const fn ring(&mut self, source: Source) -> &mut AudioRing {
-        match source {
-            Source::System => &mut self.system,
-            Source::Microphone => &mut self.microphone,
-        }
+    pub(crate) fn of(format: &AudioFormat) -> Self {
+        Self(format.tracks.iter().copied().map(AudioRing::new).collect())
+    }
+
+    /// Returns the ring of `source`, or `None` when it is not recorded.
+    pub(crate) fn ring(&mut self, source: Source) -> Option<&mut AudioRing> {
+        self.0.iter_mut().find(|ring| ring.track.source == source)
     }
 }
 
 /// One source's captured chunks, oldest first. Gaps where nothing was captured read as silence.
 pub(crate) struct AudioRing {
-    source: Source,
+    track: TrackFormat,
     chunks: VecDeque<Chunk>,
 }
 
 impl AudioRing {
-    const fn new(source: Source) -> Self {
+    const fn new(track: TrackFormat) -> Self {
         Self {
-            source,
+            track,
             chunks: VecDeque::new(),
         }
     }
 
-    pub(crate) fn push(&mut self, format: &AudioFormat, start: u64, data: Arc<[i16]>) {
-        let channels = format.channels_of(self.source);
+    fn channels(&self) -> usize {
+        usize::from(self.track.channels.get())
+    }
+
+    pub(crate) fn push(&mut self, start: u64, data: Arc<[i16]>) {
+        let channels = self.channels();
         let mut chunk = Chunk {
             start,
             data,
@@ -186,7 +190,7 @@ impl AudioRing {
     }
 
     pub(crate) fn trim(&mut self, format: &AudioFormat, start: Option<i64>) {
-        let channels = format.channels_of(self.source);
+        let channels = self.channels();
         let keep_from = match start {
             Some(start) => {
                 u64::try_from(AudioFormat::frame_input(format.first_frame(start))).unwrap_or(0)
@@ -202,14 +206,14 @@ impl AudioRing {
         self.chunks.back().map_or(0, |newest| newest.end(channels))
     }
 
-    fn since(&self, format: &AudioFormat, sample: i64) -> Captured {
-        let channels = format.channels_of(self.source);
+    fn since(&self, sample: i64) -> PcmTrack {
+        let channels = self.channels();
         let from = u64::try_from(sample).unwrap_or(0);
         let first = self
             .chunks
             .partition_point(|chunk| chunk.end(channels) <= from);
-        Captured {
-            channels,
+        PcmTrack {
+            format: self.track,
             chunks: self.chunks.range(first..).cloned().collect(),
         }
     }
@@ -223,8 +227,8 @@ impl AudioRing {
     }
 
     #[cfg(test)]
-    pub(crate) fn runs(&self, format: &AudioFormat) -> Vec<(u64, u64)> {
-        let channels = format.channels_of(self.source);
+    pub(crate) fn runs(&self) -> Vec<(u64, u64)> {
+        let channels = self.channels();
         self.chunks
             .iter()
             .map(|chunk| (chunk.start, chunk.length(channels)))
@@ -234,68 +238,57 @@ impl AudioRing {
 
 /// One source's chunks in a clip.
 #[derive(Debug)]
-struct Captured {
-    channels: usize,
+pub(crate) struct PcmTrack {
+    pub(crate) format: TrackFormat,
     chunks: Vec<Chunk>,
 }
 
-impl Captured {
-    /// Adds the samples from sample `from` on to `output`, interleaved in `channels`. A source
-    /// with fewer channels than the clip repeats its last one; mono plays on both sides.
-    fn mix_into(&self, from: i64, output: &mut [i16], channels: usize) {
+impl PcmTrack {
+    fn channels(&self) -> usize {
+        usize::from(self.format.channels.get())
+    }
+
+    /// Reads the samples from sample `from` on into `output`, interleaved in the track's channels.
+    /// Where nothing was captured reads as silence.
+    pub(crate) fn read(&self, from: i64, output: &mut [i16]) {
+        output.fill(0);
+        let channels = self.channels();
         let to = from.saturating_add(i64::try_from(output.len() / channels).unwrap_or(i64::MAX));
-        let end_of = |chunk: &Chunk| i64::try_from(chunk.end(self.channels)).unwrap_or(i64::MAX);
+        let end_of = |chunk: &Chunk| i64::try_from(chunk.end(channels)).unwrap_or(i64::MAX);
         let first = self.chunks.partition_point(|chunk| end_of(chunk) <= from);
-        let index = |sample: i64, base: i64, channels: usize| {
-            usize::try_from(sample - base).unwrap_or(0) * channels
-        };
+        let index = |sample: i64, base: i64| usize::try_from(sample - base).unwrap_or(0) * channels;
         for chunk in &self.chunks[first..] {
             let start = i64::try_from(chunk.start).unwrap_or(i64::MAX);
             if start >= to {
                 break;
             }
             let (low, high) = (start.max(from), end_of(chunk).min(to));
-            let output = &mut output[index(low, from, channels)..index(high, from, channels)];
-            let input = &chunk.samples()
-                [index(low, start, self.channels)..index(high, start, self.channels)];
-            for (mixed, frame) in output
-                .chunks_exact_mut(channels)
-                .zip(input.chunks_exact(self.channels))
-            {
-                for (channel, sample) in mixed.iter_mut().enumerate() {
-                    let added = frame.get(channel).or(frame.last()).copied().unwrap_or(0);
-                    *sample = sample.saturating_add(added);
-                }
-            }
+            output[index(low, from)..index(high, from)]
+                .copy_from_slice(&chunk.samples()[index(low, start)..index(high, start)]);
         }
     }
 }
 
+/// The sound of a clip, cut to its video, with a track for each source recorded.
 #[derive(Debug)]
 pub(crate) struct PcmClip {
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows encoder reads it")
+    )]
     pub(crate) format: Arc<AudioFormat>,
     /// Negative when the video starts before the sound did.
     pub(crate) start: i64,
     pub(crate) frames: usize,
     /// Samples of the first frames that play before the video. The edit list skips them.
     pub(crate) lead: u32,
-    system: Captured,
-    microphone: Captured,
+    pub(crate) tracks: Vec<PcmTrack>,
 }
 
-impl PcmClip {
-    /// Reads both sources mixed, clipping where their sum leaves the 16-bit range.
-    pub(crate) fn read(&self, from: i64, output: &mut [i16]) {
-        output.fill(0);
-        let channels = self.format.channels();
-        for captured in [&self.system, &self.microphone] {
-            captured.mix_into(from, output, channels);
-        }
-    }
-}
-
+/// One track of a clip's sound, encoded.
 #[derive(Debug)]
 pub(crate) struct AudioClip {
+    pub(crate) source: Source,
     pub(crate) sample_rate: u32,
     pub(crate) channels: u16,
     /// The `AudioSpecificConfig` the `esds` box carries.
@@ -317,8 +310,7 @@ pub(crate) fn cut(rings: &AudioRings, format: &Arc<AudioFormat>, start: i64, end
         start: input,
         frames: usize::try_from(end_frame - first).unwrap_or(0),
         lead: u32::try_from(first_sample - first * samples).unwrap_or(0),
-        system: rings.system.since(format, input),
-        microphone: rings.microphone.since(format, input),
+        tracks: rings.0.iter().map(|ring| ring.since(input)).collect(),
     }
 }
 
@@ -330,18 +322,32 @@ pub(crate) mod tests {
     pub(crate) const STEREO: NonZeroU16 = NonZeroU16::new(2).unwrap();
     pub(crate) const MONO: NonZeroU16 = NonZeroU16::new(1).unwrap();
 
-    pub(crate) fn format(priming: u32) -> Arc<AudioFormat> {
-        Arc::new(AudioFormat {
+    pub(crate) const SYSTEM: TrackFormat = TrackFormat {
+        source: Source::System,
+        channels: STEREO,
+    };
+    pub(crate) const MICROPHONE: TrackFormat = TrackFormat {
+        source: Source::Microphone,
+        channels: MONO,
+    };
+
+    /// System sound and the microphone, starting at clock time `anchor`.
+    pub(crate) fn both(anchor: i64, priming: u32) -> AudioFormat {
+        AudioFormat {
             sample_rate: RATE,
-            channels: STEREO,
-            microphone_channels: MONO,
-            anchor: 0,
+            tracks: vec![SYSTEM, MICROPHONE],
+            anchor,
             priming,
-        })
+        }
+    }
+
+    pub(crate) fn format(priming: u32) -> Arc<AudioFormat> {
+        Arc::new(both(0, priming))
     }
 
     pub(crate) fn aac_clip(frames: Vec<Arc<[u8]>>, lead: u32) -> AudioClip {
         AudioClip {
+            source: Source::System,
             sample_rate: 48_000,
             channels: 2,
             config: Box::new([0x11, 0x90]),
@@ -369,7 +375,7 @@ pub(crate) mod tests {
 
     fn left(clip: &PcmClip, from: i64, length: usize) -> Vec<i16> {
         let mut output = vec![1; length * 2];
-        clip.read(from, &mut output);
+        clip.tracks[0].read(from, &mut output);
         output.chunks(2).map(|pair| pair[0]).collect()
     }
 
@@ -390,33 +396,33 @@ pub(crate) mod tests {
     #[test]
     fn keeps_the_samples_a_clip_of_the_buffered_video_needs_to_the_sample() {
         let format = format(1024);
-        let mut ring = AudioRing::new(Source::System);
+        let mut ring = AudioRing::new(SYSTEM);
         for chunk in 0..20 {
-            ring.push(&format, chunk * 1000, numbered(chunk * 1000, 1000));
+            ring.push(chunk * 1000, numbered(chunk * 1000, 1000));
         }
         ring.trim(&format, Some(time_of(10 * 1024 + 100) - time_of(1024)));
-        let runs = ring.runs(&format);
+        let runs = ring.runs();
         assert_eq!(runs[0], (9216, 784));
         assert_eq!(runs[1], (10_000, 1000));
         assert_eq!(runs.len(), 11);
         assert_eq!(ring.bytes(), (20_000 - 9216) * 4);
 
-        ring.push(&format, 19_500, numbered(19_500, 1000));
-        assert_eq!(ring.runs(&format).last(), Some(&(20_000, 500)));
-        ring.push(&format, 19_000, numbered(19_000, 100));
-        assert_eq!(ring.runs(&format).len(), 12);
+        ring.push(19_500, numbered(19_500, 1000));
+        assert_eq!(ring.runs().last(), Some(&(20_000, 500)));
+        ring.push(19_000, numbered(19_000, 100));
+        assert_eq!(ring.runs().len(), 12);
     }
 
     #[test]
     fn keeps_a_few_seconds_until_the_video_starts() {
         let format = format(1024);
-        let mut ring = AudioRing::new(Source::System);
+        let mut ring = AudioRing::new(SYSTEM);
         let second = 48_000;
         for chunk in 0..(SECONDS_BEFORE_VIDEO + 2) {
-            ring.push(&format, chunk * second, numbered(chunk * second, second));
+            ring.push(chunk * second, numbered(chunk * second, second));
             ring.trim(&format, None);
         }
-        let runs = ring.runs(&format);
+        let runs = ring.runs();
         assert_eq!(runs.len(), usize::try_from(SECONDS_BEFORE_VIDEO).unwrap());
         assert_eq!(runs[0].0, 2 * second);
     }
@@ -424,10 +430,10 @@ pub(crate) mod tests {
     #[test]
     fn a_cut_covers_the_video_to_the_sample_and_reads_gaps_as_silence() {
         let format = format(1024);
-        let mut rings = AudioRings::new();
-        let system = rings.ring(Source::System);
-        system.push(&format, 0, numbered(0, 7000));
-        system.push(&format, 12_000, numbered(12_000, 28_000));
+        let mut rings = AudioRings::of(&format);
+        let system = rings.ring(Source::System).unwrap();
+        system.push(0, numbered(0, 7000));
+        system.push(12_000, numbered(12_000, 28_000));
         let clip = cut(&rings, &format, time_of(4800), time_of(19_200));
 
         assert_eq!(clip.start, 4096);
@@ -443,7 +449,7 @@ pub(crate) mod tests {
         assert!(samples[7000 - 4096..12_000 - 4096].iter().all(|&s| s == 0));
         assert_eq!(samples[12_000 - 4096], 12_000);
         let mut pair = [0; 2];
-        clip.read(13_000, &mut pair);
+        clip.tracks[0].read(13_000, &mut pair);
         assert_eq!(pair, [13_000, -13_000]);
         assert!(left(&clip, 39_990, 20)[10..].iter().all(|&s| s == 0));
     }
@@ -451,10 +457,11 @@ pub(crate) mod tests {
     #[test]
     fn video_before_the_first_sound_is_padded_with_silence() {
         let format = format(1024);
-        let mut rings = AudioRings::new();
+        let mut rings = AudioRings::of(&format);
         rings
             .ring(Source::System)
-            .push(&format, 0, numbered(0, 2048));
+            .unwrap()
+            .push(0, numbered(0, 2048));
         let clip = cut(&rings, &format, -time_of(4800), time_of(2400));
 
         assert!(clip.start < 0);
@@ -469,41 +476,51 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_microphone_is_kept_in_mono_and_mixed_onto_both_channels() {
+    fn the_microphone_is_kept_in_mono_on_a_track_of_its_own() {
         let format = format(0);
-        let mut rings = AudioRings::new();
+        let mut rings = AudioRings::of(&format);
         rings
             .ring(Source::System)
-            .push(&format, 0, numbered(0, 4000));
+            .unwrap()
+            .push(0, numbered(0, 4000));
         let voice: Arc<[i16]> = (0..3000).map(|sample| 10_000 + sample).collect();
-        let microphone = rings.ring(Source::Microphone);
-        microphone.push(&format, 2000, voice);
-        assert_eq!(microphone.runs(&format), [(2000, 3000)]);
+        let microphone = rings.ring(Source::Microphone).unwrap();
+        microphone.push(2000, voice);
+        assert_eq!(microphone.runs(), [(2000, 3000)]);
         assert_eq!(microphone.bytes(), 3000 * 2);
         let clip = cut(&rings, &format, 0, time_of(6000));
 
-        let mut samples = vec![7; 6000 * 2];
-        clip.read(0, &mut samples);
-        let frame = |number: usize| [samples[number * 2], samples[number * 2 + 1]];
-        assert_eq!(frame(1999), [1999, -1999]);
-        assert_eq!(frame(2000), [12_000, 8000]);
-        assert_eq!(frame(3999), [3999 + 11_999, 11_999 - 3999]);
-        assert_eq!(frame(4000), [12_000, 12_000]);
-        assert_eq!(frame(4999), [12_999, 12_999]);
-        assert_eq!(frame(5000), [0, 0]);
+        let [system, microphone] = &clip.tracks[..] else {
+            panic!("expected two tracks");
+        };
+        assert_eq!((system.format, microphone.format), (SYSTEM, MICROPHONE));
+        let mut stereo = vec![7; 6000 * 2];
+        system.read(0, &mut stereo);
+        assert_eq!(stereo[3999 * 2..3999 * 2 + 2], [3999, -3999]);
+        assert!(stereo[4000 * 2..].iter().all(|&sample| sample == 0));
+        let mut mono = vec![7; 6000];
+        microphone.read(0, &mut mono);
+        assert!(mono[..2000].iter().all(|&sample| sample == 0));
+        assert_eq!(mono[2000], 10_000);
+        assert_eq!(mono[4999], 12_999);
+        assert!(mono[5000..].iter().all(|&sample| sample == 0));
     }
 
     #[test]
-    fn a_mix_louder_than_16_bits_is_clipped() {
-        let format = format(0);
-        let mut rings = AudioRings::new();
-        let loud: Arc<[i16]> = [30_000, -30_000].into();
-        rings.ring(Source::System).push(&format, 0, loud);
-        let voice: Arc<[i16]> = [10_000].into();
-        rings.ring(Source::Microphone).push(&format, 0, voice);
+    fn only_the_sources_recorded_have_rings_and_tracks() {
+        let format = Arc::new(AudioFormat {
+            tracks: vec![MICROPHONE],
+            ..both(0, 0)
+        });
+        let mut rings = AudioRings::of(&format);
+        assert!(rings.ring(Source::System).is_none());
+        let voice: Arc<[i16]> = [5].into();
+        rings.ring(Source::Microphone).unwrap().push(0, voice);
         let clip = cut(&rings, &format, 0, time_of(1));
-        let mut pair = [0; 2];
-        clip.read(0, &mut pair);
-        assert_eq!(pair, [i16::MAX, -20_000]);
+        let [microphone] = &clip.tracks[..] else {
+            panic!("expected one track");
+        };
+        assert_eq!(microphone.format, MICROPHONE);
+        assert!(AudioRings::new().ring(Source::System).is_none());
     }
 }

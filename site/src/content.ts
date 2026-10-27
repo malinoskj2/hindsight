@@ -23,7 +23,7 @@ export const features = [
   },
   {
     title: "H.264, HEVC or AV1 at up to 240 fps.",
-    body: "With system sound as AAC. The settings only offer what your GPU can encode.",
+    body: "With system sound as AAC, and your microphone on a track of its own if you like. The settings only offer what your GPU can encode.",
   },
 ] as const satisfies readonly Point[];
 
@@ -110,7 +110,7 @@ export const settingGroups = [
         id: "sound",
         fields: ["Record system sound", "Record the microphone"],
         title: "Turn off sound you never use.",
-        body: "System sound is cheap, under a fifth of the video's CPU, but not free. Leave the microphone off unless you want your voice in the clips.",
+        body: "System sound is cheap, under a fifth of the video's CPU, but not free. Leave the microphone off unless you want your voice in the clips, where it gets a sound track of its own.",
       },
       {
         id: "cursor",
