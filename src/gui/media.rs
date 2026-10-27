@@ -1,5 +1,6 @@
-//! The Clips tab: the clip folder's videos shown as thumbnails, newest first. The folder is read and the
-//! shell's thumbnails are made on a dedicated thread.
+//! The Clips and Screenshots tabs: the clip folder's videos or pictures shown as thumbnails,
+//! newest first. Each tab reads the folder and has the shell make its thumbnails on a thread of
+//! its own.
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
@@ -9,7 +10,8 @@ use super::{
     theme::Skin,
 };
 use crate::{
-    config, log,
+    config::{self, Container, ScreenshotFormat},
+    log,
     replay::ClipName,
     service::Status,
     sys::{
@@ -43,18 +45,71 @@ const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 /// folder answers well within this time, and a slow network folder no longer freezes the window.
 const LISTING_WAIT: Duration = Duration::from_millis(200);
 
+/// What a media tab lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Media {
+    Clips,
+    Screenshots,
+}
+
+impl Media {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Clips => text::TAB_CLIPS,
+            Self::Screenshots => text::TAB_SCREENSHOTS,
+        }
+    }
+
+    fn empty_text(self) -> &'static str {
+        match self {
+            Self::Clips => text::NO_CLIPS,
+            Self::Screenshots => text::NO_SCREENSHOTS,
+        }
+    }
+
+    fn thread_name(self) -> &'static str {
+        match self {
+            Self::Clips => "clips",
+            Self::Screenshots => "screenshots",
+        }
+    }
+
+    fn directories(self, folder: &Path) -> [PathBuf; 2] {
+        match self {
+            Self::Clips => config::video_directories(folder),
+            Self::Screenshots => config::screenshot_directories(folder),
+        }
+    }
+
+    /// Whether a file with this extension, in any case, is one of the tab's.
+    fn admits(self, extension: &str) -> bool {
+        match self {
+            Self::Clips => Container::of_extension(extension).is_some(),
+            Self::Screenshots => ScreenshotFormat::of_extension(extension).is_some(),
+        }
+    }
+
+    fn last_saved(self, status: &Status) -> Option<&Path> {
+        match self {
+            Self::Clips => status.last_clip.as_deref(),
+            Self::Screenshots => status.last_screenshot.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(super) struct ClipsPage(Rc<Inner>);
+pub(super) struct MediaPage(Rc<Inner>);
 
 struct Inner {
+    media: Media,
     page: gui::TabPage,
     list: gui::ListView,
     state: RefCell<State>,
 }
 
-impl Pane for ClipsPage {
+impl Pane for MediaPage {
     fn title(&self) -> &'static str {
-        text::TAB_CLIPS
+        self.0.media.title()
     }
 
     fn page(&self) -> &gui::TabPage {
@@ -72,8 +127,8 @@ impl Pane for ClipsPage {
     }
 }
 
-impl ClipsPage {
-    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
+impl MediaPage {
+    pub(super) fn new(parent: &(impl GuiParent + 'static), media: Media, skin: &Skin) -> Self {
         let page = layout::page(parent);
         let list = gui::ListView::new(
             &page,
@@ -91,6 +146,7 @@ impl ClipsPage {
         pane::paint(&page, skin, ());
 
         let page = Self(Rc::new(Inner {
+            media,
             page,
             list,
             state: RefCell::default(),
@@ -109,15 +165,16 @@ impl ClipsPage {
         self.set_colours(background, text);
     }
 
-    /// Rereads the folder when the tab comes into view, the folder changes or a clip was saved.
-    /// Finished thumbnails are collected in either case.
+    /// Rereads the folder when the tab comes into view, the folder changes or a file of the
+    /// tab's was saved. Finished thumbnails are collected in either case.
     pub(super) fn update(&self, status: &Status, folder: &Path, shown: bool) {
         self.receive(None);
+        let saved = self.0.media.last_saved(status);
         let rebuild = {
             let mut state = self.0.state.borrow_mut();
-            if state.folder.as_deref() != Some(folder) || state.last_clip != status.last_clip {
+            if state.folder.as_deref() != Some(folder) || state.last_saved.as_deref() != saved {
                 state.folder = Some(folder.to_owned());
-                state.last_clip = status.last_clip.clone();
+                state.last_saved = saved.map(Path::to_path_buf);
                 state.stale = true;
             }
             if shown && !state.in_view {
@@ -138,7 +195,7 @@ impl ClipsPage {
     fn events(&self) {
         let page = self.clone();
         self.0.list.on().nm_click(move |click| {
-            if let Some(path) = page.clip_path(click.iItem) {
+            if let Some(path) = page.file_path(click.iItem) {
                 open(&path);
             }
             Ok(())
@@ -151,24 +208,24 @@ impl ClipsPage {
         });
         let page = self.clone();
         self.0.list.on().lvn_get_empty_markup(move |markup| {
-            // The "no clips" text is not shown while the folder is still being read.
+            // The "nothing yet" text is not shown while the folder is still being read.
             if page.0.state.borrow().listings_out > 0 {
                 return Ok(false);
             }
             markup.dwFlags = co::EMF::CENTERED;
-            markup.set_szMarkup(text::NO_CLIPS);
+            markup.set_szMarkup(page.0.media.empty_text());
             Ok(true)
         });
     }
 
-    fn clip_path(&self, index: i32) -> Option<PathBuf> {
+    fn file_path(&self, index: i32) -> Option<PathBuf> {
         let index = usize::try_from(index).ok()?;
         let state = self.0.state.borrow();
-        state.clips.get(index).map(|clip| clip.path.clone())
+        state.files.get(index).map(|file| file.path.clone())
     }
 
     fn on_right_click(&self, index: i32) {
-        let Some(path) = self.clip_path(index) else {
+        let Some(path) = self.file_path(index) else {
             return;
         };
         if let Ok(item) = u32::try_from(index) {
@@ -177,21 +234,21 @@ impl ClipsPage {
         // TrackPopupMenu pumps messages, so the timer may rebuild the list in the meantime, which
         // is why `path` was resolved first.
         match self.choose_command() {
-            Ok(Some(ClipCommand::Open)) => open(&path),
-            Ok(Some(ClipCommand::Reveal)) => {
+            Ok(Some(FileCommand::Open)) => open(&path),
+            Ok(Some(FileCommand::Reveal)) => {
                 if let Err(error) = shell::reveal(&path) {
-                    log::warning(text::clip_reveal_failed(&path, error));
+                    log::warning(text::reveal_failed(&path, error));
                 }
             }
-            Ok(Some(ClipCommand::Delete)) => self.delete(&path),
+            Ok(Some(FileCommand::Delete)) => self.delete(&path),
             Ok(None) => {}
-            Err(error) => log::warning(text::clip_menu_failed(error)),
+            Err(error) => log::warning(text::menu_failed(self.0.media.title(), error)),
         }
     }
 
-    fn choose_command(&self) -> w::SysResult<Option<ClipCommand>> {
+    fn choose_command(&self) -> w::SysResult<Option<FileCommand>> {
         let mut menu = w::HMENU::CreatePopupMenu()?;
-        let items: Vec<w::MenuItem> = ClipCommand::ALL
+        let items: Vec<w::MenuItem> = FileCommand::ALL
             .iter()
             .map(|command| w::MenuItem::Entry {
                 cmd_id: command.id(),
@@ -200,7 +257,7 @@ impl ClipsPage {
             .collect();
         let chosen = menu
             .append_item(&items)
-            .and_then(|()| menu.SetMenuDefaultItem(w::IdPos::Id(ClipCommand::Open.id())))
+            .and_then(|()| menu.SetMenuDefaultItem(w::IdPos::Id(FileCommand::Open.id())))
             .and_then(|()| w::GetCursorPos())
             .and_then(|at| {
                 menu.TrackPopupMenu(
@@ -210,15 +267,15 @@ impl ClipsPage {
                 )
             });
         let _ = menu.DestroyMenu();
-        Ok(chosen?.and_then(ClipCommand::from_id))
+        Ok(chosen?.and_then(FileCommand::from_id))
     }
 
     fn delete(&self, path: &Path) {
         if let Err(error) = shell::recycle(path, self.0.list.hwnd()) {
-            log::warning(text::clip_delete_failed(path, error));
+            log::warning(text::recycle_failed(path, error));
             return;
         }
-        log::info(text::clip_deleted(path));
+        log::info(text::recycled(path));
         let folder = {
             let mut state = self.0.state.borrow_mut();
             state.thumbnails.forget(path);
@@ -235,7 +292,7 @@ impl ClipsPage {
         let sent = {
             let mut state = self.0.state.borrow_mut();
             let sent = state
-                .worker()
+                .worker(self.0.media)
                 .is_some_and(|worker| worker.jobs.send(Job::List(folder.to_owned())).is_ok());
             if sent {
                 state.listings_out += 1;
@@ -245,7 +302,7 @@ impl ClipsPage {
         if sent {
             self.receive(Some(Instant::now() + LISTING_WAIT));
         } else {
-            self.rebuild(list_clips(folder));
+            self.rebuild(list_files(self.0.media, folder));
         }
     }
 
@@ -267,8 +324,8 @@ impl ClipsPage {
             };
             match done {
                 Some(Done::Thumbnail(path, result)) => self.receive_thumbnail(path, result),
-                Some(Done::List(folder, clips)) => {
-                    self.receive_listing(&folder, clips);
+                Some(Done::List(folder, files)) => {
+                    self.receive_listing(&folder, files);
                     if deadline.is_some() {
                         return;
                     }
@@ -280,49 +337,49 @@ impl ClipsPage {
 
     /// Rebuilds the list from a listing. A listing of a folder that is no longer the current one
     /// is dropped.
-    fn receive_listing(&self, folder: &Path, clips: Vec<Clip>) {
+    fn receive_listing(&self, folder: &Path, files: Vec<MediaFile>) {
         let current = {
             let mut state = self.0.state.borrow_mut();
             state.listings_out = state.listings_out.saturating_sub(1);
             state.folder.as_deref() == Some(folder)
         };
         if current {
-            self.rebuild(clips);
+            self.rebuild(files);
         }
     }
 
     /// The list's messages re-enter the window procedure with notifications, so the state is not
-    /// borrowed while they run. No clip is listed in the meantime, so no item resolves to a stale
+    /// borrowed while they run. No file is listed in the meantime, so no item resolves to a stale
     /// path.
-    fn rebuild(&self, clips: Vec<Clip>) {
+    fn rebuild(&self, files: Vec<MediaFile>) {
         let images: Vec<Option<u32>> = {
             let mut state = self.0.state.borrow_mut();
-            state.clips.clear();
-            clips
+            state.files.clear();
+            files
                 .iter()
-                .map(|clip| state.thumbnails.image(&clip.path))
+                .map(|file| state.thumbnails.image(&file.path))
                 .collect()
         };
         self.0.list.set_redraw(false);
         let _ = self.0.list.items().delete_all();
-        for (clip, image) in clips.iter().zip(images) {
-            if let Err(error) = self.insert_item(&clip.caption(), image) {
-                log::warning(text::clip_not_listed(&clip.path, error));
+        for (file, image) in files.iter().zip(images) {
+            if let Err(error) = self.insert_item(&file.caption(), image) {
+                log::warning(text::not_listed(self.0.media.title(), &file.path, error));
             }
         }
-        self.place_items(clips.len());
+        self.place_items(files.len());
         self.0.list.set_redraw(true);
         let _ = self.0.list.hwnd().InvalidateRect(None, true);
         let mut state = self.0.state.borrow_mut();
-        state.clips = clips;
+        state.files = files;
         let State {
-            clips,
+            files,
             thumbnails,
             worker,
             ..
         } = &mut *state;
         if let Some(worker) = worker {
-            thumbnails.request_missing(clips, worker);
+            thumbnails.request_missing(files, worker);
         }
     }
 
@@ -380,7 +437,7 @@ impl ClipsPage {
     /// The borrow ends before the list is updated, because `LVM_SETITEM` re-enters the window
     /// procedure.
     fn receive_thumbnail(&self, path: PathBuf, result: Result<Thumbnail, ThumbnailError>) {
-        // The clip was deleted while its thumbnail was being made.
+        // The file was deleted while its thumbnail was being made.
         if !self.0.state.borrow().thumbnails.requested.contains(&path) {
             return;
         }
@@ -388,7 +445,7 @@ impl ClipsPage {
             Ok(image) => {
                 let index = {
                     let mut state = self.0.state.borrow_mut();
-                    let index = state.clips.iter().position(|clip| clip.path == path);
+                    let index = state.files.iter().position(|file| file.path == path);
                     state.thumbnails.images.insert(path, image);
                     index
                 };
@@ -398,7 +455,7 @@ impl ClipsPage {
                     let _ = self.0.list.items().get(index).set_icon_index(Some(image));
                 }
             }
-            Err(error) => log::warning(text::thumbnail_failed(&path, error)),
+            Err(error) => log::warning(text::thumbnail_failed(self.0.media.title(), &path, error)),
         }
     }
 
@@ -413,8 +470,9 @@ impl ClipsPage {
     #[expect(unsafe_code, reason = "sends LVM_SETIMAGELIST")]
     fn install_image_list(&self) {
         let size = thumbnail_size();
+        let title = self.0.media.title();
         let images = w::HIMAGELIST::Create(w::SIZE::with(size.0, size.1), co::ILC::COLOR32, 16, 16)
-            .inspect_err(|error| log::warning(text::thumbnails_unavailable(error)));
+            .inspect_err(|error| log::warning(text::thumbnails_unavailable(title, error)));
         let Ok(mut images) = images else {
             return;
         };
@@ -425,7 +483,7 @@ impl ClipsPage {
         });
         match placeholder {
             Ok(index) => self.0.state.borrow_mut().thumbnails.placeholder = Some(index),
-            Err(error) => log::warning(text::thumbnails_unavailable(error)),
+            Err(error) => log::warning(text::thumbnails_unavailable(title, error)),
         }
         // SAFETY: LVM_SETIMAGELIST takes the handle by value, and the control owns it from then on.
         unsafe {
@@ -488,10 +546,10 @@ impl ClipsPage {
 #[derive(Default)]
 struct State {
     folder: Option<PathBuf>,
-    last_clip: Option<PathBuf>,
+    last_saved: Option<PathBuf>,
     stale: bool,
     in_view: bool,
-    clips: Vec<Clip>,
+    files: Vec<MediaFile>,
     /// Listings requested from the worker and not yet collected.
     listings_out: usize,
     thumbnails: Thumbnails,
@@ -500,15 +558,15 @@ struct State {
 
 impl State {
     /// The worker, started on first use.
-    fn worker(&mut self) -> Option<&Worker> {
+    fn worker(&mut self, media: Media) -> Option<&Worker> {
         if self.worker.is_none() {
-            self.worker = Worker::start(thumbnail_size());
+            self.worker = Worker::start(media, thumbnail_size());
         }
         self.worker.as_ref()
     }
 }
 
-/// The clips' thumbnails in the list's image list, and the outstanding requests for the rest.
+/// The files' thumbnails in the list's image list, and the outstanding requests for the rest.
 #[derive(Default)]
 struct Thumbnails {
     placeholder: Option<u32>,
@@ -521,10 +579,10 @@ impl Thumbnails {
         self.images.get(path).copied().or(self.placeholder)
     }
 
-    fn request_missing(&mut self, clips: &[Clip], worker: &Worker) {
-        let missing: Vec<PathBuf> = clips
+    fn request_missing(&mut self, files: &[MediaFile], worker: &Worker) {
+        let missing: Vec<PathBuf> = files
             .iter()
-            .map(|clip| clip.path.clone())
+            .map(|file| file.path.clone())
             .filter(|path| !self.images.contains_key(path) && !self.requested.contains(path))
             .collect();
         for path in missing {
@@ -534,7 +592,7 @@ impl Thumbnails {
         }
     }
 
-    /// Forgets the clip's thumbnail. The image stays in the image list, because removing one
+    /// Forgets the file's thumbnail. The image stays in the image list, because removing one
     /// renumbers those after it.
     fn forget(&mut self, path: &Path) {
         self.images.remove(path);
@@ -543,13 +601,13 @@ impl Thumbnails {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClipCommand {
+enum FileCommand {
     Open,
     Reveal,
     Delete,
 }
 
-impl ClipCommand {
+impl FileCommand {
     const ALL: [Self; 3] = [Self::Open, Self::Reveal, Self::Delete];
 
     /// The menu command id, counted from 1, because the menu reports no choice as 0.
@@ -569,9 +627,9 @@ impl ClipCommand {
 
     fn text(self) -> &'static str {
         match self {
-            Self::Open => text::CLIP_MENU_OPEN,
-            Self::Reveal => text::CLIP_MENU_REVEAL,
-            Self::Delete => text::CLIP_MENU_DELETE,
+            Self::Open => text::MENU_OPEN,
+            Self::Reveal => text::MENU_REVEAL,
+            Self::Delete => text::MENU_DELETE,
         }
     }
 }
@@ -583,7 +641,7 @@ enum Job {
 }
 
 enum Done {
-    List(PathBuf, Vec<Clip>),
+    List(PathBuf, Vec<MediaFile>),
     Thumbnail(PathBuf, Result<Thumbnail, ThumbnailError>),
 }
 
@@ -594,27 +652,27 @@ struct Worker {
 }
 
 impl Worker {
-    fn start(size: (i32, i32)) -> Option<Self> {
+    fn start(media: Media, size: (i32, i32)) -> Option<Self> {
         let (jobs, jobs_in) = mpsc::channel();
         let (done_out, done) = mpsc::channel();
         thread::Builder::new()
-            .name("clips".to_owned())
-            .spawn(move || serve(size, &jobs_in, &done_out))
-            .inspect_err(|error| log::warning(text::thumbnails_unavailable(error)))
+            .name(media.thread_name().to_owned())
+            .spawn(move || serve(media, size, &jobs_in, &done_out))
+            .inspect_err(|error| log::warning(text::thumbnails_unavailable(media.title(), error)))
             .ok()?;
         Some(Self { jobs, done })
     }
 }
 
 /// Serves jobs until the sender is dropped.
-fn serve(size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Done>) {
+fn serve(media: Media, size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Done>) {
     let _ = sys_thread::enter_background_mode();
     let com = Apartment::single_threaded();
     for job in jobs {
         let finished = match job {
             Job::List(folder) => {
-                let clips = list_clips(&folder);
-                Done::List(folder, clips)
+                let files = list_files(media, &folder);
+                Done::List(folder, files)
             }
             Job::Thumbnail(path) => {
                 let made = match &com {
@@ -630,20 +688,23 @@ fn serve(size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Done>) {
     }
 }
 
+/// A clip or a screenshot. Those hindsight named are captioned by the time they were saved,
+/// and the rest by their file name.
 #[derive(Debug, PartialEq, Eq)]
-struct Clip {
+struct MediaFile {
     path: PathBuf,
     name: Option<ClipName>,
     size: u64,
 }
 
-impl Clip {
-    fn new(path: PathBuf, size: u64) -> Option<Self> {
+impl MediaFile {
+    fn new(media: Media, path: PathBuf, size: u64) -> Option<Self> {
         let file_name = path.file_name()?.to_str()?;
-        file_name
-            .rsplit_once('.')
-            .and_then(|(_, extension)| config::Container::of_extension(extension))?;
-        let name = ClipName::parse(file_name);
+        let (_, extension) = file_name.rsplit_once('.')?;
+        if !media.admits(extension) {
+            return None;
+        }
+        let name = ClipName::parse(file_name, |extension| media.admits(extension));
         Some(Self { path, name, size })
     }
 
@@ -659,7 +720,7 @@ impl Clip {
             .name
             .as_ref()
             .map_or_else(|| self.file_name(), ClipName::title);
-        text::clip_caption(&title, self.size)
+        text::caption(&title, self.size)
     }
 
     /// The sort key: the recorder's names before the rest, then by name. The key is borrowed, so
@@ -669,8 +730,9 @@ impl Clip {
     }
 }
 
-fn list_clips(folder: &Path) -> Vec<Clip> {
-    let mut clips: Vec<Clip> = config::video_directories(folder)
+fn list_files(media: Media, folder: &Path) -> Vec<MediaFile> {
+    let mut files: Vec<MediaFile> = media
+        .directories(folder)
         .iter()
         .filter_map(|directory| fs::read_dir(directory).ok())
         .flat_map(Iterator::flatten)
@@ -679,15 +741,15 @@ fn list_clips(folder: &Path) -> Vec<Clip> {
             if !metadata.is_file() {
                 return None;
             }
-            Clip::new(entry.path(), metadata.len())
+            MediaFile::new(media, entry.path(), metadata.len())
         })
         .collect();
-    newest_first(&mut clips);
-    clips
+    newest_first(&mut files);
+    files
 }
 
-fn newest_first(clips: &mut [Clip]) {
-    clips.sort_by(|a, b| b.order().cmp(&a.order()));
+fn newest_first(files: &mut [MediaFile]) {
+    files.sort_by(|a, b| b.order().cmp(&a.order()));
 }
 
 fn thumbnail_size() -> (i32, i32) {
@@ -741,27 +803,63 @@ mod tests {
     const EDGE: i32 = 2;
     const SCROLL_BAR: i32 = 17;
 
-    fn clip(name: &str) -> Clip {
-        Clip::new(PathBuf::from(r"D:\Clips").join(name), 0).unwrap()
+    fn clip(name: &str) -> MediaFile {
+        MediaFile::new(Media::Clips, PathBuf::from(r"D:\Clips").join(name), 0).unwrap()
+    }
+
+    fn screenshot(name: &str) -> Option<MediaFile> {
+        MediaFile::new(
+            Media::Screenshots,
+            PathBuf::from(r"D:\Clips\screenshots").join(name),
+            0,
+        )
+    }
+
+    fn names(files: &[MediaFile]) -> Vec<String> {
+        files.iter().map(MediaFile::file_name).collect()
     }
 
     #[test]
     fn only_mp4_and_mkv_files_are_clips_and_a_hand_named_one_is_captioned_by_its_name() {
-        assert!(Clip::new(PathBuf::from(r"D:\Clips\notes.txt"), 1).is_none());
-        assert!(
-            Clip::new(
-                PathBuf::from(r"D:\Clips\hindsight_2026-10-12_21-14-05.partial"),
-                1
-            )
-            .is_none()
-        );
-        let named = Clip::new(PathBuf::from(r"D:\Clips\Boss fight.MP4"), 1_572_864).unwrap();
+        let file =
+            |name: &str| MediaFile::new(Media::Clips, PathBuf::from(r"D:\Clips").join(name), 1);
+        assert!(file("notes.txt").is_none());
+        assert!(file("hindsight_2026-10-12_21-14-05.partial").is_none());
+        assert!(file("hindsight_2026-10-12_21-14-05.png").is_none());
+        let named = MediaFile::new(
+            Media::Clips,
+            PathBuf::from(r"D:\Clips\Boss fight.MP4"),
+            1_572_864,
+        )
+        .unwrap();
         assert_eq!(named.name, None);
         assert_eq!(named.caption(), "Boss fight.MP4 2\u{a0}MB");
         let recorded = clip("hindsight_2026-10-12_21-14-05.mp4");
         assert_eq!(recorded.caption(), "2026-10-12 21:14:05 0\u{a0}MB");
         let matroska = clip("hindsight_2026-10-12_21-14-06.mkv");
         assert_eq!(matroska.caption(), "2026-10-12 21:14:06 0\u{a0}MB");
+    }
+
+    #[test]
+    fn every_image_format_is_a_screenshot_and_a_hand_named_one_is_captioned_by_its_name() {
+        for extension in ["png", "jpg", "jpeg", "webp", "avif", "PNG"] {
+            let recorded = screenshot(&format!("hindsight_2026-10-12_21-14-05.{extension}"))
+                .unwrap_or_else(|| panic!("{extension} is a screenshot"));
+            assert_eq!(recorded.caption(), "2026-10-12 21:14:05 0\u{a0}MB");
+        }
+        for other in [
+            "hindsight_2026-10-12_21-14-05.mp4",
+            "hindsight_2026-10-12_21-14-05.png.partial",
+            "notes.txt",
+            "png",
+        ] {
+            assert!(screenshot(other).is_none(), "{other}");
+        }
+        let named = screenshot("Clutch.webp").unwrap();
+        assert_eq!(named.name, None);
+        assert_eq!(named.caption(), "Clutch.webp 0\u{a0}MB");
+        let again = screenshot("hindsight_2026-10-12_21-14-05-2.jpg").unwrap();
+        assert_eq!(again.caption(), "2026-10-12 21:14:05 0\u{a0}MB");
     }
 
     #[test]
@@ -775,9 +873,8 @@ mod tests {
             clip("hindsight_2026-10-12_09-00-00.mkv"),
         ];
         newest_first(&mut clips);
-        let names: Vec<String> = clips.iter().map(Clip::file_name).collect();
         assert_eq!(
-            names,
+            names(&clips),
             [
                 "hindsight_2026-10-12_21-14-05-2.mp4",
                 "hindsight_2026-10-12_21-14-05.mp4",
@@ -805,10 +902,8 @@ mod tests {
         )
         .unwrap();
 
-        let names: Vec<String> = list_clips(folder).iter().map(Clip::file_name).collect();
-
         assert_eq!(
-            names,
+            names(&list_files(Media::Clips, folder)),
             [
                 "hindsight_2026-10-12_21-14-05.mp4",
                 "hindsight_2026-10-11_21-14-05.mp4"
@@ -817,14 +912,47 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_offers_open_reveal_and_delete_each_under_an_id_of_its_own() {
-        for command in ClipCommand::ALL {
-            assert_ne!(command.id(), 0, "{command:?} would read as no choice");
-            assert_eq!(ClipCommand::from_id(command.id().into()), Some(command));
+    fn screenshots_are_listed_newest_first_from_their_folder_and_the_clip_folder_itself() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path();
+        let videos = folder.join("videos");
+        let screenshots = folder.join("screenshots");
+        fs::create_dir(&videos).unwrap();
+        fs::create_dir(&screenshots).unwrap();
+        fs::create_dir(screenshots.join("old.png")).unwrap();
+        for (directory, name) in [
+            (&screenshots, "hindsight_2026-10-12_21-14-05.png"),
+            (&screenshots, "hindsight_2026-10-12_21-14-05-2.avif"),
+            (&screenshots, "hindsight_2026-10-13_08-00-00.jpg.partial"),
+            (&screenshots, "Clutch.webp"),
+            (&videos, "hindsight_2026-10-12_21-14-06.mp4"),
+            (&videos, "hindsight_2026-10-12_21-14-07.png"),
+            (&folder.to_path_buf(), "hindsight_2026-10-11_09-30-00.jpg"),
+            (&folder.to_path_buf(), "hindsight_2026-10-12_21-14-08.mkv"),
+        ] {
+            fs::write(directory.join(name), b"file").unwrap();
         }
-        assert_eq!(ClipCommand::from_id(0), None);
-        assert_eq!(ClipCommand::from_id(4), None);
-        assert_eq!(ClipCommand::ALL[0], ClipCommand::Open);
+
+        assert_eq!(
+            names(&list_files(Media::Screenshots, folder)),
+            [
+                "hindsight_2026-10-12_21-14-05-2.avif",
+                "hindsight_2026-10-12_21-14-05.png",
+                "hindsight_2026-10-11_09-30-00.jpg",
+                "Clutch.webp",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_menu_offers_open_reveal_and_delete_each_under_an_id_of_its_own() {
+        for command in FileCommand::ALL {
+            assert_ne!(command.id(), 0, "{command:?} would read as no choice");
+            assert_eq!(FileCommand::from_id(command.id().into()), Some(command));
+        }
+        assert_eq!(FileCommand::from_id(0), None);
+        assert_eq!(FileCommand::from_id(4), None);
+        assert_eq!(FileCommand::ALL[0], FileCommand::Open);
     }
 
     #[test]
