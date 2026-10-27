@@ -1323,7 +1323,7 @@ mod tests {
         let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
         let fill = layout::FILL_Y + layout::FILL_HEIGHT;
         assert!(bottom - rows::ADVANCED_HEIGHT <= fill);
-        assert_eq!(ADVANCED_EXTRA, 146);
+        assert_eq!(ADVANCED_EXTRA, 190);
         assert_eq!(bottom, fill + ADVANCED_EXTRA);
     }
 

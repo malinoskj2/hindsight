@@ -23,9 +23,10 @@ pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
 const TITLE_LABEL_INDENT: i32 = 8;
 
 pub(super) const FILL_Y: i32 = 6;
-/// The height down to where the Settings tab's last group ends while compact. It grows with the
-/// page.
-pub(super) const FILL_HEIGHT: i32 = 414;
+/// The height down to where the About tab's last group ends, the tallest of the pages laid out
+/// by hand. The window grows past it only while a page needs more, as Settings does with
+/// Advanced open.
+pub(super) const FILL_HEIGHT: i32 = 370;
 /// The tab strip above the pages and the slack under their content.
 const TAB_CHROME: i32 = 36;
 pub(super) const TAB_HEIGHT: i32 = FILL_Y + FILL_HEIGHT + TAB_CHROME;
