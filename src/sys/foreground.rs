@@ -5,7 +5,7 @@ use super::{
     callback::Slot,
     win32::{cb_size, cb_size_u16},
 };
-use crate::service::{MonitorHandle, Target, WindowHandle};
+use crate::service::{MonitorHandle, Target, Through, WindowHandle};
 use std::{path::Path, rc::Rc};
 use windows::{
     Win32::{
@@ -131,6 +131,7 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
         title: window.GetWindowText().unwrap_or_default(),
         size,
         rotated: is_rotated(&monitor),
+        through: Through::Window,
     })
 }
 

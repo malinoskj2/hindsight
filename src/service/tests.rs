@@ -96,8 +96,15 @@ fn scripted(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) ->
             steady_until_closed(config, live, stop);
             Ok(Ended::Closed)
         }
-        Target::Window { .. } => Ok(Ended::NoFrames),
-        Target::Monitor { .. } => steady(config, target, live, stop),
+        Target::Window {
+            through: Through::Window,
+            ..
+        } => Ok(Ended::NoFrames),
+        Target::Window {
+            through: Through::Monitor,
+            ..
+        }
+        | Target::Monitor { .. } => steady(config, target, live, stop),
     }
 }
 
@@ -199,6 +206,7 @@ fn window(window: isize) -> Target {
         title: String::new(),
         size: (64, 64),
         rotated: false,
+        through: Through::Window,
     }
 }
 
@@ -358,6 +366,46 @@ fn full_screen_mode_waits_for_an_app_and_follows_it() {
     assert_eq!(status.source.as_deref(), Some("game2.exe"));
 }
 
+static MONITOR_ONLY_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Records a window only through its monitor, as Windows Graphics Capture records an exclusive
+/// full-screen game.
+fn monitor_only(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+    MONITOR_ONLY_SESSIONS.fetch_add(1, Ordering::Relaxed);
+    match target {
+        Target::Window {
+            through: Through::Window,
+            ..
+        } => Ok(Ended::NoFrames),
+        _ => steady(config, target, live, stop),
+    }
+}
+
+#[test]
+fn an_app_recorded_through_its_monitor_carries_on_when_it_comes_back_to_the_front() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Config {
+        mode: Mode::Fullscreen,
+        ..config_in(directory.path())
+    };
+    let worker = spawn(monitor_only, RETRY_INTERVAL, None, config);
+    wait_for(&worker, |status| status.state == State::Waiting);
+
+    worker.target(window(5));
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_)) && status.bytes.session_written > 0
+    });
+    assert_eq!(MONITOR_ONLY_SESSIONS.load(Ordering::Relaxed), 2);
+
+    worker.target(window(5));
+    // Commands are handled in order, so the clip confirms that the offer was seen.
+    worker.save();
+    let status = wait_for(&worker, |status| status.last_clip.is_some());
+    assert!(matches!(status.state, State::Recording(_)));
+    assert_eq!(status.source.as_deref(), Some("game5.exe"));
+    assert_eq!(MONITOR_ONLY_SESSIONS.load(Ordering::Relaxed), 2);
+}
+
 #[test]
 fn full_screen_mode_ignores_targets_while_stopped_or_cooling_down() {
     let config = Config {
@@ -441,6 +489,7 @@ fn full_screen_mode_passes_over_an_app_it_cannot_record_and_waits_for_the_next()
         title: String::new(),
         size: (1080, 1920),
         rotated: true,
+        through: Through::Window,
     };
     worker.target(rotated);
     worker.save();
@@ -705,12 +754,13 @@ fn a_target_is_known_by_its_handles_not_its_name() {
         title: "renamed".to_owned(),
         size: (1, 1),
         rotated: true,
+        through: Through::Monitor,
     };
     assert_eq!(renamed, window(1));
     assert_ne!(window(2), window(1));
-    assert_ne!(window(1).monitor(), window(1));
-    assert_eq!(window(1).monitor(), window(2).monitor());
-    assert_ne!(window(1).monitor(), Target::primary_monitor());
+    assert_eq!(window(1).through_monitor(), window(1));
+    assert_ne!(window(1).through_monitor(), window(2));
+    assert_ne!(window(1), Target::primary_monitor());
     assert_eq!(MonitorHandle::new(7).map(MonitorHandle::get), Some(7));
     assert_eq!(MonitorHandle::new(0), None);
 }
