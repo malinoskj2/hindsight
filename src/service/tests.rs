@@ -819,6 +819,8 @@ fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
     let shots = files_in(&directory.path().join("screenshots"));
     assert_eq!(shots.len(), 1, "{shots:?}");
     assert_eq!(shots[0].extension().unwrap(), "png");
+    let status = wait_for(&worker, |status| status.last_screenshot.is_some());
+    assert_eq!(status.last_screenshot.as_ref(), Some(&shots[0]));
     assert_eq!(
         files_in(&directory.path().join("videos")),
         Vec::<PathBuf>::new()
@@ -829,6 +831,10 @@ fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
     wait_for(&worker, |_| tones(&heard).len() == 2);
     assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved]);
     assert_eq!(files_in(&directory.path().join("screenshots")).len(), 2);
+    let status = wait_for(&worker, |status| {
+        status.last_screenshot.as_ref() != Some(&shots[0])
+    });
+    assert!(status.last_screenshot.unwrap().exists());
 }
 
 #[test]

@@ -23,6 +23,7 @@ const MEGABYTE: u64 = 1_000_000;
 
 pub(super) const TAB_STATUS: &str = "Status";
 pub(super) const TAB_CLIPS: &str = "Clips";
+pub(super) const TAB_SCREENSHOTS: &str = "Screenshots";
 pub(super) const TAB_SETTINGS: &str = "Settings";
 pub(super) const TAB_LOGS: &str = "Logs";
 pub(super) const TAB_ABOUT: &str = "About";
@@ -50,9 +51,10 @@ pub(super) const LIFETIME_SAVED: &str = "Lifetime Saved";
 
 pub(super) const NO_CLIPS: &str =
     "No clips yet — press the hotkey while a full-screen app is running";
-pub(super) const CLIP_MENU_OPEN: &str = "&Open";
-pub(super) const CLIP_MENU_REVEAL: &str = "Show in &Explorer";
-pub(super) const CLIP_MENU_DELETE: &str = "&Delete";
+pub(super) const NO_SCREENSHOTS: &str = "No screenshots yet — press the screenshot hotkey";
+pub(super) const MENU_OPEN: &str = "&Open";
+pub(super) const MENU_REVEAL: &str = "Show in &Explorer";
+pub(super) const MENU_DELETE: &str = "&Delete";
 
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
@@ -146,43 +148,43 @@ pub(super) fn startup_setting_failed(error: impl Display) -> String {
     format!("Start with Windows · not updated ({error})")
 }
 
-pub(super) fn thumbnails_unavailable(error: impl Display) -> String {
-    format!("Clips · no thumbnails ({error})")
+pub(super) fn thumbnails_unavailable(tab: &str, error: impl Display) -> String {
+    format!("{tab} · no thumbnails ({error})")
 }
 
-pub(super) fn thumbnail_failed(path: &Path, error: impl Display) -> String {
-    format!("Clips · no thumbnail for {} ({error})", file_name(path))
+pub(super) fn thumbnail_failed(tab: &str, path: &Path, error: impl Display) -> String {
+    format!("{tab} · no thumbnail for {} ({error})", file_name(path))
 }
 
-pub(super) fn clip_not_listed(path: &Path, error: impl Display) -> String {
-    format!("Clips · {} not listed ({error})", file_name(path))
+pub(super) fn not_listed(tab: &str, path: &Path, error: impl Display) -> String {
+    format!("{tab} · {} not listed ({error})", file_name(path))
 }
 
 pub(super) fn folder_pick_failed(error: impl Display) -> String {
     format!("Clip folder · dialog failed ({error})")
 }
 
-pub(super) fn clip_open_failed(path: &Path, error: impl Display) -> String {
+pub(super) fn open_failed(path: &Path, error: impl Display) -> String {
     format!("Could not open {} · {error}", file_name(path))
 }
 
-pub(super) fn clip_reveal_failed(path: &Path, error: impl Display) -> String {
+pub(super) fn reveal_failed(path: &Path, error: impl Display) -> String {
     format!("Could not show {} in Explorer · {error}", file_name(path))
 }
 
-pub(super) fn clip_deleted(path: &Path) -> String {
+pub(super) fn recycled(path: &Path) -> String {
     format!("Recycled · {}", file_name(path))
 }
 
-pub(super) fn clip_delete_failed(path: &Path, error: impl Display) -> String {
+pub(super) fn recycle_failed(path: &Path, error: impl Display) -> String {
     format!("Could not recycle {} · {error}", file_name(path))
 }
 
-pub(super) fn clip_menu_failed(error: impl Display) -> String {
-    format!("Clip menu · not shown ({error})")
+pub(super) fn menu_failed(tab: &str, error: impl Display) -> String {
+    format!("{tab} · menu not shown ({error})")
 }
 
-pub(super) fn clip_caption(title: &str, bytes: u64) -> String {
+pub(super) fn caption(title: &str, bytes: u64) -> String {
     // A no-break space, because the list view wraps captions and would split the size from its
     // unit.
     format!("{title} {}", format_bytes(bytes).replace(' ', "\u{a0}"))
@@ -532,20 +534,14 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_caption_keeps_the_size_with_its_unit() {
+    fn a_caption_keeps_the_size_with_its_unit() {
         assert_eq!(
-            clip_caption("2026-10-12 21:14:05", 0),
+            caption("2026-10-12 21:14:05", 0),
             "2026-10-12 21:14:05 0\u{a0}MB"
         );
-        assert_eq!(
-            clip_caption("boss.mp4", 155_189_248),
-            "boss.mp4 155\u{a0}MB"
-        );
-        assert_eq!(clip_caption("boss.mp4", 1_572_864), "boss.mp4 2\u{a0}MB");
-        assert_eq!(
-            clip_caption("boss.mp4", 2_000_000_000),
-            "boss.mp4 2.0\u{a0}GB"
-        );
+        assert_eq!(caption("boss.mp4", 155_189_248), "boss.mp4 155\u{a0}MB");
+        assert_eq!(caption("boss.mp4", 1_572_864), "boss.mp4 2\u{a0}MB");
+        assert_eq!(caption("boss.mp4", 2_000_000_000), "boss.mp4 2.0\u{a0}GB");
     }
 
     #[test]

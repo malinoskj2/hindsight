@@ -232,7 +232,6 @@ pub(crate) enum ScreenshotFormat {
 }
 
 impl ScreenshotFormat {
-    #[cfg(windows)]
     pub(crate) const ALL: [Self; 4] = [Self::Png, Self::Jpeg, Self::Webp, Self::Avif];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -251,6 +250,17 @@ impl ScreenshotFormat {
             Self::Webp => "webp",
             Self::Avif => "avif",
         }
+    }
+
+    /// The format a file name's extension names, in any case. `.jpeg` names JPEG as well as
+    /// `.jpg`, since pictures put in the folder by hand often use it.
+    pub(crate) fn of_extension(extension: &str) -> Option<Self> {
+        if extension.eq_ignore_ascii_case("jpeg") {
+            return Some(Self::Jpeg);
+        }
+        Self::ALL
+            .into_iter()
+            .find(|format| extension.eq_ignore_ascii_case(format.extension()))
     }
 }
 
@@ -605,6 +615,15 @@ pub(crate) fn video_directories(clip_directory: &Path) -> [PathBuf; 2] {
     ]
 }
 
+/// The folders whose pictures the Screenshots tab lists: the screenshots folder, then the clip
+/// folder itself, where pictures may have been put by hand.
+pub(crate) fn screenshot_directories(clip_directory: &Path) -> [PathBuf; 2] {
+    [
+        clip_directory.join(SCREENSHOT_DIRECTORY),
+        clip_directory.to_path_buf(),
+    ]
+}
+
 /// Settings from before screenshots may have chosen the screenshot hotkey's default for saving,
 /// so a screenshot hotkey equal to the save hotkey gives way to a default that differs.
 fn apart_from(save: Hotkey, screenshot: Hotkey) -> Hotkey {
@@ -939,6 +958,23 @@ mod tests {
     }
 
     #[test]
+    fn every_screenshot_format_is_known_by_its_extension_in_any_case() {
+        for format in ScreenshotFormat::ALL {
+            assert_eq!(
+                ScreenshotFormat::of_extension(&format.extension().to_uppercase()),
+                Some(format)
+            );
+        }
+        assert_eq!(
+            ScreenshotFormat::of_extension("jpeg"),
+            Some(ScreenshotFormat::Jpeg)
+        );
+        for other in ["mp4", "gif", "png.partial", ""] {
+            assert_eq!(ScreenshotFormat::of_extension(other), None, "{other}");
+        }
+    }
+
+    #[test]
     fn rejects_out_of_range_settings() {
         let mut config = Config::default();
         assert!(config.validate().is_ok());
@@ -1023,6 +1059,10 @@ mod tests {
         assert_eq!(
             video_directories(&config.clip_directory()),
             [config.video_directory(), absolute_folder()]
+        );
+        assert_eq!(
+            screenshot_directories(&config.clip_directory()),
+            [config.screenshot_directory(), absolute_folder()]
         );
         assert!(
             Config::default()
