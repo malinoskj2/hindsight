@@ -32,6 +32,20 @@ The capture, encoding and GUI only compile on Windows, but the rest (the replay 
 MP4 writer, the worker and the settings) builds and tests on Linux and macOS too, so a lot of
 the project can be worked on without an NVIDIA GPU.
 
+## Trying an update
+
+hindsight offers an update only when the latest release is newer than itself. To try updating
+against the release already out, install it, quit it from the tray, and start it again with
+`HINDSIGHT_UPDATE_FROM` set to an older version, so that it takes itself for that version:
+
+```
+set HINDSIGHT_UPDATE_FROM=0.1.0
+"C:\Program Files\hindsight\hindsight.exe"
+```
+
+The About tab then offers the latest release, and Update reinstalls it. The copy the installer
+starts afterwards does not inherit the variable.
+
 ## Before you open a pull request
 
 CI runs these, so running them first saves a round trip:

@@ -22,6 +22,10 @@ const SIGNATURE_EXTENSION: &str = "minisig";
 const RELEASE_KEY: &str = "RWS8QHCApYhZBeuje7KwHPxzYQvonUdt6eOwQGpVK2M4ZB8xsX+hCSrA";
 /// The installer leaves its uninstaller beside the app; the portable zip has none.
 const UNINSTALLER: &str = "uninstall.exe";
+/// The environment variable that, set to a version, makes update checks take this copy for that
+/// version, so updating can be tried against the latest release while it is installed.
+#[cfg(windows)]
+pub(crate) const VERSION_SWITCH: &str = "HINDSIGHT_UPDATE_FROM";
 /// The installer's flags: silent, then waiting for this copy to exit and starting the new one.
 /// `/D=` sets the folder, and NSIS requires it last and unquoted.
 const INSTALLER_FLAGS: &str = "/S /UPDATE";
@@ -47,6 +51,19 @@ impl Version {
         env!("CARGO_PKG_VERSION")
             .parse()
             .expect("Cargo requires the package version to be a semantic version")
+    }
+
+    /// The version update checks compare the latest release with.
+    #[cfg(windows)]
+    pub(crate) fn for_updates() -> Self {
+        Self::chosen(std::env::var(VERSION_SWITCH).ok().as_deref())
+    }
+
+    /// The version `switch` names, or this build's when it names none.
+    fn chosen(switch: Option<&str>) -> Self {
+        switch
+            .and_then(|version| version.trim().parse().ok())
+            .unwrap_or_else(Self::running)
     }
 }
 
@@ -423,6 +440,14 @@ trusted comment: hindsight-windows-x64.zip 0.2.1
     #[test]
     fn the_running_version_is_the_package_version() {
         assert_eq!(Version::running().to_string(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_switch_names_the_version_to_update_from() {
+        assert_eq!(Version::chosen(Some("0.1.0")), version("0.1.0"));
+        assert_eq!(Version::chosen(Some(" 0.1.0\r\n")), version("0.1.0"));
+        assert_eq!(Version::chosen(None), Version::running());
+        assert_eq!(Version::chosen(Some("old")), Version::running());
     }
 
     #[test]

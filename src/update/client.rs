@@ -124,7 +124,7 @@ fn check() -> Result<Check, CheckError> {
     let body = http::get(&super::latest_signature_url(), MAX_SIGNATURE_BYTES)?;
     let signature = String::from_utf8(body).map_err(|_| CheckError::NotText)?;
     let latest = Release::announced(&signature)?;
-    Ok(Check::of(&Version::running(), latest))
+    Ok(Check::of(&Version::for_updates(), latest))
 }
 
 fn download(release: &Release) -> Result<Installer, DownloadError> {
