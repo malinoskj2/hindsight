@@ -890,7 +890,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                run_in_background();
+                run_in_background(text::SCREENSHOT_THREAD);
                 screenshot::save(readback, &directory, format)
             })
     }
@@ -1172,7 +1172,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                run_in_background();
+                run_in_background(text::SAVE_THREAD);
                 write(&snapshot, &directory, container)
             })
     }
@@ -1349,14 +1349,15 @@ impl Machine {
 }
 
 /// Lowers the calling thread's priority and opts it into power throttling, so that a save or a
-/// screenshot takes longer but does not compete with the game.
+/// screenshot takes longer but does not compete with the game. `work` names the thread in the
+/// log.
 #[cfg(windows)]
-fn run_in_background() {
+fn run_in_background(work: &str) {
     if let Err(error) = sys::thread::enter_background_mode() {
-        log::warning(text::background_save_failed(error));
+        log::warning(text::background_refused(work, error));
     }
     if let Err(error) = sys::thread::prefer_efficiency() {
-        log::warning(text::efficiency_refused(error));
+        log::warning(text::efficiency_refused(work, error));
     }
 }
 

@@ -178,18 +178,23 @@ pub(super) fn screenshot_panicked(message: &str) -> impl Display {
 }
 
 #[cfg(windows)]
-pub(super) fn background_save_failed(error: impl Display) -> impl Display {
+pub(super) const SAVE_THREAD: &str = "Save";
+#[cfg(windows)]
+pub(super) const SCREENSHOT_THREAD: &str = "Screenshot";
+
+#[cfg(windows)]
+pub(super) fn background_refused(work: &str, error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
             f,
-            "Save · background mode refused ({error}) · normal priority"
+            "{work} · background mode refused ({error}) · normal priority"
         )
     })
 }
 
 #[cfg(windows)]
-pub(super) fn efficiency_refused(error: impl Display) -> impl Display {
-    fmt::from_fn(move |f| write!(f, "Save · EcoQoS refused ({error}) · full speed"))
+pub(super) fn efficiency_refused(work: &str, error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "{work} · EcoQoS refused ({error}) · full speed"))
 }
 
 pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> impl Display {
