@@ -1,3 +1,7 @@
+//! One picture for a screenshot: copied out of a capture on the GPU and read back on the thread
+//! that saves it, or grabbed from a whole monitor on a device of its own when no recording
+//! shows it.
+
 use crate::{
     config::Backend,
     gpu::{

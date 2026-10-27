@@ -1,3 +1,6 @@
+//! Screenshots: the picture a capture hands over, the one-slot request the capture thread looks
+//! for each frame, and writing the picture as PNG, JPEG, WebP or AVIF under a timestamped name.
+
 use crate::{
     config::{Backend, ScreenshotFormat},
     saving::{self, WriteError},
