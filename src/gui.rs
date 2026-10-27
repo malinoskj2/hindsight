@@ -421,7 +421,7 @@ impl Main {
     fn on_hotkey(&self, id: usize) {
         match Action::from_id(id) {
             Some(Action::Save) => self.save(),
-            Some(Action::Screenshot) => self.0.worker.screenshot(),
+            Some(Action::Screenshot) => self.0.worker.screenshot(foreground::in_front()),
             None => {}
         }
     }

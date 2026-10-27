@@ -15,6 +15,7 @@ mod still;
 mod vram;
 
 pub(crate) use pipeline::record;
+pub(crate) use still::grab;
 
 use crate::config::Codec;
 use thiserror::Error;

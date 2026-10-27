@@ -140,9 +140,30 @@ fn steady_until_closed(config: &Config, live: &Live, stop: &AtomicBool) {
     });
 }
 
+/// A picture one pixel high and as wide as 3 plus the monitor's handle, or 3 for the primary
+/// monitor, so that the file tells which monitor was grabbed and that it is not a capture's 2×2
+/// picture.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the grab function's signature"
+)]
+fn grabbed(grab: &Grab) -> Result<Still, StillError> {
+    let width = 3 + grab
+        .monitor
+        .map_or(0, |monitor| monitor.get().unsigned_abs());
+    let width = u32::try_from(width).unwrap();
+    let row = width as usize * 4;
+    Ok(Still::from_pitched(width, 1, row, &vec![0x80; row]).unwrap())
+}
+
+fn failing_grab(_: &Grab) -> Result<Still, StillError> {
+    Err(StillError::Grab("the monitor is asleep".into()))
+}
+
 fn services(record: Recorder, retry_interval: Duration) -> Services {
     Services {
         record,
+        grab: grabbed,
         audio: |_, _| None,
         write: replay::save,
         chime: Box::new(|_| {}),
@@ -674,9 +695,21 @@ fn spawn_listening(
     write: Writer,
     config: Config,
 ) -> (Worker, Heard) {
+    spawn_grabbing(record, grabbed, clock, write, config)
+}
+
+/// Like `spawn_listening`, grabbing monitors with `grab`.
+fn spawn_grabbing(
+    record: Recorder,
+    grab: Grabber,
+    clock: &ManualClock,
+    write: Writer,
+    config: Config,
+) -> (Worker, Heard) {
     let heard = Heard::default();
     let ear = Arc::clone(&heard);
     let services = Services {
+        grab,
         write,
         chime: Box::new(move |tone| ear.lock().unwrap().push(tone)),
         clock: clock.reader(),
@@ -803,8 +836,42 @@ fn files_in(folder: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+const PRIMARY: Front = Front {
+    window: None,
+    monitor: None,
+};
+
+fn on_monitor(monitor: isize) -> Front {
+    Front {
+        window: None,
+        monitor: MonitorHandle::new(monitor),
+    }
+}
+
+/// The width and height of each screenshot taken, smallest width first.
+fn screenshot_sizes(directory: &Path) -> Vec<(u32, u32)> {
+    let mut sizes: Vec<_> = files_in(&directory.join("screenshots"))
+        .iter()
+        .map(|path| {
+            assert_eq!(path.extension().unwrap(), "png");
+            let file = std::io::BufReader::new(std::fs::File::open(path).unwrap());
+            let info = png::Decoder::new(file).read_info().unwrap();
+            (info.info().width, info.info().height)
+        })
+        .collect();
+    sizes.sort_unstable();
+    sizes
+}
+
+/// Asks for a screenshot of `front` and waits for its tone.
+fn shoot(worker: &Worker, heard: &Heard, front: Front) {
+    let before = tones(heard).len();
+    worker.screenshot(front);
+    wait_for(worker, |_| tones(heard).len() == before + 1);
+}
+
 #[test]
-fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
+fn a_screenshot_of_the_recorded_monitor_comes_from_the_capture_and_of_another_is_grabbed() {
     let directory = tempfile::tempdir().unwrap();
     let clock = ManualClock::new();
     let (worker, heard) =
@@ -813,40 +880,69 @@ fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
         matches!(status.state, State::Recording(_))
     });
 
-    worker.screenshot();
-    wait_for(&worker, |_| tones(&heard) == [Tone::Saved]);
-
-    let shots = files_in(&directory.path().join("screenshots"));
-    assert_eq!(shots.len(), 1, "{shots:?}");
-    assert_eq!(shots[0].extension().unwrap(), "png");
+    shoot(&worker, &heard, PRIMARY);
+    assert_eq!(screenshot_sizes(directory.path()), [(2, 2)]);
     assert_eq!(
         files_in(&directory.path().join("videos")),
         Vec::<PathBuf>::new()
     );
-    assert!(worker.status().problem.is_none());
 
-    worker.screenshot();
-    wait_for(&worker, |_| tones(&heard).len() == 2);
+    shoot(&worker, &heard, on_monitor(9));
+    assert_eq!(screenshot_sizes(directory.path()), [(2, 2), (12, 1)]);
     assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved]);
-    assert_eq!(files_in(&directory.path().join("screenshots")).len(), 2);
+    assert!(worker.status().problem.is_none());
 }
 
 #[test]
-fn a_screenshot_before_capture_starts_sounds_failed_and_writes_nothing() {
+fn a_screenshot_while_nothing_records_grabs_the_monitor_in_front() {
     let directory = tempfile::tempdir().unwrap();
     let clock = ManualClock::new();
     let (worker, heard) =
         spawn_listening(failing, &clock, replay::save, config_in(directory.path()));
     wait_for(&worker, |status| status.state == State::Retrying);
 
-    worker.screenshot();
-    wait_for(&worker, |_| !tones(&heard).is_empty());
-    assert_eq!(tones(&heard), [Tone::Failed]);
-    assert!(!directory.path().join("screenshots").exists());
+    shoot(&worker, &heard, on_monitor(9));
+    assert_eq!(tones(&heard), [Tone::Saved]);
+    assert_eq!(screenshot_sizes(directory.path()), [(12, 1)]);
 }
 
 #[test]
-fn a_screenshot_capture_stops_before_taking_is_reported_and_can_be_asked_again() {
+fn a_screenshot_of_the_recorded_app_comes_from_the_capture_only_while_it_is_in_front() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let config = Config {
+        mode: Mode::Fullscreen,
+        ..config_in(directory.path())
+    };
+    let (worker, heard) = spawn_listening(steady, &clock, replay::save, config);
+    worker.target(window(5));
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+
+    let monitor = MonitorHandle::new(7);
+    shoot(
+        &worker,
+        &heard,
+        Front {
+            window: WindowHandle::new(5),
+            monitor,
+        },
+    );
+    shoot(
+        &worker,
+        &heard,
+        Front {
+            window: WindowHandle::new(6),
+            monitor,
+        },
+    );
+    assert_eq!(screenshot_sizes(directory.path()), [(2, 2), (10, 1)]);
+    assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved]);
+}
+
+#[test]
+fn a_screenshot_capture_stops_before_taking_is_grabbed_instead() {
     let directory = tempfile::tempdir().unwrap();
     let clock = ManualClock::new();
     let (worker, heard) = spawn_listening(deaf, &clock, replay::save, config_in(directory.path()));
@@ -854,21 +950,36 @@ fn a_screenshot_capture_stops_before_taking_is_reported_and_can_be_asked_again()
         matches!(status.state, State::Recording(_))
     });
 
-    worker.screenshot();
+    worker.screenshot(PRIMARY);
     worker.toggle_pause();
+    wait_for(&worker, |_| tones(&heard) == [Tone::Saved]);
+    assert_eq!(screenshot_sizes(directory.path()), [(3, 1)]);
+
+    shoot(&worker, &heard, PRIMARY);
+    assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved], "paused");
+    assert_eq!(screenshot_sizes(directory.path()), [(3, 1), (3, 1)]);
+    assert!(worker.status().problem.is_none());
+}
+
+#[test]
+fn a_failed_grab_is_reported_and_writes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) = spawn_grabbing(
+        failing,
+        failing_grab,
+        &clock,
+        replay::save,
+        config_in(directory.path()),
+    );
+    wait_for(&worker, |status| status.state == State::Retrying);
+
+    shoot(&worker, &heard, PRIMARY);
     let status = wait_for(&worker, |status| status.problem.is_some());
     let problem = status.problem.unwrap();
     assert_eq!(problem.kind, ProblemKind::ScreenshotNotSaved);
-    assert!(
-        problem
-            .cause
-            .contains("capture stopped before taking the picture")
-    );
+    assert_eq!(problem.cause, "capture the monitor: the monitor is asleep");
     assert_eq!(tones(&heard), [Tone::Failed]);
-
-    worker.screenshot();
-    wait_for(&worker, |_| tones(&heard).len() == 2);
-    assert_eq!(tones(&heard), [Tone::Failed, Tone::Failed], "paused");
     assert!(!directory.path().join("screenshots").exists());
 }
 

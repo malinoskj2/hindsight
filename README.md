@@ -42,7 +42,7 @@ hindsight looks for a newer release when it starts and once a day, and the About
 - **Nothing runs on the shader cores.** Single-pass rate control, no B-frames, no lookahead, no adaptive quantization. An unchanged screen is repeated GPU-side.
 - **Capture gets the GPU first.** High GPU thread and scheduling priority, never realtime, and no power throttling.
 - **Sound is kept raw** and mixed and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound and kept in mono. Long silences are dropped.
-- **Screenshots cost nothing until you take one.** The capture thread looks for a request with one atomic read per frame. A screenshot copies the picture the encoder was given on the GPU, and a background thread reads it back and writes the PNG.
+- **Screenshots cost nothing until you take one.** A screenshot is of the whole monitor in front, whether or not anything is recording. The capture thread looks for a request with one atomic read per frame: when it records that monitor, or the game in front, the screenshot copies the picture the encoder was given on the GPU. Otherwise a background thread captures the monitor once, tone-mapped on an HDR display. Either way a background thread reads the picture back and writes the file.
 - **Saves run in the background** at low CPU, I/O and memory priority, so they never compete with the game.
 
 Run as administrator for the highest GPU priority. To check for yourself, compare CPU use and frame times (PresentMon or CapFrameX) with hindsight, with Instant Replay and with neither.
