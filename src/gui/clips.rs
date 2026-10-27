@@ -1,4 +1,4 @@
-//! The Clips tab: the clip folder shown as thumbnails, newest first. The folder is read and the
+//! The Clips tab: the clip folder's videos shown as thumbnails, newest first. The folder is read and the
 //! shell's thumbnails are made on a dedicated thread.
 
 use super::{
@@ -9,7 +9,7 @@ use super::{
     theme::Skin,
 };
 use crate::{
-    log,
+    config, log,
     replay::ClipName,
     service::Status,
     sys::{
@@ -673,11 +673,10 @@ impl Clip {
 }
 
 fn list_clips(folder: &Path) -> Vec<Clip> {
-    let Ok(entries) = fs::read_dir(folder) else {
-        return Vec::new();
-    };
-    let mut clips: Vec<Clip> = entries
-        .flatten()
+    let mut clips: Vec<Clip> = config::video_directories(folder)
+        .iter()
+        .filter_map(|directory| fs::read_dir(directory).ok())
+        .flat_map(Iterator::flatten)
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             if !metadata.is_file() {
@@ -787,6 +786,33 @@ mod tests {
                 "hindsight_2026-10-11_23-59-59.mp4",
                 "zebra.mp4",
                 "alpha.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn clips_are_listed_from_the_videos_folder_and_from_the_clip_folder_itself() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path();
+        let videos = folder.join("videos");
+        let screenshots = folder.join("screenshots");
+        fs::create_dir(&videos).unwrap();
+        fs::create_dir(&screenshots).unwrap();
+        fs::write(videos.join("hindsight_2026-10-12_21-14-05.mp4"), b"new").unwrap();
+        fs::write(folder.join("hindsight_2026-10-11_21-14-05.mp4"), b"old").unwrap();
+        fs::write(
+            screenshots.join("hindsight_2026-10-12_21-14-06.png"),
+            b"png",
+        )
+        .unwrap();
+
+        let names: Vec<String> = list_clips(folder).iter().map(Clip::file_name).collect();
+
+        assert_eq!(
+            names,
+            [
+                "hindsight_2026-10-12_21-14-05.mp4",
+                "hindsight_2026-10-11_21-14-05.mp4"
             ]
         );
     }

@@ -238,7 +238,7 @@ fn desktop_mode_records_and_saves_a_clip() {
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
     let clip = status.last_clip.unwrap();
-    assert!(clip.starts_with(directory.path()));
+    assert!(clip.starts_with(directory.path().join("videos")));
     assert_eq!(&std::fs::read(&clip).unwrap()[4..8], b"ftyp");
 }
 

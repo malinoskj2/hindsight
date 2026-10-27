@@ -934,7 +934,7 @@ impl Machine {
         snapshot: Snapshot,
         ending: Ending,
     ) -> io::Result<JoinHandle<Result<Saved, SaveError>>> {
-        let directory = self.config.clip_directory();
+        let directory = self.config.video_directory();
         let write = self.services.write;
         thread::Builder::new()
             .name("save".to_owned())

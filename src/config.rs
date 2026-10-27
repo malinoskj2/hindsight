@@ -2,7 +2,11 @@
 
 use crate::{log, sys::hotkey::Hotkey};
 use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 pub(crate) const MIN_BUFFER_SECONDS: u32 = 5;
@@ -14,6 +18,7 @@ pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
 const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
 const CLIP_DIRECTORY: &str = "hindsight";
+const VIDEO_DIRECTORY: &str = "videos";
 /// Installed memory from which the buffer defaults to RAM. Games of this generation want 8 to
 /// 16 GB of their own.
 const RAM_BUFFER_MEMORY: u64 = 32 << 30;
@@ -434,6 +439,10 @@ impl Config {
             .map_or_else(default_clip_directory, PathBuf::clone)
     }
 
+    pub(crate) fn video_directory(&self) -> PathBuf {
+        self.clip_directory().join(VIDEO_DIRECTORY)
+    }
+
     pub(crate) const fn estimated_buffer_bytes(&self) -> u64 {
         self.buffer_seconds as u64 * self.bitrate() as u64 / BITS_PER_BYTE
     }
@@ -461,6 +470,15 @@ pub(crate) enum ConfigError {
     Bitrate,
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
     ClipDirectory,
+}
+
+/// The folders whose videos the Clips tab lists: the videos folder, then the clip folder
+/// itself, where earlier versions saved them.
+pub(crate) fn video_directories(clip_directory: &Path) -> [PathBuf; 2] {
+    [
+        clip_directory.join(VIDEO_DIRECTORY),
+        clip_directory.to_path_buf(),
+    ]
 }
 
 fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
@@ -759,6 +777,25 @@ mod tests {
             }
             .clip_directory(),
             absolute_folder()
+        );
+    }
+
+    #[test]
+    fn videos_have_a_folder_in_the_clip_folder() {
+        let config = Config {
+            clip_directory: Some(absolute_folder()),
+            ..Config::default()
+        };
+
+        assert_eq!(config.video_directory(), absolute_folder().join("videos"));
+        assert_eq!(
+            video_directories(&config.clip_directory()),
+            [config.video_directory(), absolute_folder()]
+        );
+        assert!(
+            Config::default()
+                .video_directory()
+                .ends_with(Path::new(CLIP_DIRECTORY).join(VIDEO_DIRECTORY))
         );
     }
 
