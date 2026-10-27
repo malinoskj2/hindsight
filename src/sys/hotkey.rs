@@ -1,5 +1,5 @@
 //! The global hotkeys that save a clip and take a screenshot, written as text such as
-//! `Alt+F10`.
+//! `Alt+F1`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, ops::BitOr, str::FromStr};
@@ -42,7 +42,7 @@ const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
 
 #[derive(Debug, Error)]
 pub(crate) enum ParseError {
-    #[error("enter a hotkey such as Alt+F10")]
+    #[error("enter a hotkey such as Alt+F1")]
     Empty,
     #[error("\"{0}\" is not a key the hotkey can use")]
     UnknownKey(String),
@@ -52,7 +52,7 @@ pub(crate) enum ParseError {
     NeedsModifier(String),
 }
 
-/// A hotkey, serialised and displayed as text, so the settings file contains `"Alt+F10"`.
+/// A hotkey, serialised and displayed as text, so the settings file contains `"Alt+F1"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hotkey {
     modifiers: u16,
@@ -80,14 +80,15 @@ impl BitOr for Modifiers {
 }
 
 impl Hotkey {
+    /// The NVIDIA overlay's own defaults for its screenshot and photo mode are also Alt+F1 and
+    /// Alt+F2.
     pub(crate) const DEFAULT: Self = Self {
         modifiers: MOD_ALT,
-        key: VK_F1 + 9,
+        key: VK_F1,
     };
-    /// Beside the save hotkey, and free of the NVIDIA overlay's own Alt+F1 to Alt+F3.
     pub(crate) const DEFAULT_SCREENSHOT: Self = Self {
         modifiers: MOD_ALT,
-        key: VK_F1 + 10,
+        key: VK_F1 + 1,
     };
 
     /// Returns the hotkey a hotkey field enters when `key`, a virtual-key code, is pressed with
@@ -353,9 +354,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_hotkeys_are_alt_f10_and_alt_f11() {
-        assert_eq!(Hotkey::DEFAULT.to_string(), "Alt+F10");
-        assert_eq!(Hotkey::DEFAULT_SCREENSHOT.to_string(), "Alt+F11");
+    fn the_default_hotkeys_are_alt_f1_and_alt_f2() {
+        assert_eq!(Hotkey::DEFAULT.to_string(), "Alt+F1");
+        assert_eq!(Hotkey::DEFAULT_SCREENSHOT.to_string(), "Alt+F2");
     }
 
     #[cfg(windows)]

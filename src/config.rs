@@ -662,8 +662,8 @@ mod tests {
         assert_eq!(config.codec, Codec::Av1);
         assert_eq!(config.buffer_seconds, 120);
         assert_eq!(config.frame_rate, 60);
-        assert_eq!(config.hotkey.to_string(), "Alt+F10");
-        assert_eq!(config.screenshot_hotkey.to_string(), "Alt+F11");
+        assert_eq!(config.hotkey.to_string(), "Alt+F1");
+        assert_eq!(config.screenshot_hotkey.to_string(), "Alt+F2");
         assert_eq!(config.theme, Theme::Classic);
         assert!(config.audio);
         assert_eq!(parse("{}").unwrap(), Config::default());
@@ -760,24 +760,24 @@ mod tests {
         };
 
         assert_eq!(
-            hotkeys(parse(r#"{"hotkey":"Alt+F11"}"#)),
-            ("Alt+F11".to_owned(), "Alt+F10".to_owned())
+            hotkeys(parse(r#"{"hotkey":"Alt+F2"}"#)),
+            ("Alt+F2".to_owned(), "Alt+F1".to_owned())
         );
         assert_eq!(
-            hotkeys(parse(
-                r#"{"hotkey":"Alt+F11","screenshot_hotkey":"Alt+F11"}"#
-            )),
-            ("Alt+F11".to_owned(), "Alt+F10".to_owned())
+            hotkeys(parse(r#"{"hotkey":"Alt+F2","screenshot_hotkey":"Alt+F2"}"#)),
+            ("Alt+F2".to_owned(), "Alt+F1".to_owned())
         );
         assert_eq!(
             hotkeys(parse(r#"{"hotkey":"Ctrl+S","screenshot_hotkey":"Ctrl+S"}"#)),
-            ("Ctrl+S".to_owned(), "Alt+F11".to_owned())
+            ("Ctrl+S".to_owned(), "Alt+F2".to_owned())
         );
         assert_eq!(
-            hotkeys(parse(
-                r#"{"hotkey":"Alt+F11","screenshot_hotkey":"Ctrl+P"}"#
-            )),
-            ("Alt+F11".to_owned(), "Ctrl+P".to_owned())
+            hotkeys(parse(r#"{"hotkey":"Alt+F2","screenshot_hotkey":"Ctrl+P"}"#)),
+            ("Alt+F2".to_owned(), "Ctrl+P".to_owned())
+        );
+        assert_eq!(
+            hotkeys(parse(r#"{"hotkey":"Alt+F10"}"#)),
+            ("Alt+F10".to_owned(), "Alt+F2".to_owned())
         );
     }
 
