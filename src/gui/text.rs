@@ -70,7 +70,7 @@ pub(super) const FRAME_RATE: &str = "Frame rate";
 pub(super) const REPLAY_LENGTH: &str = "Replay length (s)";
 pub(super) const BITRATE: &str = "Bitrate (Mbps)";
 pub(super) const HOTKEY: &str = "Save hotkey";
-pub(super) const SCREENSHOT_HOTKEY: &str = "Screenshot key";
+pub(super) const SCREENSHOT_HOTKEY: &str = "Screenshot hotkey";
 pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
@@ -344,12 +344,10 @@ pub(super) fn buffer_estimate(bytes: u64, memory: Memory, bitrate_mbps: u32) -> 
     let place = memory.place();
     let size = format_bytes(bytes);
     match memory {
-        Memory::Ram => format!("Buffer {place} at this bitrate: about {size}"),
-        Memory::Vram => format!(
-            "Buffer {place} at this bitrate: about {size}, plus as much RAM while a clip is saved"
-        ),
+        Memory::Ram => format!("About {size} {place} at this bitrate"),
+        Memory::Vram => format!("About {size} {place}, the same in RAM while saving"),
         Memory::Disk => format!(
-            "Buffer {place} at this bitrate: about {size}, writing about {} an hour",
+            "About {size} {place}, writing {} an hour",
             format_bytes(bytes_an_hour(bitrate_mbps))
         ),
     }
@@ -612,15 +610,15 @@ mod tests {
     fn the_buffer_estimate_names_where_the_buffer_lives() {
         assert_eq!(
             buffer_estimate(500_000_000, Memory::Ram, 50),
-            "Buffer in RAM at this bitrate: about 500 MB"
+            "About 500 MB in RAM at this bitrate"
         );
-        assert!(
-            buffer_estimate(500_000_000, Memory::Vram, 50)
-                .ends_with("plus as much RAM while a clip is saved")
+        assert_eq!(
+            buffer_estimate(500_000_000, Memory::Vram, 50),
+            "About 500 MB in VRAM, the same in RAM while saving"
         );
         assert_eq!(
             buffer_estimate(1_260_000_000, Memory::Disk, 100),
-            "Buffer on disk at this bitrate: about 1.3 GB, writing about 45.0 GB an hour"
+            "About 1.3 GB on disk, writing 45.0 GB an hour"
         );
     }
 
