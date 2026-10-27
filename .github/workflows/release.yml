@@ -120,10 +120,14 @@ jobs:
           gh api --method POST "repos/$GH_REPO/git/refs" \
             -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$BUILD_SHA"
 
+          # A tag with a pre-release suffix is marked as one, so that the app's update check,
+          # which follows the latest release, never offers it.
+          prerelease=()
+          [[ "$RELEASE_TAG" == *-* ]] && prerelease=(--prerelease)
           gh release create "$RELEASE_TAG" \
             release/hindsight-setup-x64.exe \
             release/hindsight-setup-x64.exe.minisig \
             release/hindsight-windows-x64.zip \
             release/SHA256SUMS.txt \
             --verify-tag --draft --title "hindsight $RELEASE_TAG" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md "${prerelease[@]}"
