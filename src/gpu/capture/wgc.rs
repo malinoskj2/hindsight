@@ -2,13 +2,13 @@
 //! buffers in place. A display in HDR is tone-mapped from FP16 instead.
 
 use super::{
-    CaptureError, CopyTarget, Frame, Source, Surface, deliver, display, failed, monitor,
-    monitor_of, tonemap::ToneMapper,
+    CaptureError, CopyTarget, Frame, Source, Surface, deliver, display, failed, monitor_of,
+    tonemap::ToneMapper,
 };
 use crate::{
     gpu::{device::Device, pacer::filetime_units},
     log,
-    service::Target,
+    service::{Target, Through},
     sys::com::Apartment,
 };
 use std::{
@@ -100,7 +100,13 @@ impl Capture {
             session,
             size,
             pixels,
-            captures_window: matches!(target, Target::Window { .. }),
+            captures_window: matches!(
+                target,
+                Target::Window {
+                    through: Through::Window,
+                    ..
+                }
+            ),
             closed,
             closed_token,
             direct3d,
@@ -108,7 +114,7 @@ impl Capture {
             surfaces: Vec::new(),
             held: Vec::new(),
             tone_map,
-            monitor: monitor_of(target).0,
+            monitor: monitor_of(target),
             next_hdr_check: Instant::now() + HDR_CHECK_INTERVAL,
             _apartment: apartment,
         })
@@ -162,6 +168,12 @@ impl Source for Capture {
         copied
             .map(|()| Frame::Fresh)
             .map_err(failed("tone-map the HDR frame"))
+    }
+
+    fn hold(&mut self) {
+        if let Some(frame) = newest_frame(&self.pool) {
+            let _ = frame.Close();
+        }
     }
 }
 
@@ -254,12 +266,20 @@ fn capture_item(target: &Target) -> Result<GraphicsCaptureItem, CaptureError> {
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(failed("open the capture interop"))?;
     match *target {
-        Target::Monitor { handle, .. } => {
+        Target::Monitor { .. }
+        | Target::Window {
+            through: Through::Monitor,
+            ..
+        } => {
             // SAFETY: a stale handle makes the call fail, not misbehave.
-            unsafe { interop.CreateForMonitor(monitor(handle)) }
+            unsafe { interop.CreateForMonitor(monitor_of(target)) }
                 .map_err(failed("capture the monitor"))
         }
-        Target::Window { window, .. } => {
+        Target::Window {
+            window,
+            through: Through::Window,
+            ..
+        } => {
             // SAFETY: as above, for a window handle.
             unsafe { interop.CreateForWindow(HWND(window.get() as *mut c_void)) }
                 .map_err(failed("capture the window"))

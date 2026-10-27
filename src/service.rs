@@ -64,7 +64,8 @@ impl WindowHandle {
     }
 }
 
-/// The capture target. Equality compares handles only; the name is descriptive.
+/// The capture target. Equality compares handles only: the name is descriptive, and a window is
+/// the same target however it is recorded.
 #[derive(Clone, Debug)]
 pub(crate) enum Target {
     /// `None` is the primary monitor.
@@ -81,7 +82,18 @@ pub(crate) enum Target {
         size: (u32, u32),
         /// The monitor is turned from the panel's own orientation.
         rotated: bool,
+        through: Through,
     },
+}
+
+/// How a window target is recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Through {
+    /// The window's own content, where the backend can capture a window, and its monitor
+    /// otherwise.
+    Window,
+    /// The monitor the window fills, as when the window cannot be captured itself.
+    Monitor,
 }
 
 impl PartialEq for Target {
@@ -121,14 +133,13 @@ impl Target {
         }
     }
 
-    fn monitor(&self) -> Self {
-        match self {
-            Self::Monitor { .. } => self.clone(),
-            Self::Window { monitor, name, .. } => Self::Monitor {
-                handle: Some(*monitor),
-                name: name.clone(),
-            },
+    /// The same target, recorded through its monitor.
+    fn through_monitor(&self) -> Self {
+        let mut target = self.clone();
+        if let Self::Window { through, .. } = &mut target {
+            *through = Through::Monitor;
         }
+        target
     }
 }
 
@@ -638,11 +649,7 @@ impl Machine {
             return;
         }
         let same = self.session.is_some() && self.target.as_ref() == Some(&target);
-        // A window whose session fell back to its monitor is passed over as that monitor.
-        let passed_over = self
-            .passed_over
-            .as_ref()
-            .is_some_and(|passed| *passed == target || *passed == target.monitor());
+        let passed_over = self.passed_over.as_ref() == Some(&target);
         if same || passed_over {
             return;
         }
@@ -888,12 +895,18 @@ impl Machine {
     }
 
     fn fall_back_to_monitor(&mut self) {
-        let Some(window @ Target::Window { .. }) = &self.target else {
+        let Some(
+            window @ Target::Window {
+                through: Through::Window,
+                ..
+            },
+        ) = &self.target
+        else {
             self.fail(text::NO_FRAMES);
             return;
         };
         log::info(text::falling_back_to_monitor(window.name()));
-        let monitor = window.monitor();
+        let monitor = window.through_monitor();
         self.start_session(monitor);
     }
 

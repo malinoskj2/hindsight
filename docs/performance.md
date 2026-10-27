@@ -134,4 +134,5 @@ The capture thread runs in Windows' multimedia scheduling class so it is never l
 never leave video memory before they are encoded; NVENC reads the captured surfaces in place;
 the encoder uses no extras that would run on the GPU's shader cores (no lookahead, no
 B-frames, no weighted prediction); a clip is written in the background at low I/O priority.
-Nothing runs at all while no full-screen app is in front.
+Nothing runs at all while no full-screen app is in front, and while you are tabbed out of the game
+nothing is grabbed: the game's last picture is repeated until it is back.

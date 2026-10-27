@@ -52,10 +52,9 @@ fn main() {
     resource
         .set_manifest(MANIFEST)
         .set("ProductName", env!("CARGO_PKG_NAME"))
-        .set(
-            "FileDescription",
-            "The lowest-overhead instant replay, captured and encoded on the GPU",
-        )
+        // Windows names the app by its description in the taskbar's tray icon settings, Task
+        // Manager and the startup apps list.
+        .set("FileDescription", env!("CARGO_PKG_NAME"))
         .set("ProductVersion", env!("CARGO_PKG_VERSION"));
     for table::IconEntry { ico, id, .. } in table::ICONS {
         resource.set_icon_with_id(&format!("assets/{ico}"), &id.to_string());

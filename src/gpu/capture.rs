@@ -22,6 +22,10 @@ use crate::{
     log,
     replay::Matrix,
     service::{MonitorHandle, Target},
+    sys::{
+        foreground::AppWindow,
+        view::{Decision, View},
+    },
 };
 use std::{
     ffi::c_void,
@@ -32,14 +36,10 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::{
-        Direct3D9::{IDirect3DDevice9Ex, IDirect3DSurface9},
-        Direct3D11::ID3D11Texture2D,
-        Gdi::HMONITOR,
-    },
-    UI::WindowsAndMessaging::IsWindow,
+use windows::Win32::Graphics::{
+    Direct3D9::{IDirect3DDevice9Ex, IDirect3DSurface9},
+    Direct3D11::ID3D11Texture2D,
+    Gdi::HMONITOR,
 };
 
 const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
@@ -120,9 +120,18 @@ trait Source {
     /// Copies the newest frame into `target`. There is no target when the encoder runs on CUDA
     /// or reads the source's surfaces in place.
     fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError>;
+
+    /// Called instead of [`take`](Self::take) while the monitor shows something other than the
+    /// app recorded through it. Drops any frame kept for the next `take`, so that a picture of
+    /// what covered the app is not delivered once it is back.
+    fn hold(&mut self) {}
 }
 
-pub(super) struct Capture(ByBackend);
+pub(super) struct Capture {
+    backend: ByBackend,
+    /// The app a monitor capture records for, when the target is a window.
+    app: Option<Watched>,
+}
 
 enum ByBackend {
     Wgc(wgc::Capture),
@@ -133,7 +142,7 @@ enum ByBackend {
 
 impl Capture {
     fn source(&self) -> &dyn Source {
-        match &self.0 {
+        match &self.backend {
             ByBackend::Wgc(capture) => capture,
             ByBackend::Dxgi(capture) => capture,
             ByBackend::Nvfbc(capture) => capture,
@@ -142,7 +151,7 @@ impl Capture {
     }
 
     fn source_mut(&mut self) -> &mut dyn Source {
-        match &mut self.0 {
+        match &mut self.backend {
             ByBackend::Wgc(capture) => capture,
             ByBackend::Dxgi(capture) => capture,
             ByBackend::Nvfbc(capture) => capture,
@@ -161,14 +170,25 @@ impl Capture {
     }
 
     /// Copies the newest frame into `target`. There is no target when the encoder runs on CUDA
-    /// or reads the source's surfaces in place.
+    /// or reads the source's surfaces in place. A monitor recorded for an app reports
+    /// [`Frame::Unchanged`] while it shows something else, so the app's last picture is repeated.
     pub(super) fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
+        if let Some(app) = &mut self.app {
+            match app.decide() {
+                Decision::Record => {}
+                Decision::Hold => {
+                    self.source_mut().hold();
+                    return Ok(Frame::Unchanged);
+                }
+                Decision::Closed => return Err(CaptureError::Closed),
+            }
+        }
         self.source_mut().take(target)
     }
 
     /// The device the encoder must run on to read this capture's surfaces.
     pub(super) fn encoder_device(&self) -> EncoderDevice {
-        match &self.0 {
+        match &self.backend {
             ByBackend::Wgc(_) | ByBackend::Dxgi(_) => EncoderDevice::Direct3D,
             ByBackend::Nvfbc(capture) => capture.encoder_device(),
             ByBackend::NvfbcCuda(capture) => capture.encoder_device(),
@@ -188,7 +208,7 @@ impl Capture {
     /// Switches to leaving each picture in a surface of its own, reported as
     /// [`Frame::InSurface`]. Returns whether the switch was made.
     pub(super) fn hand_over_surfaces(&mut self) -> bool {
-        match &mut self.0 {
+        match &mut self.backend {
             ByBackend::Wgc(capture) => capture.hand_over_surfaces(),
             ByBackend::Dxgi(_) => false,
             ByBackend::Nvfbc(capture) => capture.hand_over_surfaces(),
@@ -199,7 +219,7 @@ impl Capture {
     /// The surface the next [`take`](Self::take) captures into. The encoder must be done with
     /// it first.
     pub(super) fn next_surface(&self) -> Option<usize> {
-        match &self.0 {
+        match &self.backend {
             ByBackend::Wgc(_) | ByBackend::Dxgi(_) => None,
             ByBackend::Nvfbc(capture) => capture.next_surface(),
             ByBackend::NvfbcCuda(capture) => capture.next_surface(),
@@ -208,10 +228,51 @@ impl Capture {
 
     /// Releases the surfaces for which `in_use` is false.
     pub(super) fn release_surfaces(&mut self, in_use: &dyn Fn(usize) -> bool) {
-        match &mut self.0 {
+        match &mut self.backend {
             ByBackend::Wgc(capture) => capture.release_surfaces(in_use),
             ByBackend::Dxgi(_) | ByBackend::Nvfbc(_) | ByBackend::NvfbcCuda(_) => {}
         }
+    }
+}
+
+/// An app whose monitor is recorded. The monitor shows whatever is in front, so its pictures are
+/// recorded only while that is the app.
+struct Watched {
+    window: AppWindow,
+    view: View,
+    name: String,
+}
+
+impl Watched {
+    /// `None` unless the capture records a window target's monitor.
+    fn of(target: &Target, captures_window: bool) -> Option<Self> {
+        match target {
+            Target::Window {
+                window,
+                monitor,
+                name,
+                ..
+            } if !captures_window => Some(Self {
+                window: AppWindow::new(*window, *monitor),
+                view: View::default(),
+                name: name.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn decide(&mut self) -> Decision {
+        let was_shown = self.view == View::Shown;
+        let decision = self.view.update(self.window.sight(), Instant::now());
+        match (was_shown, self.view == View::Shown) {
+            (true, false) => log::info(format!(
+                "Capture · {} out of view · its last picture held",
+                self.name
+            )),
+            (false, true) => log::info(format!("Capture · {} back in view", self.name)),
+            _ => {}
+        }
+        decision
     }
 }
 
@@ -243,7 +304,7 @@ pub(super) fn start(
     target: &Target,
     cursor: bool,
 ) -> Result<Capture, CaptureError> {
-    let display = display::describe(monitor_of(target).0);
+    let display = display::describe(monitor_of(target));
     if let Some(display) = &display {
         log::info(format!("Display · {display}"));
     }
@@ -256,7 +317,7 @@ pub(super) fn start(
         }
         _ => None,
     };
-    Ok(Capture(match backend {
+    let backend = match backend {
         Backend::Wgc => ByBackend::Wgc(wgc::Capture::start(
             device, period, target, cursor, tone_map,
         )?),
@@ -265,7 +326,10 @@ pub(super) fn start(
         Backend::NvfbcCuda => {
             ByBackend::NvfbcCuda(nvfbc::CudaCapture::start(device, target, cursor)?)
         }
-    }))
+    };
+    let mut capture = Capture { backend, app: None };
+    capture.app = Watched::of(target, capture.captures_window());
+    Ok(capture)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,19 +406,13 @@ fn deliver(
     Ok(())
 }
 
-/// The monitor to record and, when the target is a window, the window the monitor is recorded
-/// in place of.
-fn monitor_of(target: &Target) -> (HMONITOR, Option<HWND>) {
+/// The monitor to record, which for a window target is the monitor it fills.
+fn monitor_of(target: &Target) -> HMONITOR {
     match *target {
-        Target::Monitor { handle, .. } => (monitor(handle), None),
+        Target::Monitor { handle, .. } => monitor(handle),
         Target::Window {
-            window,
-            monitor: handle,
-            ..
-        } => (
-            monitor(Some(handle)),
-            Some(HWND(window.get() as *mut c_void)),
-        ),
+            monitor: handle, ..
+        } => monitor(Some(handle)),
     }
 }
 
@@ -370,12 +428,6 @@ fn monitor(handle: Option<MonitorHandle>) -> HMONITOR {
             .ptr(),
         ),
     }
-}
-
-#[expect(unsafe_code, reason = "calls IsWindow")]
-fn is_window_closed(window: Option<HWND>) -> bool {
-    // SAFETY: IsWindow accepts any handle, live or not.
-    window.is_some_and(|window| !unsafe { IsWindow(Some(window)) }.as_bool())
 }
 
 #[cfg(test)]
