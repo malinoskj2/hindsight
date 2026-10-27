@@ -143,30 +143,30 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
                 <strong>{{ setting.title }}</strong>
                 {{ " " }}<span>{{ setting.body }}</span>
               </p>
+              <div v-if="setting.id === 'codec'" class="table-wrap">
+                <table class="codecs">
+                  <caption>
+                    Picture per bit
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Codec</th>
+                      <th scope="col">Bitrate for the same picture</th>
+                      <th scope="col">Cards</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="codec in codecs" :key="codec.name">
+                      <th scope="row">{{ codec.name }}</th>
+                      <td>{{ codec.bitrate }}</td>
+                      <td>{{ codec.cards }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </li>
           </ol>
         </section>
-      </div>
-      <div class="table-wrap">
-        <table class="codecs">
-          <caption>
-            Codecs: same CPU cost, different picture per bit.
-          </caption>
-          <thead>
-            <tr>
-              <th scope="col">Codec</th>
-              <th scope="col">Bitrate for the same picture</th>
-              <th scope="col">Cards</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="codec in codecs" :key="codec.name">
-              <th scope="row">{{ codec.name }}</th>
-              <td>{{ codec.bitrate }}</td>
-              <td>{{ codec.cards }}</td>
-            </tr>
-          </tbody>
-        </table>
       </div>
       <p class="aside">
         The full guide, with every backend and buffer option:
@@ -521,15 +521,15 @@ nav a:hover {
 }
 
 .table-wrap {
-  margin-top: 2.25rem;
+  margin-top: 1rem;
   overflow-x: auto;
 }
 
 .codecs {
   width: 100%;
-  min-width: 30rem;
+  min-width: 18rem;
   border-collapse: collapse;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
 }
 
 .codecs caption {
@@ -543,7 +543,7 @@ nav a:hover {
 
 .codecs th,
 .codecs td {
-  padding: 0.65rem 1rem 0.65rem 0;
+  padding: 0.5rem 1rem 0.5rem 0;
   border-bottom: 1px solid var(--rule);
   text-align: left;
   vertical-align: top;
@@ -553,6 +553,10 @@ nav a:hover {
   border-bottom: 1.5px solid var(--ink);
   color: var(--ink-soft);
   font: 500 0.75rem/1.4 var(--mono);
+}
+
+.codecs tbody tr:last-child > * {
+  border-bottom: 0;
 }
 
 .codecs tbody th {
