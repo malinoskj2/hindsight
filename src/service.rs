@@ -9,6 +9,7 @@ use crate::{
     screenshot::{self, Grab, Grabber, Readback, Reply, ScreenshotError, Still, StillError, Taken},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
+    update::Version,
 };
 use anyhow::Result;
 use std::{
@@ -361,6 +362,8 @@ enum Command {
     CloseToTray(bool),
     CheckForUpdates(bool),
     MoreOptions(bool),
+    /// Records the version as the last one that ran.
+    VersionSeen(Version),
     Wake,
     Exit,
 }
@@ -444,6 +447,10 @@ impl Worker {
 
     pub(crate) fn set_more_options(&self, more_options: bool) {
         self.request(Command::MoreOptions(more_options));
+    }
+
+    pub(crate) fn record_version(&self, version: Version) {
+        self.request(Command::VersionSeen(version));
     }
 
     pub(crate) fn refresh(&self) {
@@ -568,6 +575,14 @@ impl Ledger {
             .map_or(Ok(()), |store| store.save_config(previous, config))
     }
 
+    fn save_last_version(&self, version: &Version) {
+        if let Some(store) = &self.store
+            && let Err(error) = store.save_last_version(version)
+        {
+            log::warning(text::save_last_version_failed(log::chain(&error)));
+        }
+    }
+
     /// Adds a finished replay buffer to the totals.
     fn bank(&mut self, live: &Live) {
         let bytes = live.bytes();
@@ -688,6 +703,7 @@ impl Machine {
                     more_options,
                     ..self.config.clone()
                 }),
+                Ok(Command::VersionSeen(version)) => self.ledger.save_last_version(&version),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
             }

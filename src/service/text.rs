@@ -204,3 +204,7 @@ pub(super) fn load_totals_failed(error: impl Display) -> impl Display {
 pub(super) fn save_totals_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Totals · not saved ({error})"))
 }
+
+pub(super) fn save_last_version_failed(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Last version · not saved ({error})"))
+}
