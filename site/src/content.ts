@@ -58,28 +58,88 @@ export const internals = [
   },
 ] as const satisfies readonly Point[];
 
-export const tips = [
+export interface Setting extends Point {
+  readonly id: string;
+  readonly fields: readonly string[];
+}
+
+export interface SettingGroup {
+  readonly name: string;
+  readonly settings: readonly Setting[];
+}
+
+export const settingGroups = [
   {
-    title: "Keep the NVIDIA NvFBC backend.",
-    body: "It is the default and costs the game least. Switch to Windows Graphics Capture for a laptop whose display hangs off the integrated GPU, or for HDR.",
+    name: "Recording",
+    settings: [
+      {
+        id: "length",
+        fields: ["Replay length (s)", "Bitrate (Mbps)"],
+        title: "Replay length and bitrate cost room, not CPU.",
+        body: "The buffer holds bitrate × replay length: 30 s at 50 Mb/s is about 190 MB.",
+      },
+      {
+        id: "codec",
+        fields: ["Codec"],
+        title: "Pick the best codec your card offers.",
+        body: "They all cost the same CPU; they differ in picture per bit.",
+      },
+      {
+        id: "frame-rate",
+        fields: ["Frame rate"],
+        title: "Record at the frame rate your clips need.",
+        body: "Cost scales with frames captured, not with codec or bitrate. 60 fps costs about a third of what 240 fps does.",
+      },
+      {
+        id: "hotkeys",
+        fields: ["Save hotkey", "Screenshot hotkey"],
+        title: "Set one hotkey for clips and one for screenshots.",
+        body: "Click a field and press the keys, or type them, such as Alt+F10.",
+      },
+      {
+        id: "backend",
+        fields: ["Backend"],
+        title: "Keep the NVIDIA NvFBC backend.",
+        body: "It is the default and costs the game least. Switch to Windows Graphics Capture for a laptop whose display hangs off the integrated GPU, or for HDR.",
+      },
+      {
+        id: "folder",
+        fields: ["Clip folder"],
+        title: "Pick where clips and screenshots go.",
+        body: "Clips land in the folder's videos subfolder, screenshots in its screenshots subfolder.",
+      },
+      {
+        id: "memory",
+        fields: ["Buffer in"],
+        title: "Keep the buffer in RAM if you have the room.",
+        body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD.",
+      },
+      {
+        id: "sound",
+        fields: ["Record system sound", "Record the microphone"],
+        title: "Turn off sound you never use.",
+        body: "System sound is cheap, under a fifth of the video's CPU, but not free. Leave the microphone off unless you want your voice in the clips.",
+      },
+      {
+        id: "cursor",
+        fields: ["Record the mouse cursor"],
+        title: "The cursor is free either way.",
+        body: "Recording it makes no measurable difference.",
+      },
+    ],
   },
   {
-    title: "Record at the frame rate your clips need.",
-    body: "Cost scales with frames captured, not with codec or bitrate. 60 fps costs about a third of what 240 fps does.",
+    name: "General",
+    settings: [
+      {
+        id: "tray",
+        fields: ["Close to tray"],
+        title: "Closing the window keeps it recording.",
+        body: "Close to tray is on by default, so hindsight stays in the tray. Turn it off and closing the window quits.",
+      },
+    ],
   },
-  {
-    title: "Pick the best codec your card offers.",
-    body: "They all cost the same CPU; they differ in picture per bit.",
-  },
-  {
-    title: "Keep the buffer in RAM if you have the room.",
-    body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD. Its size is bitrate × length: 30 s at 50 Mb/s is about 190 MB.",
-  },
-  {
-    title: "Turn off system sound if you never use it.",
-    body: "It is cheap, under a fifth of the video's CPU, but not free.",
-  },
-] as const satisfies readonly Point[];
+] as const satisfies readonly SettingGroup[];
 
 export interface Codec {
   readonly name: string;

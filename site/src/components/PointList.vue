@@ -4,17 +4,16 @@ import type { Point } from "../content.ts";
 const { columns = 1 } = defineProps<{
   points: readonly Point[];
   columns?: 1 | 2;
-  numbered?: boolean;
 }>();
 </script>
 
 <template>
-  <component :is="numbered ? 'ol' : 'ul'" class="points" :class="{ split: columns === 2 }">
+  <ul class="points" :class="{ split: columns === 2 }">
     <li v-for="point in points" :key="point.title" class="point">
       <strong class="point-title">{{ point.title }}</strong>
       {{ " " }}<span class="point-body">{{ point.body }}</span>
     </li>
-  </component>
+  </ul>
 </template>
 
 <style scoped>
@@ -24,14 +23,12 @@ const { columns = 1 } = defineProps<{
   margin: 0;
   padding: 0;
   list-style: none;
-  counter-reset: point;
 }
 
 .point {
   position: relative;
   padding-left: 1.6rem;
   line-height: 1.6;
-  counter-increment: point;
 }
 
 .point::before {
@@ -39,12 +36,6 @@ const { columns = 1 } = defineProps<{
   position: absolute;
   left: 0;
   color: var(--accent);
-}
-
-ol .point::before {
-  content: counter(point);
-  top: 0.2em;
-  font: 500 0.78rem/1.6 var(--mono);
 }
 
 .point-title {

@@ -8,7 +8,7 @@ import DownloadCard from "./components/DownloadCard.vue";
 import KeyCombo from "./components/KeyCombo.vue";
 import PageSection from "./components/PageSection.vue";
 import PointList from "./components/PointList.vue";
-import { codecs, features, internals, tips } from "./content.ts";
+import { codecs, features, internals, settingGroups } from "./content.ts";
 import { installerName, repository } from "./release.ts";
 
 const nav = [
@@ -19,6 +19,11 @@ const nav = [
 ] as const;
 
 const hotkey = ["Alt", "F10"] as const;
+
+const settingStarts = settingGroups.map(
+  (_, index) =>
+    1 + settingGroups.slice(0, index).reduce((count, group) => count + group.settings.length, 0),
+);
 
 const repositorySlug = new URL(repository).pathname.slice(1);
 const hashCommand = `Get-FileHash $HOME\\Downloads\\${installerName}`;
@@ -94,8 +99,8 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
         <li>
           <h3>Press <KeyCombo :keys="hotkey" /> to save a clip.</h3>
           <p>
-            It saves what you just played. Change how much it keeps, the hotkey, codec and frame
-            rate in the Settings tab.
+            It saves what you just played. Change the replay length, codec, frame rate and hotkeys
+            in the Settings tab.
           </p>
         </li>
       </ol>
@@ -119,9 +124,29 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
       id="settings"
       :index="4"
       label="Settings"
-      title="What each setting costs, in short."
+      title="Each setting, in the order the app shows it."
     >
-      <PointList :points="tips" numbered />
+      <div class="settings">
+        <section
+          v-for="(group, groupIndex) in settingGroups"
+          :key="group.name"
+          class="setting-group"
+          :aria-labelledby="`settings-${group.name.toLowerCase()}`"
+        >
+          <h3 :id="`settings-${group.name.toLowerCase()}`" class="group-name">{{ group.name }}</h3>
+          <ol class="setting-list" :start="settingStarts[groupIndex]">
+            <li v-for="setting in group.settings" :key="setting.id" class="setting">
+              <p class="fields">
+                <span v-for="field in setting.fields" :key="field" class="field">{{ field }}</span>
+              </p>
+              <p class="setting-text">
+                <strong>{{ setting.title }}</strong>
+                {{ " " }}<span>{{ setting.body }}</span>
+              </p>
+            </li>
+          </ol>
+        </section>
+      </div>
       <div class="table-wrap">
         <table class="codecs">
           <caption>
@@ -416,6 +441,83 @@ nav a:hover {
   margin: 0;
   color: var(--ink-soft);
   line-height: 1.6;
+}
+
+.settings {
+  display: grid;
+  gap: 2.25rem;
+  max-width: 46rem;
+  counter-reset: setting;
+}
+
+.group-name {
+  margin: 0 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1.5px solid var(--ink);
+  color: var(--ink-soft);
+  font: 500 0.72rem/1.4 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.setting-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setting {
+  position: relative;
+  padding: 1rem 0 1.1rem 2.25rem;
+  border-bottom: 1px solid var(--rule);
+  counter-increment: setting;
+}
+
+.setting:first-child {
+  padding-top: 0.25rem;
+}
+
+.setting::before {
+  content: counter(setting, decimal-leading-zero);
+  position: absolute;
+  top: 1.05rem;
+  left: 0;
+  color: var(--accent);
+  font: 500 0.78rem/1.6 var(--mono);
+}
+
+.setting:first-child::before {
+  top: 0.3rem;
+}
+
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.55rem;
+}
+
+.field {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--paper-bright);
+  color: var(--ink);
+  font: 500 0.74rem/1.5 var(--mono);
+}
+
+.setting-text {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.setting-text strong {
+  font-weight: 600;
+}
+
+.setting-text span {
+  color: var(--ink-soft);
 }
 
 .table-wrap {
