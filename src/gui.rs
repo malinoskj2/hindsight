@@ -273,6 +273,13 @@ impl Main {
         let this = self.clone();
         self.0
             .settings
+            .on_close_to_tray_toggled(move |close_to_tray| {
+                this.on_close_to_tray_toggled(close_to_tray);
+            });
+
+        let this = self.clone();
+        self.0
+            .settings
             .on_hotkey_capture(move |capture| this.on_hotkey_capture(capture));
     }
 
@@ -362,11 +369,16 @@ impl Main {
     }
 
     fn on_close(&self) {
-        let to_tray = self.0.tray.borrow().is_some() && !self.0.quitting.get();
+        let to_tray = self.0.tray.borrow().is_some()
+            && !self.0.quitting.get()
+            && self.0.config.borrow().close_to_tray;
         if to_tray {
             log::info(text::CLOSED_TO_TRAY);
             self.0.main_window.hwnd().ShowWindow(co::SW::HIDE);
             return;
+        }
+        if !self.0.quitting.get() {
+            log::info(text::QUIT_ON_CLOSE);
         }
         // winsafe frees its handlers, this one included, when the window is destroyed. The
         // timer callback is dispatched straight from the message loop, so no handler is running.
@@ -470,6 +482,11 @@ impl Main {
         self.0.config.borrow_mut().theme = theme;
         self.0.worker.set_theme(theme);
         self.apply_look();
+    }
+
+    fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
+        self.0.config.borrow_mut().close_to_tray = close_to_tray;
+        self.0.worker.set_close_to_tray(close_to_tray);
     }
 
     fn apply_look(&self) {

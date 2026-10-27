@@ -223,6 +223,10 @@ impl Machine {
 /// way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawConfig")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent switch in Settings, stored as a JSON boolean"
+)]
 pub(crate) struct Config {
     pub(crate) mode: Mode,
     pub(crate) backend: Backend,
@@ -242,11 +246,17 @@ pub(crate) struct Config {
     /// draws it.
     pub(crate) cursor: bool,
     pub(crate) buffer_memory: Memory,
+    /// Whether closing the window leaves hindsight running in the tray, rather than quitting.
+    pub(crate) close_to_tray: bool,
 }
 
 /// The settings as stored, before validation. Missing settings take their defaults.
 #[derive(Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent switch in Settings, stored as a JSON boolean"
+)]
 struct RawConfig {
     mode: Mode,
     backend: Backend,
@@ -263,6 +273,7 @@ struct RawConfig {
     microphone: bool,
     cursor: bool,
     buffer_memory: Memory,
+    close_to_tray: bool,
     /// Settings written by a newer version, collected here so a downgrade still starts.
     #[serde(flatten)]
     #[expect(
@@ -288,6 +299,7 @@ impl Default for RawConfig {
             microphone,
             cursor,
             buffer_memory,
+            close_to_tray,
         } = Config::default();
         Self {
             mode,
@@ -303,6 +315,7 @@ impl Default for RawConfig {
             microphone,
             cursor,
             buffer_memory,
+            close_to_tray,
             unknown: BTreeMap::new(),
         }
     }
@@ -326,6 +339,7 @@ impl TryFrom<RawConfig> for Config {
             microphone,
             cursor,
             buffer_memory,
+            close_to_tray,
             unknown,
         } = raw;
         if !unknown.is_empty() {
@@ -349,6 +363,7 @@ impl TryFrom<RawConfig> for Config {
             microphone,
             cursor,
             buffer_memory,
+            close_to_tray,
         };
         config.validate()?;
         Ok(config)
@@ -371,6 +386,7 @@ impl Default for Config {
             microphone: false,
             cursor: false,
             buffer_memory: Memory::Ram,
+            close_to_tray: true,
         }
     }
 }
@@ -663,6 +679,21 @@ mod tests {
             let json = serde_json::to_string(&config).unwrap();
             assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), config);
         }
+    }
+
+    #[test]
+    fn closing_to_the_tray_stays_on_unless_turned_off() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        assert!(Config::default().close_to_tray);
+        assert!(parse(r#"{"buffer_seconds":120}"#).unwrap().close_to_tray);
+        let config = Config {
+            close_to_tray: false,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""close_to_tray":false"#), "{json}");
+        assert_eq!(parse(&json).unwrap(), config);
     }
 
     #[test]

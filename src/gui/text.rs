@@ -72,6 +72,7 @@ pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the replay length, bitrate and frame rate.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
+pub(super) const CLOSE_TO_TRAY: &str = "Close to tray";
 
 pub(super) const GROUP_ABOUT: &str = "hindsight";
 pub(super) const GROUP_DETAILS: &str = "Details";
@@ -89,6 +90,7 @@ pub(super) const STARTUP_ENABLED: &str = "Start with Windows · enabled";
 pub(super) const STARTUP_DISABLED: &str = "Start with Windows · disabled";
 pub(super) const QUIT_FROM_TRAY: &str = "Quit · from the tray menu";
 pub(super) const CLOSED_TO_TRAY: &str = "Window closed · recording continues from the tray";
+pub(super) const QUIT_ON_CLOSE: &str = "Quit · window closed";
 pub(super) const FOREGROUND_WATCH_FAILED: &str =
     "Foreground hook · not installed · apps noticed every second";
 
