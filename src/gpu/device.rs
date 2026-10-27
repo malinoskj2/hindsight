@@ -184,7 +184,7 @@ pub(super) fn describe_nvidia_adapter() -> Result<(String, Option<String>), Devi
 #[expect(unsafe_code, reason = "calls IDXGIAdapter::EnumOutputs")]
 pub(super) fn nvidia_capacity() -> Result<(u64, bool), DeviceError> {
     let (adapter, description) = nvidia_adapter()?;
-    // SAFETY: enumeration ends with DXGI_ERROR_NOT_FOUND.
+    // SAFETY: a plain query on a live adapter; the output comes back owned.
     let drives_display = match unsafe { adapter.EnumOutputs(0) } {
         Ok(_) => true,
         Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => false,
