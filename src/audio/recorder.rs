@@ -2,14 +2,14 @@
 //! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
-    CHANNELS, SAMPLE_RATE, Sources, aac,
+    SAMPLE_RATE, Sources, aac,
     pcm::{Channels, Layout},
     timeline::{Frames, Ticks, Timeline},
     wasapi::{self, Devices, OpenError, Packet, Signal, Wake, Watch},
 };
 use crate::{
     log,
-    replay::{AudioFormat, CLOCK_RATE, Live, Source},
+    replay::{AudioFormat, CLOCK_RATE, Live, Source, TrackFormat},
     sys::{self, clock, com::Apartment},
 };
 use std::{
@@ -90,7 +90,8 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
     }
 }
 
-/// The channels each source is kept in. The microphone is kept in mono, which halves its memory.
+/// The channels each source is kept and encoded in. The microphone is kept in mono, which halves
+/// its memory.
 const fn kept_in(source: Source) -> Channels {
     match source {
         Source::System => Channels::Stereo,
@@ -173,8 +174,13 @@ impl<'a> Pipeline<'a> {
         let anchor = clock::now();
         live.set_audio(AudioFormat {
             sample_rate: SAMPLE_RATE,
-            channels: CHANNELS,
-            microphone_channels: kept_in(Source::Microphone).count(),
+            tracks: sources
+                .iter()
+                .map(|source| TrackFormat {
+                    source,
+                    channels: kept_in(source).count(),
+                })
+                .collect(),
             anchor,
             priming: aac::PRIMING,
         });
@@ -666,15 +672,21 @@ mod tests {
         for entry in log::since(0) {
             println!("{}", entry.line());
         }
-        let audio = crate::audio::encode(&live.clip().unwrap().audio.unwrap()).unwrap();
-        println!(
-            "{} frames for 10 s of video, lead {}",
-            audio.frames.len(),
-            audio.lead
-        );
-        assert!((469..=471).contains(&audio.frames.len()));
+        let tracks = crate::audio::encode(&live.clip().unwrap().audio.unwrap()).unwrap();
+        let [system, microphone] = &tracks[..] else {
+            panic!("expected two tracks");
+        };
+        for audio in [system, microphone] {
+            println!(
+                "{:?}: {} frames for 10 s of video, lead {}",
+                audio.source,
+                audio.frames.len(),
+                audio.lead
+            );
+            assert!((469..=471).contains(&audio.frames.len()));
+        }
         if let Some(path) = std::env::var_os("HINDSIGHT_AUDIO_OUTPUT") {
-            std::fs::write(path, crate::audio::testing::adts(&audio.frames)).unwrap();
+            std::fs::write(path, crate::audio::testing::adts(&system.frames)).unwrap();
         }
     }
 }

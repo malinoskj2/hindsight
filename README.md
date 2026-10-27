@@ -17,7 +17,7 @@ It does the same job as NVIDIA's Instant Replay (part of ShadowPlay) with less o
 - **A tray icon and one small window.** No overlay, no account, no launcher.
 - **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game.
 - **Keep anywhere from 5 seconds to 10 minutes**, buffered in RAM, VRAM or on disk.
-- **H.264, HEVC or AV1** at up to 240 fps, with system sound and, if you like, your microphone as AAC, saved as MP4 or MKV. Screenshots as PNG, JPEG, WebP or AVIF.
+- **H.264, HEVC or AV1** at up to 240 fps, with system sound and, if you like, your microphone on a track of its own, as AAC, saved as MP4 or MKV. Screenshots as PNG, JPEG, WebP or AVIF.
 
 <p align="center">
   <img src="assets/screenshots/status.png" alt="hindsight's Status tab while recording cs2 at 240 fps" width="472">
@@ -41,7 +41,7 @@ hindsight looks for a newer release when it starts and once a day, and the About
 - **Nothing polls.** A waitable timer wakes the capture thread once per frame, in the multimedia scheduling class, and three encode slots rotate so it never waits on the GPU.
 - **Nothing runs on the shader cores.** Single-pass rate control, no B-frames, no lookahead, no adaptive quantization. An unchanged screen is repeated GPU-side.
 - **Capture gets the GPU first.** High GPU thread and scheduling priority, never realtime, and no power throttling.
-- **Sound is kept raw** and mixed and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound and kept in mono. Long silences are dropped.
+- **Sound is kept raw** and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound, kept in mono and saved as a second sound track, which players leave off until you pick it. Long silences are dropped.
 - **Screenshots cost nothing until you take one.** The capture thread looks for a request with one atomic read per frame. A screenshot copies the picture the encoder was given on the GPU, and a background thread reads it back and writes the PNG.
 - **Saves run in the background** at low CPU, I/O and memory priority, so they never compete with the game.
 

@@ -1,5 +1,5 @@
-//! A minimal MP4 writer: one H.264, HEVC or AV1 video track and optionally one AAC track, with
-//! `moov` ahead of `mdat`, so the packets are passed over twice.
+//! A minimal MP4 writer: one H.264, HEVC or AV1 video track and an AAC track for each source of
+//! sound, with `moov` ahead of `mdat`, so the packets are passed over twice.
 
 #[cfg(test)]
 use super::Packet;
@@ -24,7 +24,10 @@ use thiserror::Error;
 const TICKS_PER_FRAME: u32 = 1000;
 const MOVIE_TIMESCALE: u32 = 1000;
 const VIDEO_TRACK_ID: u32 = 1;
-const AUDIO_TRACK_ID: u32 = 2;
+const FIRST_AUDIO_TRACK_ID: u32 = 2;
+/// Sound tracks are alternatives, so a player plays one of them: the enabled one, the first. This
+/// is the group ffmpeg puts sound in.
+const SOUND_GROUP: u16 = 1;
 const CHUNK_SECONDS: u64 = 1;
 /// `esds` object and stream types for AAC (ISO/IEC 14496-1).
 const OBJECT_TYPE_MPEG4_AUDIO: u8 = 0x40;
@@ -131,10 +134,11 @@ impl<'a> Sound<'a> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A chunk's track: the video, or the sound track at this position.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Video,
-    Audio,
+    Audio(usize),
 }
 
 struct Chunk {
@@ -150,8 +154,8 @@ struct Layout {
 
 impl Layout {
     /// Returns video alone in one chunk, or video and sound alternating [`CHUNK_SECONDS`] each.
-    fn of(track: &Track<'_>, sound: Option<&Sound<'_>>) -> Self {
-        let Some(sound) = sound else {
+    fn of(track: &Track<'_>, sounds: &[Sound<'_>]) -> Self {
+        if sounds.is_empty() {
             return Self {
                 chunks: vec![Chunk {
                     kind: Kind::Video,
@@ -164,7 +168,7 @@ impl Layout {
                         .sum(),
                 }],
             };
-        };
+        }
         let first_index = track.samples.first().map_or(0, |sample| sample.index);
         let frame_rate = u64::from(track.stream.frame_rate);
         let video = runs(
@@ -174,17 +178,21 @@ impl Layout {
                 (window, u64::from(sample.size))
             }),
         );
-        let rate = u64::from(sound.clip.sample_rate);
-        let lead = u64::from(sound.clip.lead);
-        let audio = runs(
-            Kind::Audio,
-            (0..).zip(&sound.sizes).map(|(number, &size)| {
-                let start = (number * u64::from(FRAME_SAMPLES)).saturating_sub(lead);
-                (start / rate / CHUNK_SECONDS, u64::from(size))
-            }),
-        );
+        let audio = sounds.iter().enumerate().flat_map(|(position, sound)| {
+            let rate = u64::from(sound.clip.sample_rate);
+            let lead = u64::from(sound.clip.lead);
+            runs(
+                Kind::Audio(position),
+                (0..).zip(&sound.sizes).map(move |(number, &size)| {
+                    let start = (number * u64::from(FRAME_SAMPLES)).saturating_sub(lead);
+                    (start / rate / CHUNK_SECONDS, u64::from(size))
+                }),
+            )
+        });
+        let mut chunks: Vec<(u64, Chunk)> = video.into_iter().chain(audio).collect();
+        chunks.sort_by_key(|(window, chunk)| (*window, chunk.kind));
         Self {
-            chunks: interleave(video, audio),
+            chunks: chunks.into_iter().map(|(_, chunk)| chunk).collect(),
         }
     }
 
@@ -237,20 +245,6 @@ fn runs(kind: Kind, samples: impl Iterator<Item = (u64, u64)>) -> Vec<(u64, Chun
     chunks
 }
 
-/// Merges by window, video first within a window.
-fn interleave(video: Vec<(u64, Chunk)>, audio: Vec<(u64, Chunk)>) -> Vec<Chunk> {
-    let mut merged = Vec::with_capacity(video.len() + audio.len());
-    let mut audio = audio.into_iter().peekable();
-    for (window, chunk) in video {
-        while let Some((_, earlier)) = audio.next_if(|(other, _)| *other < window) {
-            merged.push(earlier);
-        }
-        merged.push(chunk);
-    }
-    merged.extend(audio.map(|(_, chunk)| chunk));
-    merged
-}
-
 /// The reason a clip could not be written. The message names only what failed, and the cause is
 /// its `source()`.
 #[derive(Debug, Error)]
@@ -293,7 +287,7 @@ pub(crate) fn write(
     stream: &Stream,
     packets: &[Arc<Packet>],
 ) -> Result<(), MuxError> {
-    write_from(output, stream, packets, None)
+    write_from(output, stream, packets, &[])
 }
 
 #[cfg(test)]
@@ -301,16 +295,18 @@ pub(crate) fn write_with_audio(
     output: &mut impl io::Write,
     stream: &Stream,
     packets: &[Arc<Packet>],
-    audio: &AudioClip,
+    audio: &[AudioClip],
 ) -> Result<(), MuxError> {
-    write_from(output, stream, packets, Some(audio))
+    write_from(output, stream, packets, audio)
 }
 
+/// Writes the video and a track for each of `audio` that has frames, the first of which players
+/// play.
 pub(crate) fn write_from<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     stream: &Stream,
     packets: &P,
-    audio: Option<&AudioClip>,
+    audio: &[AudioClip],
 ) -> Result<(), MuxError> {
     let (decoder, samples) = index(stream.codec, packets)?;
     let track = Track {
@@ -318,14 +314,15 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
         decoder: &decoder,
         samples: &samples,
     };
-    let sound = audio
+    let sounds = audio
+        .iter()
         .filter(|clip| !clip.frames.is_empty())
         .map(Sound::of)
-        .transpose()?;
-    let layout = Layout::of(&track, sound.as_ref());
+        .collect::<Result<Vec<_>, _>>()?;
+    let layout = Layout::of(&track, &sounds);
 
-    output.write_all(&header(&track, sound.as_ref(), &layout)?)?;
-    write_media(output, &track, sound.as_ref(), &layout, packets)?;
+    output.write_all(&header(&track, &sounds, &layout)?)?;
+    write_media(output, &track, &sounds, &layout, packets)?;
     output.flush()?;
     Ok(())
 }
@@ -403,25 +400,21 @@ fn duration_between(from: u64, to: u64) -> Result<u32, MuxError> {
         .ok_or(MuxError::TooLarge)
 }
 
-fn header(
-    track: &Track<'_>,
-    sound: Option<&Sound<'_>>,
-    layout: &Layout,
-) -> Result<Vec<u8>, MuxError> {
+fn header(track: &Track<'_>, sounds: &[Sound<'_>], layout: &Layout) -> Result<Vec<u8>, MuxError> {
     let mut file = Vec::new();
     file_type(track.stream.codec).encode(&mut file)?;
     // Offsets are 64-bit whatever their value, so the index is the same length either way.
     let mut probe = Vec::new();
-    movie(track, sound, layout, 0)?.encode(&mut probe)?;
+    movie(track, sounds, layout, 0)?.encode(&mut probe)?;
     let media_offset = (file.len() + probe.len()) as u64 + MDAT_HEADER_BYTES;
-    movie(track, sound, layout, media_offset)?.encode(&mut file)?;
+    movie(track, sounds, layout, media_offset)?.encode(&mut file)?;
     Ok(file)
 }
 
 fn write_media<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     track: &Track<'_>,
-    sound: Option<&Sound<'_>>,
+    sounds: &[Sound<'_>],
     layout: &Layout,
     packets: &P,
 ) -> Result<(), MuxError> {
@@ -431,7 +424,7 @@ fn write_media<P: Packets + ?Sized>(
     let mut writer = MediaWriter {
         output,
         track,
-        sound,
+        sounds,
         chunks: layout.chunks.iter(),
         written: 0,
         chunk_end: 0,
@@ -443,7 +436,7 @@ fn write_media<P: Packets + ?Sized>(
 struct MediaWriter<'a, W> {
     output: &'a mut W,
     track: &'a Track<'a>,
-    sound: Option<&'a Sound<'a>>,
+    sounds: &'a [Sound<'a>],
     chunks: slice::Iter<'a, Chunk>,
     written: usize,
     chunk_end: usize,
@@ -481,7 +474,7 @@ impl<W: io::Write> MediaWriter<'_, W> {
     fn next_video_chunk(&mut self) -> Result<(), MuxError> {
         while let Some(chunk) = self.chunks.next() {
             match chunk.kind {
-                Kind::Audio => self.sound_chunk(chunk)?,
+                Kind::Audio(position) => self.sound_chunk(position, chunk)?,
                 Kind::Video => {
                     self.chunk_end = chunk.first + chunk.count;
                     return Ok(());
@@ -491,11 +484,19 @@ impl<W: io::Write> MediaWriter<'_, W> {
         Err(MuxError::Changed)
     }
 
-    fn sound_chunk(&mut self, chunk: &Chunk) -> Result<(), MuxError> {
-        if let Some(sound) = self.sound {
-            for frame in &sound.clip.frames[chunk.first..chunk.first + chunk.count] {
-                self.output.write_all(frame)?;
-            }
+    fn sound_chunk(&mut self, position: usize, chunk: &Chunk) -> Result<(), MuxError> {
+        let frames = self
+            .sounds
+            .get(position)
+            .and_then(|sound| {
+                sound
+                    .clip
+                    .frames
+                    .get(chunk.first..chunk.first + chunk.count)
+            })
+            .ok_or(MuxError::Changed)?;
+        for frame in frames {
+            self.output.write_all(frame)?;
         }
         Ok(())
     }
@@ -506,7 +507,7 @@ impl<W: io::Write> MediaWriter<'_, W> {
         }
         while let Some(chunk) = self.chunks.next() {
             match chunk.kind {
-                Kind::Audio => self.sound_chunk(chunk)?,
+                Kind::Audio(position) => self.sound_chunk(position, chunk)?,
                 Kind::Video => return Err(MuxError::Changed),
             }
         }
@@ -543,7 +544,7 @@ fn file_type(codec: Codec) -> Ftyp {
 
 fn movie(
     track: &Track<'_>,
-    sound: Option<&Sound<'_>>,
+    sounds: &[Sound<'_>],
     layout: &Layout,
     media_offset: u64,
 ) -> Result<Moov, MuxError> {
@@ -553,11 +554,12 @@ fn movie(
         &durations,
         layout.placement(Kind::Video, media_offset)?,
     )?];
-    if let Some(sound) = sound {
+    for (position, sound) in sounds.iter().enumerate() {
         tracks.push(sound_track(
             sound,
+            position,
             durations.movie,
-            layout.placement(Kind::Audio, media_offset)?,
+            layout.placement(Kind::Audio(position), media_offset)?,
         )?);
     }
     let next_track_id = fit::<u32, _>(tracks.len())? + 1;
@@ -723,14 +725,22 @@ fn sample_sizes(sizes: Vec<u32>) -> Stsz {
 }
 
 /// The edit list skips the lead so the sound starts with the video. Every AAC frame decodes on
-/// its own, so there is no `stss`.
-fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result<Trak, MuxError> {
+/// its own, so there is no `stss`. Only the first sound track is enabled.
+fn sound_track(
+    sound: &Sound<'_>,
+    position: usize,
+    duration: u32,
+    placement: Placement,
+) -> Result<Trak, MuxError> {
     let clip = sound.clip;
     Ok(Trak {
         tkhd: Tkhd {
-            track_id: AUDIO_TRACK_ID,
+            track_id: FIRST_AUDIO_TRACK_ID
+                .checked_add(fit(position)?)
+                .ok_or(MuxError::TooLarge)?,
             duration: duration.into(),
-            enabled: true,
+            alternate_group: SOUND_GROUP,
+            enabled: position == 0,
             in_movie: true,
             volume: 1.into(),
             ..Tkhd::default()
@@ -746,7 +756,7 @@ fn sound_track(sound: &Sound<'_>, duration: u32, placement: Placement) -> Result
         }),
         mdia: Mdia {
             mdhd: media_header(clip.sample_rate, sound.media_duration()?),
-            hdlr: handler(*b"soun", "SoundHandler"),
+            hdlr: handler(*b"soun", clip.source.track_name()),
             minf: Minf {
                 smhd: Some(Smhd::default()),
                 dinf: data_information(),
