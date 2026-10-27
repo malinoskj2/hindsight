@@ -54,7 +54,9 @@ rather than as a list of commits. A change worth noticing adds a line to the nex
 section.
 
 Before tagging a release, check that the section for the version in `Cargo.toml` is complete.
-The release workflow uses it as the release's notes on GitHub, and stops if it is missing.
+A release build fails without it. The app embeds the section and shows it once after updating,
+and About's What's new shows it again. The release workflow uses the same section as the
+release's notes on GitHub.
 
 ## Before you open a pull request
 

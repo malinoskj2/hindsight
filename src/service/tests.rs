@@ -591,6 +591,26 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
 }
 
 #[test]
+fn the_version_seen_is_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let worker = spawn(
+        steady,
+        RETRY_INTERVAL,
+        Some(Store::at(state.clone()).unwrap()),
+        config_in(directory.path()),
+    );
+
+    worker.record_version(Version::running());
+    drop(worker);
+
+    assert_eq!(
+        Store::at(state).unwrap().load_last_version().unwrap(),
+        Some(Version::running())
+    );
+}
+
+#[test]
 fn turning_off_closing_to_the_tray_is_saved() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");

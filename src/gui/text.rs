@@ -103,6 +103,9 @@ pub(super) const UPDATE_CHECKING: &str = "Checking for updates…";
 pub(super) const UPDATE_CURRENT: &str = "hindsight is up to date.";
 pub(super) const UPDATE_DECLINED: &str = "Update · administrator prompt declined";
 pub(super) const UPDATE_THREAD_MISSING: &str = "the update thread could not start";
+pub(super) const WHATS_NEW_CLOSE: &str = "OK";
+pub(super) const WHATS_NEW_RELEASES: &str = "All releases";
+pub(super) const WHATS_NEW_MISSING: &str = "This build has no release notes.";
 
 pub(super) const STARTUP_ENABLED: &str = "Start with Windows · enabled";
 pub(super) const STARTUP_DISABLED: &str = "Start with Windows · disabled";
@@ -452,6 +455,14 @@ pub(super) fn update_download_log(version: impl Display, error: impl Display) ->
 
 pub(super) fn update_installing(version: impl Display) -> String {
     format!("Update · installing hindsight {version} · quitting")
+}
+
+pub(super) fn whats_new_title(version: impl Display) -> String {
+    format!("What's new in {APP_NAME} {version}")
+}
+
+pub(super) fn whats_new_failed(error: impl Display) -> String {
+    format!("What's new · not shown ({error})")
 }
 
 pub(super) fn link_open_failed(target: impl Display, error: impl Display) -> String {

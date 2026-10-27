@@ -26,8 +26,9 @@ use crate::{
         window,
     },
     update::{
-        Check, Installation, Release, State,
+        Check, Installation, Release, State, Version,
         client::{CheckError, Done, DownloadError, Installer, Updater},
+        notes::Arrival,
     },
 };
 use anyhow::Result;
@@ -51,6 +52,7 @@ mod startup_error;
 mod status;
 mod text;
 mod theme;
+mod whats_new;
 
 const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
@@ -67,10 +69,14 @@ const UPDATE_INTERVAL_MS: u32 = 24 * 60 * 60 * 1000;
 /// Runs while the update thread has a job.
 const UPDATE_POLL_TIMER: usize = 5;
 const UPDATE_POLL_MS: u32 = 250;
+/// Shows the notes after an upgrade, once the window that was just shown has painted.
+const WHATS_NEW_TIMER: usize = 6;
 
-pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
+pub(crate) fn run(startup: Result<(Worker, Config, Arrival)>, start_hidden: bool) -> Result<()> {
     match startup {
-        Ok((worker, config)) => Main::create_and_run(worker, config, start_hidden),
+        Ok((worker, config, arrival)) => {
+            Main::create_and_run(worker, config, arrival, start_hidden)
+        }
         Err(error) => startup_error::show(&format!("{error:#}"), ICON_RESOURCE),
     }
 }
@@ -105,11 +111,18 @@ struct Inner {
     updater: Option<Updater>,
     update_state: RefCell<State>,
     installation: Installation,
+    /// `Upgraded` until the notes have been shown, which waits for the window to be.
+    arrival: Cell<Arrival>,
 }
 
 impl Main {
-    fn create_and_run(worker: Worker, config: Config, start_hidden: bool) -> Result<()> {
-        let main = Self::create(worker, config, start_hidden);
+    fn create_and_run(
+        worker: Worker,
+        config: Config,
+        arrival: Arrival,
+        start_hidden: bool,
+    ) -> Result<()> {
+        let main = Self::create(worker, config, arrival, start_hidden);
         main.draw();
         main.window_events();
         main.status_events();
@@ -118,7 +131,7 @@ impl Main {
         main.run(start_hidden)
     }
 
-    fn create(worker: Worker, config: Config, start_hidden: bool) -> Self {
+    fn create(worker: Worker, config: Config, arrival: Arrival, start_hidden: bool) -> Self {
         let skin = Skin::new(config.theme);
         let width = WINDOW_WIDTH + skin.extra_width();
         let main_window = application_window(width, start_hidden);
@@ -166,6 +179,7 @@ impl Main {
             installation: std::env::current_exe().map_or(Installation::Portable, |executable| {
                 Installation::of(&executable)
             }),
+            arrival: Cell::new(arrival),
         }))
     }
 
@@ -234,6 +248,12 @@ impl Main {
                 this.poll_updates();
                 Ok(())
             });
+
+        let this = self.clone();
+        self.0.main_window.on().wm_timer(WHATS_NEW_TIMER, move || {
+            this.on_whats_new_timer();
+            Ok(())
+        });
 
         let this = self.clone();
         self.0.main_window.on().wm(co::WM::HOTKEY, move |message| {
@@ -407,10 +427,29 @@ impl Main {
                 .main_window
                 .hwnd()
                 .SetTimer(STATUS_TIMER, STATUS_INTERVAL_MS, None);
+            if self.0.arrival.get() == Arrival::Upgraded {
+                let _ = self.0.main_window.hwnd().SetTimer(WHATS_NEW_TIMER, 0, None);
+            }
             self.refresh();
         } else {
             let _ = self.0.main_window.hwnd().KillTimer(STATUS_TIMER);
         }
+    }
+
+    /// Shows the notes after an upgrade, then records the version so they are not shown again.
+    fn on_whats_new_timer(&self) {
+        let _ = self.0.main_window.hwnd().KillTimer(WHATS_NEW_TIMER);
+        if !self.0.main_window.hwnd().IsWindowVisible()
+            || self.0.arrival.replace(Arrival::Again) != Arrival::Upgraded
+        {
+            return;
+        }
+        self.show_whats_new();
+        self.0.worker.record_version(Version::running());
+    }
+
+    fn show_whats_new(&self) {
+        whats_new::show(&self.0.main_window, &self.0.skin);
     }
 
     fn on_timer(&self) {
@@ -602,8 +641,9 @@ impl Main {
                     .borrow()
                     .release()
                     .map(Release::notes_url);
-                if let Some(notes) = notes {
-                    about::open_link(&notes);
+                match notes {
+                    Some(notes) => about::open_link(&notes),
+                    None => self.show_whats_new(),
                 }
             }
         }
@@ -729,11 +769,7 @@ impl Main {
 
     fn apply_look(&self) {
         self.apply_icon();
-        let hwnd = self.0.main_window.hwnd();
-        match self.0.skin.title_bar_colours() {
-            Some((caption, text)) => window::paint_title_bar(hwnd, caption, text),
-            None => window::match_dialog_title_bar(hwnd),
-        }
+        layout::match_title_bar(self.0.main_window.hwnd(), &self.0.skin);
         let classic = !self.0.skin.is_themed();
         for frame in self.panes().into_iter().flat_map(Pane::frames) {
             frame.show_title_label(classic);

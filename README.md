@@ -32,7 +32,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 3. Play. When something happens that you want to keep, press **Alt+F7** (or the hotkey you set) to save what just happened as a clip, or **Alt+F8** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
-hindsight looks for a newer release when it starts and once a day, and the About tab's **Update** button installs it. Each installer is signed, and hindsight runs only one whose signature it can verify. Turn **Check for updates** off in Settings to stop the checks.
+hindsight looks for a newer release when it starts and once a day, and the About tab's **Update** button installs it. Each installer is signed, and hindsight runs only one whose signature it can verify. After an update it shows what is new in that version, and the About tab's **What's new** shows it again. Turn **Check for updates** off in Settings to stop the checks.
 
 ## How it stays light
 

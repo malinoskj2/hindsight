@@ -71,6 +71,7 @@ enum Link {
 pub(super) enum UpdateAction {
     Check,
     Install,
+    /// The notes of the release on offer, or of the running version when none is.
     Notes,
 }
 
@@ -225,7 +226,7 @@ impl AboutPage {
             let enabled = match action {
                 UpdateAction::Check => !busy,
                 UpdateAction::Install => offered,
-                UpdateAction::Notes => state.release().is_some(),
+                UpdateAction::Notes => true,
             };
             button.hwnd().EnableWindow(enabled);
             if *action == UpdateAction::Install {
