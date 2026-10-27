@@ -18,7 +18,7 @@ const nav = [
   { href: repository, label: "GitHub" },
 ] as const;
 
-const hotkey = ["Alt", "F1"] as const;
+const hotkey = ["Alt", "F7"] as const;
 
 const settingStarts = settingGroups.map(
   (_, index) =>
@@ -99,8 +99,8 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
         <li>
           <h3>Press <KeyCombo :keys="hotkey" /> to save a clip.</h3>
           <p>
-            It saves what you just played. Change the replay length, codec, frame rate and hotkeys
-            in the Settings tab.
+            It saves what you just played. The Clips and Screenshots tabs list what you have saved.
+            Change the replay length, codec, frame rate and hotkeys in the Settings tab.
           </p>
         </li>
       </ol>

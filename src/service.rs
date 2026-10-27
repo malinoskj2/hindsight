@@ -313,6 +313,7 @@ pub(crate) struct Status {
     pub(crate) buffer_capacity_bytes: u64,
     pub(crate) bytes: Bytes,
     pub(crate) last_clip: Option<PathBuf>,
+    pub(crate) last_screenshot: Option<PathBuf>,
     /// The last clip was saved without the sound that was buffered for it.
     pub(crate) clip_without_sound: bool,
     /// What went wrong last, until the same work next succeeds.
@@ -609,6 +610,7 @@ struct Machine {
     /// A save was requested before the buffer held anything. Cleared when a save starts.
     nothing_to_save: bool,
     last_clip: Option<PathBuf>,
+    last_screenshot: Option<PathBuf>,
     clip_without_sound: bool,
     encode_rate: Option<f64>,
     session: Option<Session>,
@@ -642,6 +644,7 @@ impl Machine {
             problem: None,
             nothing_to_save: false,
             last_clip: None,
+            last_screenshot: None,
             clip_without_sound: false,
             encode_rate: None,
             session: None,
@@ -908,6 +911,7 @@ impl Machine {
         match writing.join.join() {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
+                self.last_screenshot = Some(path);
                 self.problem = None;
                 (self.services.chime)(Tone::Saved);
             }
@@ -1279,6 +1283,7 @@ impl Machine {
             buffer_capacity_bytes: self.config.estimated_buffer_bytes(),
             bytes: self.count_bytes(reading.live_bytes),
             last_clip: self.last_clip.clone(),
+            last_screenshot: self.last_screenshot.clone(),
             clip_without_sound: self.clip_without_sound,
             problem: self.problem.clone(),
             nothing_to_save: self.nothing_to_save,

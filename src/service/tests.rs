@@ -882,6 +882,9 @@ fn a_screenshot_of_the_recorded_monitor_comes_from_the_capture_and_of_another_is
 
     shoot(&worker, &heard, PRIMARY);
     assert_eq!(screenshot_sizes(directory.path()), [(2, 2)]);
+    let first = files_in(&directory.path().join("screenshots")).remove(0);
+    let status = wait_for(&worker, |status| status.last_screenshot.is_some());
+    assert_eq!(status.last_screenshot, Some(first.clone()));
     assert_eq!(
         files_in(&directory.path().join("videos")),
         Vec::<PathBuf>::new()
@@ -890,7 +893,11 @@ fn a_screenshot_of_the_recorded_monitor_comes_from_the_capture_and_of_another_is
     shoot(&worker, &heard, on_monitor(9));
     assert_eq!(screenshot_sizes(directory.path()), [(2, 2), (12, 1)]);
     assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved]);
-    assert!(worker.status().problem.is_none());
+    let status = wait_for(&worker, |status| {
+        status.last_screenshot.as_ref() != Some(&first)
+    });
+    assert!(status.last_screenshot.unwrap().exists());
+    assert!(status.problem.is_none());
 }
 
 #[test]
