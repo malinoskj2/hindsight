@@ -1,13 +1,12 @@
 use crate::{
     config::{Backend, ScreenshotFormat},
-    replay::{self, SaveError},
+    saving::{self, WriteError},
     service::MonitorHandle,
 };
 use std::{
     error::Error,
     fmt,
-    fs::File,
-    io::{BufWriter, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Mutex, MutexGuard, PoisonError,
@@ -21,7 +20,6 @@ const JPEG_QUALITY: u8 = 92;
 const AVIF_QUALITY: f32 = 80.0;
 /// The fastest of ravif's speeds: about two seconds of one core for a 1440p picture.
 const AVIF_SPEED: u8 = 10;
-const WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 /// A picture as the encoder receives it: 8-bit BGRA rows, top to bottom, with no padding.
 pub(crate) struct Still {
@@ -207,7 +205,7 @@ pub(crate) enum ScreenshotError {
     #[error(transparent)]
     Picture(#[from] StillError),
     #[error(transparent)]
-    Save(#[from] SaveError),
+    Save(#[from] WriteError),
     #[error("write {}", path.display())]
     Encode {
         path: PathBuf,
@@ -240,21 +238,15 @@ pub(crate) fn save(
     format: ScreenshotFormat,
 ) -> Result<PathBuf, ScreenshotError> {
     let still = readback.finish()?;
-    let (path, ()) = replay::save_file(directory, format.extension(), |partial| {
-        write_file(&still, partial, format)
+    let (path, ()) = saving::save_file(directory, format.extension(), |partial| {
+        saving::write_file(partial, |output| {
+            encode(&still, output, format).map_err(|source| ScreenshotError::Encode {
+                path: partial.to_owned(),
+                source,
+            })
+        })
     })?;
     Ok(path)
-}
-
-fn write_file(still: &Still, path: &Path, format: ScreenshotFormat) -> Result<(), ScreenshotError> {
-    let file = File::create(path).map_err(SaveError::io("create", path))?;
-    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    encode(still, &mut output, format).map_err(|source| ScreenshotError::Encode {
-        path: path.to_owned(),
-        source,
-    })?;
-    replay::sync(output).map_err(SaveError::io("finish", path))?;
-    Ok(())
 }
 
 /// The picture is sRGB: an HDR display's is tone-mapped to it before the encoder sees it. PNG
@@ -317,7 +309,7 @@ fn encode(
 mod tests {
     use super::*;
     use std::{
-        fs,
+        fs::{self, File},
         sync::{Arc, mpsc},
     };
 

@@ -1,7 +1,8 @@
 //! The replay buffer and saving, end to end: rings, stores, saves and their sound.
 
 use super::*;
-use std::assert_matches;
+use crate::saving::WRITE_BUFFER_BYTES;
+use std::{assert_matches, fs, io};
 use store::Data;
 
 const STREAM: Stream = Stream {
@@ -23,7 +24,9 @@ fn setting_the_stream_twice_is_a_bug() {
 
 #[test]
 fn a_save_error_names_its_step_and_chains_its_cause_once() {
-    let error = SaveError::io("create", Path::new("clip.mp4"))(io::Error::other("denied"));
+    let error = SaveError::from(WriteError::at("create", Path::new("clip.mp4"))(
+        io::Error::other("denied"),
+    ));
     assert_eq!(error.to_string(), "create clip.mp4");
     assert_eq!(log::chain(&error).to_string(), "create clip.mp4: denied");
     let error = SaveError::from(MuxError::from(io::Error::other("full")));
@@ -738,28 +741,6 @@ fn saves_complete_files_under_unique_names() {
     assert_eq!(&fs::read(&first).unwrap()[4..8], b"ftyp");
     assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
     assert_eq!(fs::read_dir(&target).unwrap().count(), 2);
-}
-
-#[test]
-fn a_name_another_file_holds_is_skipped_not_replaced() {
-    let directory = tempfile::tempdir().unwrap();
-    let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4", |_| true).unwrap();
-    let taken = directory
-        .path()
-        .join(name.file_name(Container::Mp4.extension()));
-    fs::write(&taken, b"theirs").unwrap();
-    let partial = directory.path().join("clip.partial");
-    fs::write(&partial, b"ours").unwrap();
-
-    let path = claim_name(directory.path(), name, Container::Mp4.extension(), &partial).unwrap();
-
-    assert_eq!(
-        path,
-        directory.path().join("hindsight_2026-10-12_21-14-05-2.mp4")
-    );
-    assert_eq!(fs::read(&path).unwrap(), b"ours");
-    assert_eq!(fs::read(&taken).unwrap(), b"theirs");
-    assert!(!partial.exists());
 }
 
 #[test]

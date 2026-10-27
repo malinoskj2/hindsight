@@ -5,11 +5,10 @@ use crate::{
     audio::EncodeError,
     config::{Codec, Container},
     log,
+    saving::{self, WriteError},
     screenshot::{self, Reply},
 };
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, BufWriter},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
@@ -21,7 +20,6 @@ use thiserror::Error;
 mod annexb;
 mod audio;
 mod av1;
-mod clip_name;
 mod disk;
 mod h264;
 mod hevc;
@@ -36,7 +34,6 @@ pub(crate) use audio::{
 use audio::{AudioRings, tick_time};
 #[cfg(windows)]
 pub(crate) use audio::{PcmTrack, SourceFormat};
-pub(crate) use clip_name::ClipName;
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
 use mp4::{DecoderConfig, MuxError, Visit};
@@ -47,11 +44,6 @@ pub(crate) use store::{
     BufferTooLarge, CHUNK_BYTES, PAGE_BYTES, Page, Pages, Slot, pages_within, pieces,
 };
 pub(crate) use store::{Store, StoreError};
-
-const PARTIAL_EXTENSION: &str = "partial";
-/// The number of clips saved within one second before a save gives up looking for a free name.
-const NAME_ATTEMPTS: u32 = 1000;
-const WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 /// One encoded frame: an H.264 or HEVC access unit in Annex B form, or an AV1 temporal unit.
 #[derive(Debug)]
@@ -421,25 +413,10 @@ fn seconds(first: Option<u64>, last: Option<u64>, frame_rate: u32) -> f64 {
 /// `source()`, so it is displayed with [`log::chain`].
 #[derive(Debug, Error)]
 pub(crate) enum SaveError {
-    #[error("{step} {}", path.display())]
-    Io {
-        step: &'static str,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    #[error(transparent)]
+    Write(#[from] WriteError),
     #[error(transparent)]
     Mux(#[from] MuxError),
-}
-
-impl SaveError {
-    pub(crate) fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
-        move |source| Self::Io {
-            step,
-            path: path.to_owned(),
-            source,
-        }
-    }
 }
 
 pub(crate) fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
@@ -482,69 +459,10 @@ pub(crate) fn save(
     directory: &Path,
     container: Container,
 ) -> Result<Saved, SaveError> {
-    let (path, sound_error) = save_file(directory, container.extension(), |partial| {
+    let (path, sound_error) = saving::save_file(directory, container.extension(), |partial| {
         write_file(snapshot, partial, container)
     })?;
     Ok(Saved { path, sound_error })
-}
-
-/// Creates `directory` and has `write` fill a file in it named for the time now with
-/// `extension`. The file is written under a `.partial` name and renamed to its final one only
-/// once complete.
-pub(crate) fn save_file<T, E: From<SaveError>>(
-    directory: &Path,
-    extension: &str,
-    write: impl FnOnce(&Path) -> Result<T, E>,
-) -> Result<(PathBuf, T), E> {
-    fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
-    let name = ClipName::now();
-    let partial = directory
-        .join(name.file_name(extension))
-        .with_extension(PARTIAL_EXTENSION);
-    let result = write(&partial).and_then(|written| {
-        claim_name(directory, name, extension, &partial)
-            .map(|path| (path, written))
-            .map_err(E::from)
-    });
-    if result.is_err() {
-        let _ = fs::remove_file(&partial);
-    }
-    result
-}
-
-/// Moves the finished `partial` to the first attempt of `name` that no file has. Each name is
-/// claimed by creating it, so a file that appears in the meantime is never replaced.
-fn claim_name(
-    directory: &Path,
-    name: ClipName,
-    extension: &str,
-    partial: &Path,
-) -> Result<PathBuf, SaveError> {
-    let mut name = name;
-    for _ in 0..NAME_ATTEMPTS {
-        let path = directory.join(name.file_name(extension));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(claimed) => {
-                drop(claimed);
-                return match fs::rename(partial, &path) {
-                    Ok(()) => Ok(path),
-                    Err(error) => {
-                        let _ = fs::remove_file(&path);
-                        Err(SaveError::io("finish", &path)(error))
-                    }
-                };
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => name = name.next(),
-            Err(error) => return Err(SaveError::io("name", &path)(error)),
-        }
-    }
-    Err(SaveError::io(
-        "name",
-        &directory.join(name.file_name(extension)),
-    )(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "every name for this second is taken",
-    )))
 }
 
 /// Writes the clip to `path` and returns the reason the buffered sound was left out, if it was.
@@ -558,22 +476,15 @@ fn write_file(
         Some(Err(error)) => (Vec::new(), Some(error)),
         None => (Vec::new(), None),
     };
-    let file = File::create(path).map_err(SaveError::io("create", path))?;
-    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     let (stream, entries, audio) = (&snapshot.stream, &snapshot.entries[..], &audio[..]);
-    match container {
-        Container::Mp4 => mp4::write_from(&mut output, stream, entries, audio)?,
-        Container::Mkv => mkv::write_from(&mut output, stream, entries, audio)?,
-    }
-    sync(output).map_err(SaveError::io("finish", path))?;
+    saving::write_file(path, |output| {
+        match container {
+            Container::Mp4 => mp4::write_from(output, stream, entries, audio),
+            Container::Mkv => mkv::write_from(output, stream, entries, audio),
+        }
+        .map_err(SaveError::from)
+    })?;
     Ok(sound_error)
-}
-
-pub(crate) fn sync(output: BufWriter<File>) -> io::Result<()> {
-    let file = output
-        .into_inner()
-        .map_err(io::IntoInnerError::into_error)?;
-    file.sync_all()
 }
 
 #[cfg(test)]

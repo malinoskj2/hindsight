@@ -1053,6 +1053,19 @@ mod tests {
     }
 
     #[test]
+    fn every_container_is_known_by_its_extension_in_any_case() {
+        for container in Container::ALL {
+            assert_eq!(
+                Container::of_extension(&container.extension().to_uppercase()),
+                Some(container)
+            );
+        }
+        for other in ["png", "mp4.partial", ""] {
+            assert_eq!(Container::of_extension(other), None, "{other}");
+        }
+    }
+
+    #[test]
     fn every_screenshot_format_is_known_by_its_extension_in_any_case() {
         for format in ScreenshotFormat::ALL {
             assert_eq!(

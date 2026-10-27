@@ -5,6 +5,7 @@ use crate::{
     audio::EncodeError,
     config::Theme,
     replay::{Matrix, Packet, Picture},
+    saving::WriteError,
 };
 use std::sync::atomic::AtomicUsize;
 
@@ -745,19 +746,15 @@ fn silent_write(
 
 fn failing_write(_: &Snapshot, directory: &Path, _: Container) -> Result<Saved, SaveError> {
     hold_until(&FAILING_WRITE_ENDS, &AtomicBool::new(false));
-    Err(SaveError::Io {
-        step: "create",
-        path: directory.to_owned(),
-        source: io::Error::other("the disk is full"),
-    })
+    Err(disk_full(directory))
 }
 
 fn refusing_write(_: &Snapshot, directory: &Path, _: Container) -> Result<Saved, SaveError> {
-    Err(SaveError::Io {
-        step: "create",
-        path: directory.to_owned(),
-        source: io::Error::other("the disk is full"),
-    })
+    Err(disk_full(directory))
+}
+
+fn disk_full(directory: &Path) -> SaveError {
+    WriteError::at("create", directory)(io::Error::other("the disk is full")).into()
 }
 
 #[test]

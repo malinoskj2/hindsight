@@ -54,6 +54,14 @@ mod replay;
         reason = "off Windows `run` only refuses, so nothing reaches this module"
     )
 )]
+mod saving;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod screenshot;
 #[cfg_attr(
     all(not(windows), not(test)),
