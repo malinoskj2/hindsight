@@ -727,7 +727,7 @@ fn saves_complete_files_under_unique_names() {
 #[test]
 fn a_name_another_file_holds_is_skipped_not_replaced() {
     let directory = tempfile::tempdir().unwrap();
-    let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
+    let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4", |_| true).unwrap();
     let taken = directory
         .path()
         .join(name.file_name(Container::Mp4.extension()));

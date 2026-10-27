@@ -10,7 +10,7 @@
 
 **Save clips of your game after they happen.**
 
-hindsight quietly records your game in the background, keeping only the last few moments. When something worth keeping happens, press **Alt+F1** and what you just played is saved as a video. You never have to remember to hit record first.
+hindsight quietly records your game in the background, keeping only the last few moments. When something worth keeping happens, press **Alt+F7** and what you just played is saved as a video. You never have to remember to hit record first.
 
 It does the same job as NVIDIA's Instant Replay (part of ShadowPlay) with less overhead: captured and encoded on the GPU, no overlay, no launcher, no bloat.
 
@@ -29,7 +29,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 
 1. Download **`hindsight-setup-x64.exe`** from the [Releases page](https://github.com/malinoskj2/hindsight/releases) and run it.
 2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
-3. Play. When something happens that you want to keep, press **Alt+F1** (or the hotkey you set) to save what just happened as a clip, or **Alt+F2** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another.
+3. Play. When something happens that you want to keep, press **Alt+F7** (or the hotkey you set) to save what just happened as a clip, or **Alt+F8** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another. The Clips and Screenshots tabs list them newest first: click one to open it, or right-click it to show it in Explorer or delete it.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
 hindsight looks for a newer release when it starts and once a day, and the About tab's **Update** button installs it. Each installer is signed, and hindsight runs only one whose signature it can verify. Turn **Check for updates** off in Settings to stop the checks.
