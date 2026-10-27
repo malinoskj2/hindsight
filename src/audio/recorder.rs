@@ -2,19 +2,24 @@
 //! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
-    SAMPLE_RATE, Sources, aac,
+    SAMPLE_RATE, Sources, StandIns, aac,
+    choice::Picked,
     pcm::{Channels, Layout},
     timeline::{Frames, Ticks, Timeline},
     wasapi::{self, Devices, OpenError, Packet, Signal, Wake, Watch},
 };
 use crate::{
+    config::DeviceId,
     log,
     replay::{AudioFormat, CLOCK_RATE, Live, Source, TrackFormat},
     sys::{self, clock, com::Apartment},
 };
 use std::{
     any::Any,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -27,10 +32,12 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(100);
 /// gap.
 const SILENCE_LAG: Ticks = Ticks(CLOCK_RATE / 2);
 const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the devices are checked when nothing reports their changes.
+const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Capture {
     stop: Arc<Signal>,
+    stand_ins: Arc<StandInFlags>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -38,6 +45,37 @@ impl Capture {
     /// Returns whether the audio thread ended by itself, so that sound is no longer recorded.
     pub(crate) fn has_stopped(&self) -> bool {
         self.join.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+
+    pub(crate) fn stand_ins(&self) -> StandIns {
+        self.stand_ins.read()
+    }
+}
+
+/// The audio thread's [`StandIns`], for the worker to read.
+#[derive(Default)]
+struct StandInFlags {
+    system: AtomicBool,
+    microphone: AtomicBool,
+}
+
+impl StandInFlags {
+    const fn flag(&self, source: Source) -> &AtomicBool {
+        match source {
+            Source::System => &self.system,
+            Source::Microphone => &self.microphone,
+        }
+    }
+
+    fn set(&self, source: Source, standing_in: bool) {
+        self.flag(source).store(standing_in, Ordering::Relaxed);
+    }
+
+    fn read(&self) -> StandIns {
+        StandIns {
+            system: self.system.load(Ordering::Relaxed),
+            microphone: self.microphone.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -72,13 +110,15 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
             return None;
         }
     };
-    let (live, signal) = (Arc::clone(live), Arc::clone(&stop));
+    let stand_ins = Arc::new(StandInFlags::default());
+    let (live, signal, flags) = (Arc::clone(live), Arc::clone(&stop), Arc::clone(&stand_ins));
     match thread::Builder::new()
         .name("audio".to_owned())
-        .spawn(move || record(&live, sources, &signal))
+        .spawn(move || record(&live, &sources, &signal, &flags))
     {
         Ok(join) => Some(Capture {
             stop,
+            stand_ins,
             join: Some(join),
         }),
         Err(error) => {
@@ -107,7 +147,7 @@ const fn names(source: Source) -> (&'static str, &'static str) {
     }
 }
 
-fn record(live: &Live, sources: Sources, stop: &Signal) {
+fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlags) {
     let Some(mut pipeline) = Pipeline::open(live, sources) else {
         return;
     };
@@ -118,19 +158,20 @@ fn record(live: &Live, sources: Sources, stop: &Signal) {
         ..
     } = &mut pipeline;
     let unchanged = if watch.is_some() {
-        Defaults::Unchanged
+        Changes::Unchanged
     } else {
-        Defaults::Unwatched
+        Changes::Unwatched
     };
     let mut placed = false;
-    let mut defaults = unchanged;
+    let mut changes = unchanged;
     loop {
         if !placed && let Some(capture) = live.capture_processor() {
             sys::thread::keep_off(capture);
             placed = true;
         }
         for input in inputs.iter_mut() {
-            input.device.update(devices, defaults);
+            input.device.update(devices, changes);
+            stand_ins.set(input.device.source, input.device.standing_in);
         }
         let interval = inputs
             .iter()
@@ -146,8 +187,8 @@ fn record(live: &Live, sources: Sources, stop: &Signal) {
                 break;
             }
         };
-        defaults = match wake {
-            Wake::Changed => Defaults::Changed,
+        changes = match wake {
+            Wake::Changed => Changes::Changed,
             Wake::Stop | Wake::Read => unchanged,
         };
         let settled = Ticks(clock::now()).saturating_sub(SILENCE_LAG);
@@ -168,7 +209,7 @@ struct Pipeline<'a> {
 }
 
 impl<'a> Pipeline<'a> {
-    fn open(live: &'a Live, sources: Sources) -> Option<Self> {
+    fn open(live: &'a Live, sources: &Sources) -> Option<Self> {
         let com = started(Apartment::multi_threaded(), "COM unavailable")?;
         let devices = started(Devices::new(), "devices not listed")?;
         let anchor = clock::now();
@@ -188,12 +229,12 @@ impl<'a> Pipeline<'a> {
             .iter()
             .map(|source| Input {
                 track: Track::new(live, source, Ticks(anchor)),
-                device: Device::new(source),
+                device: Device::new(source, sources.device(source).cloned()),
             })
             .collect();
         Some(Self {
             inputs,
-            watch: watch_defaults(&devices),
+            watch: watch_devices(&devices),
             devices,
             _com: com,
         })
@@ -206,25 +247,26 @@ fn started<T>(result: windows::core::Result<T>, what: &str) -> Option<T> {
         .ok()
 }
 
-fn watch_defaults(devices: &Devices) -> Option<Watch> {
+fn watch_devices(devices: &Devices) -> Option<Watch> {
     devices
         .watch()
         .inspect_err(|error| {
             log::warning(format!(
                 "Sound · no device change events ({error}) · checking every {} s",
-                DEFAULT_CHECK_INTERVAL.as_secs()
+                DEVICE_CHECK_INTERVAL.as_secs()
             ));
         })
         .ok()
 }
 
-/// What is known of the default devices since the last update.
+/// What is known of the devices since the last update.
 #[derive(Clone, Copy)]
-enum Defaults {
-    /// The watch reported that a default device changed, perhaps another source's.
+enum Changes {
+    /// The watch reported that a device came or went or a default changed, perhaps another
+    /// source's.
     Changed,
     Unchanged,
-    /// Nothing reports changes, so the defaults are checked on a timer.
+    /// Nothing reports changes, so the devices are checked on a timer.
     Unwatched,
 }
 
@@ -248,8 +290,12 @@ impl Input<'_> {
 
 struct Device {
     source: Source,
+    /// The device chosen in Settings, or `None` to follow Windows' default.
+    choice: Option<DeviceId>,
     state: DeviceState,
-    /// When to next check the default device or try to open one. `None` means now.
+    /// The default device was last opened in place of the chosen one, which was missing.
+    standing_in: bool,
+    /// When to next check the devices or try to open one. `None` means now.
     due: Option<Instant>,
 }
 
@@ -272,13 +318,15 @@ impl DeviceState {
 }
 
 impl Device {
-    const fn new(source: Source) -> Self {
+    const fn new(source: Source, choice: Option<DeviceId>) -> Self {
         Self {
             source,
+            choice,
             state: DeviceState::Closed {
                 opened_before: false,
                 reported: false,
             },
+            standing_in: false,
             due: None,
         }
     }
@@ -290,44 +338,62 @@ impl Device {
         }
     }
 
-    fn update(&mut self, devices: &Devices, defaults: Defaults) {
+    fn update(&mut self, devices: &Devices, changes: Changes) {
         let now = Instant::now();
-        if let Defaults::Changed = defaults {
-            self.follow_default(devices, now);
+        if let Changes::Changed = changes {
+            self.follow(devices, now);
             return;
         }
         if self.due.is_some_and(|due| now < due) {
             return;
         }
-        match (&self.state, defaults) {
+        match (&self.state, changes) {
             (DeviceState::Closed { .. }, _) => self.open(devices, now),
-            (DeviceState::Open(_), Defaults::Unwatched) => self.follow_default(devices, now),
-            (DeviceState::Open(_), Defaults::Changed | Defaults::Unchanged) => {
-                self.due = Some(now + DEFAULT_CHECK_INTERVAL);
+            (DeviceState::Open(_), Changes::Unwatched) => self.follow(devices, now),
+            (DeviceState::Open(_), Changes::Changed | Changes::Unchanged) => {
+                self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
         }
     }
 
-    /// Switches to the default device if it is no longer the one open.
-    fn follow_default(&mut self, devices: &Devices, now: Instant) {
+    /// Switches to the device the source should be captured from if it is not the one open: the
+    /// chosen device when it is back, or the default when that changed and stands for the choice.
+    fn follow(&mut self, devices: &Devices, now: Instant) {
         let DeviceState::Open(stream) = &self.state else {
             self.open(devices, now);
             return;
         };
-        if devices
-            .default_id(self.source)
-            .is_some_and(|id| id != stream.id())
-        {
-            let (label, device) = names(self.source);
-            log::info(format!("{label} · default {device} changed · switching"));
-            self.state = DeviceState::CLOSED_AFTER_OPEN;
-            self.open(devices, now);
+        let Ok(pick) = devices.pick(self.source, self.choice.as_ref()) else {
+            self.due = Some(now + DEVICE_CHECK_INTERVAL);
+            return;
+        };
+        if pick.id().is_none_or(|id| id == stream.id()) {
+            self.due = Some(now + DEVICE_CHECK_INTERVAL);
             return;
         }
-        self.due = Some(now + DEFAULT_CHECK_INTERVAL);
+        let (label, device) = names(self.source);
+        if pick.picked() == Picked::Chosen {
+            log::info(format!("{label} · chosen {device} back · switching"));
+        } else {
+            log::info(format!("{label} · default {device} changed · switching"));
+        }
+        self.state = DeviceState::CLOSED_AFTER_OPEN;
+        let opened = pick.open(self.source);
+        self.opened(opened, now);
     }
 
     fn open(&mut self, devices: &Devices, now: Instant) {
+        if let DeviceState::Open(_) = self.state {
+            return;
+        }
+        let opened = devices
+            .pick(self.source, self.choice.as_ref())
+            .and_then(|pick| pick.open(self.source));
+        self.opened(opened, now);
+    }
+
+    /// Takes the stream an attempt to open a device made, while the state is closed.
+    fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
         let DeviceState::Closed {
             opened_before,
             reported,
@@ -336,15 +402,22 @@ impl Device {
             return;
         };
         let (label, device) = names(self.source);
-        match devices.open(self.source) {
+        match opened {
             Ok(stream) => {
                 log::info(format!(
                     "{label} · {}{}",
                     stream.name(),
                     if *opened_before { " · again" } else { "" }
                 ));
+                let standing_in = stream.picked() == Picked::StandIn;
+                if standing_in && !self.standing_in {
+                    log::warning(format!(
+                        "{label} · chosen {device} missing · the default until it returns"
+                    ));
+                }
+                self.standing_in = standing_in;
                 self.state = DeviceState::Open(stream);
-                self.due = Some(now + DEFAULT_CHECK_INTERVAL);
+                self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
             Err(error) => {
                 if !*reported {
@@ -663,6 +736,8 @@ mod tests {
         let sources = Sources {
             system: true,
             microphone: true,
+            system_device: None,
+            microphone_device: None,
         };
         let capture = start(&live, sources).unwrap();
         thread::sleep(Duration::from_secs(10));

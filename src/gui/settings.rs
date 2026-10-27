@@ -11,18 +11,24 @@ use super::{
     theme::{Skin, Tone},
 };
 use crate::{
+    audio::{self, DeviceList, Entry},
     config::{
-        self, Backend, Codec, Config, ConfigError, Container, MAX_BITRATE_MBPS, MAX_BUFFER_SECONDS,
-        MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE, Memory, Mode,
-        ScreenshotFormat, Theme,
+        self, Backend, Codec, Config, ConfigError, Container, DeviceId, MAX_BITRATE_MBPS,
+        MAX_BUFFER_SECONDS, MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE,
+        Memory, Mode, ScreenshotFormat, Theme,
     },
     log,
+    replay::Source,
     sys::{
         hotkey::{self, RegisterError},
         shell, startup,
     },
 };
-use std::{cell::Cell, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+};
 use thiserror::Error;
 use winsafe::{co, gui, prelude::*};
 
@@ -68,7 +74,9 @@ mod rows {
     pub(super) const BACKEND: i32 = ENCODING + FIELD_PITCH;
     pub(super) const MEMORY: i32 = BACKEND + FIELD_PITCH;
     pub(super) const FORMATS: i32 = MEMORY + FIELD_PITCH;
-    pub(super) const ESTIMATE: i32 = FORMATS + FIELD_PITCH;
+    pub(super) const SOUND_DEVICE: i32 = FORMATS + FIELD_PITCH;
+    pub(super) const MICROPHONE_DEVICE: i32 = SOUND_DEVICE + FIELD_PITCH;
+    pub(super) const ESTIMATE: i32 = MICROPHONE_DEVICE + FIELD_PITCH;
     pub(super) const APPLY: i32 = ESTIMATE + LINE + 4;
     pub(super) const MORE_OPTIONS_HEIGHT: i32 = APPLY - ENCODING;
     pub(super) const RECORDING_HEIGHT: i32 = APPLY + BUTTON_HEIGHT + 14 - RECORDING_FRAME;
@@ -106,6 +114,8 @@ struct Inner {
     general: GeneralControls,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
+    /// `None` when the devices could not be listed, so only the default is offered.
+    devices: Option<DeviceList>,
     /// Whether More options is open. The controls are created open.
     more_options: Cell<bool>,
     /// Whether More options opens once the controls exist, as the settings left it.
@@ -140,6 +150,7 @@ impl Pane for SettingsPage {
         layout::fit_titles(&self.0.frames);
         self.update_estimate();
         self.update_cursor_choice();
+        self.update_device_choices();
         self.show_more_options(self.0.open_at_start);
     }
 
@@ -163,7 +174,10 @@ impl SettingsPage {
             rows::RECORDING_FRAME,
             rows::RECORDING_HEIGHT,
         );
-        let recording = RecordingControls::new(&page, config, codecs, skin);
+        let devices = DeviceList::open()
+            .inspect_err(|error| log::warning(text::devices_not_listed(error)))
+            .ok();
+        let recording = RecordingControls::new(&page, config, codecs, devices.as_ref(), skin);
         let general_frame = Frame::new(
             &page,
             text::GROUP_GENERAL,
@@ -181,6 +195,7 @@ impl SettingsPage {
             recording,
             general,
             codecs: codecs.to_vec(),
+            devices,
             more_options: Cell::new(true),
             open_at_start: config.more_options,
         });
@@ -189,7 +204,20 @@ impl SettingsPage {
         page.estimate_events();
         page.browse_events();
         page.backend_events();
+        page.sound_events();
         page
+    }
+
+    /// Lists the devices again if any came or went since they were listed, keeping each list's
+    /// selection.
+    pub(super) fn update_devices(&self) {
+        let Some(devices) = self.0.devices.as_ref().filter(|devices| devices.changed()) else {
+            return;
+        };
+        let choices = &self.0.recording.choices;
+        for field in [&choices.sound_device, &choices.microphone_device] {
+            field.refill(devices, field.chosen().as_ref());
+        }
     }
 
     pub(super) fn extra(&self) -> i32 {
@@ -372,6 +400,28 @@ impl SettingsPage {
             });
     }
 
+    fn sound_events(&self) {
+        for check_box in [&self.0.recording.audio, &self.0.recording.microphone] {
+            let page = self.clone();
+            check_box.on().bn_clicked(move || {
+                page.update_device_choices();
+                Ok(())
+            });
+        }
+    }
+
+    /// A source's device list is disabled while the source is not recorded.
+    fn update_device_choices(&self) {
+        let recording = &self.0.recording;
+        let choices = &recording.choices;
+        for (field, check_box) in [
+            (&choices.sound_device, &recording.audio),
+            (&choices.microphone_device, &recording.microphone),
+        ] {
+            field.field.hwnd().EnableWindow(check_box.is_checked());
+        }
+    }
+
     /// DXGI Desktop Duplication cannot draw the cursor, so the cursor choice is disabled while
     /// that backend is selected.
     fn update_cursor_choice(&self) {
@@ -467,6 +517,8 @@ impl SettingsPage {
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
             microphone: recording.microphone.is_checked(),
+            sound_device: recording.choices.sound_device.chosen(),
+            microphone_device: recording.choices.microphone_device.chosen(),
             cursor: recording.cursor.is_checked(),
             buffer_memory: chosen(&recording.choices.memory, &Memory::ALL),
             theme: chosen(&self.0.general.theme, &Theme::ALL),
@@ -504,7 +556,13 @@ struct RecordingControls {
 }
 
 impl RecordingControls {
-    fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec], skin: &Skin) -> Self {
+    fn new(
+        page: &gui::TabPage,
+        config: &Config,
+        codecs: &[Codec],
+        devices: Option<&DeviceList>,
+        skin: &Skin,
+    ) -> Self {
         let (encoding, mut advanced) = EncodingFields::new(page, config, codecs);
         let [hotkey, screenshot_hotkey] = hotkey_fields(page, config);
         let (mode, _) = choice_field(
@@ -516,7 +574,7 @@ impl RecordingControls {
             &Mode::ALL.map(Mode::name),
             index_of(&Mode::ALL, config.mode),
         );
-        let choices = AdvancedChoices::new(page, config);
+        let choices = AdvancedChoices::new(page, config, devices);
         let folder = text_field(
             page,
             text::FOLDER,
@@ -628,11 +686,13 @@ struct AdvancedChoices {
     memory: gui::ComboBox,
     container: gui::ComboBox,
     screenshot_format: gui::ComboBox,
+    sound_device: DeviceField,
+    microphone_device: DeviceField,
     captions: [gui::Label; 4],
 }
 
 impl AdvancedChoices {
-    fn new(page: &gui::TabPage, config: &Config) -> Self {
+    fn new(page: &gui::TabPage, config: &Config, devices: Option<&DeviceList>) -> Self {
         let backends = Backend::offered(config.backend);
         let (backend, backend_caption) = choice_field(
             page,
@@ -673,12 +733,30 @@ impl AdvancedChoices {
             &ScreenshotFormat::ALL.map(ScreenshotFormat::name),
             index_of(&ScreenshotFormat::ALL, config.screenshot_format),
         );
+        let sound_device = DeviceField::new(
+            page,
+            text::SOUND_DEVICE,
+            rows::SOUND_DEVICE,
+            Source::System,
+            devices,
+            config.sound_device.as_ref(),
+        );
+        let microphone_device = DeviceField::new(
+            page,
+            text::MICROPHONE_DEVICE,
+            rows::MICROPHONE_DEVICE,
+            Source::Microphone,
+            devices,
+            config.microphone_device.as_ref(),
+        );
         Self {
             backend,
             backends,
             memory,
             container,
             screenshot_format,
+            sound_device,
+            microphone_device,
             captions: [
                 backend_caption,
                 memory_caption,
@@ -689,19 +767,101 @@ impl AdvancedChoices {
     }
 
     fn controls(&self) -> impl Iterator<Item = Control> {
+        let devices = [&self.sound_device, &self.microphone_device];
         [
             &self.backend,
             &self.memory,
             &self.container,
             &self.screenshot_format,
         ]
-        .map(|field| Box::new(field.clone()) as Control)
         .into_iter()
+        .chain(devices.map(|device| &device.field))
+        .map(|field| Box::new(field.clone()) as Control)
         .chain(
             self.captions
-                .clone()
-                .map(|caption| Box::new(caption) as Control),
+                .iter()
+                .chain(devices.map(|device| &device.caption))
+                .map(|caption| Box::new(caption.clone()) as Control),
         )
+    }
+}
+
+/// A list of the devices a source can be captured from, Windows' default first.
+struct DeviceField {
+    source: Source,
+    field: gui::ComboBox,
+    caption: gui::Label,
+    /// The list's entries, in the order of its items.
+    entries: RefCell<Vec<Entry>>,
+}
+
+impl DeviceField {
+    fn new(
+        page: &gui::TabPage,
+        caption: &str,
+        y: i32,
+        source: Source,
+        devices: Option<&DeviceList>,
+        chosen: Option<&DeviceId>,
+    ) -> Self {
+        let (entries, selected) = device_entries(source, devices, chosen);
+        let labels: Vec<String> = entries.iter().map(entry_label).collect();
+        let (field, caption) = choice_field(
+            page,
+            caption,
+            INNER_X,
+            y,
+            FULL_WIDTH,
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            u32::try_from(selected).ok(),
+        );
+        Self {
+            source,
+            field,
+            caption,
+            entries: RefCell::new(entries),
+        }
+    }
+
+    /// Lists the devices there are now, selecting `selected`.
+    fn refill(&self, devices: &DeviceList, selected: Option<&DeviceId>) {
+        let (entries, position) = device_entries(self.source, Some(devices), selected);
+        let labels: Vec<String> = entries.iter().map(entry_label).collect();
+        let items = self.field.items();
+        items.delete_all();
+        let _ = items.add(&labels);
+        items.select(u32::try_from(position).ok());
+        *self.entries.borrow_mut() = entries;
+    }
+
+    /// Returns the device selected, or `None` for the default.
+    fn chosen(&self) -> Option<DeviceId> {
+        let index = usize::try_from(self.field.items().selected_index()?).ok()?;
+        self.entries.borrow().get(index)?.device().cloned()
+    }
+}
+
+/// Returns the entries of `source`'s device list and the position of `selected` among them.
+fn device_entries(
+    source: Source,
+    devices: Option<&DeviceList>,
+    selected: Option<&DeviceId>,
+) -> (Vec<Entry>, usize) {
+    let present = devices.map_or_else(|| Ok(Vec::new()), |devices| devices.endpoints(source));
+    let present = present.unwrap_or_else(|error| {
+        log::warning(text::devices_not_listed(&error));
+        Vec::new()
+    });
+    audio::entries(present, selected, |id| {
+        devices.and_then(|devices| devices.name(id))
+    })
+}
+
+fn entry_label(entry: &Entry) -> String {
+    match entry {
+        Entry::Default => text::DEFAULT_DEVICE.to_owned(),
+        Entry::Present(endpoint) => endpoint.name.clone(),
+        Entry::Absent { name, .. } => text::absent_device(name.as_deref()),
     }
 }
 
@@ -1014,6 +1174,23 @@ mod tests {
     }
 
     #[test]
+    fn device_lists_name_the_default_and_a_chosen_device_that_is_not_connected() {
+        let id = DeviceId::new("{0.0.1.00000000}.{headset}".to_owned()).unwrap();
+        assert_eq!(entry_label(&Entry::Default), text::DEFAULT_DEVICE);
+        assert_eq!(
+            entry_label(&Entry::Absent {
+                id: id.clone(),
+                name: Some("Headset".to_owned())
+            }),
+            "Headset (not connected)"
+        );
+        assert_eq!(
+            entry_label(&Entry::Absent { id, name: None }),
+            "A device not connected"
+        );
+    }
+
+    #[test]
     fn a_settings_error_reads_as_the_message_it_stands_for() {
         assert_eq!(
             SettingsError::NumberRequired.to_string(),
@@ -1053,14 +1230,16 @@ mod tests {
                 rows::BACKEND,
                 rows::MEMORY,
                 rows::FORMATS,
+                rows::SOUND_DEVICE,
+                rows::MICROPHONE_DEVICE,
                 rows::ESTIMATE,
                 rows::APPLY,
                 rows::MORE_OPTIONS_HEIGHT,
             ],
-            [216, 244, 272, 300, 328, 350, 134]
+            [216, 244, 272, 300, 328, 356, 384, 406, 190]
         );
-        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 382));
-        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (388, 94));
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 438));
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (444, 94));
         assert_eq!(
             [
                 rows::THEME,
@@ -1068,7 +1247,7 @@ mod tests {
                 rows::CLOSE_TO_TRAY,
                 rows::STARTUP_ERROR
             ],
-            [408, 436, 458, 480]
+            [464, 492, 514, 536]
         );
     }
 
@@ -1077,7 +1256,7 @@ mod tests {
         let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
         let fill = layout::FILL_Y + layout::FILL_HEIGHT;
         assert!(bottom - rows::MORE_OPTIONS_HEIGHT <= fill);
-        assert_eq!(MORE_OPTIONS_EXTRA, 62);
+        assert_eq!(MORE_OPTIONS_EXTRA, 118);
         assert_eq!(bottom, fill + MORE_OPTIONS_EXTRA);
     }
 

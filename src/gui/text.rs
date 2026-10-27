@@ -4,7 +4,7 @@ use crate::{
     APP_NAME,
     config::{Codec, Memory},
     gpu::{Adapter, ProbeError},
-    replay::Stream,
+    replay::{Source, Stream},
     service::{Problem, ProblemKind, State, Status},
     sys::release::Release,
 };
@@ -15,6 +15,15 @@ pub(super) use crate::service::text::NOTHING_TO_SAVE;
 pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab says why.";
 pub(super) const CLIP_WITHOUT_SOUND: &str =
     "The last clip was saved without sound; the Logs tab says why.";
+
+/// The notice line for a source recorded from the default device because the chosen one is
+/// missing.
+pub(super) const fn device_missing(source: Source) -> &'static str {
+    match source {
+        Source::System => "The chosen sound device is missing; the default is recorded for now.",
+        Source::Microphone => "The chosen microphone is missing; the default is recorded for now.",
+    }
+}
 
 const NO_VALUE: &str = "—";
 // Decimal units, as the bitrate's megabits are.
@@ -72,6 +81,9 @@ pub(super) const CURSOR: &str = "Record the mouse cursor";
 pub(super) const MEMORY: &str = "Buffer in";
 pub(super) const CONTAINER: &str = "Clip format";
 pub(super) const SCREENSHOT_FORMAT: &str = "Image format";
+pub(super) const SOUND_DEVICE: &str = "Sound from";
+pub(super) const MICROPHONE_DEVICE: &str = "Microphone";
+pub(super) const DEFAULT_DEVICE: &str = "Default device";
 // A command button that shows more in place takes a double chevron.
 pub(super) const MORE_OPTIONS: &str = "More options »";
 pub(super) const FEWER_OPTIONS: &str = "« Fewer options";
@@ -158,6 +170,18 @@ pub(super) fn thumbnail_failed(tab: &str, path: &Path, error: impl Display) -> S
 
 pub(super) fn not_listed(tab: &str, path: &Path, error: impl Display) -> String {
     format!("{tab} · {} not listed ({error})", file_name(path))
+}
+
+/// A chosen device that is not connected, by its name when Windows still knows it.
+pub(super) fn absent_device(name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("{name} (not connected)"),
+        None => "A device not connected".to_owned(),
+    }
+}
+
+pub(super) fn devices_not_listed(error: impl Display) -> String {
+    format!("Settings · sound devices not listed ({error}) · only the default is offered")
 }
 
 pub(super) fn folder_pick_failed(error: impl Display) -> String {

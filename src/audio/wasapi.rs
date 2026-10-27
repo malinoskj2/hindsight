@@ -1,11 +1,12 @@
-//! WASAPI capture of the default output device, by loopback, and of the default microphone, read
-//! on a timer a few packets at a time.
+//! WASAPI capture of an output device, by loopback, and of a microphone, read on a timer a few
+//! packets at a time, and the devices there are.
 
 use super::{
+    choice::{self, Endpoint, Picked},
     pcm::{Layout, Sample},
     timeline::Ticks,
 };
-use crate::replay::Source;
+use crate::{config::DeviceId, replay::Source};
 use listener::Listener;
 use std::{ptr, sync::Arc, time::Duration};
 use task_mem::CoTaskMem;
@@ -20,10 +21,11 @@ use windows::{
                 AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                 AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                DEVICE_STATE, EDataFlow, ERole, IAudioCaptureClient, IAudioClient,
-                IAudioSessionControl, IAudioSessionControl2, IMMDevice, IMMDeviceEnumerator,
-                IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
-                WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
+                DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioCaptureClient,
+                IAudioClient, IAudioSessionControl, IAudioSessionControl2, IMMDevice,
+                IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
+                MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture,
+                eConsole, eRender,
             },
             MediaFoundation::{MFAudioFormat_Float, MFAudioFormat_PCM},
         },
@@ -35,7 +37,7 @@ use windows::{
             Threading::WaitForMultipleObjects,
         },
     },
-    core::{GUID, HRESULT, Interface, PCWSTR, implement},
+    core::{GUID, HRESULT, HSTRING, Interface, PCWSTR, implement},
 };
 use winsafe::{HEVENT, guard::CloseHandleGuard};
 
@@ -84,7 +86,7 @@ impl Signal {
 
 pub(super) enum Wake {
     Stop,
-    /// The default output device or microphone changed.
+    /// A device came or went, or a default device changed.
     Changed,
     /// The timeout elapsed, so it is time to read.
     Read,
@@ -121,7 +123,7 @@ pub(super) fn wait(
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum OpenError {
-    #[error("there is no default device")]
+    #[error("there is no device")]
     NoDevice,
     #[error("could not {0}")]
     Windows(&'static str, #[source] windows::core::Error),
@@ -142,33 +144,31 @@ const fn flow(source: Source) -> EDataFlow {
 
 const fn fallback_name(source: Source) -> &'static str {
     match source {
-        Source::System => "the default output",
-        Source::Microphone => "the default microphone",
+        Source::System => "the output device",
+        Source::Microphone => "the microphone",
     }
 }
 
 pub(super) struct Devices(IMMDeviceEnumerator);
 
-impl Devices {
-    pub(super) fn new() -> windows::core::Result<Self> {
-        // SAFETY: creates the in-process device enumerator; COM is initialised on this thread.
-        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map(Self)
+/// A device picked for a source, not yet opened.
+pub(super) struct Pick {
+    device: IMMDevice,
+    picked: Picked,
+}
+
+impl Pick {
+    pub(super) fn id(&self) -> Option<String> {
+        id(&self.device)
     }
 
-    fn default_device(&self, source: Source) -> Result<IMMDevice, OpenError> {
-        // SAFETY: a query of the live enumerator.
-        unsafe { self.0.GetDefaultAudioEndpoint(flow(source), eConsole) }
-            .map_err(|_| OpenError::NoDevice)
+    pub(super) const fn picked(&self) -> Picked {
+        self.picked
     }
 
-    pub(super) fn default_id(&self, source: Source) -> Option<String> {
-        self.default_device(source)
-            .ok()
-            .and_then(|device| id(&device))
-    }
-
-    pub(super) fn open(&self, source: Source) -> Result<Stream, OpenError> {
-        let device = self.default_device(source)?;
+    /// Opens the device and starts capturing `source` from it.
+    pub(super) fn open(self, source: Source) -> Result<Stream, OpenError> {
+        let Self { device, picked } = self;
         // SAFETY: activates an audio client on the live device.
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(failed("activate the audio client"))?;
@@ -188,44 +188,127 @@ impl Devices {
             layout,
             id: id(&device).unwrap_or_default(),
             name: friendly_name(&device).unwrap_or_else(|| fallback_name(source).to_owned()),
+            picked,
+        })
+    }
+}
+
+impl Devices {
+    pub(super) fn new() -> windows::core::Result<Self> {
+        // SAFETY: creates the in-process device enumerator; COM is initialised on this thread.
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map(Self)
+    }
+
+    fn default_device(&self, source: Source) -> Result<IMMDevice, OpenError> {
+        // SAFETY: a query of the live enumerator.
+        unsafe { self.0.GetDefaultAudioEndpoint(flow(source), eConsole) }
+            .map_err(|_| OpenError::NoDevice)
+    }
+
+    /// Returns the device with endpoint ID `id`, connected or not, if Windows knows it.
+    fn device(&self, id: &DeviceId) -> Option<IMMDevice> {
+        let id = HSTRING::from(id.as_str());
+        // SAFETY: a query of the live enumerator; `id` is a null-terminated string that outlives
+        // the call.
+        unsafe { self.0.GetDevice(&id) }.ok()
+    }
+
+    /// Returns the device with endpoint ID `id` if it is connected and enabled.
+    fn active(&self, id: &DeviceId) -> Option<IMMDevice> {
+        let device = self.device(id)?;
+        // SAFETY: a query of a live device.
+        let state = unsafe { device.GetState() }.ok()?;
+        (state == DEVICE_STATE_ACTIVE).then_some(device)
+    }
+
+    /// Picks the device `choice` names if it is present, or else the default for `source`.
+    pub(super) fn pick(
+        &self,
+        source: Source,
+        choice: Option<&DeviceId>,
+    ) -> Result<Pick, OpenError> {
+        let (device, picked) =
+            choice::pick(choice, |id| self.active(id), || self.default_device(source))?;
+        Ok(Pick { device, picked })
+    }
+
+    /// Returns the connected, enabled devices `source` can be captured from.
+    pub(super) fn endpoints(&self, source: Source) -> windows::core::Result<Vec<Endpoint>> {
+        // SAFETY: a query of the live enumerator; the call returns a new collection.
+        let collection = unsafe { self.0.EnumAudioEndpoints(flow(source), DEVICE_STATE_ACTIVE) }?;
+        // SAFETY: a query of the live collection.
+        let count = unsafe { collection.GetCount() }?;
+        let mut endpoints = Vec::new();
+        for index in 0..count {
+            // SAFETY: `index` is below the collection's count; the call returns a new reference.
+            let device = unsafe { collection.Item(index) }?;
+            let Some(id) = id(&device).and_then(DeviceId::new) else {
+                continue;
+            };
+            let name = friendly_name(&device).unwrap_or_else(|| id.as_str().to_owned());
+            endpoints.push(Endpoint { id, name });
+        }
+        Ok(endpoints)
+    }
+
+    /// Returns the name of the device with endpoint ID `id`, connected or not, if Windows knows
+    /// it.
+    pub(super) fn name(&self, id: &DeviceId) -> Option<String> {
+        friendly_name(&self.device(id)?)
+    }
+
+    /// Calls `changed`, on a thread of Windows', whenever a device comes or goes, is enabled or
+    /// disabled, or becomes a default device, until the registration drops.
+    pub(super) fn register(
+        &self,
+        changed: impl Fn() + Send + Sync + 'static,
+    ) -> windows::core::Result<Registration> {
+        let listener: IMMNotificationClient = Listener(Box::new(changed)).into();
+        // SAFETY: `Registration` unregisters the listener before either is released.
+        unsafe { self.0.RegisterEndpointNotificationCallback(&listener) }?;
+        Ok(Registration {
+            devices: self.0.clone(),
+            listener,
         })
     }
 
-    /// Watches both the default output device and the default microphone.
+    /// Watches for the changes `register` reports, as an event `wait` can wait on.
     pub(super) fn watch(&self) -> windows::core::Result<Watch> {
         let changed = Arc::new(Signal::pulse()?);
-        let listener: IMMNotificationClient = Listener(Arc::clone(&changed)).into();
-        // SAFETY: `Watch` unregisters the listener before either is released.
-        unsafe { self.0.RegisterEndpointNotificationCallback(&listener) }?;
+        let signal = Arc::clone(&changed);
+        let registration = self.register(move || signal.set())?;
         Ok(Watch {
-            devices: self.0.clone(),
-            listener,
+            _registration: registration,
             changed,
         })
     }
 }
 
-pub(super) struct Watch {
+pub(super) struct Registration {
     devices: IMMDeviceEnumerator,
     listener: IMMNotificationClient,
-    changed: Arc<Signal>,
 }
 
-impl Watch {
-    /// Returns the event set when the default output device or microphone changes. `wait`
-    /// reports it as `Wake::Changed`.
-    pub(super) fn event(&self) -> HANDLE {
-        self.changed.handle()
-    }
-}
-
-impl Drop for Watch {
+impl Drop for Registration {
     fn drop(&mut self) {
-        // SAFETY: unregisters the listener this watch registered, while both are still alive.
+        // SAFETY: unregisters the listener this registration registered, while both are alive.
         let _ = unsafe {
             self.devices
                 .UnregisterEndpointNotificationCallback(&self.listener)
         };
+    }
+}
+
+/// Unregisters before the signal it sets is released.
+pub(super) struct Watch {
+    _registration: Registration,
+    changed: Arc<Signal>,
+}
+
+impl Watch {
+    /// Returns the event set when a device changes. `wait` reports it as `Wake::Changed`.
+    pub(super) fn event(&self) -> HANDLE {
+        self.changed.handle()
     }
 }
 
@@ -239,14 +322,13 @@ mod listener {
 
     use super::{
         DEVICE_STATE, EDataFlow, ERole, IMMNotificationClient, IMMNotificationClient_Impl, PCWSTR,
-        PROPERTYKEY, Signal, eCapture, eConsole, eRender, implement,
+        PROPERTYKEY, eCapture, eConsole, eRender, implement,
     };
-    use std::sync::Arc;
 
-    /// Only a change of the default device matters. A device lost while open shows up as a
-    /// capture failure.
+    /// Calls its function when a device comes or goes, is enabled or disabled, or becomes the
+    /// default output or recording device. A change of a device's properties does not count.
     #[implement(IMMNotificationClient)]
-    pub(super) struct Listener(pub(super) Arc<Signal>);
+    pub(super) struct Listener(pub(super) Box<dyn Fn() + Send + Sync>);
 
     /// Windows calls the listener on threads of its own.
     const _: () = {
@@ -261,14 +343,17 @@ mod listener {
             _id: &PCWSTR,
             _state: DEVICE_STATE,
         ) -> windows::core::Result<()> {
+            (self.0)();
             Ok(())
         }
 
         fn OnDeviceAdded(&self, _id: &PCWSTR) -> windows::core::Result<()> {
+            (self.0)();
             Ok(())
         }
 
         fn OnDeviceRemoved(&self, _id: &PCWSTR) -> windows::core::Result<()> {
+            (self.0)();
             Ok(())
         }
 
@@ -279,7 +364,7 @@ mod listener {
             _id: &PCWSTR,
         ) -> windows::core::Result<()> {
             if (flow == eRender || flow == eCapture) && role == eConsole {
-                self.0.set();
+                (self.0)();
             }
             Ok(())
         }
@@ -537,9 +622,14 @@ pub(super) struct Stream {
     layout: Layout,
     id: String,
     name: String,
+    picked: Picked,
 }
 
 impl Stream {
+    pub(super) const fn picked(&self) -> Picked {
+        self.picked
+    }
+
     pub(super) const fn layout(&self) -> Layout {
         self.layout
     }

@@ -41,7 +41,7 @@ hindsight looks for a newer release when it starts and once a day, and the About
 - **Nothing polls.** A waitable timer wakes the capture thread once per frame, in the multimedia scheduling class, and three encode slots rotate so it never waits on the GPU.
 - **Nothing runs on the shader cores.** Single-pass rate control, no B-frames, no lookahead, no adaptive quantization. An unchanged screen is repeated GPU-side.
 - **Capture gets the GPU first.** High GPU thread and scheduling priority, never realtime, and no power throttling.
-- **Sound is kept raw** and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound, kept in mono and saved as a second sound track, which players leave off until you pick it. Long silences are dropped.
+- **Sound is kept raw** and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound, kept in mono and saved as a second sound track, which players leave off until you pick it. Both follow Windows' default devices unless you pick others under More options. Long silences are dropped.
 - **Screenshots cost nothing until you take one.** The capture thread looks for a request with one atomic read per frame. A screenshot copies the picture the encoder was given on the GPU, and a background thread reads it back and writes the PNG.
 - **Saves run in the background** at low CPU, I/O and memory priority, so they never compete with the game.
 

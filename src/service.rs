@@ -2,7 +2,7 @@
 //! screenshots of what it captures.
 
 use crate::{
-    audio::{self, Sources},
+    audio::{self, Sources, StandIns},
     config::{Backend, Config, Container, Memory, Mode, Theme},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
@@ -259,7 +259,8 @@ pub(crate) struct Buffer {
 /// system sound or the microphone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
-    Recording,
+    /// Recording, from the default device where a chosen one is missing.
+    Recording(StandIns),
     /// Sound capture could not start or has stopped. The log gives the reason.
     Failed,
 }
@@ -1234,7 +1235,7 @@ impl Machine {
             .as_ref()
             .filter(|_| sources(&self.config).any())?;
         Some(match &session.audio {
-            Some(capture) if !capture.has_stopped() => Sound::Recording,
+            Some(capture) if !capture.has_stopped() => Sound::Recording(capture.stand_ins()),
             _ => Sound::Failed,
         })
     }
@@ -1287,10 +1288,12 @@ impl Machine {
 }
 
 /// Runs the worker. If it panics, reports the reason on the Status tab and stops what it can.
-const fn sources(config: &Config) -> Sources {
+fn sources(config: &Config) -> Sources {
     Sources {
         system: config.audio,
         microphone: config.microphone,
+        system_device: config.sound_device.clone(),
+        microphone_device: config.microphone_device.clone(),
     }
 }
 

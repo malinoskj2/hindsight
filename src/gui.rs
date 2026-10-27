@@ -843,6 +843,7 @@ impl Main {
             .screenshots
             .update(&status, &folder, self.tab_in_view(SCREENSHOTS_TAB));
         self.0.logs.update();
+        self.0.settings.update_devices();
     }
 
     fn tab_in_view(&self, index: u32) -> bool {
