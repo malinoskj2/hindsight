@@ -32,6 +32,8 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 3. Play. When something happens that you want to keep, press **Alt+F10** (or the hotkey you set) to save what just happened as a clip, or **Alt+F11** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
+hindsight looks for a newer release when it starts and once a day, and the About tab's **Update** button installs it. Each installer is signed, and hindsight runs only one whose signature it can verify. Turn **Check for updates** off in Settings to stop the checks.
+
 ## How it stays light
 
 - **Nothing touches the CPU's memory.** Each frame is copied once, on the GPU, into a texture NVENC owns, and NVENC converts and encodes it on its own silicon. With NvFBC the encoder reads the grab where the driver left it, so even that copy goes.

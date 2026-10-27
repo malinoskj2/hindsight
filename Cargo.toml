@@ -13,6 +13,7 @@ anyhow = "1.0.97"
 bitstream-io = "4"
 hound = "3.5"
 log = "0.4"
+minisign-verify = "0.3"
 mp4-atom = "0.16"
 png = { version = "0.18", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +44,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

@@ -14,6 +14,9 @@ pub(crate) mod com;
 pub(crate) mod foreground;
 pub(crate) mod hotkey;
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "calls WinHTTP")]
+pub(crate) mod http;
+#[cfg(windows)]
 pub(crate) mod icon;
 #[cfg(windows)]
 pub(crate) mod instance;

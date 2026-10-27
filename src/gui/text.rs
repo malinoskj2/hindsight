@@ -74,6 +74,7 @@ pub(super) const NUMBER_REQUIRED: &str =
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
 pub(super) const CLOSE_TO_TRAY: &str = "Close to tray";
+pub(super) const CHECK_FOR_UPDATES: &str = "Check for updates";
 
 pub(super) const GROUP_ABOUT: &str = "hindsight";
 pub(super) const GROUP_DETAILS: &str = "Details";
@@ -86,6 +87,16 @@ pub(super) const GPU: &str = "GPU";
 pub(super) const LINK_WEBSITE: &str = "Website";
 pub(super) const LINK_REPORT: &str = "Report a problem";
 pub(super) const LINK_LOG_FOLDER: &str = "Open log folder";
+pub(super) const GROUP_UPDATES: &str = "Updates";
+pub(super) const UPDATE_CHECK: &str = "Check now";
+pub(super) const UPDATE_INSTALL: &str = "Update";
+pub(super) const UPDATE_DOWNLOAD: &str = "Download";
+pub(super) const UPDATE_NOTES: &str = "What's new";
+pub(super) const UPDATE_UNCHECKED: &str = "Not checked yet.";
+pub(super) const UPDATE_CHECKING: &str = "Checking for updates…";
+pub(super) const UPDATE_CURRENT: &str = "hindsight is up to date.";
+pub(super) const UPDATE_DECLINED: &str = "Update · administrator prompt declined";
+pub(super) const UPDATE_THREAD_MISSING: &str = "the update thread could not start";
 
 pub(super) const STARTUP_ENABLED: &str = "Start with Windows · enabled";
 pub(super) const STARTUP_DISABLED: &str = "Start with Windows · disabled";
@@ -374,6 +385,49 @@ pub(super) fn gpu(adapter: &Result<Adapter, ProbeError>) -> String {
         Ok(Adapter { name, driver: None }) => name.clone(),
         Err(error) => capitalised(&error.to_string()),
     }
+}
+
+pub(super) fn update_available(version: impl Display) -> String {
+    format!("hindsight {version} is available.")
+}
+
+pub(super) fn update_downloading(version: impl Display) -> String {
+    format!("Downloading hindsight {version}…")
+}
+
+pub(super) fn update_check_failed(error: impl Display) -> String {
+    format!("Could not check for updates: {error}.")
+}
+
+pub(super) fn update_failed(error: impl Display) -> String {
+    format!("Could not update: {error}.")
+}
+
+pub(super) fn update_confirmation(version: impl Display) -> String {
+    format!(
+        "hindsight closes to install {version} and starts again when it is done. The replay \
+         buffer is discarded, so save a clip first if you want one."
+    )
+}
+
+pub(super) fn updates_unavailable(error: impl Display) -> String {
+    format!("Update · unavailable ({error})")
+}
+
+pub(super) fn update_found(version: impl Display) -> String {
+    format!("Update · hindsight {version} available")
+}
+
+pub(super) fn update_check_log(error: impl Display) -> String {
+    format!("Update · check failed ({error})")
+}
+
+pub(super) fn update_download_log(version: impl Display, error: impl Display) -> String {
+    format!("Update · hindsight {version} not installed ({error})")
+}
+
+pub(super) fn update_installing(version: impl Display) -> String {
+    format!("Update · installing hindsight {version} · quitting")
 }
 
 pub(super) fn link_open_failed(target: impl Display, error: impl Display) -> String {

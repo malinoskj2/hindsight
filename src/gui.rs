@@ -1,7 +1,7 @@
 //! The main window: a plain Win32 dialog built from the system's common controls.
 
 use self::{
-    about::AboutPage,
+    about::{AboutPage, UpdateAction},
     clips::ClipsPage,
     hotkey_field::Capture,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
@@ -12,15 +12,22 @@ use self::{
     theme::{Skin, Surface},
 };
 use crate::{
+    APP_NAME,
     config::{Codec, Config, Mode, Theme},
     gpu, log,
     service::{Target, Worker},
     sys::{
         foreground::{self, ForegroundHook},
         hotkey::{self, Action, RegisterError},
-        icon, instance, shell, startup,
+        icon, instance,
+        shell::{self, Elevation},
+        startup,
         tray::{Tray, TrayAction},
         window,
+    },
+    update::{
+        Check, Installation, Release, State,
+        client::{CheckError, Done, DownloadError, Installer, Updater},
     },
 };
 use anyhow::Result;
@@ -53,6 +60,13 @@ const PANES: usize = 5;
 const DESTROY_TIMER: usize = 2;
 const SETTLE_TIMER: usize = 3;
 const SETTLE_MS: u32 = 500;
+const UPDATE_TIMER: usize = 4;
+/// The first check waits, since at sign-in the network may not be up yet.
+const FIRST_UPDATE_CHECK_MS: u32 = 60 * 1000;
+const UPDATE_INTERVAL_MS: u32 = 24 * 60 * 60 * 1000;
+/// Runs while the update thread has a job.
+const UPDATE_POLL_TIMER: usize = 5;
+const UPDATE_POLL_MS: u32 = 250;
 
 pub(crate) fn run(startup: Result<(Worker, Config)>, start_hidden: bool) -> Result<()> {
     match startup {
@@ -87,6 +101,10 @@ struct Inner {
     initial_startup_error: Cell<Option<String>>,
     /// The height the pages have grown by to show their messages.
     extra: Cell<i32>,
+    /// `None` when its thread could not start.
+    updater: Option<Updater>,
+    update_state: RefCell<State>,
+    installation: Installation,
 }
 
 impl Main {
@@ -96,6 +114,7 @@ impl Main {
         main.window_events();
         main.status_events();
         main.settings_events();
+        main.update_events();
         main.run(start_hidden)
     }
 
@@ -140,6 +159,13 @@ impl Main {
             tray_error: OnceCell::new(),
             initial_startup_error: Cell::new(startup_error),
             extra: Cell::new(0),
+            updater: Updater::start()
+                .inspect_err(|error| log::warning(text::updates_unavailable(error)))
+                .ok(),
+            update_state: RefCell::new(State::Unchecked),
+            installation: std::env::current_exe().map_or(Installation::Portable, |executable| {
+                Installation::of(&executable)
+            }),
         }))
     }
 
@@ -193,6 +219,21 @@ impl Main {
             this.settle_foreground();
             Ok(())
         });
+
+        let this = self.clone();
+        self.0.main_window.on().wm_timer(UPDATE_TIMER, move || {
+            this.on_update_timer();
+            Ok(())
+        });
+
+        let this = self.clone();
+        self.0
+            .main_window
+            .on()
+            .wm_timer(UPDATE_POLL_TIMER, move || {
+                this.poll_updates();
+                Ok(())
+            });
 
         let this = self.clone();
         self.0.main_window.on().wm(co::WM::HOTKEY, move |message| {
@@ -282,6 +323,18 @@ impl Main {
         self.0
             .settings
             .on_hotkey_capture(move |capture| this.on_hotkey_capture(capture));
+
+        let this = self.clone();
+        self.0
+            .settings
+            .on_update_checks_toggled(move |check| this.on_update_checks_toggled(check));
+    }
+
+    fn update_events(&self) {
+        let this = self.clone();
+        self.0
+            .about
+            .on_update_action(move |action| this.on_update_action(action));
     }
 
     fn run(&self, start_hidden: bool) -> Result<()> {
@@ -306,6 +359,7 @@ impl Main {
         self.register_configured_hotkeys();
         self.watch_foreground_changes();
         self.add_tray_icon();
+        self.start_update_checks();
         self.refresh();
     }
 
@@ -493,6 +547,172 @@ impl Main {
     fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
         self.0.config.borrow_mut().close_to_tray = close_to_tray;
         self.0.worker.set_close_to_tray(close_to_tray);
+    }
+
+    fn on_update_checks_toggled(&self, check: bool) {
+        self.0.config.borrow_mut().check_for_updates = check;
+        self.0.worker.set_check_for_updates(check);
+        if check && matches!(*self.0.update_state.borrow(), State::Unchecked) {
+            self.check_for_updates();
+        }
+    }
+
+    /// Checks a minute after starting, if checks are on, and then once a day while hindsight
+    /// runs.
+    fn start_update_checks(&self) {
+        let _ = self
+            .0
+            .main_window
+            .hwnd()
+            .SetTimer(UPDATE_TIMER, FIRST_UPDATE_CHECK_MS, None);
+        self.show_update();
+    }
+
+    fn on_update_timer(&self) {
+        let _ = self
+            .0
+            .main_window
+            .hwnd()
+            .SetTimer(UPDATE_TIMER, UPDATE_INTERVAL_MS, None);
+        if self.0.config.borrow().check_for_updates {
+            self.check_for_updates();
+        }
+    }
+
+    fn on_update_action(&self, action: UpdateAction) {
+        match action {
+            UpdateAction::Check => self.check_for_updates(),
+            UpdateAction::Install => self.install_update(),
+            UpdateAction::Notes => {
+                let notes = self
+                    .0
+                    .update_state
+                    .borrow()
+                    .release()
+                    .map(Release::notes_url);
+                if let Some(notes) = notes {
+                    about::open_link(&notes);
+                }
+            }
+        }
+    }
+
+    fn check_for_updates(&self) {
+        let Some(updater) = &self.0.updater else {
+            *self.0.update_state.borrow_mut() =
+                State::CheckFailed(text::UPDATE_THREAD_MISSING.to_owned());
+            self.show_update();
+            return;
+        };
+        if self.0.update_state.borrow_mut().begin_check() {
+            updater.check();
+            self.poll_updates_soon();
+        }
+        self.show_update();
+    }
+
+    /// Asks before downloading, since installing closes hindsight. The portable copy opens the
+    /// release's page instead, which has the zip.
+    fn install_update(&self) {
+        let Some(release) = self.0.update_state.borrow().release().cloned() else {
+            return;
+        };
+        let (Installation::Installed(_), Some(updater)) = (&self.0.installation, &self.0.updater)
+        else {
+            about::open_link(&release.notes_url());
+            return;
+        };
+        let answer = self.0.main_window.hwnd().MessageBox(
+            &text::update_confirmation(release.version()),
+            APP_NAME,
+            co::MB::OKCANCEL | co::MB::ICONINFORMATION,
+        );
+        if answer != Ok(co::DLGID::OK) {
+            return;
+        }
+        // The dialog ran the message loop, so the state may have moved on.
+        let Some(release) = self.0.update_state.borrow_mut().begin_download() else {
+            return;
+        };
+        updater.download(release);
+        self.poll_updates_soon();
+        self.show_update();
+    }
+
+    fn poll_updates_soon(&self) {
+        let _ = self
+            .0
+            .main_window
+            .hwnd()
+            .SetTimer(UPDATE_POLL_TIMER, UPDATE_POLL_MS, None);
+    }
+
+    fn poll_updates(&self) {
+        let Some(updater) = &self.0.updater else {
+            return;
+        };
+        while let Some(done) = updater.finished() {
+            match done {
+                Done::Checked(found) => self.checked(found),
+                Done::Downloaded(release, installer) => self.downloaded(release, installer),
+            }
+        }
+        let busy = matches!(
+            *self.0.update_state.borrow(),
+            State::Checking | State::Downloading(_)
+        );
+        if !busy {
+            let _ = self.0.main_window.hwnd().KillTimer(UPDATE_POLL_TIMER);
+        }
+        self.show_update();
+    }
+
+    fn checked(&self, found: Result<Check, CheckError>) {
+        let found = found.map_err(|error| log::chain(&error).to_string());
+        match &found {
+            Ok(Check::Newer(release)) => log::info(text::update_found(release.version())),
+            Ok(Check::Current) => {}
+            Err(reason) => log::warning(text::update_check_log(reason)),
+        }
+        self.0.update_state.borrow_mut().checked(found);
+    }
+
+    /// Starts a downloaded installer and quits, so the installer can replace this copy.
+    fn downloaded(&self, release: Release, installer: Result<Installer, DownloadError>) {
+        let Installation::Installed(folder) = &self.0.installation else {
+            *self.0.update_state.borrow_mut() = State::Available(release);
+            return;
+        };
+        let launched = installer
+            .map_err(|error| log::chain(&error).to_string())
+            .and_then(|installer| {
+                installer
+                    .launch(folder)
+                    .map_err(|error| log::chain(&error).to_string())
+            });
+        let next = match launched {
+            Ok(Elevation::Started) => {
+                log::info(text::update_installing(release.version()));
+                self.0.quitting.set(true);
+                self.0.main_window.close();
+                return;
+            }
+            Ok(Elevation::Declined) => {
+                log::info(text::UPDATE_DECLINED);
+                State::Available(release)
+            }
+            Err(reason) => {
+                log::warning(text::update_download_log(release.version(), &reason));
+                State::UpdateFailed(release, reason)
+            }
+        };
+        *self.0.update_state.borrow_mut() = next;
+    }
+
+    fn show_update(&self) {
+        // Cloned so no borrow is held while the controls are updated.
+        let state = self.0.update_state.borrow().clone();
+        self.0.about.show_update(&state, &self.0.installation);
     }
 
     fn apply_look(&self) {

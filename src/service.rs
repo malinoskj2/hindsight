@@ -307,6 +307,7 @@ enum Command {
     Restart,
     Theme(Theme),
     CloseToTray(bool),
+    CheckForUpdates(bool),
     Wake,
     Exit,
 }
@@ -382,6 +383,10 @@ impl Worker {
 
     pub(crate) fn set_close_to_tray(&self, close_to_tray: bool) {
         self.request(Command::CloseToTray(close_to_tray));
+    }
+
+    pub(crate) fn set_check_for_updates(&self, check_for_updates: bool) {
+        self.request(Command::CheckForUpdates(check_for_updates));
     }
 
     pub(crate) fn refresh(&self) {
@@ -600,6 +605,10 @@ impl Machine {
                 }),
                 Ok(Command::CloseToTray(close_to_tray)) => self.remember(Config {
                     close_to_tray,
+                    ..self.config.clone()
+                }),
+                Ok(Command::CheckForUpdates(check_for_updates)) => self.remember(Config {
+                    check_for_updates,
                     ..self.config.clone()
                 }),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}

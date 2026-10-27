@@ -2,6 +2,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 
 # The version comes from Cargo.toml, passed in by scripts\build-windows.ps1, so that the installer
 # cannot drift from the program it installs.
@@ -11,6 +12,13 @@ Unicode true
 !ifndef VERSION_NUMERIC
   !error "VERSION_NUMERIC is not defined; build with scripts\build-windows.ps1, which passes /DVERSION_NUMERIC from Cargo.toml"
 !endif
+
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight"
+# How long an update waits for the running copy to exit: 300 tries 200 ms apart.
+!define UPDATE_WAIT_TRIES 300
+
+# 1 when hindsight started this installer to update itself, with /UPDATE.
+Var IsUpdate
 
 Name "hindsight"
 OutFile "..\dist\hindsight-setup-x64.exe"
@@ -54,9 +62,64 @@ Function .onInit
 
   SetRegView 64
   SetShellVarContext all
+
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/UPDATE" $1
+  ${IfNot} ${Errors}
+    StrCpy $IsUpdate 1
+  ${EndIf}
+
+  # Install over an earlier installation where it is, unless /D chose a folder.
+  ${If} $INSTDIR == "$PROGRAMFILES64\hindsight"
+    ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
+    ${If} $0 != ""
+      StrCpy $INSTDIR $0
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+# An update starts the new copy, and a failed one starts the copy it left in place.
+Function .onInstSuccess
+  ${If} $IsUpdate == 1
+    Call LaunchApplication
+  ${EndIf}
+FunctionEnd
+
+Function .onInstFailed
+  ${If} $IsUpdate == 1
+    Call LaunchApplication
+  ${EndIf}
+FunctionEnd
+
+# Waits until no running copy holds hindsight.exe, which Windows keeps from being replaced. An
+# update waits for the copy that started it to exit; otherwise the user is asked to quit it.
+Function WaitForApp
+  ${IfNot} ${FileExists} "$INSTDIR\hindsight.exe"
+    Return
+  ${EndIf}
+  StrCpy $R0 0
+  ${Do}
+    ClearErrors
+    FileOpen $R1 "$INSTDIR\hindsight.exe" a
+    ${IfNot} ${Errors}
+      FileClose $R1
+      Return
+    ${EndIf}
+    ${If} $IsUpdate == 1
+      IntOp $R0 $R0 + 1
+      ${If} $R0 >= ${UPDATE_WAIT_TRIES}
+        Abort "hindsight did not exit."
+      ${EndIf}
+      Sleep 200
+    ${ElseIf} ${Cmd} `MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "hindsight is running. Quit it from its tray menu, then select Retry." /SD IDCANCEL IDCANCEL`
+      Abort "hindsight is running."
+    ${EndIf}
+  ${Loop}
 FunctionEnd
 
 Section "hindsight"
+  Call WaitForApp
   SetOutPath "$INSTDIR"
   File "..\dist\hindsight.exe"
   File "..\dist\README.md"
@@ -67,12 +130,13 @@ Section "hindsight"
   CreateShortcut "$SMPROGRAMS\hindsight\hindsight.lnk" "$INSTDIR\hindsight.exe" "" "$INSTDIR\hindsight.exe" 0
   CreateShortcut "$SMPROGRAMS\hindsight\Uninstall.lnk" "$INSTDIR\uninstall.exe"
 
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayIcon" "$INSTDIR\hindsight.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayName" "hindsight"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "UninstallString" '"$INSTDIR\uninstall.exe"'
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "NoModify" 1
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight" "NoRepair" 1
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\hindsight.exe"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "hindsight"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
+  WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
 
 Function un.onInit
@@ -134,5 +198,5 @@ Section "Uninstall"
   RMDir "$INSTDIR"
 
   Call un.RemoveUserState
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight"
+  DeleteRegKey HKLM "${UNINSTALL_KEY}"
 SectionEnd

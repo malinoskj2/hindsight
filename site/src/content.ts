@@ -143,6 +143,12 @@ export const settingGroups = [
         title: "Closing the window keeps it recording.",
         body: "Close to tray is on by default, so hindsight stays in the tray. Turn it off and closing the window quits.",
       },
+      {
+        id: "updates",
+        fields: ["Check for updates"],
+        title: "Updates are one click.",
+        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again. Turn it off and nothing is checked until you select Check now.",
+      },
     ],
   },
 ] as const satisfies readonly SettingGroup[];
