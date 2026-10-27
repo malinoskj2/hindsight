@@ -26,8 +26,8 @@ pub(crate) use listing::DeviceList;
 pub(crate) use recorder::{Capture, start};
 
 use crate::{
-    config::DeviceId,
-    replay::{AudioClip, PcmClip, Source},
+    config::{Config, DeviceId},
+    replay::{AudioClip, PcmClip, PerSource, Source},
 };
 use std::num::{NonZeroU16, NonZeroU32};
 use thiserror::Error;
@@ -44,69 +44,63 @@ const SAMPLE_RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
 )]
 const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 
-/// The sources a session records, and the device each is captured from.
+/// The device a source is captured from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Sources {
-    pub(crate) system: bool,
-    pub(crate) microphone: bool,
-    /// The output device whose sound is recorded, or `None` for Windows' default.
-    pub(crate) system_device: Option<DeviceId>,
-    /// The recording device, or `None` for Windows' default.
-    pub(crate) microphone_device: Option<DeviceId>,
+pub(crate) enum DeviceChoice {
+    /// Windows' default, as it changes.
+    Default,
+    /// The device chosen in Settings.
+    Chosen(DeviceId),
 }
 
-impl Sources {
-    pub(crate) const fn any(&self) -> bool {
-        self.system || self.microphone
-    }
-
+impl DeviceChoice {
     #[cfg_attr(
         all(not(windows), test),
         expect(dead_code, reason = "only the Windows capture uses it")
     )]
-    fn iter(&self) -> impl Iterator<Item = Source> {
-        [
-            (self.system, Source::System),
-            (self.microphone, Source::Microphone),
-        ]
-        .into_iter()
-        .filter_map(|(recorded, source)| recorded.then_some(source))
-    }
-
-    #[cfg_attr(
-        all(not(windows), test),
-        expect(dead_code, reason = "only the Windows capture uses it")
-    )]
-    const fn device(&self, source: Source) -> Option<&DeviceId> {
-        match source {
-            Source::System => self.system_device.as_ref(),
-            Source::Microphone => self.microphone_device.as_ref(),
+    pub(crate) const fn chosen(&self) -> Option<&DeviceId> {
+        match self {
+            Self::Default => None,
+            Self::Chosen(device) => Some(device),
         }
+    }
+}
+
+/// The sources a session records, each with the device it is captured from, and `None` for a
+/// source it does not record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Sources(pub(crate) PerSource<Option<DeviceChoice>>);
+
+impl Sources {
+    pub(crate) fn of(config: &Config) -> Self {
+        let choice = |recorded: bool, device: &Option<DeviceId>| {
+            recorded.then(|| {
+                device
+                    .clone()
+                    .map_or(DeviceChoice::Default, DeviceChoice::Chosen)
+            })
+        };
+        Self(PerSource {
+            system: choice(config.audio, &config.system_device),
+            microphone: choice(config.microphone, &config.microphone_device),
+        })
+    }
+
+    pub(crate) fn any(&self) -> bool {
+        self.recorded().next().is_some()
+    }
+
+    /// The sources recorded, with their devices.
+    pub(crate) fn recorded(&self) -> impl Iterator<Item = (Source, &DeviceChoice)> {
+        self.0
+            .iter()
+            .filter_map(|(source, device)| device.as_ref().map(|device| (source, device)))
     }
 }
 
 /// The sources recorded from Windows' default device because the device chosen for them in
 /// Settings is missing. They return to it once it is back.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct StandIns {
-    pub(crate) system: bool,
-    pub(crate) microphone: bool,
-}
-
-impl StandIns {
-    #[cfg_attr(
-        all(not(windows), test),
-        expect(dead_code, reason = "only the Windows window shows them")
-    )]
-    pub(crate) fn sources(self) -> impl Iterator<Item = Source> {
-        [
-            (self.system, Source::System),
-            (self.microphone, Source::Microphone),
-        ]
-        .into_iter()
-        .filter_map(|(standing_in, source)| standing_in.then_some(source))
-    }
-}
+pub(crate) type StandIns = PerSource<bool>;
 
 #[derive(Debug, Error)]
 pub(crate) enum EncodeError {

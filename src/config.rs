@@ -327,6 +327,27 @@ impl Machine {
     }
 }
 
+/// A setting that applies at once, without restarting capture, so it is saved on its own while
+/// recording carries on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Preference {
+    Theme(Theme),
+    CloseToTray(bool),
+    CheckForUpdates(bool),
+    MoreOptions(bool),
+}
+
+impl Preference {
+    pub(crate) fn apply_to(self, config: &mut Config) {
+        match self {
+            Self::Theme(theme) => config.theme = theme,
+            Self::CloseToTray(close_to_tray) => config.close_to_tray = close_to_tray,
+            Self::CheckForUpdates(check) => config.check_for_updates = check,
+            Self::MoreOptions(open) => config.more_options = open,
+        }
+    }
+}
+
 /// The validated settings. A `Config` read from disk is built only from settings that passed
 /// [`Config::validate`], and the Settings tab validates what it builds from the form the same
 /// way.
@@ -355,7 +376,7 @@ pub(crate) struct Config {
     pub(crate) microphone: bool,
     /// The output device whose sound is recorded, or `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) sound_device: Option<DeviceId>,
+    pub(crate) system_device: Option<DeviceId>,
     /// The recording device the microphone is, or `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) microphone_device: Option<DeviceId>,
@@ -396,7 +417,7 @@ struct RawConfig {
     audio: bool,
     microphone: bool,
     #[serde(deserialize_with = "device_or_none")]
-    sound_device: Option<DeviceId>,
+    system_device: Option<DeviceId>,
     #[serde(deserialize_with = "device_or_none")]
     microphone_device: Option<DeviceId>,
     cursor: bool,
@@ -430,7 +451,7 @@ impl Default for RawConfig {
             theme,
             audio,
             microphone,
-            sound_device,
+            system_device,
             microphone_device,
             cursor,
             buffer_memory,
@@ -453,7 +474,7 @@ impl Default for RawConfig {
             theme,
             audio,
             microphone,
-            sound_device,
+            system_device,
             microphone_device,
             cursor,
             buffer_memory,
@@ -484,7 +505,7 @@ impl TryFrom<RawConfig> for Config {
             theme,
             audio,
             microphone,
-            sound_device,
+            system_device,
             microphone_device,
             cursor,
             buffer_memory,
@@ -515,7 +536,7 @@ impl TryFrom<RawConfig> for Config {
             theme,
             audio,
             microphone,
-            sound_device,
+            system_device,
             microphone_device,
             cursor,
             buffer_memory,
@@ -545,7 +566,7 @@ impl Default for Config {
             theme: Theme::Classic,
             audio: true,
             microphone: false,
-            sound_device: None,
+            system_device: None,
             microphone_device: None,
             cursor: false,
             buffer_memory: Memory::Ram,
@@ -1006,15 +1027,15 @@ mod tests {
         let parse = |json: &str| serde_json::from_str::<Config>(json);
 
         let old = parse(r#"{"buffer_seconds":120}"#).unwrap();
-        assert_eq!((old.sound_device, old.microphone_device), (None, None));
+        assert_eq!((old.system_device, old.microphone_device), (None, None));
         let json = serde_json::to_string(&Config::default()).unwrap();
         assert!(!json.contains("_device"), "{json}");
-        let empty = parse(r#"{"sound_device":"","microphone_device":null}"#).unwrap();
-        assert_eq!((empty.sound_device, empty.microphone_device), (None, None));
+        let empty = parse(r#"{"system_device":"","microphone_device":null}"#).unwrap();
+        assert_eq!((empty.system_device, empty.microphone_device), (None, None));
 
         let headset = r"{0.0.1.00000000}.{8d2b6e5c-55a1-4a1e-9b8f-3f0a3c7e2d11}";
         let config = Config {
-            sound_device: DeviceId::new(headset.replace("0.0.1", "0.0.0")),
+            system_device: DeviceId::new(headset.replace("0.0.1", "0.0.0")),
             microphone_device: DeviceId::new(headset.to_owned()),
             ..Config::default()
         };
@@ -1028,7 +1049,20 @@ mod tests {
             config.microphone_device.as_ref().map(DeviceId::as_str),
             Some(headset)
         );
-        assert!(parse(r#"{"sound_device":7}"#).is_err());
+        assert!(parse(r#"{"system_device":7}"#).is_err());
+    }
+
+    #[test]
+    fn every_container_is_known_by_its_extension_in_any_case() {
+        for container in Container::ALL {
+            assert_eq!(
+                Container::of_extension(&container.extension().to_uppercase()),
+                Some(container)
+            );
+        }
+        for other in ["png", "mp4.partial", ""] {
+            assert_eq!(Container::of_extension(other), None, "{other}");
+        }
     }
 
     #[test]

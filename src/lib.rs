@@ -54,6 +54,14 @@ mod replay;
         reason = "off Windows `run` only refuses, so nothing reaches this module"
     )
 )]
+mod saving;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod screenshot;
 #[cfg_attr(
     all(not(windows), not(test)),
@@ -169,14 +177,17 @@ fn startup() -> Result<(service::Worker, config::Config, update::notes::Arrival)
     let config = store.load_config(&defaults).context("load configuration")?;
     let worker =
         service::Worker::spawn(store, config.clone()).context("start the recording worker")?;
+    // A first run or a downgrade is recorded at once; an upgrade only once the window has shown
+    // its notes.
+    if arrival == update::notes::Arrival::Unannounced {
+        worker.record_version(update::Version::running());
+    }
     Ok((worker, config, arrival))
 }
 
-/// Compares the version that ran last with this one. A first run or a downgrade is recorded
-/// here; an upgrade only once the window has shown its notes.
+/// Compares the version that ran last with this one.
 #[cfg(windows)]
 fn arrival(store: &storage::Store) -> update::notes::Arrival {
-    let running = update::Version::running();
     let last = store
         .load_last_version()
         .inspect_err(|error| {
@@ -184,13 +195,7 @@ fn arrival(store: &storage::Store) -> update::notes::Arrival {
         })
         .ok()
         .flatten();
-    let arrival = update::notes::Arrival::of(last.as_ref(), &running);
-    if arrival == update::notes::Arrival::Unannounced
-        && let Err(error) = store.save_last_version(&running)
-    {
-        log::warning(format!("Last version · not saved ({})", log::chain(&error)));
-    }
-    arrival
+    update::notes::Arrival::of(last.as_ref(), &update::Version::running())
 }
 
 /// Reads what the defaults depend on. A part that cannot be read is logged and left unknown.

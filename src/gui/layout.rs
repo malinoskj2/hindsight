@@ -159,12 +159,17 @@ impl TintedLabel {
     }
 }
 
-/// A group that grows while its message label is shown, moving the controls declared below it.
+/// The space under a message label.
+const MESSAGE_PADDING: i32 = 4;
+
+/// A group that grows while its message label is shown, by as many lines as the message
+/// takes, moving the controls declared below it.
 pub(super) struct ExpandableGroup {
     /// The index of the growing frame among the page's frames. Those after it move down.
     frame: usize,
     message: gui::Label,
-    extra: i32,
+    /// The lines the message label is sized for.
+    lines: Cell<i32>,
     controls_below: Vec<Movable>,
     shown: Cell<i32>,
 }
@@ -197,11 +202,12 @@ impl From<gui::Button> for Movable {
 }
 
 impl ExpandableGroup {
-    pub(super) fn new(frame: usize, message: gui::Label, extra: i32) -> Self {
+    /// `lines` is the height `message` was created with.
+    pub(super) fn new(frame: usize, message: gui::Label, lines: i32) -> Self {
         Self {
             frame,
             message,
-            extra,
+            lines: Cell::new(lines),
             controls_below: Vec::new(),
             shown: Cell::new(0),
         }
@@ -217,9 +223,17 @@ impl ExpandableGroup {
         self.shown.get()
     }
 
+    /// Shows `message`, or hides the label for `None`, and reports whether the group's height
+    /// changed.
     pub(super) fn set_message(&self, frames: &[Frame], message: Option<&str>) -> bool {
         set_text(&self.message, message.unwrap_or(""));
-        let extra = if message.is_some() { self.extra } else { 0 };
+        let extra = message.map_or(0, |message| {
+            let lines = i32::try_from(message.lines().count())
+                .unwrap_or(i32::MAX)
+                .max(1);
+            self.fit_lines(lines);
+            lines.saturating_mul(LINE).saturating_add(MESSAGE_PADDING)
+        });
         let previous = self.shown.replace(extra);
         if previous == extra {
             return false;
@@ -240,6 +254,13 @@ impl ExpandableGroup {
             let _ = page.InvalidateRect(None, true);
         }
         true
+    }
+
+    fn fit_lines(&self, lines: i32) {
+        let delta = lines - self.lines.replace(lines);
+        if delta != 0 {
+            resize_height_by(self.message.hwnd(), gui::dpi_y(delta * LINE));
+        }
     }
 }
 

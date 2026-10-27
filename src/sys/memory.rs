@@ -1,3 +1,5 @@
+//! The memory installed in the machine, which the default buffer place depends on.
+
 use windows::Win32::System::SystemInformation::GetPhysicallyInstalledSystemMemory;
 
 const BYTES_PER_KILOBYTE: u64 = 1024;

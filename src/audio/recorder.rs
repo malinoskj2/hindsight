@@ -11,7 +11,7 @@ use super::{
 use crate::{
     config::DeviceId,
     log,
-    replay::{AudioFormat, CLOCK_RATE, Live, Source, SourceFormat},
+    replay::{AudioFormat, CLOCK_RATE, Live, PerSource, Source, SourceFormat},
     sys::{self, clock, com::Apartment},
 };
 use std::{
@@ -37,7 +37,8 @@ const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Capture {
     stop: Arc<Signal>,
-    stand_ins: Arc<StandInFlags>,
+    /// The audio thread's [`StandIns`], for the worker to read.
+    stand_ins: Arc<PerSource<AtomicBool>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -48,34 +49,7 @@ impl Capture {
     }
 
     pub(crate) fn stand_ins(&self) -> StandIns {
-        self.stand_ins.read()
-    }
-}
-
-/// The audio thread's [`StandIns`], for the worker to read.
-#[derive(Default)]
-struct StandInFlags {
-    system: AtomicBool,
-    microphone: AtomicBool,
-}
-
-impl StandInFlags {
-    const fn flag(&self, source: Source) -> &AtomicBool {
-        match source {
-            Source::System => &self.system,
-            Source::Microphone => &self.microphone,
-        }
-    }
-
-    fn set(&self, source: Source, standing_in: bool) {
-        self.flag(source).store(standing_in, Ordering::Relaxed);
-    }
-
-    fn read(&self) -> StandIns {
-        StandIns {
-            system: self.system.load(Ordering::Relaxed),
-            microphone: self.microphone.load(Ordering::Relaxed),
-        }
+        self.stand_ins.map(|flag| flag.load(Ordering::Relaxed))
     }
 }
 
@@ -110,7 +84,7 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
             return None;
         }
     };
-    let stand_ins = Arc::new(StandInFlags::default());
+    let stand_ins = Arc::new(PerSource::<AtomicBool>::default());
     let (live, signal, flags) = (Arc::clone(live), Arc::clone(&stop), Arc::clone(&stand_ins));
     match thread::Builder::new()
         .name("audio".to_owned())
@@ -147,7 +121,7 @@ const fn names(source: Source) -> (&'static str, &'static str) {
     }
 }
 
-fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlags) {
+fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &PerSource<AtomicBool>) {
     let Some(mut pipeline) = Pipeline::open(live, sources) else {
         return;
     };
@@ -171,7 +145,9 @@ fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlag
         }
         for input in inputs.iter_mut() {
             input.device.update(devices, changes);
-            stand_ins.set(input.device.source, input.device.standing_in);
+            stand_ins
+                .get(input.device.source)
+                .store(input.device.standing_in(), Ordering::Relaxed);
         }
         let interval = inputs
             .iter()
@@ -216,8 +192,8 @@ impl<'a> Pipeline<'a> {
         live.set_audio(AudioFormat {
             sample_rate: SAMPLE_RATE,
             sources: sources
-                .iter()
-                .map(|source| SourceFormat {
+                .recorded()
+                .map(|(source, _)| SourceFormat {
                     source,
                     channels: kept_in(source).count(),
                 })
@@ -226,10 +202,10 @@ impl<'a> Pipeline<'a> {
             priming: aac::PRIMING,
         });
         let inputs = sources
-            .iter()
-            .map(|source| Input {
+            .recorded()
+            .map(|(source, device)| Input {
                 track: Track::new(live, source, Ticks(anchor)),
-                device: Device::new(source, sources.device(source).cloned()),
+                device: Device::new(source, device.chosen().cloned()),
             })
             .collect();
         Some(Self {
@@ -293,8 +269,6 @@ struct Device {
     /// The device chosen in Settings, or `None` to follow Windows' default.
     choice: Option<DeviceId>,
     state: DeviceState,
-    /// The default device was last opened in place of the chosen one, which was missing.
-    standing_in: bool,
     /// When to next check the devices or try to open one. `None` means now.
     due: Option<Instant>,
 }
@@ -302,19 +276,12 @@ struct Device {
 enum DeviceState {
     Open(wasapi::Stream),
     Closed {
-        /// A device was open before, so opening one is logged as a return.
-        opened_before: bool,
+        /// Why the device open before was picked, or `None` when none was. Opening one after
+        /// another is logged as a return, and the default standing in is logged once.
+        previous: Option<Picked>,
         /// A failure to open has been logged since the last success, so another is not.
         reported: bool,
     },
-}
-
-impl DeviceState {
-    /// The state after a device that was open closes.
-    const CLOSED_AFTER_OPEN: Self = Self::Closed {
-        opened_before: true,
-        reported: false,
-    };
 }
 
 impl Device {
@@ -323,11 +290,25 @@ impl Device {
             source,
             choice,
             state: DeviceState::Closed {
-                opened_before: false,
+                previous: None,
                 reported: false,
             },
-            standing_in: false,
             due: None,
+        }
+    }
+
+    /// Whether the default device is open in place of the chosen one, which is missing.
+    fn standing_in(&self) -> bool {
+        matches!(&self.state, DeviceState::Open(stream) if stream.picked() == Picked::StandIn)
+    }
+
+    /// Closes the open device, keeping why it was picked for the next open.
+    fn close(&mut self) {
+        if let DeviceState::Open(stream) = &self.state {
+            self.state = DeviceState::Closed {
+                previous: Some(stream.picked()),
+                reported: false,
+            };
         }
     }
 
@@ -377,7 +358,7 @@ impl Device {
         } else {
             log::info(format!("{label} · default {device} changed · switching"));
         }
-        self.state = DeviceState::CLOSED_AFTER_OPEN;
+        self.close();
         let opened = pick.open(self.source);
         self.opened(opened, now);
     }
@@ -394,11 +375,7 @@ impl Device {
 
     /// Takes the stream an attempt to open a device made, while the state is closed.
     fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
-        let DeviceState::Closed {
-            opened_before,
-            reported,
-        } = &mut self.state
-        else {
+        let DeviceState::Closed { previous, reported } = &mut self.state else {
             return;
         };
         let (label, device) = names(self.source);
@@ -407,15 +384,13 @@ impl Device {
                 log::info(format!(
                     "{label} · {}{}",
                     stream.name(),
-                    if *opened_before { " · again" } else { "" }
+                    if previous.is_some() { " · again" } else { "" }
                 ));
-                let standing_in = stream.picked() == Picked::StandIn;
-                if standing_in && !self.standing_in {
+                if stream.picked() == Picked::StandIn && *previous != Some(Picked::StandIn) {
                     log::warning(format!(
                         "{label} · chosen {device} missing · the default until it returns"
                     ));
                 }
-                self.standing_in = standing_in;
                 self.state = DeviceState::Open(stream);
                 self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
@@ -443,7 +418,7 @@ impl Device {
         } else {
             log::warning(format!("{label} · capture failed ({error}) · reopening"));
         }
-        self.state = DeviceState::CLOSED_AFTER_OPEN;
+        self.close();
         self.due = None;
     }
 
@@ -551,7 +526,10 @@ fn count(frames: Frames) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::pcm, *};
+    use super::{
+        super::{DeviceChoice, pcm},
+        *,
+    };
     use crate::{
         config::Codec,
         replay::{Matrix, Packet, Picture, Stream},
@@ -733,12 +711,10 @@ mod tests {
             data: Box::new([0]),
         };
         live.push(packet(0), Picture::Fresh);
-        let sources = Sources {
-            system: true,
-            microphone: true,
-            system_device: None,
-            microphone_device: None,
-        };
+        let sources = Sources(PerSource {
+            system: Some(DeviceChoice::Default),
+            microphone: Some(DeviceChoice::Default),
+        });
         let capture = start(&live, sources).unwrap();
         thread::sleep(Duration::from_secs(10));
         live.push(packet(599), Picture::Fresh);

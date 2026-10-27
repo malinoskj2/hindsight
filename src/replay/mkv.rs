@@ -4,10 +4,9 @@
 
 use super::{
     AudioClip, FRAME_SAMPLES, Stream,
-    mp4::{self, DecoderConfig, MuxError, Packets, Sample},
+    mux::{self, BOX_HEADER_BYTES, DecoderConfig, MuxError, Packets, Sample},
     sample_parts,
 };
-use crate::config::Codec;
 use mp4_atom::Encode;
 use std::io;
 
@@ -91,7 +90,7 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     packets: &P,
     audio: &[AudioClip],
 ) -> Result<(), MuxError> {
-    let (decoder, samples) = mp4::index(stream.codec, packets)?;
+    let (decoder, samples) = mux::index(stream.codec, packets)?;
     let audio: Vec<&AudioClip> = audio
         .iter()
         .filter(|clip| !clip.frames.is_empty())
@@ -469,7 +468,7 @@ fn audio_entry(track: u8, clip: &AudioClip) -> Vec<u8> {
 fn body(record: &impl Encode) -> Result<Vec<u8>, MuxError> {
     let mut boxed = Vec::new();
     record.encode(&mut boxed)?;
-    Ok(boxed.split_off(8))
+    Ok(boxed.split_off(BOX_HEADER_BYTES))
 }
 
 struct BlockWriter<'a, W> {
@@ -488,10 +487,7 @@ impl<W: io::Write> BlockWriter<'_, W> {
         if parts.is_empty() {
             return Ok(());
         }
-        let sample = self.samples.get(self.written).ok_or(MuxError::Changed)?;
-        if sample.size != mp4::stored_size(&parts, mp4::prefix_bytes(codec))? {
-            return Err(MuxError::Changed);
-        }
+        let sample = mux::indexed(self.samples, self.written, codec, &parts)?;
         let offset = loop {
             match self.items.next() {
                 Some(Item::Video { sample, offset }) if *sample == self.written => break *offset,
@@ -500,13 +496,7 @@ impl<W: io::Write> BlockWriter<'_, W> {
             }
         };
         self.block_header(VIDEO_TRACK, offset, sample.keyframe, u64::from(sample.size))?;
-        for part in parts {
-            if length_prefixed(codec) {
-                let length: u32 = part.len().try_into().map_err(|_| MuxError::TooLarge)?;
-                self.output.write_all(&length.to_be_bytes())?;
-            }
-            self.output.write_all(part)?;
-        }
+        mux::write_parts(self.output, codec, &parts)?;
         self.written += 1;
         Ok(())
     }
@@ -561,11 +551,6 @@ impl<W: io::Write> BlockWriter<'_, W> {
         }
         Ok(())
     }
-}
-
-/// H.264 and HEVC blocks are length-prefixed NAL units; AV1 OBUs carry their own sizes.
-const fn length_prefixed(codec: Codec) -> bool {
-    !matches!(codec, Codec::Av1)
 }
 
 /// An element ID's bytes. IDs carry their own length marker, so leading zero bytes are dropped.

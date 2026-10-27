@@ -3,7 +3,7 @@
 
 use crate::{
     audio::{self, Sources, StandIns},
-    config::{Backend, Config, Container, Memory, Mode, Theme},
+    config::{Backend, Config, Container, Memory, Mode, Preference},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
     screenshot::{self, Grab, Grabber, Readback, Reply, ScreenshotError, Still, StillError, Taken},
@@ -34,6 +34,8 @@ const RATE_SPAN: Duration = Duration::from_secs(10);
 const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+/// The problems that starting or stopping capture resolves.
+const CAPTURE_PROBLEMS: &[ProblemKind] = &[ProblemKind::CaptureFailed, ProblemKind::AppNotRecorded];
 
 /// A monitor's OS handle, which is never null. It is carried as an integer so the worker stays
 /// portable.
@@ -359,10 +361,8 @@ enum Command {
     /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
-    Theme(Theme),
-    CloseToTray(bool),
-    CheckForUpdates(bool),
-    MoreOptions(bool),
+    /// Saves a setting that leaves recording alone.
+    Remember(Preference),
     /// Records the version as the last one that ran.
     VersionSeen(Version),
     Wake,
@@ -434,20 +434,8 @@ impl Worker {
         self.request(Command::Restart);
     }
 
-    pub(crate) fn set_theme(&self, theme: Theme) {
-        self.request(Command::Theme(theme));
-    }
-
-    pub(crate) fn set_close_to_tray(&self, close_to_tray: bool) {
-        self.request(Command::CloseToTray(close_to_tray));
-    }
-
-    pub(crate) fn set_check_for_updates(&self, check_for_updates: bool) {
-        self.request(Command::CheckForUpdates(check_for_updates));
-    }
-
-    pub(crate) fn set_more_options(&self, more_options: bool) {
-        self.request(Command::MoreOptions(more_options));
+    pub(crate) fn remember(&self, preference: Preference) {
+        self.request(Command::Remember(preference));
     }
 
     pub(crate) fn record_version(&self, version: Version) {
@@ -688,22 +676,7 @@ impl Machine {
                 Ok(Command::Captured { taken, monitor }) => self.captured(taken, monitor),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
-                Ok(Command::Theme(theme)) => self.remember(Config {
-                    theme,
-                    ..self.config.clone()
-                }),
-                Ok(Command::CloseToTray(close_to_tray)) => self.remember(Config {
-                    close_to_tray,
-                    ..self.config.clone()
-                }),
-                Ok(Command::CheckForUpdates(check_for_updates)) => self.remember(Config {
-                    check_for_updates,
-                    ..self.config.clone()
-                }),
-                Ok(Command::MoreOptions(more_options)) => self.remember(Config {
-                    more_options,
-                    ..self.config.clone()
-                }),
+                Ok(Command::Remember(preference)) => self.remember(preference),
                 Ok(Command::VersionSeen(version)) => self.ledger.save_last_version(&version),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -764,7 +737,7 @@ impl Machine {
         self.retry_at = None;
         self.stop_session();
         self.phase = Phase::Paused;
-        self.problem = None;
+        self.resolve(CAPTURE_PROBLEMS);
     }
 
     fn resume(&mut self) {
@@ -917,7 +890,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                run_in_background();
+                run_in_background(text::SCREENSHOT_THREAD);
                 screenshot::save(readback, &directory, format)
             })
     }
@@ -927,7 +900,7 @@ impl Machine {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
                 self.last_screenshot = Some(path);
-                self.problem = None;
+                self.resolve(&[ProblemKind::ScreenshotNotSaved]);
                 (self.services.chime)(Tone::Saved);
             }
             Ok(Err(error)) => self.report_failed_shot(log::chain(&error)),
@@ -941,8 +914,9 @@ impl Machine {
         self.report_failed_save(ProblemKind::ScreenshotNotSaved, error);
     }
 
-    /// Saves a change to a setting that leaves recording alone.
-    fn remember(&mut self, config: Config) {
+    fn remember(&mut self, preference: Preference) {
+        let mut config = self.config.clone();
+        preference.apply_to(&mut config);
         // The failure is reported, and the change still holds for this run.
         let _ = self.save_settings(&config);
         self.config = config;
@@ -952,6 +926,7 @@ impl Machine {
     fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
         self.ledger
             .save_config(&self.config, config)
+            .inspect(|()| self.resolve(&[ProblemKind::SettingsNotSaved]))
             .inspect_err(|error| self.report(ProblemKind::SettingsNotSaved, log::chain(error)))
     }
 
@@ -963,7 +938,7 @@ impl Machine {
             Mode::Fullscreen => {
                 self.target = None;
                 self.phase = Phase::Waiting;
-                self.problem = None;
+                self.resolve(CAPTURE_PROBLEMS);
             }
         }
     }
@@ -973,7 +948,7 @@ impl Machine {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let sources = sources(&self.config);
+        let sources = Sources::of(&self.config);
         let audio = sources
             .any()
             .then(|| (self.services.audio)(&live, sources))
@@ -994,7 +969,7 @@ impl Machine {
                 });
                 self.live = Some(live);
                 self.phase = Phase::Starting;
-                self.problem = None;
+                self.resolve(CAPTURE_PROBLEMS);
             }
             Err(error) => self.fail(text::capture_thread_failed(error)),
         }
@@ -1072,6 +1047,18 @@ impl Machine {
         self.report(ProblemKind::CaptureFailed, error);
         self.phase = Phase::Retrying;
         self.retry_at = Some(self.now() + self.services.retry_interval);
+    }
+
+    /// Clears the problem shown when it is one of `kinds`, whose work has just succeeded. A
+    /// problem of another kind stays until its own work does.
+    fn resolve(&mut self, kinds: &[ProblemKind]) {
+        if self
+            .problem
+            .as_ref()
+            .is_some_and(|problem| kinds.contains(&problem.kind))
+        {
+            self.problem = None;
+        }
     }
 
     fn report(&mut self, kind: ProblemKind, cause: impl Display) {
@@ -1185,7 +1172,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                run_in_background();
+                run_in_background(text::SAVE_THREAD);
                 write(&snapshot, &directory, container)
             })
     }
@@ -1224,7 +1211,7 @@ impl Machine {
         self.clip_without_sound = saved.sound_error.is_some();
         self.ledger.add_saved(&saved.path);
         self.last_clip = Some(saved.path);
-        self.problem = None;
+        self.resolve(&[ProblemKind::ClipNotSaved]);
         (self.services.chime)(Tone::Saved);
     }
 
@@ -1307,7 +1294,7 @@ impl Machine {
         let session = self
             .session
             .as_ref()
-            .filter(|_| sources(&self.config).any())?;
+            .filter(|_| Sources::of(&self.config).any())?;
         Some(match &session.audio {
             Some(capture) if !capture.has_stopped() => Sound::Recording(capture.stand_ins()),
             _ => Sound::Failed,
@@ -1362,23 +1349,15 @@ impl Machine {
 }
 
 /// Lowers the calling thread's priority and opts it into power throttling, so that a save or a
-/// screenshot takes longer but does not compete with the game.
+/// screenshot takes longer but does not compete with the game. `work` names the thread in the
+/// log.
 #[cfg(windows)]
-fn run_in_background() {
+fn run_in_background(work: &str) {
     if let Err(error) = sys::thread::enter_background_mode() {
-        log::warning(text::background_save_failed(error));
+        log::warning(text::background_refused(work, error));
     }
     if let Err(error) = sys::thread::prefer_efficiency() {
-        log::warning(text::efficiency_refused(error));
-    }
-}
-
-fn sources(config: &Config) -> Sources {
-    Sources {
-        system: config.audio,
-        microphone: config.microphone,
-        system_device: config.sound_device.clone(),
-        microphone_device: config.microphone_device.clone(),
+        log::warning(text::efficiency_refused(work, error));
     }
 }
 

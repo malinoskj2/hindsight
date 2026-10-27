@@ -12,7 +12,7 @@ use super::{
 use crate::{
     config::{self, Container, ScreenshotFormat},
     log,
-    replay::ClipName,
+    saving::SavedName,
     service::Status,
     sys::{
         com::Apartment,
@@ -693,7 +693,7 @@ fn serve(media: Media, size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Don
 #[derive(Debug, PartialEq, Eq)]
 struct MediaFile {
     path: PathBuf,
-    name: Option<ClipName>,
+    name: Option<SavedName>,
     size: u64,
 }
 
@@ -704,7 +704,7 @@ impl MediaFile {
         if !media.admits(extension) {
             return None;
         }
-        let name = ClipName::parse(file_name, |extension| media.admits(extension));
+        let name = SavedName::parse(file_name);
         Some(Self { path, name, size })
     }
 
@@ -719,13 +719,13 @@ impl MediaFile {
         let title = self
             .name
             .as_ref()
-            .map_or_else(|| self.file_name(), ClipName::title);
+            .map_or_else(|| self.file_name(), SavedName::title);
         text::caption(&title, self.size)
     }
 
     /// The sort key: the recorder's names before the rest, then by name. The key is borrowed, so
     /// sorting allocates nothing. `new` admits only UTF-8 names, which order as their text does.
-    fn order(&self) -> (Option<&ClipName>, Option<&OsStr>) {
+    fn order(&self) -> (Option<&SavedName>, Option<&OsStr>) {
         (self.name.as_ref(), self.path.file_name())
     }
 }

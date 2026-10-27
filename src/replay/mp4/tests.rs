@@ -1,7 +1,14 @@
 //! The MP4 layout, checked by reading the written atoms back.
 
 use super::*;
-use crate::replay::{Matrix, audio::TrackKind, av1, h264, hevc};
+use crate::replay::{
+    audio::TrackKind,
+    av1, h264, hevc,
+    mux::{
+        length_prefixed,
+        tests::{packet, stream},
+    },
+};
 use std::assert_matches;
 
 /// The atom's bytes, as the file holds them.
@@ -119,32 +126,6 @@ fn chunk_runs(stsc: &Stsc) -> Vec<(u32, u32)> {
         .iter()
         .map(|entry| (entry.first_chunk, entry.samples_per_chunk))
         .collect()
-}
-
-pub(in crate::replay) fn stream(codec: Codec) -> Stream {
-    Stream {
-        codec,
-        width: 1920,
-        height: 1080,
-        frame_rate: 60,
-        matrix: Matrix::Bt709,
-    }
-}
-
-pub(in crate::replay) fn packet(codec: Codec, index: u64, keyframe: bool) -> Arc<Packet> {
-    let data = match (codec, keyframe) {
-        (Codec::H264, true) => h264::tests::keyframe(),
-        (Codec::H264, false) => h264::tests::inter_frame(),
-        (Codec::Hevc, true) => hevc::tests::keyframe(),
-        (Codec::Hevc, false) => hevc::tests::inter_frame(),
-        (Codec::Av1, true) => av1::tests::keyframe(),
-        (Codec::Av1, false) => av1::tests::inter_frame(),
-    };
-    Arc::new(Packet {
-        index,
-        keyframe,
-        data: data.into(),
-    })
 }
 
 fn mux(codec: Codec, packets: &[Arc<Packet>]) -> Vec<u8> {

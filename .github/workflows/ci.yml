@@ -63,6 +63,15 @@ jobs:
           New-Item -ItemType Directory release | Out-Null
           Compress-Archive -Path dist/* -DestinationPath release/hindsight-windows-x64.zip
           Copy-Item dist/hindsight-setup-x64.exe release/
+          # The notes the build script embedded in the app, taken from its output directory so
+          # the GitHub release shows the same ones. The build is up to date, so cargo only
+          # reports it.
+          $outDir = cargo build --locked --release --target x86_64-pc-windows-msvc --message-format=json |
+            ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq 'build-script-executed' -and $_.package_id -match '[/#]hindsight[#@]' } |
+            Select-Object -Last 1 -ExpandProperty out_dir
+          if ($LASTEXITCODE -ne 0 -or !$outDir) { throw 'Could not find the build script output' }
+          Copy-Item (Join-Path $outDir release-notes.md) release/
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
           } | Set-Content release/SHA256SUMS.txt -Encoding utf8

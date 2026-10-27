@@ -60,22 +60,21 @@ jobs:
             exit 1
           }
 
-          # The release notes are the build commit's CHANGELOG.md section for this version, the
-          # same notes the build embeds in the app.
-          notes=$(gh api "repos/$GH_REPO/contents/CHANGELOG.md?ref=$build_sha" \
-            -H "Accept: application/vnd.github.raw" \
-            | awk -v version="$cargo_version" '
-                { sub(/\r$/, "") }
-                /^## / { if (found) ended = 1; split(substr($0, 4), words, " "); found = !ended && words[1] == version; next }
-                found && (started || NF) { started = 1; print }')
-          [[ -n "$notes" ]] || { echo "CHANGELOG.md at $build_sha has no section for $cargo_version" >&2; exit 1; }
+          # The app verifies updates against the key at this path in its own build, so the
+          # signature is checked against the build commit's copy.
+          gh api "repos/$GH_REPO/contents/release.pub?ref=$build_sha" \
+            -H "Accept: application/vnd.github.raw" > release.pub
 
           gh run download "$BUILD_RUN_ID" --name hindsight-windows-x64 --dir release
-          for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt; do
+          for asset in hindsight-setup-x64.exe hindsight-windows-x64.zip SHA256SUMS.txt release-notes.md; do
             gh attestation verify "release/$asset" --repo "$GH_REPO" \
               --signer-workflow "$GH_REPO/.github/workflows/ci.yml" \
               --source-digest "$build_sha" --deny-self-hosted-runners
           done
+
+          # The release notes are the CHANGELOG.md section the build embedded in the app.
+          notes=$(cat release/release-notes.md)
+          [[ -n "$notes" ]] || { echo "The build at $build_sha carries no release notes" >&2; exit 1; }
 
           echo "sha=$build_sha" >> "$GITHUB_OUTPUT"
           {
@@ -95,7 +94,6 @@ jobs:
       - name: Sign the installer for in-app updates
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PUBLIC_KEY: RWS8QHCApYhZBeuje7KwHPxzYQvonUdt6eOwQGpVK2M4ZB8xsX+hCSrA
         shell: bash
         run: |
           set -euo pipefail
@@ -108,7 +106,7 @@ jobs:
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
           minisign -S -s "$key" -m release/hindsight-setup-x64.exe \
             -t "hindsight-setup-x64.exe ${RELEASE_TAG#v}"
-          minisign -V -P "$MINISIGN_PUBLIC_KEY" -m release/hindsight-setup-x64.exe
+          minisign -V -p release.pub -m release/hindsight-setup-x64.exe
 
       - name: Tag the build commit and create a draft
         env:
@@ -120,10 +118,14 @@ jobs:
           gh api --method POST "repos/$GH_REPO/git/refs" \
             -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$BUILD_SHA"
 
+          # A tag with a pre-release suffix is marked as one, so that the app's update check,
+          # which follows the latest release, never offers it.
+          prerelease=()
+          [[ "$RELEASE_TAG" == *-* ]] && prerelease=(--prerelease)
           gh release create "$RELEASE_TAG" \
             release/hindsight-setup-x64.exe \
             release/hindsight-setup-x64.exe.minisig \
             release/hindsight-windows-x64.zip \
             release/SHA256SUMS.txt \
             --verify-tag --draft --title "hindsight $RELEASE_TAG" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md "${prerelease[@]}"

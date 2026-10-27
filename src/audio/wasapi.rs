@@ -299,7 +299,8 @@ impl Drop for Registration {
     }
 }
 
-/// Unregisters before the signal it sets is released.
+/// The event pulsed when a device changes, and the registration that pulses it. The listener
+/// holds the signal through an `Arc` of its own, so neither field need drop first.
 pub(super) struct Watch {
     _registration: Registration,
     changed: Arc<Signal>,

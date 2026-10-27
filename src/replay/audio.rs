@@ -41,6 +41,61 @@ pub(crate) enum Source {
     Microphone,
 }
 
+/// A value for each source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PerSource<T> {
+    pub(crate) system: T,
+    pub(crate) microphone: T,
+}
+
+impl<T> PerSource<T> {
+    pub(crate) const fn get(&self, source: Source) -> &T {
+        match source {
+            Source::System => &self.system,
+            Source::Microphone => &self.microphone,
+        }
+    }
+
+    pub(crate) const fn get_mut(&mut self, source: Source) -> &mut T {
+        match source {
+            Source::System => &mut self.system,
+            Source::Microphone => &mut self.microphone,
+        }
+    }
+
+    /// Each source's value, the system's first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (Source, &T)> {
+        [
+            (Source::System, &self.system),
+            (Source::Microphone, &self.microphone),
+        ]
+        .into_iter()
+    }
+
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows capture uses it")
+    )]
+    pub(crate) fn map<U>(&self, mut value: impl FnMut(&T) -> U) -> PerSource<U> {
+        PerSource {
+            system: value(&self.system),
+            microphone: value(&self.microphone),
+        }
+    }
+}
+
+impl PerSource<bool> {
+    /// The sources whose flag is set.
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows window shows them")
+    )]
+    pub(crate) fn flagged(&self) -> impl Iterator<Item = Source> {
+        self.iter()
+            .filter_map(|(source, &flagged)| flagged.then_some(source))
+    }
+}
+
 /// A source the session records, and the channels it is kept in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SourceFormat {
@@ -129,28 +184,32 @@ impl Chunk {
 }
 
 /// A ring for each source recorded.
-pub(crate) struct AudioRings(Vec<AudioRing>);
+pub(crate) struct AudioRings(PerSource<Option<AudioRing>>);
 
 impl AudioRings {
     /// No rings, before the sound's format is known.
     pub(crate) const fn new() -> Self {
-        Self(Vec::new())
+        Self(PerSource {
+            system: None,
+            microphone: None,
+        })
     }
 
     pub(crate) fn of(format: &AudioFormat) -> Self {
-        Self(format.sources.iter().copied().map(AudioRing::new).collect())
+        let mut rings = Self::new();
+        for format in &format.sources {
+            *rings.0.get_mut(format.source) = Some(AudioRing::new(*format));
+        }
+        rings
     }
 
     /// Returns the ring of `source`, or `None` when it is not recorded.
     pub(crate) fn ring(&mut self, source: Source) -> Option<&mut AudioRing> {
-        self.0.iter_mut().find(|ring| ring.format.source == source)
+        self.0.get_mut(source).as_mut()
     }
 
     fn since(&self, source: Source, sample: i64) -> Option<Captured> {
-        self.0
-            .iter()
-            .find(|ring| ring.format.source == source)
-            .map(|ring| ring.since(sample))
+        self.0.get(source).as_ref().map(|ring| ring.since(sample))
     }
 }
 

@@ -1,3 +1,6 @@
+//! Whether the monitor recorded for an app shows that app, decided from what its window looks
+//! like each frame, so that another window over it is held out of the clip.
+
 use std::time::{Duration, Instant};
 
 /// How long an app must be back in front before its monitor is recorded again, so that a window

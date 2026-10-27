@@ -1,3 +1,7 @@
+//! One picture for a screenshot: copied out of a capture on the GPU and read back on the thread
+//! that saves it, or grabbed from a whole monitor on a device of its own when no recording
+//! shows it.
+
 use crate::{
     config::Backend,
     gpu::{
@@ -44,8 +48,6 @@ const FIRST_PICTURE: Duration = Duration::from_secs(1);
 /// bounds how soon the first arrives.
 const GRAB_PERIOD: Duration = Duration::from_millis(16);
 
-type Cause = Box<dyn Error + Send + Sync>;
-
 /// Copies the top-left `width` × `height` of `surface` on the GPU, which the screenshot thread
 /// then reads back. The capture thread only queues the copy, except on CUDA, where it waits
 /// for the device-to-device copy before the grab may reuse the buffer.
@@ -55,23 +57,17 @@ pub(super) fn copy(
     width: u32,
     height: u32,
 ) -> Result<Box<dyn Readback>, StillError> {
-    start(device, surface, width, height).map_err(StillError::Copy)
-}
-
-fn start(
-    device: &Device,
-    surface: &Surface,
-    width: u32,
-    height: u32,
-) -> Result<Box<dyn Readback>, Cause> {
-    let copy: Box<dyn Readback> = match surface {
-        Surface::Texture(texture) => Box::new(TextureCopy::start(device, texture, width, height)?),
-        Surface::Direct3D9(surface) => Box::new(Direct3D9Copy::start(surface, width, height)?),
+    Ok(match surface {
+        Surface::Texture(texture) => {
+            Box::new(TextureCopy::start(device, texture, width, height).map_err(copy_failed)?)
+        }
+        Surface::Direct3D9(surface) => {
+            Box::new(Direct3D9Copy::start(surface, width, height).map_err(copy_failed)?)
+        }
         Surface::CudaBuffer { buffer, pitch } => {
             Box::new(CudaCopy::start(buffer, *pitch, width, height)?)
         }
-    };
-    Ok(copy)
+    })
 }
 
 /// Captures one picture of a whole monitor on the calling thread, on a device of its own,
@@ -181,6 +177,10 @@ fn read_failed(error: impl Error + Send + Sync + 'static) -> StillError {
     StillError::Read(Box::new(error))
 }
 
+const fn truncated(width: u32, height: u32) -> StillError {
+    StillError::Truncated { width, height }
+}
+
 /// A copy into a staging texture on the capture's Direct3D 11 device.
 #[derive(Debug)]
 struct TextureCopy {
@@ -272,8 +272,9 @@ impl TextureCopy {
 impl Readback for TextureCopy {
     fn finish(self: Box<Self>) -> Result<Still, StillError> {
         let mapped = self.map().map_err(read_failed)?;
-        let pitch = mapped.RowPitch as usize;
-        let still = pitched_span(self.width, self.height, pitch).and_then(|span| {
+        let pitch = usize::try_from(mapped.RowPitch).ok();
+        let still = pitch.and_then(|pitch| {
+            let span = pitched_span(self.width, self.height, pitch)?;
             // SAFETY: while mapped, the staging texture's `height` rows lie `RowPitch` bytes
             // apart from `pData`, each at least `width` pixels long, so `span` bytes are
             // readable. They are copied out before the unmap below.
@@ -285,10 +286,7 @@ impl Readback for TextureCopy {
             // SAFETY: undoes the map above; nothing points into the mapping any more.
             unsafe { self.context.Unmap(&self.staging, 0) };
         }
-        still.ok_or(StillError::Truncated {
-            width: self.width,
-            height: self.height,
-        })
+        still.ok_or(truncated(self.width, self.height))
     }
 }
 
@@ -398,10 +396,7 @@ impl Readback for Direct3D9Copy {
     fn finish(self: Box<Self>) -> Result<Still, StillError> {
         self.read()
             .map_err(read_failed)?
-            .ok_or(StillError::Truncated {
-                width: self.width,
-                height: self.height,
-            })
+            .ok_or(truncated(self.width, self.height))
     }
 }
 
@@ -424,14 +419,18 @@ struct CudaCopy {
 }
 
 impl CudaCopy {
-    fn start(source: &DeviceBuffer, pitch: u32, width: u32, height: u32) -> Result<Self, Cause> {
-        let pitch = pitch as usize;
-        let span =
-            pitched_span(width, height, pitch).ok_or(StillError::Truncated { width, height })?;
-        let _current = source.make_current()?;
-        let buffer = source.allocate_beside(span)?;
-        buffer.copy_from(0, source, 0, span)?;
-        source.synchronize()?;
+    fn start(
+        source: &DeviceBuffer,
+        pitch: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, StillError> {
+        let pitch = usize::try_from(pitch).map_err(|_| truncated(width, height))?;
+        let span = pitched_span(width, height, pitch).ok_or(truncated(width, height))?;
+        let _current = source.make_current().map_err(copy_failed)?;
+        let buffer = source.allocate_beside(span).map_err(copy_failed)?;
+        buffer.copy_from(0, source, 0, span).map_err(copy_failed)?;
+        source.synchronize().map_err(copy_failed)?;
         Ok(Self {
             buffer,
             pitch,
@@ -451,12 +450,8 @@ impl CudaCopy {
 impl Readback for CudaCopy {
     fn finish(self: Box<Self>) -> Result<Still, StillError> {
         let bytes = self.read().map_err(read_failed)?;
-        Still::from_pitched(self.width, self.height, self.pitch, &bytes).ok_or(
-            StillError::Truncated {
-                width: self.width,
-                height: self.height,
-            },
-        )
+        Still::from_pitched(self.width, self.height, self.pitch, &bytes)
+            .ok_or(truncated(self.width, self.height))
     }
 }
 

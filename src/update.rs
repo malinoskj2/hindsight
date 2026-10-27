@@ -23,8 +23,9 @@ use thiserror::Error;
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 pub(crate) const INSTALLER: &str = "hindsight-setup-x64.exe";
 const SIGNATURE_EXTENSION: &str = "minisig";
-/// The public half of the key the release workflow signs installers with.
-const RELEASE_KEY: &str = "RWS8QHCApYhZBeuje7KwHPxzYQvonUdt6eOwQGpVK2M4ZB8xsX+hCSrA";
+/// The public half of the key the release workflow signs installers with, in minisign's own
+/// file format so that the workflow verifies against the same file.
+const RELEASE_KEY: &str = include_str!("../release.pub");
 /// The installer leaves its uninstaller beside the app; the portable zip has none.
 const UNINSTALLER: &str = "uninstall.exe";
 /// The environment variable that, set to a version, makes update checks take this copy for that
@@ -32,7 +33,6 @@ const UNINSTALLER: &str = "uninstall.exe";
 #[cfg(windows)]
 pub(crate) const VERSION_SWITCH: &str = "HINDSIGHT_UPDATE_FROM";
 /// The installer's flags: silent, then waiting for this copy to exit and starting the new one.
-/// `/D=` sets the folder, and NSIS requires it last and unquoted.
 const INSTALLER_FLAGS: &str = "/S /UPDATE";
 
 /// A semantic version. Build metadata is dropped, since it does not order versions.
@@ -283,7 +283,7 @@ fn repository() -> &'static str {
 }
 
 fn release_key() -> PublicKey {
-    PublicKey::from_base64(RELEASE_KEY).expect("the release key is a valid minisign public key")
+    PublicKey::decode(RELEASE_KEY).expect("release.pub is a valid minisign public key file")
 }
 
 /// What a check found.
@@ -323,7 +323,8 @@ impl Installation {
     }
 }
 
-/// The installer's command line for updating the copy in `folder`.
+/// The installer's command line for updating the copy in `folder`. NSIS requires `/D=` last and
+/// unquoted.
 pub(crate) fn installer_parameters(folder: &str) -> String {
     format!("{INSTALLER_FLAGS} /D={folder}")
 }

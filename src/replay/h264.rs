@@ -3,7 +3,7 @@
 
 use super::{
     annexb::{find_units, nal_units, units_except},
-    mp4::NAL_LENGTH_BYTES,
+    mux::NAL_LENGTH_BYTES,
 };
 use mp4_atom::{Avcc, AvccExt};
 
