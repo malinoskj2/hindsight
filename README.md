@@ -17,7 +17,7 @@ It does the same job as NVIDIA's Instant Replay (part of ShadowPlay) with less o
 - **A tray icon and one small window.** No overlay, no account, no launcher.
 - **Cheaper than Instant Replay.** Less CPU and fewer lost frames than NVIDIA's at the same settings, measured in-game.
 - **Keep anywhere from 5 seconds to 10 minutes**, buffered in RAM, VRAM or on disk.
-- **H.264, HEVC or AV1** at up to 240 fps, with system sound and, if you like, your microphone as AAC.
+- **H.264, HEVC or AV1** at up to 240 fps, with system sound and, if you like, your microphone as AAC, saved as MP4 or MKV. Screenshots as PNG, JPEG, WebP or AVIF.
 
 <p align="center">
   <img src="assets/screenshots/status.png" alt="hindsight's Status tab while recording cs2 at 240 fps" width="472">

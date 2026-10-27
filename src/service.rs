@@ -3,7 +3,7 @@
 
 use crate::{
     audio::{self, Sources},
-    config::{Backend, Config, Memory, Mode, Theme},
+    config::{Backend, Config, Container, Memory, Mode, Theme},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
     screenshot::{self, Readback, Reply, ScreenshotError, Taken},
@@ -162,7 +162,7 @@ pub(crate) enum Ended {
 
 type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 type Audio = fn(&Arc<Live>, Sources) -> Option<audio::Capture>;
-type Writer = fn(&Snapshot, &Path) -> Result<Saved, SaveError>;
+type Writer = fn(&Snapshot, &Path, Container) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
 /// The clock the worker uses to schedule retries and save ticks.
 type Clock = Box<dyn Fn() -> Instant + Send>;
@@ -308,6 +308,7 @@ enum Command {
     Theme(Theme),
     CloseToTray(bool),
     CheckForUpdates(bool),
+    MoreOptions(bool),
     Wake,
     Exit,
 }
@@ -387,6 +388,10 @@ impl Worker {
 
     pub(crate) fn set_check_for_updates(&self, check_for_updates: bool) {
         self.request(Command::CheckForUpdates(check_for_updates));
+    }
+
+    pub(crate) fn set_more_options(&self, more_options: bool) {
+        self.request(Command::MoreOptions(more_options));
     }
 
     pub(crate) fn refresh(&self) {
@@ -611,6 +616,10 @@ impl Machine {
                     check_for_updates,
                     ..self.config.clone()
                 }),
+                Ok(Command::MoreOptions(more_options)) => self.remember(Config {
+                    more_options,
+                    ..self.config.clone()
+                }),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -799,6 +808,7 @@ impl Machine {
         ending: Ending,
     ) -> io::Result<JoinHandle<Result<PathBuf, ScreenshotError>>> {
         let directory = self.config.screenshot_directory();
+        let format = self.config.screenshot_format;
         thread::Builder::new()
             .name("screenshot".to_owned())
             .spawn(move || {
@@ -807,7 +817,7 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                screenshot::save(readback, &directory)
+                screenshot::save(readback, &directory, format)
             })
     }
 
@@ -1062,6 +1072,7 @@ impl Machine {
         ending: Ending,
     ) -> io::Result<JoinHandle<Result<Saved, SaveError>>> {
         let directory = self.config.video_directory();
+        let container = self.config.container;
         let write = self.services.write;
         thread::Builder::new()
             .name("save".to_owned())
@@ -1071,7 +1082,7 @@ impl Machine {
                 if let Err(error) = sys::thread::enter_background_mode() {
                     log::warning(text::background_save_failed(error));
                 }
-                write(&snapshot, &directory)
+                write(&snapshot, &directory, container)
             })
     }
 

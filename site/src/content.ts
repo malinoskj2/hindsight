@@ -74,15 +74,9 @@ export const settingGroups = [
     settings: [
       {
         id: "length",
-        fields: ["Replay length (s)", "Bitrate (Mbps)"],
-        title: "Replay length and bitrate cost room, not CPU.",
+        fields: ["Replay length (s)"],
+        title: "Replay length costs room, not CPU.",
         body: "The buffer holds bitrate × replay length: 30 s at 50 Mb/s is about 190 MB.",
-      },
-      {
-        id: "codec",
-        fields: ["Codec"],
-        title: "Pick the best codec your card offers.",
-        body: "They all cost the same CPU; they differ in picture per bit.",
       },
       {
         id: "frame-rate",
@@ -103,22 +97,10 @@ export const settingGroups = [
         body: "Nothing runs while none is in front. The other choice records the whole primary monitor all the time.",
       },
       {
-        id: "backend",
-        fields: ["Backend"],
-        title: "Keep the NVIDIA NvFBC backend.",
-        body: "It is the default and costs the game least. Switch to Windows Graphics Capture for a laptop whose display hangs off the integrated GPU, or for HDR.",
-      },
-      {
         id: "folder",
         fields: ["Clip folder"],
         title: "Pick where clips and screenshots go.",
         body: "Clips land in the folder's videos subfolder, screenshots in its screenshots subfolder.",
-      },
-      {
-        id: "memory",
-        fields: ["Buffer in"],
-        title: "Keep the buffer in RAM if you have the room.",
-        body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD.",
       },
       {
         id: "sound",
@@ -131,6 +113,35 @@ export const settingGroups = [
         fields: ["Record the mouse cursor"],
         title: "The cursor is free either way.",
         body: "Recording it makes no measurable difference.",
+      },
+    ],
+  },
+  {
+    name: "More options",
+    settings: [
+      {
+        id: "codec",
+        fields: ["Bitrate (Mbps)", "Codec"],
+        title: "Pick the best codec your card offers.",
+        body: "They all cost the same CPU; they differ in picture per bit. A higher bitrate makes the buffer larger, not slower.",
+      },
+      {
+        id: "backend",
+        fields: ["Backend"],
+        title: "Keep the NVIDIA NvFBC backend.",
+        body: "It is the default and costs the game least. Switch to Windows Graphics Capture for a laptop whose display hangs off the integrated GPU, or for HDR.",
+      },
+      {
+        id: "memory",
+        fields: ["Buffer in"],
+        title: "Keep the buffer in RAM if you have the room.",
+        body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD.",
+      },
+      {
+        id: "formats",
+        fields: ["Clip format", "Image format"],
+        title: "Save clips as MP4 or MKV, screenshots as PNG, JPEG, WebP or AVIF.",
+        body: "MP4 plays everywhere. PNG and WebP keep every pixel; JPEG and AVIF are smaller, and AVIF takes a second or two of one core to save.",
       },
     ],
   },

@@ -1,7 +1,8 @@
-//! The names saved clips get, `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4`, where `-n` counts a
-//! second clip within one second. Screenshots are named the same way with their own extension.
+//! The names saved clips get, `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4` or `.mkv`, where `-n`
+//! counts a second clip within one second. Screenshots are named the same way with their own
+//! extension.
 
-use crate::log;
+use crate::{config::Container, log};
 
 const PREFIX: &str = "hindsight_";
 /// `YYYY-MM-DD_HH-MM-SS`, as `log::file_stamp` writes it.
@@ -15,8 +16,6 @@ pub(crate) struct ClipName {
 }
 
 impl ClipName {
-    pub(crate) const EXTENSION: &str = "mp4";
-
     /// The first name for a clip saved now.
     pub(crate) fn now() -> Self {
         Self {
@@ -42,12 +41,10 @@ impl ClipName {
         }
     }
 
-    /// Parses a name that `file_name` produced, returning `None` for any other file.
+    /// Parses a clip's name that `file_name` produced, returning `None` for any other file.
     pub(crate) fn parse(file_name: &str) -> Option<Self> {
-        let rest = file_name
-            .strip_prefix(PREFIX)?
-            .strip_suffix(Self::EXTENSION)?
-            .strip_suffix('.')?;
+        let (rest, extension) = file_name.strip_prefix(PREFIX)?.rsplit_once('.')?;
+        Container::of_extension(extension)?;
         let (stamp, attempt) = rest.split_at_checked(STAMP_LENGTH)?;
         if !is_stamp(stamp) {
             return None;
@@ -97,10 +94,14 @@ mod tests {
             "hindsight_2026-10-12_21-14-05-x.mp4",
             "hindsight_2026-10-12-21-14-05.mp4",
             "boss fight.mp4",
-            "hindsight_2026-10-12_21-14-05.mkv",
+            "hindsight_2026-10-12_21-14-05.png",
         ] {
             assert_eq!(ClipName::parse(other), None, "{other}");
         }
+        assert_eq!(
+            ClipName::parse("hindsight_2026-10-12_21-14-05.mkv"),
+            Some(name)
+        );
     }
 
     #[test]
@@ -109,17 +110,17 @@ mod tests {
         let second = first.next();
         for name in [&first, &second, &second.next()] {
             assert_eq!(
-                ClipName::parse(&name.file_name(ClipName::EXTENSION)).as_ref(),
+                ClipName::parse(&name.file_name(Container::Mp4.extension())).as_ref(),
                 Some(name)
             );
         }
         assert!(first < second);
         assert_eq!(
-            first.file_name(ClipName::EXTENSION),
+            first.file_name(Container::Mp4.extension()),
             format!("hindsight_{}.mp4", first.stamp)
         );
         assert_eq!(
-            second.file_name(ClipName::EXTENSION),
+            second.file_name(Container::Mp4.extension()),
             format!("hindsight_{}-2.mp4", first.stamp)
         );
         assert_eq!(

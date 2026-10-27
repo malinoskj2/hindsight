@@ -111,13 +111,13 @@ impl Frame {
         show(&self.label, shown);
     }
 
-    fn grow(&self, delta: i32) {
+    pub(super) fn grow(&self, delta: i32) {
         let mut rect = self.rect.get();
         rect.bottom += delta;
         self.rect.set(rect);
     }
 
-    fn shift(&self, delta: i32) {
+    pub(super) fn shift(&self, delta: i32) {
         let mut rect = self.rect.get();
         rect.top += delta;
         rect.bottom += delta;
@@ -446,7 +446,7 @@ pub(super) fn scroll_bar_width() -> i32 {
         .map_or_else(|_| w::GetSystemMetrics(co::SM::CXVSCROLL), gui::dpi_x)
 }
 
-pub(super) fn show(control: &impl GuiWindow, visible: bool) {
+pub(super) fn show(control: &(impl GuiWindow + ?Sized), visible: bool) {
     control
         .hwnd()
         .ShowWindow(if visible { co::SW::SHOW } else { co::SW::HIDE });

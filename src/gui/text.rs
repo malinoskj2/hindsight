@@ -68,6 +68,11 @@ pub(super) const AUDIO: &str = "Record system sound";
 pub(super) const MICROPHONE: &str = "Record the microphone";
 pub(super) const CURSOR: &str = "Record the mouse cursor";
 pub(super) const MEMORY: &str = "Buffer in";
+pub(super) const CONTAINER: &str = "Clip format";
+pub(super) const SCREENSHOT_FORMAT: &str = "Image format";
+// A command button that shows more in place takes a double chevron.
+pub(super) const MORE_OPTIONS: &str = "More options »";
+pub(super) const FEWER_OPTIONS: &str = "« Fewer options";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the replay length, bitrate and frame rate.";

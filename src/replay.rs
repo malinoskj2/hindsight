@@ -1,9 +1,9 @@
 //! The rolling buffers of encoded video and captured sound a recording session shares with
-//! the rest of the application, and saving them to an MP4 file.
+//! the rest of the application, and saving them to an MP4 or Matroska file.
 
 use crate::{
     audio::EncodeError,
-    config::Codec,
+    config::{Codec, Container},
     log,
     screenshot::{self, Reply},
 };
@@ -25,6 +25,7 @@ mod clip_name;
 mod disk;
 mod h264;
 mod hevc;
+mod mkv;
 mod mp4;
 mod ring;
 mod store;
@@ -465,11 +466,15 @@ pub(crate) struct Saved {
     pub(crate) sound_error: Option<EncodeError>,
 }
 
-/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`. Sound that cannot be
-/// encoded is left out rather than failing the save.
-pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
-    let (path, sound_error) = save_file(directory, ClipName::EXTENSION, |partial| {
-        write_file(snapshot, partial)
+/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>` in `container`. Sound that
+/// cannot be encoded is left out rather than failing the save.
+pub(crate) fn save(
+    snapshot: &Snapshot,
+    directory: &Path,
+    container: Container,
+) -> Result<Saved, SaveError> {
+    let (path, sound_error) = save_file(directory, container.extension(), |partial| {
+        write_file(snapshot, partial, container)
     })?;
     Ok(Saved { path, sound_error })
 }
@@ -534,7 +539,11 @@ fn claim_name(
 }
 
 /// Writes the clip to `path` and returns the reason the buffered sound was left out, if it was.
-fn write_file(snapshot: &Snapshot, path: &Path) -> Result<Option<EncodeError>, SaveError> {
+fn write_file(
+    snapshot: &Snapshot,
+    path: &Path,
+    container: Container,
+) -> Result<Option<EncodeError>, SaveError> {
     let (audio, sound_error) = match snapshot.audio.as_ref().map(crate::audio::encode) {
         Some(Ok(audio)) => (Some(audio), None),
         Some(Err(error)) => (None, Some(error)),
@@ -542,12 +551,11 @@ fn write_file(snapshot: &Snapshot, path: &Path) -> Result<Option<EncodeError>, S
     };
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    mp4::write_from(
-        &mut output,
-        &snapshot.stream,
-        &snapshot.entries[..],
-        audio.as_ref(),
-    )?;
+    let (stream, entries, audio) = (&snapshot.stream, &snapshot.entries[..], audio.as_ref());
+    match container {
+        Container::Mp4 => mp4::write_from(&mut output, stream, entries, audio)?,
+        Container::Mkv => mkv::write_from(&mut output, stream, entries, audio)?,
+    }
     sync(output).map_err(SaveError::io("finish", path))?;
     Ok(sound_error)
 }

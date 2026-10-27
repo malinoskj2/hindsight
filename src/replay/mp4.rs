@@ -42,13 +42,13 @@ const UNDETERMINED_LANGUAGE: &str = "und";
 const DATA_REFERENCE: u16 = 1;
 const BT709: u16 = 1;
 
-struct Sample {
-    index: u64,
+pub(super) struct Sample {
+    pub(super) index: u64,
     /// Bytes in the media data, length prefixes included.
-    size: u32,
+    pub(super) size: u32,
     /// Media ticks until the next sample.
     duration: u32,
-    keyframe: bool,
+    pub(super) keyframe: bool,
 }
 
 /// The decoder configuration record a video sample entry carries.
@@ -259,7 +259,7 @@ pub(crate) enum MuxError {
     Empty,
     #[error("the buffered video has no sequence header")]
     NoSequenceHeader,
-    #[error("the clip is too large for an MP4 index")]
+    #[error("the clip is too large to index")]
     TooLarge,
     #[error("the buffered video changed while it was being saved")]
     Changed,
@@ -332,7 +332,7 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
 
 /// The first pass. Returns the decoder record from the first packet carrying one, and a sample
 /// per packet.
-fn index<P: Packets + ?Sized>(
+pub(super) fn index<P: Packets + ?Sized>(
     codec: Codec,
     packets: &P,
 ) -> Result<(DecoderConfig, Vec<Sample>), MuxError> {
@@ -381,7 +381,7 @@ fn add_sample(
     Ok(())
 }
 
-fn prefix_bytes(codec: Codec) -> usize {
+pub(super) fn prefix_bytes(codec: Codec) -> usize {
     if length_prefixed(codec) {
         usize::from(NAL_LENGTH_BYTES)
     } else {
@@ -389,7 +389,7 @@ fn prefix_bytes(codec: Codec) -> usize {
     }
 }
 
-fn stored_size(parts: &[&[u8]], prefix: usize) -> Result<u32, MuxError> {
+pub(super) fn stored_size(parts: &[&[u8]], prefix: usize) -> Result<u32, MuxError> {
     parts
         .iter()
         .map(|part| fit::<u32, _>(part.len() + prefix))
