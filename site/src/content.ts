@@ -92,9 +92,9 @@ export const settingGroups = [
       },
       {
         id: "hotkeys",
-        fields: ["Save hotkey", "Screenshot hotkey"],
+        fields: ["Save hotkey", "Screenshot key"],
         title: "Set one hotkey for clips and one for screenshots.",
-        body: "Click a field and press the keys, or type them, such as Alt+F10.",
+        body: "Alt+F10 saves a clip and Alt+F11 a screenshot. To change one, click its field and press the keys, or type them.",
       },
       {
         id: "mode",
