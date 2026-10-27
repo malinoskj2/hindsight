@@ -187,6 +187,11 @@ pub(super) fn background_save_failed(error: impl Display) -> impl Display {
     })
 }
 
+#[cfg(windows)]
+pub(super) fn efficiency_refused(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Save · EcoQoS refused ({error}) · full speed"))
+}
+
 pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {
         write!(

@@ -58,7 +58,7 @@ export const internals = [
   },
   {
     title: "Saves run in the background.",
-    body: "At low CPU, I/O and memory priority, so they never compete with the game.",
+    body: "At low CPU, I/O and memory priority, on efficiency cores and low clocks, so they never compete with the game.",
   },
 ] as const satisfies readonly Point[];
 
