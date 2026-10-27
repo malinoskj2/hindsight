@@ -351,7 +351,7 @@ pub(crate) struct Config {
     pub(crate) theme: Theme,
     /// Whether the system's sound is recorded.
     pub(crate) audio: bool,
-    /// Whether the microphone is recorded, on a sound track of its own.
+    /// Whether the microphone is recorded, mixed into the clip's sound and on a track of its own.
     pub(crate) microphone: bool,
     /// The output device whose sound is recorded, or `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]

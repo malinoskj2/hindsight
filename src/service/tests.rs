@@ -393,12 +393,18 @@ fn full_screen_mode_waits_for_an_app_and_follows_it() {
     });
     worker.target(window(1));
     worker.target(window(1));
+    // The worker takes commands in order, so once this clip is saved it has seen the offers above
+    // while the game still ran. Closing the game before then would let a late offer start it again.
+    worker.save();
+    let first_clip = wait_for(&worker, |status| status.last_clip.is_some()).last_clip;
     GAME_CLOSES.store(true, Ordering::Relaxed);
     let status = wait_for(&worker, |status| status.state == State::Waiting);
     assert_eq!(SESSIONS.load(Ordering::Relaxed), 1);
     assert_eq!(status.source.as_deref(), Some("game1.exe"));
     worker.save();
-    wait_for(&worker, |status| status.last_clip.is_some());
+    wait_for(&worker, |status| {
+        status.last_clip.is_some() && status.last_clip != first_clip
+    });
 
     worker.target(window(2));
     let status = wait_for(&worker, |status| {

@@ -1,5 +1,4 @@
-//! A minimal Matroska writer: one H.264, HEVC or AV1 video track and an AAC track for each source
-//! of sound.
+//! A minimal Matroska writer: one H.264, HEVC or AV1 video track and the clip's AAC tracks.
 //! The first pass over the packets sizes every element, so the file is written front to back
 //! with its seek head and cues, and the packets are passed over twice, as for MP4.
 
@@ -451,7 +450,7 @@ fn audio_entry(track: u8, clip: &AudioClip) -> Vec<u8> {
             uint(TRACK_TYPE, TRACK_TYPE_AUDIO),
             uint(FLAG_DEFAULT, u64::from(track == FIRST_AUDIO_TRACK)),
             uint(FLAG_LACING, 0),
-            string(NAME, clip.source.track_name()),
+            string(NAME, clip.kind.name()),
             string(LANGUAGE, UNDETERMINED_LANGUAGE),
             string(CODEC_ID, "A_AAC"),
             element(CODEC_PRIVATE, &clip.config),

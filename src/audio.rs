@@ -1,5 +1,6 @@
 //! System sound and the microphone: WASAPI capture on its own thread, stamped on the video clock,
-//! and encoded to AAC-LC, a track for each, when a clip is saved.
+//! and mixed and encoded to AAC-LC when a clip is saved, with the microphone also on a track of its
+//! own.
 
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls Media Foundation's AAC encoder")]

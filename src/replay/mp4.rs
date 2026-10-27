@@ -1,5 +1,5 @@
-//! A minimal MP4 writer: one H.264, HEVC or AV1 video track and an AAC track for each source of
-//! sound, with `moov` ahead of `mdat`, so the packets are passed over twice.
+//! A minimal MP4 writer: one H.264, HEVC or AV1 video track and the clip's AAC tracks, with
+//! `moov` ahead of `mdat`, so the packets are passed over twice.
 
 #[cfg(test)]
 use super::Packet;
@@ -756,7 +756,7 @@ fn sound_track(
         }),
         mdia: Mdia {
             mdhd: media_header(clip.sample_rate, sound.media_duration()?),
-            hdlr: handler(*b"soun", clip.source.track_name()),
+            hdlr: handler(*b"soun", clip.kind.name()),
             minf: Minf {
                 smhd: Some(Smhd::default()),
                 dinf: data_information(),

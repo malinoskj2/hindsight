@@ -1,7 +1,7 @@
 //! The MP4 layout, checked by reading the written atoms back.
 
 use super::*;
-use crate::replay::{Matrix, av1, h264, hevc};
+use crate::replay::{Matrix, audio::TrackKind, av1, h264, hevc};
 use std::assert_matches;
 
 /// The atom's bytes, as the file holds them.
@@ -416,7 +416,7 @@ fn sound_gets_its_own_track_interleaved_with_the_video() {
 }
 
 #[test]
-fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
+fn the_mix_is_the_enabled_sound_track_and_the_microphone_a_second_one() {
     let packets: Vec<_> = (0..120)
         .map(|index| packet(Codec::H264, index, index % 30 == 0))
         .collect();
@@ -425,23 +425,27 @@ fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
             .map(|number| vec![fill.wrapping_add(number); 10 + usize::from(number % 5)])
             .collect()
     };
-    let (system_frames, voice_frames) = (frames(0), frames(128));
+    let (mixed_frames, voice_frames) = (frames(0), frames(128));
     let clip = |frames: &[Vec<u8>]| {
         let frames = frames.iter().map(|frame| Arc::from(&frame[..])).collect();
         crate::replay::audio::tests::aac_clip(frames, 1500)
     };
+    let mixed = AudioClip {
+        kind: TrackKind::Mixed,
+        ..clip(&mixed_frames)
+    };
     let microphone = AudioClip {
-        source: crate::replay::Source::Microphone,
+        kind: TrackKind::Microphone,
         channels: 1,
         ..clip(&voice_frames)
     };
     let mut file = Vec::new();
-    let tracks = [clip(&system_frames), microphone];
+    let tracks = [mixed, microphone];
     write_with_audio(&mut file, &stream(Codec::H264), &packets, &tracks).unwrap();
 
     let (moov, media) = index(&file);
     assert_eq!(moov.mvhd.next_track_id, 4);
-    let [video, system, microphone] = &moov.trak[..] else {
+    let [video, mixed, microphone] = &moov.trak[..] else {
         panic!("expected three tracks");
     };
     let header = |track: &Trak| {
@@ -453,9 +457,12 @@ fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
         )
     };
     assert_eq!(header(video), (1, 0, true, "VideoHandler".to_owned()));
-    assert_eq!(header(system), (2, 1, true, "System sound".to_owned()));
+    assert_eq!(
+        header(mixed),
+        (2, 1, true, "System sound and microphone".to_owned())
+    );
     assert_eq!(header(microphone), (3, 1, false, "Microphone".to_owned()));
-    assert_eq!(microphone.edts, system.edts);
+    assert_eq!(microphone.edts, mixed.edts);
     let [SampleEntry::Mp4a(entry)] = &microphone.mdia.minf.stbl.stsd.codecs[..] else {
         panic!("expected one mp4a entry");
     };
@@ -467,7 +474,7 @@ fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
         .collect();
     let mut chunks: Vec<(usize, &str)> = [
         (video, &video_samples, "video"),
-        (system, &system_frames, "system"),
+        (mixed, &mixed_frames, "mixed"),
         (microphone, &voice_frames, "microphone"),
     ]
     .into_iter()
@@ -484,12 +491,12 @@ fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
         order,
         [
             "video",
-            "system",
+            "mixed",
             "microphone",
             "video",
-            "system",
+            "mixed",
             "microphone",
-            "system",
+            "mixed",
             "microphone"
         ]
     );
