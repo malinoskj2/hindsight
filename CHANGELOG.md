@@ -17,3 +17,4 @@
 - A new setting quits hindsight when you close its window, rather than hiding it in the tray.
 - The Status tab says what failed and when.
 - The About tab links to the website.
+- Windows lists hindsight by its name, rather than a long description, in the taskbar's tray icon settings, Task Manager and startup apps.
