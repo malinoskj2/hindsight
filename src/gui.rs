@@ -3,6 +3,7 @@
 use self::{
     about::AboutPage,
     clips::ClipsPage,
+    hotkey_field::Capture,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
     pane::Pane,
@@ -34,6 +35,7 @@ use winsafe::{self as w, co, gui, prelude::*};
 mod about;
 mod art;
 mod clips;
+mod hotkey_field;
 mod layout;
 mod logs;
 mod pane;
@@ -267,6 +269,18 @@ impl Main {
         self.0
             .settings
             .on_startup_toggled(move || this.fit_window());
+
+        let this = self.clone();
+        self.0
+            .settings
+            .on_close_to_tray_toggled(move |close_to_tray| {
+                this.on_close_to_tray_toggled(close_to_tray);
+            });
+
+        let this = self.clone();
+        self.0
+            .settings
+            .on_hotkey_capture(move |capture| this.on_hotkey_capture(capture));
     }
 
     fn run(&self, start_hidden: bool) -> Result<()> {
@@ -355,11 +369,16 @@ impl Main {
     }
 
     fn on_close(&self) {
-        let to_tray = self.0.tray.borrow().is_some() && !self.0.quitting.get();
+        let to_tray = self.0.tray.borrow().is_some()
+            && !self.0.quitting.get()
+            && self.0.config.borrow().close_to_tray;
         if to_tray {
             log::info(text::CLOSED_TO_TRAY);
             self.0.main_window.hwnd().ShowWindow(co::SW::HIDE);
             return;
+        }
+        if !self.0.quitting.get() {
+            log::info(text::QUIT_ON_CLOSE);
         }
         // winsafe frees its handlers, this one included, when the window is destroyed. The
         // timer callback is dispatched straight from the message loop, so no handler is running.
@@ -465,6 +484,11 @@ impl Main {
         self.apply_look();
     }
 
+    fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
+        self.0.config.borrow_mut().close_to_tray = close_to_tray;
+        self.0.worker.set_close_to_tray(close_to_tray);
+    }
+
     fn apply_look(&self) {
         self.apply_icon();
         let hwnd = self.0.main_window.hwnd();
@@ -495,6 +519,15 @@ impl Main {
             resize_width_by(window, delta);
         }
         resize_width_by(self.0.main_window.hwnd(), delta);
+    }
+
+    /// Sets the hotkey aside while a hotkey field has the keyboard, so pressing it there enters it
+    /// instead of saving a clip.
+    fn on_hotkey_capture(&self, capture: Capture) {
+        match capture {
+            Capture::Began => hotkey::unregister(self.0.main_window.hwnd()),
+            Capture::Ended => self.register_configured_hotkey(),
+        }
     }
 
     fn switch_hotkey(&self, hotkey: Hotkey) -> Result<(), RegisterError> {

@@ -301,6 +301,7 @@ enum Command {
     TogglePause,
     Restart,
     Theme(Theme),
+    CloseToTray(bool),
     Wake,
     Exit,
 }
@@ -368,6 +369,10 @@ impl Worker {
 
     pub(crate) fn set_theme(&self, theme: Theme) {
         self.request(Command::Theme(theme));
+    }
+
+    pub(crate) fn set_close_to_tray(&self, close_to_tray: bool) {
+        self.request(Command::CloseToTray(close_to_tray));
     }
 
     pub(crate) fn refresh(&self) {
@@ -565,7 +570,14 @@ impl Machine {
                 Ok(Command::Save) => self.save(),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
-                Ok(Command::Theme(theme)) => self.remember_theme(theme),
+                Ok(Command::Theme(theme)) => self.remember(Config {
+                    theme,
+                    ..self.config.clone()
+                }),
+                Ok(Command::CloseToTray(close_to_tray)) => self.remember(Config {
+                    close_to_tray,
+                    ..self.config.clone()
+                }),
                 Ok(Command::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 Ok(Command::Exit) | Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -707,12 +719,9 @@ impl Machine {
         }
     }
 
-    fn remember_theme(&mut self, theme: Theme) {
-        let config = Config {
-            theme,
-            ..self.config.clone()
-        };
-        // The failure is reported, and the look still changes for this run.
+    /// Saves a change to a setting that leaves recording alone.
+    fn remember(&mut self, config: Config) {
+        // The failure is reported, and the change still holds for this run.
         let _ = self.save_settings(&config);
         self.config = config;
     }
