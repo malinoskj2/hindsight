@@ -34,6 +34,8 @@ pub(crate) use audio::{
     AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, Source, samples_of, ticks_of,
 };
 use audio::{AudioRings, tick_time};
+#[cfg(windows)]
+pub(crate) use audio::{PcmTrack, TrackFormat};
 pub(crate) use clip_name::ClipName;
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
@@ -266,17 +268,24 @@ impl Live {
     }
 
     pub(crate) fn set_audio(&self, format: AudioFormat) {
-        set_once(&self.audio, Arc::new(format), "audio format");
+        let rings = AudioRings::of(&format);
+        if set_once(&self.audio, Arc::new(format), "audio format") {
+            *self.sound() = rings;
+        }
     }
 
+    /// Adds sound captured from `source`. Sound from a source the format does not record is
+    /// dropped.
     pub(crate) fn push_audio(&self, source: Source, start: u64, data: Arc<[i16]>) {
         let Some(format) = self.audio.get() else {
             return;
         };
         let video_start = self.video_time(self.counters.oldest.load(Ordering::Relaxed));
         let mut sound = self.sound();
-        let ring = sound.ring(source);
-        ring.push(format, start, data);
+        let Some(ring) = sound.ring(source) else {
+            return;
+        };
+        ring.push(start, data);
         ring.trim(format, video_start);
     }
 
@@ -461,8 +470,8 @@ fn sample_parts(codec: Codec, data: &[u8]) -> Vec<&[u8]> {
 #[derive(Debug)]
 pub(crate) struct Saved {
     pub(crate) path: PathBuf,
-    /// The reason the buffered sound is not in the clip, or `None` when it is, or when none was
-    /// buffered.
+    /// The reason the buffered sound is not in the clip, or `None` when every track of it is, or
+    /// when none was buffered.
     pub(crate) sound_error: Option<EncodeError>,
 }
 
@@ -545,13 +554,13 @@ fn write_file(
     container: Container,
 ) -> Result<Option<EncodeError>, SaveError> {
     let (audio, sound_error) = match snapshot.audio.as_ref().map(crate::audio::encode) {
-        Some(Ok(audio)) => (Some(audio), None),
-        Some(Err(error)) => (None, Some(error)),
-        None => (None, None),
+        Some(Ok(audio)) => (audio, None),
+        Some(Err(error)) => (Vec::new(), Some(error)),
+        None => (Vec::new(), None),
     };
     let file = File::create(path).map_err(SaveError::io("create", path))?;
     let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-    let (stream, entries, audio) = (&snapshot.stream, &snapshot.entries[..], audio.as_ref());
+    let (stream, entries, audio) = (&snapshot.stream, &snapshot.entries[..], &audio[..]);
     match container {
         Container::Mp4 => mp4::write_from(&mut output, stream, entries, audio)?,
         Container::Mkv => mkv::write_from(&mut output, stream, entries, audio)?,

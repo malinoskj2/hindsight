@@ -1,4 +1,5 @@
-//! A minimal Matroska writer: one H.264, HEVC or AV1 video track and optionally one AAC track.
+//! A minimal Matroska writer: one H.264, HEVC or AV1 video track and an AAC track for each source
+//! of sound.
 //! The first pass over the packets sizes every element, so the file is written front to back
 //! with its seek head and cues, and the packets are passed over twice, as for MP4.
 
@@ -34,7 +35,9 @@ const TRACK_ENTRY: u32 = 0xAE;
 const TRACK_NUMBER: u32 = 0xD7;
 const TRACK_UID: u32 = 0x73C5;
 const TRACK_TYPE: u32 = 0x83;
+const FLAG_DEFAULT: u32 = 0x88;
 const FLAG_LACING: u32 = 0x9C;
+const NAME: u32 = 0x536E;
 const LANGUAGE: u32 = 0x22_B59C;
 const CODEC_ID: u32 = 0x86;
 const CODEC_PRIVATE: u32 = 0x63A2;
@@ -64,7 +67,8 @@ const CUE_CLUSTER_POSITION: u32 = 0xF1;
 const NANOSECONDS_PER_TICK: u64 = 1_000_000;
 const TICKS_PER_SECOND: u64 = 1000;
 const VIDEO_TRACK: u8 = 1;
-const AUDIO_TRACK: u8 = 2;
+/// Sound tracks are numbered from this, in the order of the clip's tracks.
+const FIRST_AUDIO_TRACK: u8 = 2;
 const TRACK_TYPE_VIDEO: u64 = 1;
 const TRACK_TYPE_AUDIO: u64 = 2;
 /// A cluster ends at the next keyframe, or this long after it began. Block times are 16-bit
@@ -80,23 +84,28 @@ const BT709: u64 = 1;
 const BROADCAST_RANGE: u64 = 1;
 const UNDETERMINED_LANGUAGE: &str = "und";
 
+/// Writes the video and a track for each of `audio` that has frames, the first of which is the
+/// default.
 pub(crate) fn write_from<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     stream: &Stream,
     packets: &P,
-    audio: Option<&AudioClip>,
+    audio: &[AudioClip],
 ) -> Result<(), MuxError> {
     let (decoder, samples) = mp4::index(stream.codec, packets)?;
-    let audio = audio.filter(|clip| !clip.frames.is_empty());
-    let layout = Layout::of(stream, &samples, audio)?;
-    let head = Head::of(stream, &decoder, audio, &layout)?;
+    let audio: Vec<&AudioClip> = audio
+        .iter()
+        .filter(|clip| !clip.frames.is_empty())
+        .collect();
+    let layout = Layout::of(stream, &samples, &audio)?;
+    let head = Head::of(stream, &decoder, &audio, &layout)?;
 
     output.write_all(&head.bytes)?;
     let mut writer = BlockWriter {
         output,
         stream,
         samples: &samples,
-        audio,
+        audio: &audio,
         items: layout.items.iter(),
         written: 0,
     };
@@ -109,9 +118,19 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
 
 /// What the media part of the file holds, in order.
 enum Item {
-    Cluster { time: u64, body: u64 },
-    Video { sample: usize, offset: i16 },
-    Audio { frame: usize, offset: i16 },
+    Cluster {
+        time: u64,
+        body: u64,
+    },
+    Video {
+        sample: usize,
+        offset: i16,
+    },
+    Audio {
+        track: u8,
+        frame: usize,
+        offset: i16,
+    },
 }
 
 struct Layout {
@@ -132,16 +151,12 @@ struct Block {
 }
 
 impl Layout {
-    fn of(
-        stream: &Stream,
-        samples: &[Sample],
-        audio: Option<&AudioClip>,
-    ) -> Result<Self, MuxError> {
-        // Sound starts before the video by the clip's lead, and a time cannot be negative, so the
-        // video starts that much later instead.
-        let lead = audio.map_or(0, |clip| {
-            ticks(u64::from(clip.lead), u64::from(clip.sample_rate))
-        });
+    fn of(stream: &Stream, samples: &[Sample], audio: &[&AudioClip]) -> Result<Self, MuxError> {
+        // Sound starts before the video by its track's lead, and a time cannot be negative, so the
+        // video starts as much later as the longest lead instead, and each track as much later as
+        // its lead is shorter.
+        let lead_of = |clip: &AudioClip| ticks(u64::from(clip.lead), u64::from(clip.sample_rate));
+        let lead = audio.iter().map(|clip| lead_of(clip)).max().unwrap_or(0);
         let first = samples.first().map_or(0, |sample| sample.index);
         let frame_rate = u64::from(stream.frame_rate);
         let video = samples.iter().enumerate().map(|(number, sample)| Block {
@@ -151,19 +166,24 @@ impl Layout {
             bytes: u64::from(sample.size),
             keyframe: sample.keyframe,
         });
-        let sound = audio.into_iter().flat_map(|clip| {
-            clip.frames.iter().enumerate().map(|(number, frame)| Block {
-                time: ticks(
-                    number as u64 * u64::from(FRAME_SAMPLES),
-                    u64::from(clip.sample_rate),
-                ),
-                track: AUDIO_TRACK,
+        let mut blocks: Vec<Block> = video.collect();
+        for (track, clip) in (FIRST_AUDIO_TRACK..).zip(audio) {
+            let delay = lead - lead_of(clip);
+            blocks.extend(clip.frames.iter().enumerate().map(|(number, frame)| Block {
+                time: delay
+                    + ticks(
+                        number as u64 * u64::from(FRAME_SAMPLES),
+                        u64::from(clip.sample_rate),
+                    ),
+                track,
                 number,
                 bytes: frame.len() as u64,
                 keyframe: true,
-            })
-        });
-        let blocks = merge(video.collect(), sound.collect());
+            }));
+        }
+        // Stable, so blocks of a track at the same time keep their order. The video comes first
+        // at a time, then the sound in track order.
+        blocks.sort_by_key(|block| (block.time, block.track));
         let duration = samples
             .last()
             .map_or(0, |last| lead + ticks(last.index - first + 1, frame_rate));
@@ -204,6 +224,7 @@ impl Layout {
                 }
             } else {
                 Item::Audio {
+                    track: block.track,
                     frame: block.number,
                     offset,
                 }
@@ -286,20 +307,6 @@ impl Cluster {
     }
 }
 
-/// Merges by time, video first at the same time.
-fn merge(video: Vec<Block>, audio: Vec<Block>) -> Vec<Block> {
-    let mut merged = Vec::with_capacity(video.len() + audio.len());
-    let mut audio = audio.into_iter().peekable();
-    for block in video {
-        while let Some(earlier) = audio.next_if(|sound| sound.time < block.time) {
-            merged.push(earlier);
-        }
-        merged.push(block);
-    }
-    merged.extend(audio);
-    merged
-}
-
 /// `count` units of `1 / rate` seconds in ticks, rounded to the nearest.
 fn ticks(count: u64, rate: u64) -> u64 {
     (count * TICKS_PER_SECOND + rate / 2) / rate.max(1)
@@ -315,7 +322,7 @@ impl Head {
     fn of(
         stream: &Stream,
         decoder: &DecoderConfig,
-        audio: Option<&AudioClip>,
+        audio: &[&AudioClip],
         layout: &Layout,
     ) -> Result<Self, MuxError> {
         let info = info(layout.duration);
@@ -387,11 +394,11 @@ fn info(duration: u64) -> Vec<u8> {
 fn tracks(
     stream: &Stream,
     decoder: &DecoderConfig,
-    audio: Option<&AudioClip>,
+    audio: &[&AudioClip],
 ) -> Result<Vec<u8>, MuxError> {
     let mut entries = vec![video_entry(stream, decoder)?];
-    if let Some(clip) = audio {
-        entries.push(audio_entry(clip));
+    for (track, clip) in (FIRST_AUDIO_TRACK..).zip(audio) {
+        entries.push(audio_entry(track, clip));
     }
     Ok(master(TRACKS, &entries))
 }
@@ -434,14 +441,17 @@ fn video_entry(stream: &Stream, decoder: &DecoderConfig) -> Result<Vec<u8>, MuxE
     ))
 }
 
-fn audio_entry(clip: &AudioClip) -> Vec<u8> {
+/// Only the first sound track is a default track, the one players choose.
+fn audio_entry(track: u8, clip: &AudioClip) -> Vec<u8> {
     master(
         TRACK_ENTRY,
         &[
-            uint(TRACK_NUMBER, u64::from(AUDIO_TRACK)),
-            uint(TRACK_UID, u64::from(AUDIO_TRACK)),
+            uint(TRACK_NUMBER, u64::from(track)),
+            uint(TRACK_UID, u64::from(track)),
             uint(TRACK_TYPE, TRACK_TYPE_AUDIO),
+            uint(FLAG_DEFAULT, u64::from(track == FIRST_AUDIO_TRACK)),
             uint(FLAG_LACING, 0),
+            string(NAME, clip.source.track_name()),
             string(LANGUAGE, UNDETERMINED_LANGUAGE),
             string(CODEC_ID, "A_AAC"),
             element(CODEC_PRIVATE, &clip.config),
@@ -467,7 +477,7 @@ struct BlockWriter<'a, W> {
     output: &'a mut W,
     stream: &'a Stream,
     samples: &'a [Sample],
-    audio: Option<&'a AudioClip>,
+    audio: &'a [&'a AudioClip],
     items: std::slice::Iter<'a, Item>,
     written: usize,
 }
@@ -509,12 +519,17 @@ impl<W: io::Write> BlockWriter<'_, W> {
                 self.output.write_all(&wide_size(body))?;
                 self.output.write_all(&uint(TIMESTAMP, time))?;
             }
-            Item::Audio { frame, offset } => {
-                let data = self
-                    .audio
+            Item::Audio {
+                track,
+                frame,
+                offset,
+            } => {
+                let data = track
+                    .checked_sub(FIRST_AUDIO_TRACK)
+                    .and_then(|position| self.audio.get(usize::from(position)))
                     .and_then(|clip| clip.frames.get(frame))
                     .ok_or(MuxError::Changed)?;
-                self.block_header(AUDIO_TRACK, offset, true, data.len() as u64)?;
+                self.block_header(track, offset, true, data.len() as u64)?;
                 self.output.write_all(data)?;
             }
             Item::Video { .. } => return Err(MuxError::Changed),
