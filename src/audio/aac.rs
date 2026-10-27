@@ -1,8 +1,9 @@
-//! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over a clip's PCM.
+//! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over each track of a
+//! clip's PCM.
 
 use super::EncodeError;
 use crate::{
-    replay::{AudioClip, FRAME_SAMPLES, PcmClip, ticks_of},
+    replay::{AudioClip, FRAME_SAMPLES, PcmClip, PcmTrack, ticks_of},
     sys::com::Apartment,
 };
 use std::{mem::ManuallyDrop, sync::Arc};
@@ -24,8 +25,10 @@ use windows::{
     core::{GUID, Result},
 };
 
-/// 192 kb/s. The encoder accepts 12 000, 16 000, 20 000 and 24 000 bytes a second.
-const BYTES_PER_SECOND: u32 = 24_000;
+/// 192 kb/s for stereo and 96 kb/s for mono. The encoder accepts 12 000, 16 000, 20 000 and
+/// 24 000 bytes a second.
+const STEREO_BYTES_PER_SECOND: u32 = 24_000;
+const MONO_BYTES_PER_SECOND: u32 = 12_000;
 const AAC_LC_LEVEL_2: u32 = 0x29;
 const RAW_PAYLOAD: u32 = 0;
 const PCM_BITS: u32 = 16;
@@ -173,10 +176,15 @@ impl Encoder {
 /// Sets the encoder's output type and then its input type, the order the encoder requires.
 fn set_types(transform: &IMFTransform, rate: u32, channels: u16) -> Result<()> {
     let output_type = audio_type(&MFAudioFormat_AAC, rate, channels)?;
+    let bytes_per_second = if channels == 1 {
+        MONO_BYTES_PER_SECOND
+    } else {
+        STEREO_BYTES_PER_SECOND
+    };
     set_u32(
         &output_type,
         &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-        BYTES_PER_SECOND,
+        bytes_per_second,
     )?;
     set_u32(&output_type, &MF_MT_AAC_PAYLOAD_TYPE, RAW_PAYLOAD)?;
     set_u32(
@@ -265,17 +273,25 @@ fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> EncodeErro
     move |error| EncodeError::Windows(step, error)
 }
 
-/// Encodes a clip's PCM as AAC frames. A fresh encoder started at the clip's first sample keeps
-/// its frames in step with the video. The input runs `HELD_BACK` past the clip's end so that the
-/// encoder finishes the last frame.
-pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, EncodeError> {
+/// Encodes each track of a clip's PCM as AAC frames, in the clip's order.
+pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<Vec<AudioClip>, EncodeError> {
     let _com = Apartment::multi_threaded().map_err(failed("initialise COM"))?;
     let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;
-    let format = &clip.format;
-    let mut encoder = Encoder::open(format.sample_rate.get(), format.channels.get())
-        .map_err(failed("open the AAC encoder"))?;
+    clip.tracks
+        .iter()
+        .map(|track| encode_track(clip, track))
+        .collect()
+}
+
+/// A fresh encoder started at the clip's first sample keeps the track's frames in step with the
+/// video. The input runs `HELD_BACK` past the clip's end so that the encoder finishes the last
+/// frame.
+fn encode_track(clip: &PcmClip, track: &PcmTrack) -> std::result::Result<AudioClip, EncodeError> {
+    let (sample_rate, channels) = (clip.format.sample_rate.get(), track.format.channels.get());
+    let mut encoder =
+        Encoder::open(sample_rate, channels).map_err(failed("open the AAC encoder"))?;
     let mut frames = Vec::with_capacity(clip.frames);
-    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(format.channels.get())];
+    let mut pcm = vec![0; CLIP_BLOCK as usize * usize::from(channels)];
     let input = i64::try_from(clip.frames)
         .unwrap_or(i64::MAX)
         .saturating_mul(i64::from(FRAME_SAMPLES))
@@ -283,7 +299,7 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
     let end = clip.start.saturating_add(input);
     let mut next = clip.start;
     while frames.len() < clip.frames && next < end {
-        clip.read(next, &mut pcm);
+        track.read(next, &mut pcm);
         encoder
             .encode(&pcm, |frame| frames.push(frame))
             .map_err(failed("encode the sound"))?;
@@ -297,8 +313,9 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<AudioClip, Enco
     }
     frames.truncate(clip.frames);
     Ok(AudioClip {
-        sample_rate: format.sample_rate.get(),
-        channels: format.channels.get(),
+        source: track.format.source,
+        sample_rate,
+        channels,
         config: encoder.config(),
         frames,
         lead: clip.lead,
@@ -363,7 +380,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("click.aac");
         std::fs::write(&input, &adts).unwrap();
-        let decoded = testing::decode_mono(&input);
+        let decoded = testing::decode_mono(&input, 0);
         let delay = i64::try_from(testing::peak(&decoded)).unwrap() - 10_000;
         println!(
             "click at 10000, decoded with a delay of {delay}; {} bytes of ADTS, {} samples decoded",

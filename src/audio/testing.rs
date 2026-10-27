@@ -41,17 +41,13 @@ pub(crate) fn frames(mut stream: &[u8]) -> Vec<Arc<[u8]>> {
     frames
 }
 
-/// Decodes `input` to mono 16-bit samples with the ffmpeg on the path.
-#[cfg_attr(
-    all(not(windows), test),
-    expect(dead_code, reason = "only the Windows encoder tests use it")
-)]
-pub(crate) fn decode_mono(input: &Path) -> Vec<i16> {
+/// Decodes sound track `track` of `input` to mono 16-bit samples with the ffmpeg on the path.
+pub(crate) fn decode_mono(input: &Path, track: usize) -> Vec<i16> {
     let raw = input.with_extension("raw");
     let status = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-i"])
         .arg(input)
-        .args(["-map", "0:a", "-f", "s16le", "-ac", "1"])
+        .args(["-map", &format!("0:a:{track}"), "-f", "s16le", "-ac", "1"])
         .arg(&raw)
         .status()
         .unwrap();

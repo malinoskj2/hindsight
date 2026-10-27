@@ -328,7 +328,7 @@ fn sound_gets_its_own_track_interleaved_with_the_video() {
         .collect();
     let clip = crate::replay::audio::tests::aac_clip(frames.clone(), 1500);
     let mut file = Vec::new();
-    write_with_audio(&mut file, &stream(Codec::H264), &packets, &clip).unwrap();
+    write_with_audio(&mut file, &stream(Codec::H264), &packets, &[clip]).unwrap();
 
     let (moov, media) = index(&file);
     assert_eq!(
@@ -416,6 +416,86 @@ fn sound_gets_its_own_track_interleaved_with_the_video() {
 }
 
 #[test]
+fn the_microphone_gets_a_second_sound_track_that_players_leave_off() {
+    let packets: Vec<_> = (0..120)
+        .map(|index| packet(Codec::H264, index, index % 30 == 0))
+        .collect();
+    let frames = |fill: u8| -> Vec<Vec<u8>> {
+        (0..100_u8)
+            .map(|number| vec![fill.wrapping_add(number); 10 + usize::from(number % 5)])
+            .collect()
+    };
+    let (system_frames, voice_frames) = (frames(0), frames(128));
+    let clip = |frames: &[Vec<u8>]| {
+        let frames = frames.iter().map(|frame| Arc::from(&frame[..])).collect();
+        crate::replay::audio::tests::aac_clip(frames, 1500)
+    };
+    let microphone = AudioClip {
+        source: crate::replay::Source::Microphone,
+        channels: 1,
+        ..clip(&voice_frames)
+    };
+    let mut file = Vec::new();
+    let tracks = [clip(&system_frames), microphone];
+    write_with_audio(&mut file, &stream(Codec::H264), &packets, &tracks).unwrap();
+
+    let (moov, media) = index(&file);
+    assert_eq!(moov.mvhd.next_track_id, 4);
+    let [video, system, microphone] = &moov.trak[..] else {
+        panic!("expected three tracks");
+    };
+    let header = |track: &Trak| {
+        (
+            track.tkhd.track_id,
+            track.tkhd.alternate_group,
+            track.tkhd.enabled,
+            track.mdia.hdlr.name.clone(),
+        )
+    };
+    assert_eq!(header(video), (1, 0, true, "VideoHandler".to_owned()));
+    assert_eq!(header(system), (2, 1, true, "System sound".to_owned()));
+    assert_eq!(header(microphone), (3, 1, false, "Microphone".to_owned()));
+    assert_eq!(microphone.edts, system.edts);
+    let [SampleEntry::Mp4a(entry)] = &microphone.mdia.minf.stbl.stsd.codecs[..] else {
+        panic!("expected one mp4a entry");
+    };
+    assert_eq!(entry.audio.channel_count, 1);
+
+    let video_samples: Vec<_> = packets
+        .iter()
+        .map(|packet| stored(Codec::H264, packet))
+        .collect();
+    let mut chunks: Vec<(usize, &str)> = [
+        (video, &video_samples, "video"),
+        (system, &system_frames, "system"),
+        (microphone, &voice_frames, "microphone"),
+    ]
+    .into_iter()
+    .flat_map(|(track, samples, name)| {
+        check_chunks(&file, &track.mdia.minf.stbl, samples)
+            .into_iter()
+            .map(move |offset| (offset, name))
+    })
+    .collect();
+    chunks.sort_unstable();
+    assert_eq!(chunks[0].0, media);
+    let order: Vec<_> = chunks.iter().map(|(_, name)| *name).collect();
+    assert_eq!(
+        order,
+        [
+            "video",
+            "system",
+            "microphone",
+            "video",
+            "system",
+            "microphone",
+            "system",
+            "microphone"
+        ]
+    );
+}
+
+#[test]
 #[ignore = "a timing, not a check"]
 fn times_a_five_minute_clip() {
     let packets: Vec<_> = (0..300 * 60)
@@ -429,7 +509,13 @@ fn times_a_five_minute_clip() {
     let start = std::time::Instant::now();
     for _ in 0..10 {
         file.clear();
-        write_with_audio(&mut file, &stream(Codec::H264), &packets, &clip).unwrap();
+        write_with_audio(
+            &mut file,
+            &stream(Codec::H264),
+            &packets,
+            std::slice::from_ref(&clip),
+        )
+        .unwrap();
     }
     println!(
         "ten writes of a 300 s clip with sound: {:?} for {} bytes each",

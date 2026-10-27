@@ -1,5 +1,5 @@
 //! System sound and the microphone: WASAPI capture on its own thread, stamped on the video clock,
-//! and mixed and encoded to AAC-LC when a clip is saved.
+//! and encoded to AAC-LC, a track for each, when a clip is saved.
 
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls Media Foundation's AAC encoder")]
@@ -72,13 +72,14 @@ pub(crate) enum EncodeError {
     Unsupported,
 }
 
+/// Encodes each track of `clip`, in its order.
 #[cfg(windows)]
-pub(crate) fn encode(clip: &PcmClip) -> Result<AudioClip, EncodeError> {
+pub(crate) fn encode(clip: &PcmClip) -> Result<Vec<AudioClip>, EncodeError> {
     aac::encode_clip(clip)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn encode(_clip: &PcmClip) -> Result<AudioClip, EncodeError> {
+pub(crate) fn encode(_clip: &PcmClip) -> Result<Vec<AudioClip>, EncodeError> {
     Err(EncodeError::Unsupported)
 }
 

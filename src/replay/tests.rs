@@ -343,13 +343,7 @@ fn real_encoder_output_muxes_with_sound() {
     live.set_origin(0);
     let frames = audio::tests::encoded_fixture();
     assert_eq!(frames.len(), 119);
-    live.set_audio(AudioFormat {
-        sample_rate: audio::tests::RATE,
-        channels: audio::tests::STEREO,
-        microphone_channels: audio::tests::MONO,
-        anchor: 0,
-        priming: FRAME_SAMPLES,
-    });
+    live.set_audio(audio::tests::both(0, FRAME_SAMPLES));
     for packet in encoded_fixture(Codec::H264) {
         live.push(packet, Picture::Fresh);
     }
@@ -364,7 +358,13 @@ fn real_encoder_output_muxes_with_sound() {
     let audio = &audio::tests::aac_clip(frames[46..].to_vec(), pcm.lead);
 
     let mut file = Vec::new();
-    mp4::write_with_audio(&mut file, &clip.stream, &clip.packets, audio).unwrap();
+    mp4::write_with_audio(
+        &mut file,
+        &clip.stream,
+        &clip.packets,
+        std::slice::from_ref(audio),
+    )
+    .unwrap();
     if let Some(directory) = std::env::var_os("HINDSIGHT_MUX_OUTPUT") {
         fs::write(Path::new(&directory).join("h264-aac.mp4"), &file).unwrap();
     }
@@ -430,17 +430,82 @@ fn real_encoder_output_muxes_with_sound() {
 }
 
 #[test]
+#[ignore = "needs ffmpeg"]
+fn ffmpeg_decodes_both_sound_tracks_with_every_codec_and_container() {
+    let directory = tempfile::tempdir().unwrap();
+    let system = audio::tests::aac_clip(audio::tests::encoded_fixture(), 1024);
+    let microphone = AudioClip {
+        source: Source::Microphone,
+        ..audio::tests::aac_clip(audio::tests::encoded_fixture()[..100].to_vec(), 1024)
+    };
+    let tracks = [system, microphone];
+    for codec in Codec::ALL {
+        let packets: Vec<_> = encoded_fixture(codec).into_iter().map(Arc::new).collect();
+        for container in [Container::Mp4, Container::Mkv] {
+            let path = directory
+                .path()
+                .join(format!("{codec}.{}", container.extension()));
+            let mut file = Vec::new();
+            let stream = fixture_stream(codec);
+            match container {
+                Container::Mp4 => mp4::write_from(&mut file, &stream, &packets[..], &tracks),
+                Container::Mkv => mkv::write_from(&mut file, &stream, &packets[..], &tracks),
+            }
+            .unwrap();
+            fs::write(&path, file).unwrap();
+
+            let output = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-map", "0", "-f", "null", "-"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{codec} {container:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "",
+                "{codec} {container:?}"
+            );
+
+            let probe = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-show_entries"])
+                .args([
+                    "stream=codec_name:stream_disposition=default",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let found = String::from_utf8_lossy(&probe.stdout).into_owned();
+            let video = match codec {
+                Codec::H264 => "h264,1",
+                Codec::Hevc => "hevc,1",
+                Codec::Av1 => "av1,1",
+            };
+            assert_eq!(
+                found.lines().collect::<Vec<_>>(),
+                [video, "aac,1", "aac,0"],
+                "{codec} {container:?}"
+            );
+
+            let system = crate::audio::testing::decode_mono(&path, 0);
+            let microphone = crate::audio::testing::decode_mono(&path, 1);
+            assert!(!system.is_empty(), "{codec} {container:?}");
+            assert!(
+                microphone.len() < system.len(),
+                "{codec} {container:?}: the microphone's track is the shorter"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
     let live = Live::new(60);
     live.set_stream(STREAM);
     live.set_origin(0);
-    live.set_audio(AudioFormat {
-        sample_rate: audio::tests::RATE,
-        channels: audio::tests::STEREO,
-        microphone_channels: audio::tests::MONO,
-        anchor: 0,
-        priming: 0,
-    });
+    live.set_audio(audio::tests::both(0, 0));
     let read: u64 = 2880;
     let mut next_sample: u64 = 0;
     for index in 0..150 {
@@ -463,9 +528,9 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
     assert_eq!(audio.lead, 144_000 - 139 * 1024);
     assert_eq!(audio.frames, 235 - 139);
     let mut samples = [7; 4];
-    audio.read(139 * 1024, &mut samples);
+    audio.tracks[0].read(139 * 1024, &mut samples);
     assert_eq!(samples, [22_336, -22_336, 22_337, -22_337]);
-    audio.read(239_000, &mut samples);
+    audio.tracks[0].read(239_000, &mut samples);
     assert_eq!(samples, [0; 4]);
 
     live.push_audio(
@@ -473,9 +538,8 @@ fn the_sound_is_trimmed_with_the_video_and_cut_to_it() {
         next_sample,
         audio::tests::numbered(next_sample, read),
     );
-    let format = live.audio.get().unwrap();
     assert_eq!(
-        live.sound().ring(Source::System).runs(format)[0].0,
+        live.sound().ring(Source::System).unwrap().runs()[0].0,
         139 * 1024
     );
 }
@@ -500,13 +564,7 @@ fn push_sound(live: &Live, start: u64, end: u64, sample: impl Fn(u64) -> i16) {
 fn live_with_a_click() -> Live {
     let live = live_with(90);
     live.set_origin(0);
-    live.set_audio(AudioFormat {
-        sample_rate: audio::tests::RATE,
-        channels: audio::tests::STEREO,
-        microphone_channels: audio::tests::MONO,
-        anchor: CLOCK_RATE / 3,
-        priming: 0,
-    });
+    live.set_audio(audio::tests::both(CLOCK_RATE / 3, 0));
     let click = |number| if number == 80_000 { 30_000 } else { 0 };
     push_sound(&live, 0, 104_000, click);
     push_sound(&live, 116_000, 137_600, click);
@@ -546,10 +604,14 @@ fn a_saved_clip_encodes_its_sound_in_line_with_the_video() {
     )
     .unwrap();
     let (moov, _) = mp4::tests::index(&file);
-    let [_, sound] = &moov.trak[..] else {
-        panic!("expected two tracks");
+    let [_, sound, microphone] = &moov.trak[..] else {
+        panic!("expected three tracks");
     };
     assert_eq!(moov.mvhd.duration, 2000);
+    assert_eq!(
+        microphone.mdia.mdhd.duration, sound.mdia.mdhd.duration,
+        "the silent microphone's track is as long as the system sound's"
+    );
     assert_eq!(
         (sound.mdia.mdhd.timescale, sound.mdia.mdhd.duration),
         (48_000, 95 * 1024)
@@ -578,7 +640,7 @@ fn the_click_plays_in_time_with_the_video() {
     let clip = save(&snapshot, directory.path(), Container::Mp4)
         .unwrap()
         .path;
-    let decoded = crate::audio::testing::decode_mono(&clip);
+    let decoded = crate::audio::testing::decode_mono(&clip, 0);
     let peak = crate::audio::testing::peak(&decoded);
     println!(
         "{} samples decoded for 2 s of video, the click at {peak}",
@@ -586,6 +648,9 @@ fn the_click_plays_in_time_with_the_video() {
     );
     assert_eq!(decoded.len(), 96_000);
     assert!(peak.abs_diff(48_000) <= 2, "the click at {peak}");
+    let microphone = crate::audio::testing::decode_mono(&clip, 1);
+    assert_eq!(microphone.len(), 96_000);
+    assert!(microphone.iter().all(|&sample| sample.unsigned_abs() <= 1));
 }
 
 #[test]
@@ -601,13 +666,7 @@ fn encodes_five_minutes_of_sound() {
     live.set_stream(STREAM);
     push_frames(&live, 9000);
     live.set_origin(0);
-    live.set_audio(AudioFormat {
-        sample_rate: audio::tests::RATE,
-        channels: audio::tests::STEREO,
-        microphone_channels: audio::tests::MONO,
-        anchor: 0,
-        priming: 0,
-    });
+    live.set_audio(audio::tests::both(0, 0));
     let mut seed: u32 = 1;
     let noise: Vec<i16> = (0..48_000)
         .map(|_| {
@@ -623,7 +682,8 @@ fn encodes_five_minutes_of_sound() {
     let snapshot = live.snapshot().unwrap();
     let pcm = snapshot.audio.as_ref().unwrap();
     let start = std::time::Instant::now();
-    let audio = crate::audio::encode(pcm).unwrap();
+    let tracks = crate::audio::encode(pcm).unwrap();
+    let audio = &tracks[0];
     println!(
         "{} frames ({} bytes) of AAC from 300 s of sound in {:?}",
         audio.frames.len(),
@@ -667,7 +727,7 @@ fn saves_complete_files_under_unique_names() {
 #[test]
 fn a_name_another_file_holds_is_skipped_not_replaced() {
     let directory = tempfile::tempdir().unwrap();
-    let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
+    let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4", |_| true).unwrap();
     let taken = directory
         .path()
         .join(name.file_name(Container::Mp4.extension()));

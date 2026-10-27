@@ -1,6 +1,7 @@
 use crate::{
-    config::ScreenshotFormat,
+    config::{Backend, ScreenshotFormat},
     replay::{self, SaveError},
+    service::MonitorHandle,
 };
 use std::{
     error::Error,
@@ -98,6 +99,19 @@ impl Readback for Still {
 /// What the capture thread answers a screenshot request with.
 pub(crate) type Taken = Result<Box<dyn Readback>, StillError>;
 
+/// A capture of one picture of a whole monitor, for a screenshot that no recording can serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Grab {
+    /// `None` is the primary monitor.
+    pub(crate) monitor: Option<MonitorHandle>,
+    /// The backend chosen for recording, which the grab prefers where it can.
+    pub(crate) backend: Backend,
+    pub(crate) cursor: bool,
+}
+
+/// Takes a [`Grab`] on the calling thread.
+pub(crate) type Grabber = fn(&Grab) -> Result<Still, StillError>;
+
 type Cause = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Error)]
@@ -116,6 +130,8 @@ pub(crate) enum StillError {
     )]
     #[error("copy the picture on the GPU")]
     Copy(#[source] Cause),
+    #[error("capture the monitor")]
+    Grab(#[source] Cause),
     #[error("read the picture back from the GPU")]
     Read(#[source] Cause),
     #[error("the picture read back is smaller than {width}×{height}")]

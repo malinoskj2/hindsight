@@ -2,7 +2,7 @@
 //! counts a second clip within one second. Screenshots are named the same way with their own
 //! extension.
 
-use crate::{config::Container, log};
+use crate::log;
 
 const PREFIX: &str = "hindsight_";
 /// `YYYY-MM-DD_HH-MM-SS`, as `log::file_stamp` writes it.
@@ -41,10 +41,13 @@ impl ClipName {
         }
     }
 
-    /// Parses a clip's name that `file_name` produced, returning `None` for any other file.
-    pub(crate) fn parse(file_name: &str) -> Option<Self> {
+    /// Parses a name that `file_name` produced with an extension `admits` accepts, returning
+    /// `None` for any other file.
+    pub(crate) fn parse(file_name: &str, admits: impl FnOnce(&str) -> bool) -> Option<Self> {
         let (rest, extension) = file_name.strip_prefix(PREFIX)?.rsplit_once('.')?;
-        Container::of_extension(extension)?;
+        if !admits(extension) {
+            return None;
+        }
         let (stamp, attempt) = rest.split_at_checked(STAMP_LENGTH)?;
         if !is_stamp(stamp) {
             return None;
@@ -79,13 +82,20 @@ fn is_stamp(stamp: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Container;
+
+    fn parse_clip(file_name: &str) -> Option<ClipName> {
+        ClipName::parse(file_name, |extension| {
+            Container::of_extension(extension).is_some()
+        })
+    }
 
     #[test]
     fn a_clips_name_gives_the_time_it_was_taken_and_its_attempt() {
-        let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
+        let name = parse_clip("hindsight_2026-10-12_21-14-05.mp4").unwrap();
         assert_eq!(name.title(), "2026-10-12 21:14:05");
         assert_eq!(name.attempt, 1);
-        let again = ClipName::parse("hindsight_2026-10-12_21-14-05-2.mp4").unwrap();
+        let again = parse_clip("hindsight_2026-10-12_21-14-05-2.mp4").unwrap();
         assert_eq!(again.stamp, name.stamp);
         assert_eq!(again.attempt, 2);
         for other in [
@@ -96,12 +106,9 @@ mod tests {
             "boss fight.mp4",
             "hindsight_2026-10-12_21-14-05.png",
         ] {
-            assert_eq!(ClipName::parse(other), None, "{other}");
+            assert_eq!(parse_clip(other), None, "{other}");
         }
-        assert_eq!(
-            ClipName::parse("hindsight_2026-10-12_21-14-05.mkv"),
-            Some(name)
-        );
+        assert_eq!(parse_clip("hindsight_2026-10-12_21-14-05.mkv"), Some(name));
     }
 
     #[test]
@@ -110,7 +117,7 @@ mod tests {
         let second = first.next();
         for name in [&first, &second, &second.next()] {
             assert_eq!(
-                ClipName::parse(&name.file_name(Container::Mp4.extension())).as_ref(),
+                parse_clip(&name.file_name(Container::Mp4.extension())).as_ref(),
                 Some(name)
             );
         }
@@ -127,6 +134,10 @@ mod tests {
             second.file_name("png"),
             format!("hindsight_{}-2.png", first.stamp)
         );
-        assert_eq!(ClipName::parse(&first.file_name("png")), None);
+        assert_eq!(parse_clip(&first.file_name("png")), None);
+        assert_eq!(
+            ClipName::parse(&second.file_name("png"), |extension| extension == "png").as_ref(),
+            Some(&second)
+        );
     }
 }

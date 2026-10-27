@@ -2,10 +2,10 @@
 
 use self::{
     about::{AboutPage, UpdateAction},
-    clips::ClipsPage,
     hotkey_field::Capture,
     layout::{MARGIN, TAB_HEIGHT, WINDOW_HEIGHT, WINDOW_WIDTH, resize_height_by, resize_width_by},
     logs::LogsPage,
+    media::{Media, MediaPage},
     pane::Pane,
     settings::{SettingsError, SettingsPage},
     status::{Control, StatusPage},
@@ -42,10 +42,10 @@ use winsafe::{self as w, co, gui, prelude::*};
 
 mod about;
 mod art;
-mod clips;
 mod hotkey_field;
 mod layout;
 mod logs;
+mod media;
 mod pane;
 mod settings;
 mod startup_error;
@@ -58,7 +58,8 @@ const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
 const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
-const PANES: usize = 5;
+const SCREENSHOTS_TAB: u32 = 2;
+const PANES: usize = 6;
 const DESTROY_TIMER: usize = 2;
 const SETTLE_TIMER: usize = 3;
 const SETTLE_MS: u32 = 500;
@@ -89,7 +90,8 @@ struct Inner {
     main_window: gui::WindowMain,
     tab: gui::Tab,
     status: StatusPage,
-    clips: ClipsPage,
+    clips: MediaPage,
+    screenshots: MediaPage,
     settings: SettingsPage,
     logs: LogsPage,
     about: AboutPage,
@@ -137,12 +139,13 @@ impl Main {
         let main_window = application_window(width, start_hidden);
         let (start_with_windows, startup_error) = startup_setting();
         let status = StatusPage::new(&main_window, &skin);
-        let clips = ClipsPage::new(&main_window, &skin);
+        let clips = MediaPage::new(&main_window, Media::Clips, &skin);
+        let screenshots = MediaPage::new(&main_window, Media::Screenshots, &skin);
         let codecs = offered_codecs();
         let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&main_window, &skin);
         let about = AboutPage::new(&main_window, &skin);
-        let panes: [&dyn Pane; PANES] = [&status, &clips, &settings, &logs, &about];
+        let panes: [&dyn Pane; PANES] = [&status, &clips, &screenshots, &settings, &logs, &about];
         let tab_pages = panes.map(|pane| (pane.title(), pane.page().clone()));
         let tab = gui::Tab::new(
             &main_window,
@@ -158,6 +161,7 @@ impl Main {
             tab,
             status,
             clips,
+            screenshots,
             settings,
             logs,
             about,
@@ -310,7 +314,7 @@ impl Main {
             Control::OpenFolder => {
                 let folder = self.0.config.borrow().clip_directory();
                 if let Err(error) = fs::create_dir_all(&folder) {
-                    log::warning(text::clip_open_failed(&folder, error));
+                    log::warning(text::open_failed(&folder, error));
                     return;
                 }
                 open(&folder);
@@ -460,7 +464,7 @@ impl Main {
     fn on_hotkey(&self, id: usize) {
         match Action::from_id(id) {
             Some(Action::Save) => self.save(),
-            Some(Action::Screenshot) => self.0.worker.screenshot(),
+            Some(Action::Screenshot) => self.0.worker.screenshot(foreground::in_front()),
             None => {}
         }
     }
@@ -775,6 +779,7 @@ impl Main {
             frame.show_title_label(classic);
         }
         self.0.clips.apply_look(&self.0.skin);
+        self.0.screenshots.apply_look(&self.0.skin);
         self.redraw();
     }
 
@@ -867,18 +872,23 @@ impl Main {
         if self.0.status.update(&status, window_notices) {
             self.fit_window();
         }
-        self.0.clips.update(&status, &folder, self.clips_in_view());
+        self.0
+            .clips
+            .update(&status, &folder, self.tab_in_view(CLIPS_TAB));
+        self.0
+            .screenshots
+            .update(&status, &folder, self.tab_in_view(SCREENSHOTS_TAB));
         self.0.logs.update();
     }
 
-    fn clips_in_view(&self) -> bool {
+    fn tab_in_view(&self, index: u32) -> bool {
         self.0.main_window.hwnd().IsWindowVisible()
             && self
                 .0
                 .tab
                 .items()
                 .selected()
-                .is_some_and(|item| item.index() == CLIPS_TAB)
+                .is_some_and(|item| item.index() == index)
     }
 
     fn fit_window(&self) {
@@ -902,6 +912,7 @@ impl Main {
         [
             &self.0.status,
             &self.0.clips,
+            &self.0.screenshots,
             &self.0.settings,
             &self.0.logs,
             &self.0.about,
@@ -944,7 +955,7 @@ fn application_window(width: i32, start_hidden: bool) -> gui::WindowMain {
 
 fn open(path: &Path) {
     if let Err(error) = shell::open(path) {
-        log::warning(text::clip_open_failed(path, error));
+        log::warning(text::open_failed(path, error));
     }
 }
 
@@ -978,4 +989,35 @@ fn startup_setting() -> (bool, Option<String>) {
 extern "system" fn destroy_window(window: w::HWND, _: co::WM, id: usize, _: u32) {
     let _ = window.KillTimer(id);
     let _ = window.DestroyWindow();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// More than any character of Segoe UI 9 pt averages at 96 DPI, which is about 6 pixels.
+    const CHARACTER_WIDTH: i32 = 7;
+    /// The tab control's padding on both sides of a title, and the selected tab's overhang.
+    const TAB_PADDING: i32 = 24;
+
+    #[test]
+    fn the_tab_titles_fit_across_the_narrowest_window_on_one_row() {
+        let titles = [
+            text::TAB_STATUS,
+            text::TAB_CLIPS,
+            text::TAB_SCREENSHOTS,
+            text::TAB_SETTINGS,
+            text::TAB_LOGS,
+            text::TAB_ABOUT,
+        ];
+        assert_eq!(titles.len(), PANES);
+        let strip: i32 = titles
+            .iter()
+            .map(|title| {
+                layout::saturating_i32(title.chars().count()) * CHARACTER_WIDTH + TAB_PADDING
+            })
+            .sum();
+        let tab_width = WINDOW_WIDTH - 2 * MARGIN;
+        assert!(strip <= tab_width, "{strip} in {tab_width}");
+    }
 }

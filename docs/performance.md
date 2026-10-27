@@ -58,8 +58,8 @@ sound is kept raw and encoded to AAC only when a clip is saved. It takes about 5
 5 minutes, always in RAM whichever memory holds the video. Turn it off if you never use the sound.
 
 **Record the microphone** records the default recording device, read on the same thread as the
-system sound and kept raw the same way, in mono: about 29 MB of RAM for 5 minutes. It is mixed into
-the clip's one sound track when the clip is saved, so recording it adds no encoding while you play.
+system sound and kept raw the same way, in mono: about 29 MB of RAM for 5 minutes. It is encoded to
+a second sound track when the clip is saved, so recording it adds no encoding while you play.
 
 **Record the mouse cursor** makes no measurable difference either way.
 
@@ -133,6 +133,8 @@ hindsight falls back to RAM and logs why.
 The capture thread runs in Windows' multimedia scheduling class so it is never late; frames
 never leave video memory before they are encoded; NVENC reads the captured surfaces in place;
 the encoder uses no extras that would run on the GPU's shader cores (no lookahead, no
-B-frames, no weighted prediction); a clip is written in the background at low I/O priority.
+B-frames, no weighted prediction); a clip is written in the background at low I/O priority; a
+screenshot costs nothing until its key is pressed, and then reuses the recorded picture or
+captures the monitor once on a background thread.
 Nothing runs at all while no full-screen app is in front, and while you are tabbed out of the game
 nothing is grabbed: the game's last picture is repeated until it is back.
