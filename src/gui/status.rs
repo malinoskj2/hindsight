@@ -18,9 +18,8 @@ use crate::{
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
-/// A problem's headline and a cause of up to two lines.
-const NOTICE_LINES: i32 = 3;
-const NOTICE_EXTRA: i32 = NOTICE_LINES * LINE + 4;
+/// A problem's headline and its cause. The label grows with the notices it shows.
+const NOTICE_LINES: i32 = 2;
 const ROW_PITCH: i32 = 20;
 const CONTROL_COUNT: i32 = 5;
 const CONTROL_GAP: i32 = 6;
@@ -137,7 +136,7 @@ impl StatusPage {
         let controls = ControlButtons::new(&page, skin);
         let frames = vec![recording_frame, stats_frame, buffer_frame, controls_frame];
         let recording_group =
-            ExpandableGroup::new(0, recording.notice.label().clone(), NOTICE_EXTRA)
+            ExpandableGroup::new(0, recording.notice.label().clone(), NOTICE_LINES)
                 .moving(stats.labels())
                 .moving(buffer.labels())
                 .moving(controls.buttons());

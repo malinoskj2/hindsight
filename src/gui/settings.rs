@@ -32,7 +32,6 @@ use std::{
 use thiserror::Error;
 use winsafe::{co, gui, prelude::*};
 
-const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
 const COLUMN_X: i32 = INNER_X + 204;
 const FIELD_OFFSET: i32 = 96;
 const NUMBER_WIDTH: i32 = 52;
@@ -186,8 +185,7 @@ impl SettingsPage {
         );
         let general = GeneralControls::new(&page, config, start_with_windows);
         let frames = vec![recording_frame, general_frame];
-        let general_group =
-            ExpandableGroup::new(1, general.error.label().clone(), STARTUP_ERROR_EXTRA);
+        let general_group = ExpandableGroup::new(1, general.error.label().clone(), 1);
         let inner = Rc::new(Inner {
             page,
             frames,
