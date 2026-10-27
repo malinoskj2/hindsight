@@ -2,10 +2,11 @@
 
 ## 0.2.0
 
-- Screenshots: Alt+F8 saves the picture being recorded, cropped and tone-mapped as a clip would be. Screenshots go into a `screenshots` folder and clips into a `videos` folder, both in the clip folder.
+- Screenshots: Alt+F8 saves a picture of the whole monitor in front, whether or not hindsight is recording. Screenshots go into a `screenshots` folder and clips into a `videos` folder, both in the clip folder.
+- A Screenshots tab beside Clips shows the screenshots you have taken.
 - The default hotkeys are now Alt+F7 for a clip and Alt+F8 for a screenshot, clear of the NVIDIA overlay's keys. Hotkeys already in your settings are kept.
 - Click a hotkey field and press the keys to set it.
-- Record your microphone as well as the system sound.
+- Record your microphone as well as the system sound. It goes on a sound track of its own, so you can turn it down or leave it out when editing.
 - Save clips as MKV as well as MP4, and screenshots as JPEG, WebP or AVIF as well as PNG.
 - Settings shows the common options first. More options opens the rest.
 - The replay buffer and capture method now suit the machine until you choose: the buffer goes in RAM, video memory or on disk depending on how much there is, and a laptop whose display runs on the integrated GPU uses Windows Graphics Capture.
