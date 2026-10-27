@@ -900,9 +900,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                if let Err(error) = sys::thread::enter_background_mode() {
-                    log::warning(text::background_save_failed(error));
-                }
+                run_in_background();
                 screenshot::save(readback, &directory, format)
             })
     }
@@ -1170,9 +1168,7 @@ impl Machine {
             .spawn(move || {
                 let _ending = ending;
                 #[cfg(windows)]
-                if let Err(error) = sys::thread::enter_background_mode() {
-                    log::warning(text::background_save_failed(error));
-                }
+                run_in_background();
                 write(&snapshot, &directory, container)
             })
     }
@@ -1348,7 +1344,18 @@ impl Machine {
     }
 }
 
-/// Runs the worker. If it panics, reports the reason on the Status tab and stops what it can.
+/// Lowers the calling thread's priority and tags it EcoQoS, so that a save or a screenshot takes
+/// longer but does not compete with the game.
+#[cfg(windows)]
+fn run_in_background() {
+    if let Err(error) = sys::thread::enter_background_mode() {
+        log::warning(text::background_save_failed(error));
+    }
+    if let Err(error) = sys::thread::prefer_efficiency() {
+        log::warning(text::efficiency_refused(error));
+    }
+}
+
 const fn sources(config: &Config) -> Sources {
     Sources {
         system: config.audio,
@@ -1356,6 +1363,7 @@ const fn sources(config: &Config) -> Sources {
     }
 }
 
+/// Runs the worker. If it panics, reports the reason on the Status tab and stops what it can.
 fn run_guarded(mut machine: Machine, commands: &Receiver<Command>, output: &Mutex<Status>) {
     let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| machine.run(commands))) else {
         return;

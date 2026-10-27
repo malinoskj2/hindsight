@@ -133,7 +133,8 @@ hindsight falls back to RAM and logs why.
 The capture thread runs in Windows' multimedia scheduling class so it is never late; frames
 never leave video memory before they are encoded; NVENC reads the captured surfaces in place;
 the encoder uses no extras that would run on the GPU's shader cores (no lookahead, no
-B-frames, no weighted prediction); a clip is written in the background at low I/O priority; a
+B-frames, no weighted prediction); a clip or a screenshot is written in the background at low
+I/O priority and tagged EcoQoS, so that Windows runs it on efficiency cores at low clocks; a
 screenshot costs nothing until its key is pressed, and then reuses the recorded picture or
 captures the monitor once on a background thread.
 Nothing runs at all while no full-screen app is in front, and while you are tabbed out of the game
