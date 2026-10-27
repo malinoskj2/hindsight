@@ -26,10 +26,10 @@ use winsafe::{co, gui, prelude::*};
 
 const STARTUP_ERROR_EXTRA: i32 = LINE + 4;
 const COLUMN_X: i32 = INNER_X + 204;
-const FIELD_OFFSET: i32 = 88;
+const FIELD_OFFSET: i32 = 96;
 const NUMBER_WIDTH: i32 = 52;
 const CODEC_WIDTH: i32 = 90;
-const HOTKEY_WIDTH: i32 = 110;
+const HOTKEY_WIDTH: i32 = 100;
 const CHOICE_WIDTH: i32 = 190;
 /// The width of a field that reaches the group's right edge from the first column.
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
@@ -51,9 +51,9 @@ mod rows {
     use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_FRAME, FIRST_ROW, LINE};
 
     pub(super) const RECORDING_FRAME: i32 = FIRST_FRAME;
-    pub(super) const ENCODING: i32 = RECORDING_FRAME + FIRST_ROW;
-    pub(super) const BUFFER: i32 = ENCODING + FIELD_PITCH;
-    pub(super) const HOTKEY: i32 = BUFFER + FIELD_PITCH;
+    pub(super) const REPLAY_LENGTH: i32 = RECORDING_FRAME + FIRST_ROW;
+    pub(super) const ENCODING: i32 = REPLAY_LENGTH + FIELD_PITCH;
+    pub(super) const HOTKEY: i32 = ENCODING + FIELD_PITCH;
     pub(super) const BACKEND: i32 = HOTKEY + FIELD_PITCH;
     pub(super) const FOLDER: i32 = BACKEND + FIELD_PITCH;
     pub(super) const MEMORY: i32 = FOLDER + FIELD_PITCH;
@@ -452,15 +452,31 @@ impl RecordingControls {
 }
 
 struct EncodingFields {
-    codec: gui::ComboBox,
-    frame_rate: gui::Edit,
     buffer_seconds: gui::Edit,
     bitrate: gui::Edit,
+    codec: gui::ComboBox,
+    frame_rate: gui::Edit,
     _spins: [gui::UpDown; 3],
 }
 
 impl EncodingFields {
     fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec]) -> Self {
+        let (buffer_seconds, buffer_spin) = number_field(
+            page,
+            text::REPLAY_LENGTH,
+            INNER_X,
+            rows::REPLAY_LENGTH,
+            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
+            config.buffer_seconds,
+        );
+        let (bitrate, bitrate_spin) = number_field(
+            page,
+            text::BITRATE,
+            COLUMN_X,
+            rows::REPLAY_LENGTH,
+            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
+            config.bitrate_mbps,
+        );
         let names = codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>();
         let codec = choice_field(
             page,
@@ -479,28 +495,12 @@ impl EncodingFields {
             (MIN_FRAME_RATE, MAX_FRAME_RATE),
             config.frame_rate,
         );
-        let (buffer_seconds, buffer_spin) = number_field(
-            page,
-            text::BUFFER_SECONDS,
-            INNER_X,
-            rows::BUFFER,
-            (MIN_BUFFER_SECONDS, MAX_BUFFER_SECONDS),
-            config.buffer_seconds,
-        );
-        let (bitrate, bitrate_spin) = number_field(
-            page,
-            text::BITRATE,
-            COLUMN_X,
-            rows::BUFFER,
-            (MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
-            config.bitrate_mbps,
-        );
         Self {
-            codec,
-            frame_rate,
             buffer_seconds,
             bitrate,
-            _spins: [frame_rate_spin, buffer_spin, bitrate_spin],
+            codec,
+            frame_rate,
+            _spins: [buffer_spin, bitrate_spin, frame_rate_spin],
         }
     }
 }
@@ -755,8 +755,8 @@ mod tests {
     fn the_rows_sit_where_they_were_laid_by_hand() {
         assert_eq!(
             [
+                rows::REPLAY_LENGTH,
                 rows::ENCODING,
-                rows::BUFFER,
                 rows::HOTKEY,
                 rows::BACKEND,
                 rows::FOLDER,

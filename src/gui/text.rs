@@ -56,7 +56,7 @@ pub(super) const CLIP_MENU_DELETE: &str = "&Delete";
 
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
-pub(super) const BUFFER_SECONDS: &str = "Buffer (s)";
+pub(super) const REPLAY_LENGTH: &str = "Replay length (s)";
 pub(super) const BITRATE: &str = "Bitrate (Mbps)";
 pub(super) const HOTKEY: &str = "Save hotkey";
 pub(super) const MODE: &str = "Record";
@@ -69,7 +69,7 @@ pub(super) const CURSOR: &str = "Record the mouse cursor";
 pub(super) const MEMORY: &str = "Buffer in";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
-    "Enter whole numbers for the frame rate, buffer and bitrate.";
+    "Enter whole numbers for the replay length, bitrate and frame rate.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
 

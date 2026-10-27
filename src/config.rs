@@ -426,7 +426,7 @@ impl Config {
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
     #[error(
-        "buffer length must be between {} and {} seconds",
+        "replay length must be between {} and {} seconds",
         MIN_BUFFER_SECONDS,
         MAX_BUFFER_SECONDS
     )]
