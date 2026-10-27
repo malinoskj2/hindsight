@@ -11,7 +11,10 @@ use super::{
 };
 #[cfg(test)]
 use crate::service::{Problem, ProblemKind};
-use crate::service::{Sound, State, Status};
+use crate::{
+    audio::StandIns,
+    service::{Sound, State, Status},
+};
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
@@ -406,13 +409,24 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
             text::problem_cause(problem),
         ]
     });
-    let notices = window_notices.into_iter().chain([
-        status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
-        (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
-        status
+    let stand_ins = match status.sound {
+        Some(Sound::Recording(stand_ins)) => stand_ins,
+        Some(Sound::Failed) | None => StandIns::default(),
+    };
+    let notices = window_notices
+        .into_iter()
+        .chain([
+            status.nothing_to_save.then_some(text::NOTHING_TO_SAVE),
+            (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
+        ])
+        .chain(
+            stand_ins
+                .sources()
+                .map(|source| Some(text::device_missing(source))),
+        )
+        .chain([status
             .clip_without_sound
-            .then_some(text::CLIP_WITHOUT_SOUND),
-    ]);
+            .then_some(text::CLIP_WITHOUT_SOUND)]);
     problem
         .into_iter()
         .flatten()
@@ -481,6 +495,16 @@ mod tests {
         assert_eq!(
             notice_text(&status, [None, None]),
             "●  Clip not saved at 14:03\r\nThe disk is full."
+        );
+        status.sound = Some(Sound::Recording(StandIns {
+            system: true,
+            microphone: true,
+        }));
+        assert_eq!(
+            notice_text(&status, [None, None]),
+            "●  Clip not saved at 14:03\r\nThe disk is full.\r\n\
+             The chosen sound device is missing; the default is recorded for now.\r\n\
+             The chosen microphone is missing; the default is recorded for now."
         );
         status.nothing_to_save = true;
         status.sound = Some(Sound::Failed);

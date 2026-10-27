@@ -147,6 +147,12 @@ export const settingGroups = [
         title: "Save clips as MP4 or MKV, screenshots as PNG, JPEG, WebP or AVIF.",
         body: "MP4 plays everywhere. PNG and WebP keep every pixel; JPEG and AVIF are smaller, and AVIF takes a second or two of one core to save.",
       },
+      {
+        id: "devices",
+        fields: ["Sound from", "Microphone"],
+        title: "Record the devices Windows uses, or pick your own.",
+        body: "Default device follows Windows as you switch outputs or microphones. If a device you picked is unplugged, the default stands in, the Status tab says so, and your device is used again once it is back.",
+      },
     ],
   },
   {

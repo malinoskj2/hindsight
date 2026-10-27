@@ -4,6 +4,9 @@
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls Media Foundation's AAC encoder")]
 mod aac;
+mod choice;
+#[cfg(windows)]
+mod listing;
 mod pcm;
 #[cfg(windows)]
 mod recorder;
@@ -15,9 +18,16 @@ mod timeline;
 mod wasapi;
 
 #[cfg(windows)]
+pub(crate) use choice::{Entry, entries};
+#[cfg(windows)]
+pub(crate) use listing::DeviceList;
+#[cfg(windows)]
 pub(crate) use recorder::{Capture, start};
 
-use crate::replay::{AudioClip, PcmClip, Source};
+use crate::{
+    config::DeviceId,
+    replay::{AudioClip, PcmClip, Source},
+};
 use std::num::{NonZeroU16, NonZeroU32};
 use thiserror::Error;
 
@@ -33,15 +43,19 @@ const SAMPLE_RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
 )]
 const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 
-/// The sources a session records.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The sources a session records, and the device each is captured from.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Sources {
     pub(crate) system: bool,
     pub(crate) microphone: bool,
+    /// The output device whose sound is recorded, or `None` for Windows' default.
+    pub(crate) system_device: Option<DeviceId>,
+    /// The recording device, or `None` for Windows' default.
+    pub(crate) microphone_device: Option<DeviceId>,
 }
 
 impl Sources {
-    pub(crate) const fn any(self) -> bool {
+    pub(crate) const fn any(&self) -> bool {
         self.system || self.microphone
     }
 
@@ -49,13 +63,47 @@ impl Sources {
         all(not(windows), test),
         expect(dead_code, reason = "only the Windows capture uses it")
     )]
-    fn iter(self) -> impl Iterator<Item = Source> {
+    fn iter(&self) -> impl Iterator<Item = Source> {
         [
             (self.system, Source::System),
             (self.microphone, Source::Microphone),
         ]
         .into_iter()
         .filter_map(|(recorded, source)| recorded.then_some(source))
+    }
+
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows capture uses it")
+    )]
+    const fn device(&self, source: Source) -> Option<&DeviceId> {
+        match source {
+            Source::System => self.system_device.as_ref(),
+            Source::Microphone => self.microphone_device.as_ref(),
+        }
+    }
+}
+
+/// The sources recorded from Windows' default device because the device chosen for them in
+/// Settings is missing. They return to it once it is back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StandIns {
+    pub(crate) system: bool,
+    pub(crate) microphone: bool,
+}
+
+impl StandIns {
+    #[cfg_attr(
+        all(not(windows), test),
+        expect(dead_code, reason = "only the Windows window shows them")
+    )]
+    pub(crate) fn sources(self) -> impl Iterator<Item = Source> {
+        [
+            (self.system, Source::System),
+            (self.microphone, Source::Microphone),
+        ]
+        .into_iter()
+        .filter_map(|(standing_in, source)| standing_in.then_some(source))
     }
 }
 
@@ -90,6 +138,10 @@ pub(crate) enum Capture {}
 #[cfg(not(windows))]
 impl Capture {
     pub(crate) fn has_stopped(&self) -> bool {
+        match *self {}
+    }
+
+    pub(crate) fn stand_ins(&self) -> StandIns {
         match *self {}
     }
 }

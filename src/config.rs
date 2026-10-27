@@ -274,6 +274,23 @@ display_by_name!(
     ScreenshotFormat
 );
 
+/// A sound device's endpoint ID, which Windows keeps for the device across reboots and while it
+/// is unplugged. Never empty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct DeviceId(String);
+
+impl DeviceId {
+    /// Returns `None` for an empty ID, which names no device.
+    pub(crate) fn new(id: String) -> Option<Self> {
+        (!id.is_empty()).then_some(Self(id))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The machine, as far as the defaults depend on it. Each part is `None` when it could not be
 /// read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -334,8 +351,14 @@ pub(crate) struct Config {
     pub(crate) theme: Theme,
     /// Whether the system's sound is recorded.
     pub(crate) audio: bool,
-    /// Whether the default microphone is recorded, on a sound track of its own.
+    /// Whether the microphone is recorded, on a sound track of its own.
     pub(crate) microphone: bool,
+    /// The output device whose sound is recorded, or `None` for Windows' default as it changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sound_device: Option<DeviceId>,
+    /// The recording device the microphone is, or `None` for Windows' default as it changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) microphone_device: Option<DeviceId>,
     /// Whether the cursor is drawn, where the backend can draw it. Desktop Duplication never
     /// draws it.
     pub(crate) cursor: bool,
@@ -372,6 +395,10 @@ struct RawConfig {
     theme: Theme,
     audio: bool,
     microphone: bool,
+    #[serde(deserialize_with = "device_or_none")]
+    sound_device: Option<DeviceId>,
+    #[serde(deserialize_with = "device_or_none")]
+    microphone_device: Option<DeviceId>,
     cursor: bool,
     buffer_memory: Memory,
     close_to_tray: bool,
@@ -403,6 +430,8 @@ impl Default for RawConfig {
             theme,
             audio,
             microphone,
+            sound_device,
+            microphone_device,
             cursor,
             buffer_memory,
             close_to_tray,
@@ -424,6 +453,8 @@ impl Default for RawConfig {
             theme,
             audio,
             microphone,
+            sound_device,
+            microphone_device,
             cursor,
             buffer_memory,
             close_to_tray,
@@ -453,6 +484,8 @@ impl TryFrom<RawConfig> for Config {
             theme,
             audio,
             microphone,
+            sound_device,
+            microphone_device,
             cursor,
             buffer_memory,
             close_to_tray,
@@ -482,6 +515,8 @@ impl TryFrom<RawConfig> for Config {
             theme,
             audio,
             microphone,
+            sound_device,
+            microphone_device,
             cursor,
             buffer_memory,
             close_to_tray,
@@ -510,6 +545,8 @@ impl Default for Config {
             theme: Theme::Classic,
             audio: true,
             microphone: false,
+            sound_device: None,
+            microphone_device: None,
             cursor: false,
             buffer_memory: Memory::Ram,
             close_to_tray: true,
@@ -639,6 +676,13 @@ fn apart_from(save: Hotkey, screenshot: Hotkey) -> Hotkey {
         "Settings · screenshot hotkey {screenshot} is the save hotkey · {instead} instead"
     ));
     instead
+}
+
+/// Treats an empty ID as the default device.
+fn device_or_none<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DeviceId>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.and_then(DeviceId::new))
 }
 
 fn folder_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
@@ -955,6 +999,36 @@ mod tests {
         assert!(json.contains(r#""screenshot_format":"webp""#), "{json}");
         assert_eq!(parse(&json).unwrap(), config);
         assert!(parse(r#"{"container":"avi"}"#).is_err());
+    }
+
+    #[test]
+    fn sound_devices_default_to_windows_choice_and_round_trip_by_id() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        let old = parse(r#"{"buffer_seconds":120}"#).unwrap();
+        assert_eq!((old.sound_device, old.microphone_device), (None, None));
+        let json = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!json.contains("_device"), "{json}");
+        let empty = parse(r#"{"sound_device":"","microphone_device":null}"#).unwrap();
+        assert_eq!((empty.sound_device, empty.microphone_device), (None, None));
+
+        let headset = r"{0.0.1.00000000}.{8d2b6e5c-55a1-4a1e-9b8f-3f0a3c7e2d11}";
+        let config = Config {
+            sound_device: DeviceId::new(headset.replace("0.0.1", "0.0.0")),
+            microphone_device: DeviceId::new(headset.to_owned()),
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains(&format!(r#""microphone_device":"{headset}""#)),
+            "{json}"
+        );
+        assert_eq!(parse(&json).unwrap(), config);
+        assert_eq!(
+            config.microphone_device.as_ref().map(DeviceId::as_str),
+            Some(headset)
+        );
+        assert!(parse(r#"{"sound_device":7}"#).is_err());
     }
 
     #[test]
