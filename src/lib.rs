@@ -156,9 +156,10 @@ fn log_panics() {
 }
 
 #[cfg(windows)]
-fn startup() -> Result<(service::Worker, config::Config)> {
+fn startup() -> Result<(service::Worker, config::Config, update::notes::Arrival)> {
     let store = storage::Store::open().context("open application state")?;
     mirror_log();
+    let arrival = arrival(&store);
     let defaults = config::Config::for_machine(machine());
     log::info(format!(
         "Defaults · buffer {} · {}",
@@ -168,7 +169,28 @@ fn startup() -> Result<(service::Worker, config::Config)> {
     let config = store.load_config(&defaults).context("load configuration")?;
     let worker =
         service::Worker::spawn(store, config.clone()).context("start the recording worker")?;
-    Ok((worker, config))
+    Ok((worker, config, arrival))
+}
+
+/// Compares the version that ran last with this one. A first run or a downgrade is recorded
+/// here; an upgrade only once the window has shown its notes.
+#[cfg(windows)]
+fn arrival(store: &storage::Store) -> update::notes::Arrival {
+    let running = update::Version::running();
+    let last = store
+        .load_last_version()
+        .inspect_err(|error| {
+            log::warning(format!("Last version · not read ({})", log::chain(error)));
+        })
+        .ok()
+        .flatten();
+    let arrival = update::notes::Arrival::of(last.as_ref(), &running);
+    if arrival == update::notes::Arrival::Unannounced
+        && let Err(error) = store.save_last_version(&running)
+    {
+        log::warning(format!("Last version · not saved ({})", log::chain(&error)));
+    }
+    arrival
 }
 
 /// Reads what the defaults depend on. A part that cannot be read is logged and left unknown.

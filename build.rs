@@ -1,6 +1,7 @@
 //! Embeds the Windows icon and manifest, compiles the HDR tone-map shader with the Windows
-//! SDK's `fxc.exe`, which is installed alongside the `rc.exe` the resources already need, and
-//! records the commit, date and compiler of the build for the About tab.
+//! SDK's `fxc.exe`, which is installed alongside the `rc.exe` the resources already need,
+//! records the commit, date and compiler of the build for the About tab, and embeds this
+//! version's release notes.
 
 use std::{
     env, fs,
@@ -8,6 +9,9 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[path = "src/update/changelog.rs"]
+mod changelog;
 
 #[path = "src/sys/icon/table.rs"]
 #[expect(
@@ -24,6 +28,9 @@ const SHADER_STAGES: [(&str, &str, &str); 2] = [
 ];
 /// The value shown for a build fact that could not be determined.
 const UNKNOWN: &str = "unknown";
+const CHANGELOG: &str = "CHANGELOG.md";
+/// The file in `OUT_DIR` that `src/update/notes.rs` includes.
+const RELEASE_NOTES: &str = "release-notes.md";
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -44,6 +51,7 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/{ico}");
     }
     record_build_info();
+    embed_release_notes();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -100,6 +108,23 @@ fn record_build_info() {
         .and_then(|rustc| output(Command::new(rustc).arg("--version")))
         .unwrap_or_else(|| UNKNOWN.to_owned());
     println!("cargo:rustc-env=HINDSIGHT_RUSTC={rustc}");
+}
+
+/// Writes this version's section of the changelog to `OUT_DIR`. A release build without one
+/// fails, so every installer carries its notes; any other build embeds no notes instead.
+fn embed_release_notes() {
+    println!("cargo:rerun-if-changed={CHANGELOG}");
+    let version = env!("CARGO_PKG_VERSION");
+    let changelog = fs::read_to_string(CHANGELOG).unwrap_or_default();
+    let notes = changelog::section(&changelog, version);
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    assert!(
+        notes.is_some() || !release,
+        "{CHANGELOG} has no section for {version}; add `## {version}` with its notes"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    fs::write(out.join(RELEASE_NOTES), notes.unwrap_or_default())
+        .expect("write the release notes to OUT_DIR");
 }
 
 /// Returns the trimmed output of a git command run in the package, or `None` when git is

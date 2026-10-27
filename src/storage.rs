@@ -1,6 +1,6 @@
 //! Application state on disk in `%LOCALAPPDATA%\Hindsight`, locked against a second instance.
 
-use crate::config::Config;
+use crate::{config::Config, update::Version};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::{
@@ -16,6 +16,7 @@ const STATE_DIRECTORY: &str = "Hindsight";
 const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const CONFIG_FILE: &str = "config.json";
 const TOTALS_FILE: &str = "totals.json";
+const LAST_RUN_FILE: &str = "last_run.json";
 #[cfg(windows)]
 const BUFFER_FILE: &str = "buffer.bin";
 const PENDING_EXTENSION: &str = "pending";
@@ -27,6 +28,13 @@ pub(crate) struct Totals {
     pub(crate) buffered_bytes: u64,
     #[serde(alias = "written_bytes")]
     pub(crate) saved_bytes: u64,
+}
+
+/// What a run leaves for the next one.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct LastRun {
+    version: Option<Version>,
 }
 
 #[derive(Debug)]
@@ -84,6 +92,22 @@ impl Store {
 
     pub(crate) fn save_totals(&self, totals: &Totals) -> Result<(), StorageError> {
         self.write(TOTALS_FILE, totals)
+    }
+
+    /// The version that ran last, or `None` before the first run that records one.
+    pub(crate) fn load_last_version(&self) -> Result<Option<Version>, StorageError> {
+        Ok(self
+            .read::<LastRun>(LAST_RUN_FILE)?
+            .and_then(|last| last.version))
+    }
+
+    pub(crate) fn save_last_version(&self, version: &Version) -> Result<(), StorageError> {
+        self.write(
+            LAST_RUN_FILE,
+            &LastRun {
+                version: Some(version.clone()),
+            },
+        )
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, StorageError> {
@@ -220,6 +244,42 @@ mod tests {
                 saved_bytes: 3_000_000_000,
             }
         );
+    }
+
+    #[test]
+    fn the_last_version_survives_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        assert_eq!(store.load_last_version().unwrap(), None);
+
+        let version: Version = "0.2.1".parse().unwrap();
+        store.save_last_version(&version).unwrap();
+        drop(store);
+
+        assert_eq!(
+            Store::at(directory.path().to_owned())
+                .unwrap()
+                .load_last_version()
+                .unwrap(),
+            Some(version)
+        );
+    }
+
+    #[test]
+    fn the_last_run_reads_older_and_newer_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        let file = directory.path().join(LAST_RUN_FILE);
+
+        fs::write(&file, b"{}").unwrap();
+        assert_eq!(store.load_last_version().unwrap(), None);
+        fs::write(&file, br#"{"version":"0.2.0","from_the_future":1}"#).unwrap();
+        assert_eq!(
+            store.load_last_version().unwrap(),
+            Some("0.2.0".parse().unwrap())
+        );
+        fs::write(&file, br#"{"version":"two"}"#).unwrap();
+        assert_matches!(store.load_last_version(), Err(StorageError::Json(_)));
     }
 
     #[test]

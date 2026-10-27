@@ -162,7 +162,7 @@ export const settingGroups = [
         id: "updates",
         fields: ["Check for updates"],
         title: "Updates are one click.",
-        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again. Turn it off and nothing is checked until you select Check now.",
+        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again, showing what is new. Turn it off and nothing is checked until you select Check now.",
       },
     ],
   },
