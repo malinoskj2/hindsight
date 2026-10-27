@@ -3,8 +3,8 @@
 
 use super::{
     layout::{
-        self, BUTTON_HEIGHT, BUTTON_WIDTH, Frame, INNER_WIDTH, INNER_X, LINE, Painted, TintedLabel,
-        VALUE_WIDTH, VALUE_X, button, label, saturating_i32, skin_button,
+        self, BUTTON_HEIGHT, Frame, INNER_WIDTH, INNER_X, LINE, Painted, TintedLabel, VALUE_WIDTH,
+        VALUE_X, button, label, saturating_i32, skin_button,
     },
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
@@ -31,6 +31,9 @@ const TEXT_X: i32 = INNER_X + LOGO + LOGO_GAP;
 const TEXT_WIDTH: i32 = INNER_WIDTH - LOGO - LOGO_GAP;
 const ROW_PITCH: i32 = 20;
 const BUTTON_GAP: i32 = 6;
+const BUTTON_COLUMNS: i32 = 3;
+/// A third of the group, so that a row of three buttons fills it.
+const BUTTON_WIDTH: i32 = (INNER_WIDTH - (BUTTON_COLUMNS - 1) * BUTTON_GAP) / BUTTON_COLUMNS;
 
 mod rows {
     use super::{BUTTON_HEIGHT, FIRST_FRAME, FIRST_ROW, LINE, ROW_PITCH};
@@ -454,7 +457,13 @@ mod tests {
             assert!(
                 rows::UPDATES_FRAME + rows::UPDATES_HEIGHT == layout::FILL_Y + layout::FILL_HEIGHT
             );
-            assert!(3 * BUTTON_WIDTH + 2 * BUTTON_GAP <= INNER_WIDTH);
+            assert!(
+                BUTTON_COLUMNS * BUTTON_WIDTH + (BUTTON_COLUMNS - 1) * BUTTON_GAP <= INNER_WIDTH
+            );
+            assert!(
+                INNER_WIDTH - (BUTTON_COLUMNS * BUTTON_WIDTH + (BUTTON_COLUMNS - 1) * BUTTON_GAP)
+                    < BUTTON_COLUMNS
+            );
         }
     }
 
