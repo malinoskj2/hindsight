@@ -401,7 +401,7 @@ pub(crate) enum SaveError {
 }
 
 impl SaveError {
-    fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
+    pub(crate) fn io(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
         move |source| Self::Io {
             step,
             path: path.to_owned(),
@@ -443,17 +443,32 @@ pub(crate) struct Saved {
     pub(crate) sound_error: Option<EncodeError>,
 }
 
-/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`. The file is written under
-/// a `.partial` name and renamed to its final one only once complete. Sound that cannot be
+/// Writes `snapshot` to `directory` as `hindsight_<date>_<time>.mp4`. Sound that cannot be
 /// encoded is left out rather than failing the save.
 pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveError> {
+    let (path, sound_error) = save_file(directory, ClipName::EXTENSION, |partial| {
+        write_file(snapshot, partial)
+    })?;
+    Ok(Saved { path, sound_error })
+}
+
+/// Creates `directory` and has `write` fill a file in it named for the time now with
+/// `extension`. The file is written under a `.partial` name and renamed to its final one only
+/// once complete.
+pub(crate) fn save_file<T, E: From<SaveError>>(
+    directory: &Path,
+    extension: &str,
+    write: impl FnOnce(&Path) -> Result<T, E>,
+) -> Result<(PathBuf, T), E> {
     fs::create_dir_all(directory).map_err(SaveError::io("create the clip folder", directory))?;
     let name = ClipName::now();
     let partial = directory
-        .join(name.file_name())
+        .join(name.file_name(extension))
         .with_extension(PARTIAL_EXTENSION);
-    let result = write_file(snapshot, &partial).and_then(|sound_error| {
-        claim_name(directory, name, &partial).map(|path| Saved { path, sound_error })
+    let result = write(&partial).and_then(|written| {
+        claim_name(directory, name, extension, &partial)
+            .map(|path| (path, written))
+            .map_err(E::from)
     });
     if result.is_err() {
         let _ = fs::remove_file(&partial);
@@ -463,10 +478,15 @@ pub(crate) fn save(snapshot: &Snapshot, directory: &Path) -> Result<Saved, SaveE
 
 /// Moves the finished `partial` to the first attempt of `name` that no file has. Each name is
 /// claimed by creating it, so a file that appears in the meantime is never replaced.
-fn claim_name(directory: &Path, name: ClipName, partial: &Path) -> Result<PathBuf, SaveError> {
+fn claim_name(
+    directory: &Path,
+    name: ClipName,
+    extension: &str,
+    partial: &Path,
+) -> Result<PathBuf, SaveError> {
     let mut name = name;
     for _ in 0..NAME_ATTEMPTS {
-        let path = directory.join(name.file_name());
+        let path = directory.join(name.file_name(extension));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(claimed) => {
                 drop(claimed);
@@ -482,12 +502,13 @@ fn claim_name(directory: &Path, name: ClipName, partial: &Path) -> Result<PathBu
             Err(error) => return Err(SaveError::io("name", &path)(error)),
         }
     }
-    Err(SaveError::io("name", &directory.join(name.file_name()))(
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "every name for this second is taken",
-        ),
-    ))
+    Err(SaveError::io(
+        "name",
+        &directory.join(name.file_name(extension)),
+    )(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "every name for this second is taken",
+    )))
 }
 
 /// Writes the clip to `path` and returns the reason the buffered sound was left out, if it was.
@@ -509,7 +530,7 @@ fn write_file(snapshot: &Snapshot, path: &Path) -> Result<Option<EncodeError>, S
     Ok(sound_error)
 }
 
-fn sync(output: BufWriter<File>) -> io::Result<()> {
+pub(crate) fn sync(output: BufWriter<File>) -> io::Result<()> {
     let file = output
         .into_inner()
         .map_err(io::IntoInnerError::into_error)?;

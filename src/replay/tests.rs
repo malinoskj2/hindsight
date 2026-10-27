@@ -659,12 +659,12 @@ fn saves_complete_files_under_unique_names() {
 fn a_name_another_file_holds_is_skipped_not_replaced() {
     let directory = tempfile::tempdir().unwrap();
     let name = ClipName::parse("hindsight_2026-10-12_21-14-05.mp4").unwrap();
-    let taken = directory.path().join(name.file_name());
+    let taken = directory.path().join(name.file_name(ClipName::EXTENSION));
     fs::write(&taken, b"theirs").unwrap();
     let partial = directory.path().join("clip.partial");
     fs::write(&partial, b"ours").unwrap();
 
-    let path = claim_name(directory.path(), name, &partial).unwrap();
+    let path = claim_name(directory.path(), name, ClipName::EXTENSION, &partial).unwrap();
 
     assert_eq!(
         path,
