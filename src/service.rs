@@ -1392,7 +1392,7 @@ fn sources(config: &Config) -> Sources {
     Sources {
         system: config.audio,
         microphone: config.microphone,
-        system_device: config.sound_device.clone(),
+        system_device: config.system_device.clone(),
         microphone_device: config.microphone_device.clone(),
     }
 }

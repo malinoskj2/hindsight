@@ -213,7 +213,7 @@ impl SettingsPage {
             return;
         };
         let choices = &self.0.recording.choices;
-        for field in [&choices.sound_device, &choices.microphone_device] {
+        for field in [&choices.system_device, &choices.microphone_device] {
             field.refill(devices, field.chosen().as_ref());
         }
     }
@@ -413,7 +413,7 @@ impl SettingsPage {
         let recording = &self.0.recording;
         let choices = &recording.choices;
         for (field, check_box) in [
-            (&choices.sound_device, &recording.audio),
+            (&choices.system_device, &recording.audio),
             (&choices.microphone_device, &recording.microphone),
         ] {
             field.field.hwnd().EnableWindow(check_box.is_checked());
@@ -515,7 +515,7 @@ impl SettingsPage {
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
             microphone: recording.microphone.is_checked(),
-            sound_device: recording.choices.sound_device.chosen(),
+            system_device: recording.choices.system_device.chosen(),
             microphone_device: recording.choices.microphone_device.chosen(),
             cursor: recording.cursor.is_checked(),
             buffer_memory: chosen(&recording.choices.memory, &Memory::ALL),
@@ -684,7 +684,7 @@ struct AdvancedChoices {
     memory: gui::ComboBox,
     container: gui::ComboBox,
     screenshot_format: gui::ComboBox,
-    sound_device: DeviceField,
+    system_device: DeviceField,
     microphone_device: DeviceField,
     captions: [gui::Label; 4],
 }
@@ -731,13 +731,13 @@ impl AdvancedChoices {
             &ScreenshotFormat::ALL.map(ScreenshotFormat::name),
             index_of(&ScreenshotFormat::ALL, config.screenshot_format),
         );
-        let sound_device = DeviceField::new(
+        let system_device = DeviceField::new(
             page,
             text::SOUND_DEVICE,
             rows::SOUND_DEVICE,
             Source::System,
             devices,
-            config.sound_device.as_ref(),
+            config.system_device.as_ref(),
         );
         let microphone_device = DeviceField::new(
             page,
@@ -753,7 +753,7 @@ impl AdvancedChoices {
             memory,
             container,
             screenshot_format,
-            sound_device,
+            system_device,
             microphone_device,
             captions: [
                 backend_caption,
@@ -765,7 +765,7 @@ impl AdvancedChoices {
     }
 
     fn controls(&self) -> impl Iterator<Item = Control> {
-        let devices = [&self.sound_device, &self.microphone_device];
+        let devices = [&self.system_device, &self.microphone_device];
         [
             &self.backend,
             &self.memory,
