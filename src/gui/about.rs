@@ -453,9 +453,8 @@ mod tests {
             [284, 304, 344, 92]
         );
         const {
-            // The pages end where About does, since it is the tallest of them.
             assert!(
-                rows::UPDATES_FRAME + rows::UPDATES_HEIGHT == layout::FILL_Y + layout::FILL_HEIGHT
+                rows::UPDATES_FRAME + rows::UPDATES_HEIGHT <= layout::FILL_Y + layout::FILL_HEIGHT
             );
             assert!(
                 BUTTON_COLUMNS * BUTTON_WIDTH + (BUTTON_COLUMNS - 1) * BUTTON_GAP <= INNER_WIDTH

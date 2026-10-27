@@ -3,9 +3,9 @@
 use super::{
     hotkey_field::{self, Capture},
     layout::{
-        self, BUTTON_HEIGHT, ExpandableGroup, FOOTER_PADDING, FOOTER_Y, Frame, INNER_WIDTH,
-        INNER_X, LINE, MARGIN, Painted, TintedLabel, WINDOW_WIDTH, button, hidden_label, label,
-        resize_width_by, saturating_i32, shift_by, skin_button, slide_by,
+        self, BUTTON_HEIGHT, ExpandableGroup, Frame, GROUP_WIDTH, GROUP_X, INNER_WIDTH, INNER_X,
+        LINE, Movable, Painted, TintedLabel, button, hidden_label, label, saturating_i32, shift_by,
+        skin_button,
     },
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
@@ -59,12 +59,13 @@ const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
 /// The extra space between Advanced's groups of rows: capture, output and sound.
 const GROUP_GAP: i32 = 8;
+/// Apply lines up with the groups' right edge.
+const APPLY_X: i32 = GROUP_X + GROUP_WIDTH - SMALL_BUTTON_WIDTH;
 /// The space between Apply and the message beside it.
-const FOOTER_GAP: i32 = 8;
+const APPLY_GAP: i32 = 8;
 /// How much taller the window is with Advanced open: its rows push the page past the height
 /// the other tabs need.
-const ADVANCED_EXTRA: i32 =
-    rows::GENERAL_FRAME + rows::GENERAL_HEIGHT - (layout::FILL_Y + layout::FILL_HEIGHT);
+const ADVANCED_EXTRA: i32 = rows::APPLY + BUTTON_HEIGHT - (layout::FILL_Y + layout::FILL_HEIGHT);
 
 /// The rows as laid out with Advanced open. Closed, its rows are hidden and everything below
 /// them moves up by [`rows::ADVANCED_HEIGHT`].
@@ -99,6 +100,8 @@ mod rows {
     pub(super) const CHECK_FOR_UPDATES: i32 = CLOSE_TO_TRAY + CHECK_PITCH;
     pub(super) const STARTUP_ERROR: i32 = CHECK_FOR_UPDATES + CHECK_PITCH;
     pub(super) const GENERAL_HEIGHT: i32 = CHECK_FOR_UPDATES + LINE + 6 - GENERAL_FRAME;
+    /// Under the groups, at the bottom of the page.
+    pub(super) const APPLY: i32 = GENERAL_FRAME + GENERAL_HEIGHT + 6;
 }
 
 /// Why the settings entered were not applied. Shown beside Apply.
@@ -126,7 +129,7 @@ struct Inner {
     recording: RecordingControls,
     hotkeys: HotkeyControls,
     general: GeneralControls,
-    footer: Rc<Footer>,
+    apply: ApplyControls,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
     /// `None` when the devices could not be listed, so only the default is offered.
@@ -143,7 +146,12 @@ impl Painted for Inner {
     }
 
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
-        [&self.recording.advanced.estimate, &self.general.error].into_iter()
+        [
+            &self.recording.advanced.estimate,
+            &self.general.error,
+            &self.apply.error,
+        ]
+        .into_iter()
     }
 }
 
@@ -162,11 +170,6 @@ impl Pane for SettingsPage {
         self.update_cursor_choice();
         self.update_device_choices();
         self.show_advanced(self.0.open_at_start);
-    }
-
-    /// Apply sits under the tabs, so it moves down with the window's bottom edge.
-    fn grow(&self, dy: i32) {
-        self.0.footer.shift(dy);
     }
 
     fn frames(&self) -> &[Frame] {
@@ -207,9 +210,10 @@ impl SettingsPage {
             rows::GENERAL_HEIGHT,
         );
         let general = GeneralControls::new(&page, config, start_with_windows);
-        let footer = Footer::new(parent, &codec_warning(config, codecs), skin);
+        let apply = ApplyControls::new(&page, &codec_warning(config, codecs), skin);
         let frames = vec![recording_frame, hotkeys_frame, general_frame];
-        let general_group = ExpandableGroup::new(2, general.error.label().clone(), 1);
+        let general_group =
+            ExpandableGroup::new(2, general.error.label().clone(), 1).moving(apply.movables());
         let inner = Rc::new(Inner {
             page,
             frames,
@@ -217,7 +221,7 @@ impl SettingsPage {
             recording,
             hotkeys,
             general,
-            footer: Rc::new(footer),
+            apply,
             codecs: codecs.to_vec(),
             devices,
             advanced_open: Cell::new(true),
@@ -254,21 +258,6 @@ impl SettingsPage {
         self.0.general_group.extra() + advanced
     }
 
-    /// Apply and its message, which the window paints because they sit on it, under the tabs.
-    pub(super) fn footer(&self) -> Rc<Footer> {
-        Rc::clone(&self.0.footer)
-    }
-
-    /// Shows Apply and its message while the Settings tab is the one selected.
-    pub(super) fn show_footer(&self, shown: bool) {
-        self.0.footer.show(shown);
-    }
-
-    /// Keeps Apply at the right edge of a window that widened by `dx`.
-    pub(super) fn widen(&self, dx: i32) {
-        self.0.footer.widen(dx);
-    }
-
     /// `toggled` is called with whether Advanced is now open, once the page has moved.
     pub(super) fn on_advanced_toggled(&self, toggled: impl Fn(bool) + 'static) {
         let page = self.clone();
@@ -300,6 +289,7 @@ impl SettingsPage {
             .controls
             .iter()
             .chain(&self.0.general.controls)
+            .chain(&self.0.apply.controls)
         {
             shift_by(control.hwnd(), delta);
         }
@@ -326,7 +316,7 @@ impl SettingsPage {
     }
 
     pub(super) fn on_apply(&self, apply: impl Fn() + 'static) {
-        self.0.footer.apply.on().bn_clicked(move || {
+        self.0.apply.apply.on().bn_clicked(move || {
             apply();
             Ok(())
         });
@@ -393,7 +383,7 @@ impl SettingsPage {
     /// `None` clears the message.
     pub(super) fn show_settings_error(&self, error: Option<&SettingsError>) {
         let message = error.map(ToString::to_string).unwrap_or_default();
-        self.0.footer.error.set_text(&message);
+        self.0.apply.error.set_text(&message);
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
@@ -690,59 +680,6 @@ impl RecordingControls {
             advanced_rows,
             _spins: [buffer_spin, frame_rate_spin],
         }
-    }
-}
-
-/// Apply and the message beside it, on the window in the strip under the tabs.
-pub(super) struct Footer {
-    apply: gui::Button,
-    error: TintedLabel,
-}
-
-impl Footer {
-    fn new(window: &(impl GuiParent + 'static), message: &str, skin: &Skin) -> Self {
-        let width = WINDOW_WIDTH + skin.extra_width();
-        let apply_x = width - MARGIN - SMALL_BUTTON_WIDTH;
-        let apply = button(window, text::APPLY, apply_x, FOOTER_Y, SMALL_BUTTON_WIDTH);
-        skin_button(&apply, skin);
-        // Sized for two lines, whose text fits the strip when the label starts at its top.
-        let error = label(
-            window,
-            message,
-            MARGIN,
-            FOOTER_Y - FOOTER_PADDING,
-            apply_x - FOOTER_GAP - MARGIN,
-            2,
-        );
-        Self {
-            apply,
-            error: TintedLabel::new(error, Tone::Error),
-        }
-    }
-
-    fn show(&self, shown: bool) {
-        layout::show(&self.apply, shown);
-        layout::show(self.error.label(), shown);
-    }
-
-    fn shift(&self, dy: i32) {
-        shift_by(self.apply.hwnd(), dy);
-        shift_by(self.error.label().hwnd(), dy);
-    }
-
-    fn widen(&self, dx: i32) {
-        slide_by(self.apply.hwnd(), dx);
-        resize_width_by(self.error.label().hwnd(), dx);
-    }
-}
-
-impl Painted for Footer {
-    fn frames(&self) -> &[Frame] {
-        &[]
-    }
-
-    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
-        std::iter::once(&self.error)
     }
 }
 
@@ -1105,6 +1042,41 @@ impl GeneralControls {
     }
 }
 
+/// Apply and the message beside it, under the groups at the page's bottom right.
+struct ApplyControls {
+    apply: gui::Button,
+    error: TintedLabel,
+    /// Both controls, which move with the groups above them when Advanced opens or closes.
+    controls: Vec<Control>,
+}
+
+impl ApplyControls {
+    fn new(page: &gui::TabPage, message: &str, skin: &Skin) -> Self {
+        let apply = button(page, text::APPLY, APPLY_X, rows::APPLY, SMALL_BUTTON_WIDTH);
+        skin_button(&apply, skin);
+        // Two lines, which reach the page's bottom edge from just above Apply.
+        let error = label(
+            page,
+            message,
+            GROUP_X,
+            rows::APPLY - 4,
+            APPLY_X - APPLY_GAP - GROUP_X,
+            2,
+        );
+        let controls: Vec<Control> = vec![Box::new(apply.clone()), Box::new(error.clone())];
+        Self {
+            apply,
+            error: TintedLabel::new(error, Tone::Error),
+            controls,
+        }
+    }
+
+    /// Both controls, for the General group to move down while its message shows.
+    fn movables(&self) -> [Movable; 2] {
+        [self.apply.clone().into(), self.error.label().clone().into()]
+    }
+}
+
 fn choice_field(
     page: &gui::TabPage,
     caption: &str,
@@ -1358,15 +1330,15 @@ mod tests {
             ],
             [464, 492, 514, 536, 558]
         );
+        assert_eq!(rows::APPLY, 566);
     }
 
     #[test]
-    fn closed_the_page_fits_the_window_and_open_it_grows_the_window_to_fit() {
-        let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
+    fn closed_the_page_sets_the_window_height_and_open_it_grows_the_window_to_fit() {
+        let bottom = rows::APPLY + BUTTON_HEIGHT;
         let fill = layout::FILL_Y + layout::FILL_HEIGHT;
-        assert!(bottom - rows::ADVANCED_HEIGHT <= fill);
-        assert_eq!(ADVANCED_EXTRA, 184);
-        assert_eq!(bottom, fill + ADVANCED_EXTRA);
+        assert_eq!(bottom - rows::ADVANCED_HEIGHT, fill);
+        assert_eq!(ADVANCED_EXTRA, rows::ADVANCED_HEIGHT);
     }
 
     #[test]
