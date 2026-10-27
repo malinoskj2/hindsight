@@ -33,17 +33,19 @@ use std::{
 use thiserror::Error;
 use winsafe::{co, gui, prelude::*};
 
-const FIELD_OFFSET: i32 = 108;
-// Each kind of field has one width: numbers small, the short lists compact, the lists of
-// choices medium, and paths and devices, whose values run long, the rest of the row.
+const FIELD_OFFSET: i32 = 96;
+const COLUMN_GAP: i32 = 12;
+/// Each of the two columns, which hold a caption and a field of the same widths.
+const COLUMN_WIDTH: i32 = (INNER_WIDTH - COLUMN_GAP) / 2;
+const COLUMN_X: i32 = INNER_X + COLUMN_WIDTH + COLUMN_GAP;
+// Each kind of field has one width: numbers small; the short lists and the hotkeys compact,
+// filling a column; the lists of choices medium; and paths and devices, whose values run long,
+// the rest of the row.
 const NUMBER_WIDTH: i32 = 52;
-const COMPACT_WIDTH: i32 = 88;
+const COMPACT_WIDTH: i32 = COLUMN_WIDTH - FIELD_OFFSET;
 const CHOICE_WIDTH: i32 = 190;
 /// The width of a field that reaches the group's right edge from the first column.
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
-const HOTKEY_WIDTH: i32 = 140;
-/// The second column, placed so that its compact lists end at the group's right edge.
-const COLUMN_X: i32 = INNER_X + INNER_WIDTH - COMPACT_WIDTH - FIELD_OFFSET;
 /// The width of a check box in the second column, which has no caption beside it.
 const CHECK_COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X);
 /// Browse and Apply.
@@ -71,9 +73,7 @@ mod rows {
 
     pub(super) const RECORDING_FRAME: i32 = FIRST_FRAME;
     pub(super) const REPLAY_LENGTH: i32 = RECORDING_FRAME + FIRST_ROW;
-    pub(super) const HOTKEY: i32 = REPLAY_LENGTH + FIELD_PITCH;
-    pub(super) const SCREENSHOT_HOTKEY: i32 = HOTKEY + FIELD_PITCH;
-    pub(super) const MODE: i32 = SCREENSHOT_HOTKEY + FIELD_PITCH;
+    pub(super) const MODE: i32 = REPLAY_LENGTH + FIELD_PITCH;
     pub(super) const FOLDER: i32 = MODE + FIELD_PITCH;
     pub(super) const AUDIO: i32 = FOLDER + FIELD_PITCH;
     pub(super) const CURSOR: i32 = AUDIO + CHECK_PITCH;
@@ -89,7 +89,10 @@ mod rows {
     const ADVANCED_END: i32 = MICROPHONE_DEVICE + FIELD_PITCH;
     pub(super) const ADVANCED_HEIGHT: i32 = ADVANCED_END - BACKEND;
     pub(super) const RECORDING_HEIGHT: i32 = ADVANCED_END + 2 - RECORDING_FRAME;
-    pub(super) const GENERAL_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
+    pub(super) const HOTKEYS_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
+    pub(super) const HOTKEYS: i32 = HOTKEYS_FRAME + FIRST_ROW;
+    pub(super) const HOTKEYS_HEIGHT: i32 = HOTKEYS + FIELD_PITCH + 2 - HOTKEYS_FRAME;
+    pub(super) const GENERAL_FRAME: i32 = HOTKEYS_FRAME + HOTKEYS_HEIGHT;
     pub(super) const THEME: i32 = GENERAL_FRAME + FIRST_ROW;
     pub(super) const START_WITH_WINDOWS: i32 = THEME + FIELD_PITCH;
     pub(super) const CLOSE_TO_TRAY: i32 = START_WITH_WINDOWS + CHECK_PITCH;
@@ -121,6 +124,7 @@ struct Inner {
     frames: Vec<Frame>,
     general_group: ExpandableGroup,
     recording: RecordingControls,
+    hotkeys: HotkeyControls,
     general: GeneralControls,
     footer: Rc<Footer>,
     /// The codecs offered, in the order of the codec list's items.
@@ -189,6 +193,13 @@ impl SettingsPage {
             .inspect_err(|error| log::warning(text::devices_not_listed(error)))
             .ok();
         let recording = RecordingControls::new(&page, config, codecs, devices.as_ref(), skin);
+        let hotkeys_frame = Frame::new(
+            &page,
+            text::GROUP_HOTKEYS,
+            rows::HOTKEYS_FRAME,
+            rows::HOTKEYS_HEIGHT,
+        );
+        let hotkeys = HotkeyControls::new(&page, config);
         let general_frame = Frame::new(
             &page,
             text::GROUP_GENERAL,
@@ -197,13 +208,14 @@ impl SettingsPage {
         );
         let general = GeneralControls::new(&page, config, start_with_windows);
         let footer = Footer::new(parent, &codec_warning(config, codecs), skin);
-        let frames = vec![recording_frame, general_frame];
-        let general_group = ExpandableGroup::new(1, general.error.label().clone(), 1);
+        let frames = vec![recording_frame, hotkeys_frame, general_frame];
+        let general_group = ExpandableGroup::new(2, general.error.label().clone(), 1);
         let inner = Rc::new(Inner {
             page,
             frames,
             general_group,
             recording,
+            hotkeys,
             general,
             footer: Rc::new(footer),
             codecs: codecs.to_vec(),
@@ -282,7 +294,13 @@ impl SettingsPage {
         } else {
             -rows::ADVANCED_HEIGHT
         });
-        for control in &self.0.general.controls {
+        for control in self
+            .0
+            .hotkeys
+            .controls
+            .iter()
+            .chain(&self.0.general.controls)
+        {
             shift_by(control.hwnd(), delta);
         }
         if let [recording_frame, rest @ ..] = &self.0.frames[..] {
@@ -379,11 +397,11 @@ impl SettingsPage {
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
-        layout::set_text(&self.0.recording.hotkey, hotkey);
+        layout::set_text(&self.0.hotkeys.save, hotkey);
     }
 
     pub(super) fn show_screenshot_hotkey(&self, hotkey: &str) {
-        layout::set_text(&self.0.recording.screenshot_hotkey, hotkey);
+        layout::set_text(&self.0.hotkeys.screenshot, hotkey);
     }
 
     /// Reports whether the General group changed height.
@@ -392,10 +410,7 @@ impl SettingsPage {
     }
 
     fn hotkey_fields(&self) -> [&gui::Edit; 2] {
-        [
-            &self.0.recording.hotkey,
-            &self.0.recording.screenshot_hotkey,
-        ]
+        [&self.0.hotkeys.save, &self.0.hotkeys.screenshot]
     }
 
     fn estimate_events(&self) {
@@ -532,8 +547,8 @@ impl SettingsPage {
         let required = |field: &gui::Edit| number(field).ok_or(SettingsError::NumberRequired);
         let recording = &self.0.recording;
         let advanced = &recording.advanced;
-        let hotkey = recording.hotkey.text().unwrap_or_default();
-        let screenshot_hotkey = recording.screenshot_hotkey.text().unwrap_or_default();
+        let hotkey = self.0.hotkeys.save.text().unwrap_or_default();
+        let screenshot_hotkey = self.0.hotkeys.screenshot.text().unwrap_or_default();
         let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
             mode: chosen(&recording.mode, &Mode::ALL),
@@ -571,8 +586,6 @@ type Control = Box<dyn GuiWindow>;
 struct RecordingControls {
     buffer_seconds: gui::Edit,
     frame_rate: gui::Edit,
-    hotkey: gui::Edit,
-    screenshot_hotkey: gui::Edit,
     mode: gui::ComboBox,
     folder: gui::Edit,
     browse: gui::Button,
@@ -611,7 +624,6 @@ impl RecordingControls {
             (MIN_FRAME_RATE, MAX_FRAME_RATE),
             config.frame_rate,
         );
-        let [hotkey, screenshot_hotkey] = hotkey_fields(page, config);
         let (mode, _) = choice_field(
             page,
             text::MODE,
@@ -621,9 +633,10 @@ impl RecordingControls {
             &Mode::ALL.map(Mode::name),
             index_of(&Mode::ALL, config.mode),
         );
-        let folder = text_field(
+        let (folder, _) = text_field(
             page,
             text::FOLDER,
+            INNER_X,
             rows::FOLDER,
             FOLDER_WIDTH,
             &config.clip_directory().display().to_string(),
@@ -666,8 +679,6 @@ impl RecordingControls {
         Self {
             buffer_seconds,
             frame_rate,
-            hotkey,
-            screenshot_hotkey,
             mode,
             folder,
             browse,
@@ -735,26 +746,47 @@ impl Painted for Footer {
     }
 }
 
-/// The save and screenshot hotkeys, each taking a pressed combination.
-fn hotkey_fields(page: &gui::TabPage, config: &Config) -> [gui::Edit; 2] {
-    let hotkey = text_field(
-        page,
-        text::HOTKEY,
-        rows::HOTKEY,
-        HOTKEY_WIDTH,
-        &config.hotkey.to_string(),
-    );
-    let screenshot_hotkey = text_field(
-        page,
-        text::SCREENSHOT_HOTKEY,
-        rows::SCREENSHOT_HOTKEY,
-        HOTKEY_WIDTH,
-        &config.screenshot_hotkey.to_string(),
-    );
-    for field in [&hotkey, &screenshot_hotkey] {
-        hotkey_field::capture(field);
+/// The save and screenshot hotkeys, side by side, each taking a pressed combination.
+struct HotkeyControls {
+    save: gui::Edit,
+    screenshot: gui::Edit,
+    /// Every control in the group, which moves with it when Advanced opens or closes.
+    controls: Vec<Control>,
+}
+
+impl HotkeyControls {
+    fn new(page: &gui::TabPage, config: &Config) -> Self {
+        let (save, save_caption) = text_field(
+            page,
+            text::HOTKEY,
+            INNER_X,
+            rows::HOTKEYS,
+            COMPACT_WIDTH,
+            &config.hotkey.to_string(),
+        );
+        let (screenshot, screenshot_caption) = text_field(
+            page,
+            text::SCREENSHOT_HOTKEY,
+            COLUMN_X,
+            rows::HOTKEYS,
+            COMPACT_WIDTH,
+            &config.screenshot_hotkey.to_string(),
+        );
+        for field in [&save, &screenshot] {
+            hotkey_field::capture(field);
+        }
+        let controls: Vec<Control> = vec![
+            Box::new(save.clone()),
+            Box::new(save_caption),
+            Box::new(screenshot.clone()),
+            Box::new(screenshot_caption),
+        ];
+        Self {
+            save,
+            screenshot,
+            controls,
+        }
     }
-    [hotkey, screenshot_hotkey]
 }
 
 /// The fields under Advanced, created in its row order: capture, then output, then sound.
@@ -1158,18 +1190,26 @@ fn check_box(
     )
 }
 
-fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &str) -> gui::Edit {
-    let _caption = field_caption(page, caption, INNER_X, y);
-    gui::Edit::new(
+fn text_field(
+    page: &gui::TabPage,
+    caption: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    value: &str,
+) -> (gui::Edit, gui::Label) {
+    let caption = field_caption(page, caption, x, y);
+    let field = gui::Edit::new(
         page,
         gui::EditOpts {
             text: value,
-            position: gui::dpi(INNER_X + FIELD_OFFSET, y),
+            position: gui::dpi(x + FIELD_OFFSET, y),
             width: gui::dpi_x(width),
             control_style: co::ES::AUTOHSCROLL | co::ES::NOHIDESEL,
             ..Default::default()
         },
-    )
+    );
+    (field, caption)
 }
 
 /// Also logs the warning, because the label is seen only once the tab is.
@@ -1281,15 +1321,13 @@ mod tests {
         assert_eq!(
             [
                 rows::REPLAY_LENGTH,
-                rows::HOTKEY,
-                rows::SCREENSHOT_HOTKEY,
                 rows::MODE,
                 rows::FOLDER,
                 rows::AUDIO,
                 rows::CURSOR,
                 rows::ADVANCED,
             ],
-            [26, 54, 82, 110, 138, 166, 188, 212]
+            [26, 54, 82, 110, 132, 156]
         );
         assert_eq!(
             [
@@ -1302,10 +1340,14 @@ mod tests {
                 rows::MICROPHONE_DEVICE,
                 rows::ADVANCED_HEIGHT,
             ],
-            [244, 272, 300, 326, 356, 392, 420, 204]
+            [188, 216, 244, 270, 300, 336, 364, 204]
         );
-        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 444));
-        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (450, 116));
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 388));
+        assert_eq!(
+            (rows::HOTKEYS_FRAME, rows::HOTKEYS, rows::HOTKEYS_HEIGHT),
+            (394, 414, 50)
+        );
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (444, 116));
         assert_eq!(
             [
                 rows::THEME,
@@ -1314,7 +1356,7 @@ mod tests {
                 rows::CHECK_FOR_UPDATES,
                 rows::STARTUP_ERROR
             ],
-            [470, 498, 520, 542, 564]
+            [464, 492, 514, 536, 558]
         );
     }
 
@@ -1323,7 +1365,7 @@ mod tests {
         let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
         let fill = layout::FILL_Y + layout::FILL_HEIGHT;
         assert!(bottom - rows::ADVANCED_HEIGHT <= fill);
-        assert_eq!(ADVANCED_EXTRA, 190);
+        assert_eq!(ADVANCED_EXTRA, 184);
         assert_eq!(bottom, fill + ADVANCED_EXTRA);
     }
 
