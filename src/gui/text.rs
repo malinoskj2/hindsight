@@ -85,6 +85,7 @@ pub(super) const COMPILER: &str = "Compiler";
 pub(super) const WINDOWS: &str = "Windows";
 pub(super) const GPU: &str = "GPU";
 pub(super) const LINK_WEBSITE: &str = "Website";
+pub(super) const LINK_GITHUB: &str = "GitHub";
 pub(super) const LINK_REPORT: &str = "Report a problem";
 pub(super) const LINK_LOG_FOLDER: &str = "Open log folder";
 pub(super) const GROUP_UPDATES: &str = "Updates";

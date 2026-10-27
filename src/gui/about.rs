@@ -19,6 +19,7 @@ use crate::{
 use std::{cell::RefCell, path::Path, rc::Rc};
 use winsafe::{self as w, co, guard::DestroyIconGuard, gui, prelude::*};
 
+const HOMEPAGE: &str = env!("CARGO_PKG_HOMEPAGE");
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const COMMIT: &str = env!("HINDSIGHT_COMMIT");
 const BUILD_DATE: &str = env!("HINDSIGHT_BUILD_DATE");
@@ -45,7 +46,8 @@ mod rows {
     pub(super) const GPU: i32 = WINDOWS + ROW_PITCH;
     pub(super) const DETAILS_HEIGHT: i32 = GPU + LINE + 2 - DETAILS_FRAME;
     pub(super) const LINKS_FRAME: i32 = DETAILS_FRAME + DETAILS_HEIGHT + 6;
-    pub(super) const LINKS: i32 = LINKS_FRAME + FIRST_ROW - 2;
+    pub(super) const WEBSITE: i32 = LINKS_FRAME + FIRST_ROW - 2;
+    pub(super) const LINKS: i32 = WEBSITE + BUTTON_HEIGHT + 6;
     pub(super) const LINKS_HEIGHT: i32 = LINKS + BUTTON_HEIGHT + 8 - LINKS_FRAME;
     pub(super) const UPDATES_FRAME: i32 = LINKS_FRAME + LINKS_HEIGHT + 6;
     pub(super) const UPDATE_STATE: i32 = UPDATES_FRAME + FIRST_ROW;
@@ -59,6 +61,7 @@ const DETAIL_ROWS: [i32; 4] = [rows::BUILD, rows::COMPILER, rows::WINDOWS, rows:
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Link {
     Website,
+    GitHub,
     Report,
     LogFolder,
 }
@@ -253,21 +256,26 @@ fn details() -> [(&'static str, String); 4] {
     ]
 }
 
+/// The website sits on a row of its own, above the GitHub button.
 fn buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, Link)> {
-    [
-        (text::LINK_WEBSITE, Link::Website),
+    let website = (text::LINK_WEBSITE, Link::Website, 0, rows::WEBSITE);
+    let row = [
+        (text::LINK_GITHUB, Link::GitHub),
         (text::LINK_REPORT, Link::Report),
         (text::LINK_LOG_FOLDER, Link::LogFolder),
     ]
     .into_iter()
     .enumerate()
-    .map(|(index, (caption, link))| {
-        let x = INNER_X + saturating_i32(index) * (BUTTON_WIDTH + BUTTON_GAP);
-        let button = button(page, caption, x, rows::LINKS, BUTTON_WIDTH);
-        skin_button(&button, skin);
-        (button, link)
-    })
-    .collect()
+    .map(|(index, (caption, link))| (caption, link, index, rows::LINKS));
+    std::iter::once(website)
+        .chain(row)
+        .map(|(caption, link, column, y)| {
+            let x = INNER_X + saturating_i32(column) * (BUTTON_WIDTH + BUTTON_GAP);
+            let button = button(page, caption, x, y, BUTTON_WIDTH);
+            skin_button(&button, skin);
+            (button, link)
+        })
+        .collect()
 }
 
 fn update_buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, UpdateAction)> {
@@ -297,7 +305,8 @@ fn install_caption(installation: &Installation) -> &'static str {
 
 fn follow(link: Link) {
     match link {
-        Link::Website => open_link(REPOSITORY),
+        Link::Website => open_link(HOMEPAGE),
+        Link::GitHub => open_link(REPOSITORY),
         Link::Report => open_link(&issues_url(REPOSITORY)),
         Link::LogFolder => open_log_folder(),
     }
@@ -422,8 +431,13 @@ mod tests {
             [92, 112, 172, 100]
         );
         assert_eq!(
-            [rows::LINKS_FRAME, rows::LINKS, rows::LINKS_HEIGHT],
-            [198, 216, 50]
+            [
+                rows::LINKS_FRAME,
+                rows::WEBSITE,
+                rows::LINKS,
+                rows::LINKS_HEIGHT
+            ],
+            [198, 216, 246, 80]
         );
         assert_eq!(
             [
@@ -432,7 +446,7 @@ mod tests {
                 rows::UPDATE_BUTTONS,
                 rows::UPDATES_HEIGHT
             ],
-            [254, 274, 314, 92]
+            [284, 304, 344, 92]
         );
         const {
             assert!(
