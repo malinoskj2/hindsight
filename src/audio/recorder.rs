@@ -171,7 +171,7 @@ fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &StandInFlag
         }
         for input in inputs.iter_mut() {
             input.device.update(devices, changes);
-            stand_ins.set(input.device.source, input.device.standing_in);
+            stand_ins.set(input.device.source, input.device.standing_in());
         }
         let interval = inputs
             .iter()
@@ -293,8 +293,6 @@ struct Device {
     /// The device chosen in Settings, or `None` to follow Windows' default.
     choice: Option<DeviceId>,
     state: DeviceState,
-    /// The default device was last opened in place of the chosen one, which was missing.
-    standing_in: bool,
     /// When to next check the devices or try to open one. `None` means now.
     due: Option<Instant>,
 }
@@ -302,19 +300,12 @@ struct Device {
 enum DeviceState {
     Open(wasapi::Stream),
     Closed {
-        /// A device was open before, so opening one is logged as a return.
-        opened_before: bool,
+        /// Why the device open before was picked, or `None` when none was. Opening one after
+        /// another is logged as a return, and the default standing in is logged once.
+        previous: Option<Picked>,
         /// A failure to open has been logged since the last success, so another is not.
         reported: bool,
     },
-}
-
-impl DeviceState {
-    /// The state after a device that was open closes.
-    const CLOSED_AFTER_OPEN: Self = Self::Closed {
-        opened_before: true,
-        reported: false,
-    };
 }
 
 impl Device {
@@ -323,11 +314,25 @@ impl Device {
             source,
             choice,
             state: DeviceState::Closed {
-                opened_before: false,
+                previous: None,
                 reported: false,
             },
-            standing_in: false,
             due: None,
+        }
+    }
+
+    /// Whether the default device is open in place of the chosen one, which is missing.
+    fn standing_in(&self) -> bool {
+        matches!(&self.state, DeviceState::Open(stream) if stream.picked() == Picked::StandIn)
+    }
+
+    /// Closes the open device, keeping why it was picked for the next open.
+    fn close(&mut self) {
+        if let DeviceState::Open(stream) = &self.state {
+            self.state = DeviceState::Closed {
+                previous: Some(stream.picked()),
+                reported: false,
+            };
         }
     }
 
@@ -377,7 +382,7 @@ impl Device {
         } else {
             log::info(format!("{label} · default {device} changed · switching"));
         }
-        self.state = DeviceState::CLOSED_AFTER_OPEN;
+        self.close();
         let opened = pick.open(self.source);
         self.opened(opened, now);
     }
@@ -394,11 +399,7 @@ impl Device {
 
     /// Takes the stream an attempt to open a device made, while the state is closed.
     fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
-        let DeviceState::Closed {
-            opened_before,
-            reported,
-        } = &mut self.state
-        else {
+        let DeviceState::Closed { previous, reported } = &mut self.state else {
             return;
         };
         let (label, device) = names(self.source);
@@ -407,15 +408,13 @@ impl Device {
                 log::info(format!(
                     "{label} · {}{}",
                     stream.name(),
-                    if *opened_before { " · again" } else { "" }
+                    if previous.is_some() { " · again" } else { "" }
                 ));
-                let standing_in = stream.picked() == Picked::StandIn;
-                if standing_in && !self.standing_in {
+                if stream.picked() == Picked::StandIn && *previous != Some(Picked::StandIn) {
                     log::warning(format!(
                         "{label} · chosen {device} missing · the default until it returns"
                     ));
                 }
-                self.standing_in = standing_in;
                 self.state = DeviceState::Open(stream);
                 self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
@@ -443,7 +442,7 @@ impl Device {
         } else {
             log::warning(format!("{label} · capture failed ({error}) · reopening"));
         }
-        self.state = DeviceState::CLOSED_AFTER_OPEN;
+        self.close();
         self.due = None;
     }
 
