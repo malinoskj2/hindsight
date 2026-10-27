@@ -1,5 +1,5 @@
 //! The names saved clips get, `hindsight_YYYY-MM-DD_HH-MM-SS[-n].mp4`, where `-n` counts a
-//! second clip within one second.
+//! second clip within one second. Screenshots are named the same way with their own extension.
 
 use crate::log;
 
@@ -33,9 +33,8 @@ impl ClipName {
         }
     }
 
-    pub(crate) fn file_name(&self) -> String {
+    pub(crate) fn file_name(&self, extension: &str) -> String {
         let Self { stamp, attempt } = self;
-        let extension = Self::EXTENSION;
         if *attempt == 1 {
             format!("{PREFIX}{stamp}.{extension}")
         } else {
@@ -109,13 +108,24 @@ mod tests {
         let first = ClipName::now();
         let second = first.next();
         for name in [&first, &second, &second.next()] {
-            assert_eq!(ClipName::parse(&name.file_name()).as_ref(), Some(name));
+            assert_eq!(
+                ClipName::parse(&name.file_name(ClipName::EXTENSION)).as_ref(),
+                Some(name)
+            );
         }
         assert!(first < second);
-        assert_eq!(first.file_name(), format!("hindsight_{}.mp4", first.stamp));
         assert_eq!(
-            second.file_name(),
+            first.file_name(ClipName::EXTENSION),
+            format!("hindsight_{}.mp4", first.stamp)
+        );
+        assert_eq!(
+            second.file_name(ClipName::EXTENSION),
             format!("hindsight_{}-2.mp4", first.stamp)
         );
+        assert_eq!(
+            second.file_name("png"),
+            format!("hindsight_{}-2.png", first.stamp)
+        );
+        assert_eq!(ClipName::parse(&first.file_name("png")), None);
     }
 }

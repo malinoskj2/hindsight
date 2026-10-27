@@ -475,6 +475,16 @@ impl DeviceBuffer {
         self.hold.make_current()
     }
 
+    /// Allocates another buffer in this buffer's context.
+    pub(super) fn allocate_beside(&self, bytes: usize) -> Result<Self, CudaError> {
+        self.hold.allocate(bytes)
+    }
+
+    /// Waits for the work queued on the null stream of the current context.
+    pub(super) fn synchronize(&self) -> Result<(), CudaError> {
+        self.hold.driver.synchronize()
+    }
+
     /// Copies the bytes starting at `offset` into `into`. The buffer's context must be current.
     pub(super) fn copy_to_host(&self, offset: usize, into: &mut [u8]) -> Result<(), CudaError> {
         self.check_range(offset, into.len())?;

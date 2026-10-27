@@ -34,8 +34,6 @@ const HOTKEY_WIDTH: i32 = 100;
 const CHOICE_WIDTH: i32 = 190;
 /// The width of a field that reaches the group's right edge from the first column.
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
-/// The same width from the second column.
-const COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X) - FIELD_OFFSET;
 /// The width of a check box in the second column, which has no caption beside it.
 const CHECK_COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X);
 const ERROR_X: i32 = BUTTON_WIDTH + 8;
@@ -55,7 +53,8 @@ mod rows {
     pub(super) const REPLAY_LENGTH: i32 = RECORDING_FRAME + FIRST_ROW;
     pub(super) const ENCODING: i32 = REPLAY_LENGTH + FIELD_PITCH;
     pub(super) const HOTKEY: i32 = ENCODING + FIELD_PITCH;
-    pub(super) const BACKEND: i32 = HOTKEY + FIELD_PITCH;
+    pub(super) const MODE: i32 = HOTKEY + FIELD_PITCH;
+    pub(super) const BACKEND: i32 = MODE + FIELD_PITCH;
     pub(super) const FOLDER: i32 = BACKEND + FIELD_PITCH;
     pub(super) const MEMORY: i32 = FOLDER + FIELD_PITCH;
     pub(super) const AUDIO: i32 = MEMORY + FIELD_PITCH;
@@ -78,6 +77,8 @@ pub(super) enum SettingsError {
     NumberRequired,
     #[error(transparent)]
     Hotkey(#[from] hotkey::ParseError),
+    #[error("screenshot hotkey: {0}")]
+    ScreenshotHotkey(hotkey::ParseError),
     #[error(transparent)]
     Invalid(#[from] ConfigError),
     #[error(transparent)]
@@ -245,13 +246,20 @@ impl SettingsPage {
         layout::set_text(&self.0.recording.hotkey, hotkey);
     }
 
+    pub(super) fn show_screenshot_hotkey(&self, hotkey: &str) {
+        layout::set_text(&self.0.recording.screenshot_hotkey, hotkey);
+    }
+
     /// Reports whether the General group changed height.
     pub(super) fn show_startup_error(&self, message: Option<&str>) -> bool {
         self.0.general_group.set_message(&self.0.frames, message)
     }
 
-    fn hotkey_fields(&self) -> [&gui::Edit; 1] {
-        [&self.0.recording.hotkey]
+    fn hotkey_fields(&self) -> [&gui::Edit; 2] {
+        [
+            &self.0.recording.hotkey,
+            &self.0.recording.screenshot_hotkey,
+        ]
     }
 
     fn estimate_events(&self) {
@@ -356,6 +364,7 @@ impl SettingsPage {
         let recording = &self.0.recording;
         let encoding = &recording.encoding;
         let hotkey = recording.hotkey.text().unwrap_or_default();
+        let screenshot_hotkey = recording.screenshot_hotkey.text().unwrap_or_default();
         let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
             mode: chosen(&recording.mode, &Mode::ALL),
@@ -365,6 +374,10 @@ impl SettingsPage {
             buffer_seconds: required(&encoding.buffer_seconds)?,
             bitrate_mbps: required(&encoding.bitrate)?,
             hotkey: hotkey.trim().parse()?,
+            screenshot_hotkey: screenshot_hotkey
+                .trim()
+                .parse()
+                .map_err(SettingsError::ScreenshotHotkey)?,
             clip_directory: stored_folder(folder.trim()),
             audio: recording.audio.is_checked(),
             microphone: recording.microphone.is_checked(),
@@ -379,6 +392,7 @@ impl SettingsPage {
 struct RecordingControls {
     encoding: EncodingFields,
     hotkey: gui::Edit,
+    screenshot_hotkey: gui::Edit,
     mode: gui::ComboBox,
     backend: gui::ComboBox,
     /// The backends offered, in the order of the backend list's items.
@@ -405,6 +419,15 @@ impl RecordingControls {
             &config.hotkey.to_string(),
         );
         hotkey_field::capture(&hotkey);
+        let screenshot_hotkey = text_field_at(
+            page,
+            text::SCREENSHOT_HOTKEY,
+            COLUMN_X,
+            rows::HOTKEY,
+            HOTKEY_WIDTH,
+            &config.screenshot_hotkey.to_string(),
+        );
+        hotkey_field::capture(&screenshot_hotkey);
         let backends = Backend::offered(config.backend);
         let (mode, backend) = source_fields(page, config, &backends);
         let folder = text_field(
@@ -467,6 +490,7 @@ impl RecordingControls {
         Self {
             encoding,
             hotkey,
+            screenshot_hotkey,
             mode,
             backend,
             backends,
@@ -669,12 +693,23 @@ fn check_box(
 }
 
 fn text_field(page: &gui::TabPage, caption: &str, y: i32, width: i32, value: &str) -> gui::Edit {
-    field_caption(page, caption, INNER_X, y);
+    text_field_at(page, caption, INNER_X, y, width, value)
+}
+
+fn text_field_at(
+    page: &gui::TabPage,
+    caption: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    value: &str,
+) -> gui::Edit {
+    field_caption(page, caption, x, y);
     gui::Edit::new(
         page,
         gui::EditOpts {
             text: value,
-            position: gui::dpi(INNER_X + FIELD_OFFSET, y),
+            position: gui::dpi(x + FIELD_OFFSET, y),
             width: gui::dpi_x(width),
             control_style: co::ES::AUTOHSCROLL | co::ES::NOHIDESEL,
             ..Default::default()
@@ -690,9 +725,9 @@ fn source_fields(
     let mode = choice_field(
         page,
         text::MODE,
-        COLUMN_X,
-        rows::HOTKEY,
-        COLUMN_WIDTH,
+        INNER_X,
+        rows::MODE,
+        CHOICE_WIDTH,
         &Mode::ALL.map(Mode::name),
         index_of(&Mode::ALL, config.mode),
     );
@@ -787,6 +822,11 @@ mod tests {
         let parse = "".parse::<hotkey::Hotkey>().unwrap_err();
         let shown = parse.to_string();
         assert_eq!(SettingsError::from(parse).to_string(), shown);
+        let parse = "".parse::<hotkey::Hotkey>().unwrap_err();
+        assert_eq!(
+            SettingsError::ScreenshotHotkey(parse).to_string(),
+            format!("screenshot hotkey: {shown}")
+        );
         assert_eq!(
             SettingsError::from(ConfigError::Buffer).to_string(),
             ConfigError::Buffer.to_string()
@@ -800,6 +840,7 @@ mod tests {
                 rows::REPLAY_LENGTH,
                 rows::ENCODING,
                 rows::HOTKEY,
+                rows::MODE,
                 rows::BACKEND,
                 rows::FOLDER,
                 rows::MEMORY,
@@ -808,10 +849,10 @@ mod tests {
                 rows::ESTIMATE,
                 rows::APPLY,
             ],
-            [26, 54, 82, 110, 138, 166, 194, 216, 242, 260]
+            [26, 54, 82, 110, 138, 166, 194, 222, 244, 270, 288]
         );
-        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 292));
-        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (298, 94));
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 320));
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (326, 94));
         assert_eq!(
             rows::GENERAL_FRAME + rows::GENERAL_HEIGHT,
             layout::FILL_Y + layout::FILL_HEIGHT
@@ -823,7 +864,7 @@ mod tests {
                 rows::CLOSE_TO_TRAY,
                 rows::STARTUP_ERROR
             ],
-            [318, 346, 368, 390]
+            [346, 374, 396, 418]
         );
     }
 

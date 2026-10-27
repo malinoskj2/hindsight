@@ -505,10 +505,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a clip in %USERPROFILE%\\Videos\\hindsight and the shell's video codecs"]
+    #[ignore = "needs a clip in %USERPROFILE%\\Videos\\hindsight\\videos and the shell's video codecs"]
     fn by_hand_the_shell_gives_a_thumbnail_for_a_real_clip() {
         let _com = Apartment::single_threaded().unwrap();
-        let folder = crate::config::default_clip_directory();
+        let folder = crate::config::Config::default().video_directory();
         let clip = std::fs::read_dir(&folder)
             .unwrap()
             .flatten()

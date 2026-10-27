@@ -29,7 +29,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 
 1. Download **`hindsight-setup-x64.exe`** from the [Releases page](https://github.com/malinoskj2/hindsight/releases) and run it.
 2. Launch **hindsight** from the Start menu. It waits for a full-screen app, then records it.
-3. Play. When something happens that you want to keep, press **Alt+F10** (or the hotkey you set) to save what just happened as a clip.
+3. Play. When something happens that you want to keep, press **Alt+F10** (or the hotkey you set) to save what just happened as a clip, or **Alt+F11** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
 ## How it stays light
@@ -40,6 +40,7 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 - **Nothing runs on the shader cores.** Single-pass rate control, no B-frames, no lookahead, no adaptive quantization. An unchanged screen is repeated GPU-side.
 - **Capture gets the GPU first.** High GPU thread and scheduling priority, never realtime, and no power throttling.
 - **Sound is kept raw** and mixed and encoded to AAC only when you save, on the saving thread. The microphone is read on the same thread as system sound and kept in mono. Long silences are dropped.
+- **Screenshots cost nothing until you take one.** The capture thread looks for a request with one atomic read per frame. A screenshot copies the picture the encoder was given on the GPU, and a background thread reads it back and writes the PNG.
 - **Saves run in the background** at low CPU, I/O and memory priority, so they never compete with the game.
 
 Run as administrator for the highest GPU priority. To check for yourself, compare CPU use and frame times (PresentMon or CapFrameX) with hindsight, with Instant Replay and with neither.

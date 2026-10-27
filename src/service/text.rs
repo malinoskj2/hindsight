@@ -26,7 +26,7 @@ pub(super) fn settings_applied(config: &Config) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
             f,
-            "Settings · {} · {} · {} · {} fps · {} Mbps · {} s {} · {}",
+            "Settings · {} · {} · {} · {} fps · {} Mbps · {} s {} · {} · screenshot {}",
             config.mode,
             config.backend,
             config.codec,
@@ -34,7 +34,8 @@ pub(super) fn settings_applied(config: &Config) -> impl Display {
             config.bitrate_mbps,
             config.buffer_seconds,
             config.buffer_memory.place(),
-            config.hotkey
+            config.hotkey,
+            config.screenshot_hotkey
         )
     })
 }
@@ -140,6 +141,22 @@ pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
 
 pub(super) fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Save failed · {error}"))
+}
+
+pub(super) const NOTHING_TO_SHOOT: &str =
+    "Screenshot · nothing to take yet · capture has not started";
+pub(super) const ALREADY_SHOOTING: &str = "Screenshot · already in progress";
+
+pub(super) fn screenshot_saved(path: &Path) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Screenshot · {}", file_name(path)))
+}
+
+pub(super) fn screenshot_failed(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Screenshot failed · {error}"))
+}
+
+pub(super) fn screenshot_panicked(message: &str) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "screenshot thread panicked · {message}"))
 }
 
 #[cfg(windows)]

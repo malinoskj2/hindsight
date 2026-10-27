@@ -14,6 +14,7 @@ bitstream-io = "4"
 hound = "3.5"
 log = "0.4"
 mp4-atom = "0.16"
+png = { version = "0.18", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -61,7 +62,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
-png = { version = "0.18", default-features = false }
 # The `implement` macro behind the audio device listener names this crate directly.
 windows-core = "0.62"
 

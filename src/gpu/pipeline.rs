@@ -9,10 +9,11 @@ use crate::{
         device::{Device, DeviceError},
         nvenc::{self, Encoded, Encoder, NvencError, Payload, Settings},
         pacer::{FrameIndex, Pacer},
-        priority, vram,
+        priority, still, vram,
     },
     log,
     replay::{self, DiskStore, Live, Packet, Picture, Stream},
+    screenshot::{StillError, Taken},
     service::{Ended, Target},
     storage, sys,
 };
@@ -95,6 +96,9 @@ fn run(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Resu
         let index = pacer.wait().context("wait for the frame timer")?;
         if let Some(ended) = session.tick(index, &mut output)? {
             break ended;
+        }
+        if let Some(reply) = live.take_still_request() {
+            reply.send(session.copy_still());
         }
     };
     session.encoder.finish(&mut output)?;
@@ -205,6 +209,14 @@ impl Session {
             Input::Ended(ended) => return Ok(Some(ended)),
         }
         Ok(None)
+    }
+
+    /// Starts copying the picture the encoder was last given, so a screenshot shows what the
+    /// clip does, tone-mapped alike.
+    fn copy_still(&self) -> Taken {
+        let surface = self.encoder.latest_surface().ok_or(StillError::NoPicture)?;
+        let Settings { width, height, .. } = self.encoder.settings();
+        still::copy(&self.device, &surface, width, height)
     }
 
     fn submit_surface(

@@ -37,9 +37,30 @@ fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result
             },
             Picture::Fresh,
         );
+        if let Some(reply) = live.take_still_request() {
+            let still = screenshot::Still::from_pitched(2, 2, 8, &[0x40; 16]).unwrap();
+            reply.send(Ok(Box::new(still)));
+        }
         index += 1;
         thread::sleep(Duration::from_millis(1));
     }
+    Ok(Ended::Stopped)
+}
+
+/// Records like `steady` but never takes a screenshot request.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the session function's signature"
+)]
+fn deaf(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
+    live.set_stream(Stream {
+        codec: config.codec,
+        width: 64,
+        height: 64,
+        frame_rate: config.frame_rate,
+        matrix: Matrix::Bt709,
+    });
+    hold_until(&AtomicBool::new(false), stop);
     Ok(Ended::Stopped)
 }
 
@@ -238,7 +259,7 @@ fn desktop_mode_records_and_saves_a_clip() {
     worker.save();
     let status = wait_for(&worker, |status| status.last_clip.is_some());
     let clip = status.last_clip.unwrap();
-    assert!(clip.starts_with(directory.path()));
+    assert!(clip.starts_with(directory.path().join("videos")));
     assert_eq!(&std::fs::read(&clip).unwrap()[4..8], b"ftyp");
 }
 
@@ -707,6 +728,77 @@ fn nothing_to_save_sounds_failed_without_ticking() {
     worker.save();
     wait_for(&worker, |status| status.nothing_to_save);
     assert_eq!(tones(&heard), [Tone::Failed]);
+}
+
+fn files_in(folder: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(folder)
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_screenshot_of_the_capture_goes_into_the_screenshots_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) =
+        spawn_listening(steady, &clock, replay::save, config_in(directory.path()));
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+
+    worker.screenshot();
+    wait_for(&worker, |_| tones(&heard) == [Tone::Saved]);
+
+    let shots = files_in(&directory.path().join("screenshots"));
+    assert_eq!(shots.len(), 1, "{shots:?}");
+    assert_eq!(shots[0].extension().unwrap(), "png");
+    assert!(files_in(&directory.path().join("videos")).is_empty());
+    assert!(worker.status().error.is_none());
+
+    worker.screenshot();
+    wait_for(&worker, |_| tones(&heard).len() == 2);
+    assert_eq!(tones(&heard), [Tone::Saved, Tone::Saved]);
+    assert_eq!(files_in(&directory.path().join("screenshots")).len(), 2);
+}
+
+#[test]
+fn a_screenshot_before_capture_starts_sounds_failed_and_writes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) =
+        spawn_listening(failing, &clock, replay::save, config_in(directory.path()));
+    wait_for(&worker, |status| status.state == State::Retrying);
+
+    worker.screenshot();
+    wait_for(&worker, |_| !tones(&heard).is_empty());
+    assert_eq!(tones(&heard), [Tone::Failed]);
+    assert!(!directory.path().join("screenshots").exists());
+}
+
+#[test]
+fn a_screenshot_capture_stops_before_taking_is_reported_and_can_be_asked_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new();
+    let (worker, heard) = spawn_listening(deaf, &clock, replay::save, config_in(directory.path()));
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+
+    worker.screenshot();
+    worker.toggle_pause();
+    let status = wait_for(&worker, |status| status.error.is_some());
+    assert!(
+        status
+            .error
+            .unwrap()
+            .contains("capture stopped before taking the picture")
+    );
+    assert_eq!(tones(&heard), [Tone::Failed]);
+
+    worker.screenshot();
+    wait_for(&worker, |_| tones(&heard).len() == 2);
+    assert_eq!(tones(&heard), [Tone::Failed, Tone::Failed], "paused");
+    assert!(!directory.path().join("screenshots").exists());
 }
 
 fn panicking(_: &Config, _: &Target, _: &Live, _: &AtomicBool) -> Result<Ended> {

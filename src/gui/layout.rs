@@ -25,7 +25,7 @@ const TITLE_LABEL_INDENT: i32 = 8;
 pub(super) const FILL_Y: i32 = 6;
 /// The height down to where the Settings tab's last group ends while compact. It grows with the
 /// page.
-pub(super) const FILL_HEIGHT: i32 = 386;
+pub(super) const FILL_HEIGHT: i32 = 414;
 /// The tab strip above the pages and the slack under their content.
 const TAB_CHROME: i32 = 36;
 pub(super) const TAB_HEIGHT: i32 = FILL_Y + FILL_HEIGHT + TAB_CHROME;
