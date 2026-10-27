@@ -1,7 +1,7 @@
 //! The global hotkey that saves a clip, written as text such as `Alt+F10`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::{fmt, str::FromStr};
+use std::{fmt, ops::BitOr, str::FromStr};
 use thiserror::Error;
 
 const MOD_ALT: u16 = 0x0001;
@@ -58,11 +58,40 @@ pub(crate) struct Hotkey {
     key: u16,
 }
 
+/// The modifier keys held down while another key is pressed, combined with `|`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Modifiers(u16);
+
+impl Modifiers {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const CTRL: Self = Self(MOD_CONTROL);
+    pub(crate) const ALT: Self = Self(MOD_ALT);
+    pub(crate) const SHIFT: Self = Self(MOD_SHIFT);
+    pub(crate) const WIN: Self = Self(MOD_WIN);
+}
+
+impl BitOr for Modifiers {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 impl Hotkey {
     pub(crate) const DEFAULT: Self = Self {
         modifiers: MOD_ALT,
         key: VK_F1 + 9,
     };
+
+    /// Returns the hotkey a hotkey field enters when `key`, a virtual-key code, is pressed with
+    /// `modifiers` held, or `None` when the press is typing or editing instead. Shift alone is not
+    /// enough, so capitals still type and Shift+Home still selects.
+    pub(crate) fn pressed(modifiers: Modifiers, key: u16) -> Option<Self> {
+        let Modifiers(modifiers) = modifiers;
+        let held = modifiers & !MOD_SHIFT != 0;
+        (is_known_key(key) && (held || may_stand_alone(key))).then_some(Self { modifiers, key })
+    }
 }
 
 impl Serialize for Hotkey {
@@ -173,6 +202,13 @@ fn named_key(name: &str) -> Option<u16> {
         .map(|(code, _)| *code)
 }
 
+fn is_known_key(key: u16) -> bool {
+    u8::try_from(key).is_ok_and(|code| code.is_ascii_uppercase() || code.is_ascii_digit())
+        || is_function_key(key)
+        || is_numpad_digit(key)
+        || NAMED_KEYS.iter().any(|(code, _)| *code == key)
+}
+
 fn may_stand_alone(key: u16) -> bool {
     is_function_key(key) || STANDALONE_KEYS.contains(&key)
 }
@@ -199,7 +235,7 @@ const fn is_numpad_digit(key: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use native::{RegisterError, SAVE_HOTKEY_ID, register};
+pub(crate) use native::{RegisterError, SAVE_HOTKEY_ID, register, unregister};
 
 #[cfg(windows)]
 mod native {
@@ -229,6 +265,10 @@ mod native {
                     RegisterError::System(hotkey, error)
                 }
             })
+    }
+
+    pub(crate) fn unregister(window: &w::HWND) {
+        let _ = window.UnregisterHotKey(SAVE_HOTKEY_ID);
     }
 
     #[expect(unsafe_code, reason = "builds winsafe's MOD and VK from raw values")]
@@ -299,5 +339,79 @@ mod tests {
             parse("q").unwrap_err().to_string(),
             "the hotkey needs Ctrl, Alt, Shift or Win with Q"
         );
+    }
+
+    #[test]
+    fn the_known_keys_are_those_whose_names_parse_back() {
+        for key in 0..=u16::from(u8::MAX) {
+            assert_eq!(
+                is_known_key(key),
+                key_code(&key_label(key)) == Some(key),
+                "{key:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pressed_hotkey_is_written_as_its_parser_reads_it() {
+        let held = [
+            Modifiers::NONE,
+            Modifiers::CTRL,
+            Modifiers::ALT | Modifiers::SHIFT,
+            Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::WIN,
+        ];
+        for modifiers in held {
+            for key in 0..=u16::from(u8::MAX) {
+                if let Some(hotkey) = Hotkey::pressed(modifiers, key) {
+                    assert_eq!(parse(&hotkey.to_string()).unwrap(), hotkey);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn presses_that_type_or_edit_are_not_taken_as_hotkeys() {
+        const VK_BACK: u16 = 0x08;
+        const VK_TAB: u16 = 0x09;
+        const VK_SHIFT: u16 = 0x10;
+        const VK_CONTROL: u16 = 0x11;
+        const VK_HOME: u16 = 0x24;
+        const VK_DELETE: u16 = 0x2E;
+        const VK_OEM_PLUS: u16 = 0xBB;
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        let shift = Modifiers::SHIFT;
+        let nothing = Modifiers::NONE;
+        let entered =
+            |modifiers, key| Hotkey::pressed(modifiers, key).map(|hotkey| hotkey.to_string());
+
+        assert_eq!(
+            entered(ctrl_alt, VK_F1 + 9).as_deref(),
+            Some("Ctrl+Alt+F10")
+        );
+        assert_eq!(entered(nothing, VK_F1 + 9).as_deref(), Some("F10"));
+        assert_eq!(entered(shift, VK_F1 + 9).as_deref(), Some("Shift+F10"));
+        assert_eq!(
+            entered(nothing, VK_PRINT_SCREEN).as_deref(),
+            Some("PrintScreen")
+        );
+        assert_eq!(
+            entered(ctrl_alt, u16::from(b'S')).as_deref(),
+            Some("Ctrl+Alt+S")
+        );
+
+        for (modifiers, key) in [
+            (nothing, u16::from(b'A')),
+            (shift, u16::from(b'A')),
+            (shift, VK_HOME),
+            (nothing, VK_DELETE),
+            (nothing, VK_BACK),
+            (shift, VK_TAB),
+            (ctrl_alt, VK_TAB),
+            (ctrl_alt, VK_CONTROL),
+            (shift, VK_SHIFT),
+            (shift, VK_OEM_PLUS),
+        ] {
+            assert_eq!(entered(modifiers, key), None, "{modifiers:?} {key:#04x}");
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! The Settings tab.
 
 use super::{
+    hotkey_field::{self, Capture},
     layout::{
         self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE,
         Painted, TintedLabel, button, hidden_label, label, saturating_i32, skin_button,
@@ -202,6 +203,22 @@ impl SettingsPage {
         });
     }
 
+    pub(super) fn on_hotkey_capture(&self, capture: impl Fn(Capture) + 'static) {
+        let capture = Rc::new(capture);
+        for field in self.hotkey_fields() {
+            let began = Rc::clone(&capture);
+            field.on().en_set_focus(move || {
+                began(Capture::Began);
+                Ok(())
+            });
+            let ended = Rc::clone(&capture);
+            field.on().en_kill_focus(move || {
+                ended(Capture::Ended);
+                Ok(())
+            });
+        }
+    }
+
     /// Returns the configuration as entered, after validating it.
     pub(super) fn configuration(&self) -> Result<Config, SettingsError> {
         let config = self.entered()?;
@@ -222,6 +239,10 @@ impl SettingsPage {
     /// Reports whether the General group changed height.
     pub(super) fn show_startup_error(&self, message: Option<&str>) -> bool {
         self.0.general_group.set_message(&self.0.frames, message)
+    }
+
+    fn hotkey_fields(&self) -> [&gui::Edit; 1] {
+        [&self.0.recording.hotkey]
     }
 
     fn estimate_events(&self) {
@@ -373,6 +394,7 @@ impl RecordingControls {
             HOTKEY_WIDTH,
             &config.hotkey.to_string(),
         );
+        hotkey_field::capture(&hotkey);
         let backends = Backend::offered(config.backend);
         let (mode, backend) = source_fields(page, config, &backends);
         let folder = text_field(
