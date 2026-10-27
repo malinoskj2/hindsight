@@ -7,8 +7,8 @@
 use self::{
     cache::{Ready, Resources},
     paint::{
-        buffered, button_colours, draw_centred, draw_focus, paint_frame, paint_tab_strip,
-        round_rect,
+        Rule, buffered, button_colours, draw_centred, draw_focus, paint_disclosure, paint_frame,
+        paint_tab_strip, round_rect,
     },
     palette::{Fill, Palette, classic_tint, colour, palette},
 };
@@ -224,6 +224,45 @@ impl Skin {
         if state.has(co::CDIS::FOCUS) && state.has(co::CDIS::SHOWKEYBOARDCUES) {
             draw_focus(hdc, draw.rc);
         }
+        co::CDRF::SKIPDEFAULT
+    }
+
+    /// Paints a push button as a disclosure that opens a section, which no common control draws,
+    /// so classic paints it too.
+    pub(super) fn paint_disclosure(
+        &self,
+        draw: &w::NMCUSTOMDRAW,
+        text: &str,
+        open: bool,
+    ) -> co::CDRF {
+        if draw.dwDrawStage != co::CDDS::PREPAINT {
+            return co::CDRF::DODEFAULT;
+        }
+        let hdc = &draw.hdc;
+        let rule = if let Some(palette) = self.palette() {
+            let mut resources = self.0.resources.borrow_mut();
+            let Some(gdi) = resources.gdi(palette) else {
+                return co::CDRF::DODEFAULT;
+            };
+            let _ = hdc.FillRect(draw.rc, gdi.brush(Fill::Panel));
+            Rule::Colour(colour(palette.border))
+        } else {
+            if let Ok(brush) = w::HBRUSH::GetSysColorBrush(Surface::Page.classic()) {
+                let _ = hdc.FillRect(draw.rc, &brush);
+            }
+            Rule::Native(&draw.hdr.hwndFrom)
+        };
+        let state = draw.uItemState;
+        let focused = state.has(co::CDIS::FOCUS) && state.has(co::CDIS::SHOWKEYBOARDCUES);
+        paint_disclosure(
+            hdc,
+            draw.rc,
+            text,
+            open,
+            self.colour(Tone::Text),
+            focused,
+            &rule,
+        );
         co::CDRF::SKIPDEFAULT
     }
 

@@ -59,6 +59,7 @@ const STATUS_TIMER: usize = 1;
 const STATUS_INTERVAL_MS: u32 = 1000;
 const CLIPS_TAB: u32 = 1;
 const SCREENSHOTS_TAB: u32 = 2;
+const SETTINGS_TAB: u32 = 3;
 const PANES: usize = 6;
 const DESTROY_TIMER: usize = 2;
 const SETTLE_TIMER: usize = 3;
@@ -203,7 +204,7 @@ impl Main {
             self.0.main_window.on(),
             &self.0.skin,
             Surface::Dialog,
-            (),
+            self.0.settings.footer(),
         );
     }
 
@@ -216,6 +217,7 @@ impl Main {
 
         let this = self.clone();
         self.0.tab.on().tcn_sel_change(move || {
+            this.show_footer();
             this.refresh();
             Ok(())
         });
@@ -356,7 +358,7 @@ impl Main {
         let this = self.clone();
         self.0
             .settings
-            .on_more_options_toggled(move |open| this.on_more_options_toggled(open));
+            .on_advanced_toggled(move |open| this.on_advanced_toggled(open));
     }
 
     fn update_events(&self) {
@@ -385,6 +387,7 @@ impl Main {
             pane.on_create();
         }
         self.fit_window();
+        self.show_footer();
         self.show_initial_startup_error();
         self.register_configured_hotkeys();
         self.watch_foreground_changes();
@@ -596,7 +599,7 @@ impl Main {
         self.remember(Preference::CloseToTray(close_to_tray));
     }
 
-    fn on_more_options_toggled(&self, open: bool) {
+    fn on_advanced_toggled(&self, open: bool) {
         self.remember(Preference::MoreOptions(open));
         self.fit_window();
     }
@@ -801,6 +804,7 @@ impl Main {
             resize_width_by(window, delta);
         }
         resize_width_by(self.0.main_window.hwnd(), delta);
+        self.0.settings.widen(delta);
     }
 
     /// Sets the hotkeys aside while a hotkey field has the keyboard, so pressing either there
@@ -886,13 +890,20 @@ impl Main {
     }
 
     fn tab_in_view(&self, index: u32) -> bool {
-        self.0.main_window.hwnd().IsWindowVisible()
-            && self
-                .0
-                .tab
-                .items()
-                .selected()
-                .is_some_and(|item| item.index() == index)
+        self.0.main_window.hwnd().IsWindowVisible() && self.tab_selected(index)
+    }
+
+    fn tab_selected(&self, index: u32) -> bool {
+        self.0
+            .tab
+            .items()
+            .selected()
+            .is_some_and(|item| item.index() == index)
+    }
+
+    /// Apply belongs to the Settings tab, so the strip under the tabs is empty on the others.
+    fn show_footer(&self) {
+        self.0.settings.show_footer(self.tab_selected(SETTINGS_TAB));
     }
 
     fn fit_window(&self) {

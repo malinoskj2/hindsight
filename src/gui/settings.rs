@@ -3,8 +3,9 @@
 use super::{
     hotkey_field::{self, Capture},
     layout::{
-        self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, Frame, INNER_WIDTH, INNER_X, LINE,
-        Painted, TintedLabel, button, hidden_label, label, saturating_i32, shift_by, skin_button,
+        self, BUTTON_HEIGHT, BUTTON_WIDTH, ExpandableGroup, FOOTER_PADDING, FOOTER_Y, Frame,
+        INNER_WIDTH, INNER_X, LINE, MARGIN, Painted, TintedLabel, WINDOW_WIDTH, button,
+        hidden_label, label, resize_width_by, saturating_i32, shift_by, skin_button, slide_by,
     },
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
@@ -42,7 +43,6 @@ const CHOICE_WIDTH: i32 = 190;
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
 /// The width of a check box in the second column, which has no caption beside it.
 const CHECK_COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X);
-const ERROR_X: i32 = BUTTON_WIDTH + 8;
 const BROWSE_WIDTH: i32 = 76;
 const BROWSE_GAP: i32 = 6;
 /// The width of the clip folder field, which leaves room for the Browse button at the group's
@@ -51,13 +51,15 @@ const FOLDER_WIDTH: i32 = FULL_WIDTH - BROWSE_WIDTH - BROWSE_GAP;
 const BROWSE_X: i32 = INNER_X + INNER_WIDTH - BROWSE_WIDTH;
 const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
-/// How much taller the window is with More options open: its rows push the page past the
-/// height the other tabs need.
-const MORE_OPTIONS_EXTRA: i32 =
+/// The space between Apply and the message beside it.
+const FOOTER_GAP: i32 = 8;
+/// How much taller the window is with Advanced open: its rows push the page past the height
+/// the other tabs need.
+const ADVANCED_EXTRA: i32 =
     rows::GENERAL_FRAME + rows::GENERAL_HEIGHT - (layout::FILL_Y + layout::FILL_HEIGHT);
 
-/// The rows as laid out with More options open. Closed, its rows are hidden and everything
-/// below them moves up by [`rows::MORE_OPTIONS_HEIGHT`].
+/// The rows as laid out with Advanced open. Closed, its rows are hidden and everything below
+/// them moves up by [`rows::ADVANCED_HEIGHT`].
 mod rows {
     use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_FRAME, FIRST_ROW, LINE};
 
@@ -68,17 +70,17 @@ mod rows {
     pub(super) const FOLDER: i32 = MODE + FIELD_PITCH;
     pub(super) const AUDIO: i32 = FOLDER + FIELD_PITCH;
     pub(super) const CURSOR: i32 = AUDIO + CHECK_PITCH;
-    pub(super) const MORE_OPTIONS: i32 = CURSOR + CHECK_PITCH + 2;
-    pub(super) const ENCODING: i32 = MORE_OPTIONS + BUTTON_HEIGHT + 8;
+    pub(super) const ADVANCED: i32 = CURSOR + CHECK_PITCH + 2;
+    pub(super) const ENCODING: i32 = ADVANCED + BUTTON_HEIGHT + 8;
     pub(super) const BACKEND: i32 = ENCODING + FIELD_PITCH;
     pub(super) const MEMORY: i32 = BACKEND + FIELD_PITCH;
     pub(super) const FORMATS: i32 = MEMORY + FIELD_PITCH;
     pub(super) const SOUND_DEVICE: i32 = FORMATS + FIELD_PITCH;
     pub(super) const MICROPHONE_DEVICE: i32 = SOUND_DEVICE + FIELD_PITCH;
     pub(super) const ESTIMATE: i32 = MICROPHONE_DEVICE + FIELD_PITCH;
-    pub(super) const APPLY: i32 = ESTIMATE + LINE + 4;
-    pub(super) const MORE_OPTIONS_HEIGHT: i32 = APPLY - ENCODING;
-    pub(super) const RECORDING_HEIGHT: i32 = APPLY + BUTTON_HEIGHT + 14 - RECORDING_FRAME;
+    const ADVANCED_END: i32 = ESTIMATE + LINE + 4;
+    pub(super) const ADVANCED_HEIGHT: i32 = ADVANCED_END - ENCODING;
+    pub(super) const RECORDING_HEIGHT: i32 = ADVANCED_END + 2 - RECORDING_FRAME;
     pub(super) const GENERAL_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
     pub(super) const THEME: i32 = GENERAL_FRAME + FIRST_ROW;
     pub(super) const START_WITH_WINDOWS: i32 = THEME + FIELD_PITCH;
@@ -111,13 +113,14 @@ struct Inner {
     general_group: ExpandableGroup,
     recording: RecordingControls,
     general: GeneralControls,
+    footer: Rc<Footer>,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
     /// `None` when the devices could not be listed, so only the default is offered.
     devices: Option<DeviceList>,
-    /// Whether More options is open. The controls are created open.
-    more_options: Cell<bool>,
-    /// Whether More options opens once the controls exist, as the settings left it.
+    /// Whether Advanced is open. The controls are created open.
+    advanced_open: Cell<bool>,
+    /// Whether Advanced opens once the controls exist, as the settings left it.
     open_at_start: bool,
 }
 
@@ -127,12 +130,7 @@ impl Painted for Inner {
     }
 
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
-        [
-            &self.recording.error,
-            &self.recording.estimate,
-            &self.general.error,
-        ]
-        .into_iter()
+        [&self.recording.estimate, &self.general.error].into_iter()
     }
 }
 
@@ -150,7 +148,12 @@ impl Pane for SettingsPage {
         self.update_estimate();
         self.update_cursor_choice();
         self.update_device_choices();
-        self.show_more_options(self.0.open_at_start);
+        self.show_advanced(self.0.open_at_start);
+    }
+
+    /// Apply sits under the tabs, so it moves down with the window's bottom edge.
+    fn grow(&self, dy: i32) {
+        self.0.footer.shift(dy);
     }
 
     fn frames(&self) -> &[Frame] {
@@ -184,6 +187,7 @@ impl SettingsPage {
             rows::GENERAL_HEIGHT,
         );
         let general = GeneralControls::new(&page, config, start_with_windows);
+        let footer = Footer::new(parent, &codec_warning(config, codecs), skin);
         let frames = vec![recording_frame, general_frame];
         let general_group = ExpandableGroup::new(1, general.error.label().clone(), 1);
         let inner = Rc::new(Inner {
@@ -192,13 +196,15 @@ impl SettingsPage {
             general_group,
             recording,
             general,
+            footer: Rc::new(footer),
             codecs: codecs.to_vec(),
             devices,
-            more_options: Cell::new(true),
+            advanced_open: Cell::new(true),
             open_at_start: config.more_options,
         });
         pane::paint(&inner.page, skin, Rc::clone(&inner));
         let page = Self(inner);
+        page.disclosure_events(skin);
         page.estimate_events();
         page.browse_events();
         page.backend_events();
@@ -219,28 +225,43 @@ impl SettingsPage {
     }
 
     pub(super) fn extra(&self) -> i32 {
-        let more_options = if self.0.more_options.get() {
-            MORE_OPTIONS_EXTRA
+        let advanced = if self.0.advanced_open.get() {
+            ADVANCED_EXTRA
         } else {
             0
         };
-        self.0.general_group.extra() + more_options
+        self.0.general_group.extra() + advanced
     }
 
-    /// `toggled` is called with whether More options is now open, once the page has moved.
-    pub(super) fn on_more_options_toggled(&self, toggled: impl Fn(bool) + 'static) {
+    /// Apply and its message, which the window paints because they sit on it, under the tabs.
+    pub(super) fn footer(&self) -> Rc<Footer> {
+        Rc::clone(&self.0.footer)
+    }
+
+    /// Shows Apply and its message while the Settings tab is the one selected.
+    pub(super) fn show_footer(&self, shown: bool) {
+        self.0.footer.show(shown);
+    }
+
+    /// Keeps Apply at the right edge of a window that widened by `dx`.
+    pub(super) fn widen(&self, dx: i32) {
+        self.0.footer.widen(dx);
+    }
+
+    /// `toggled` is called with whether Advanced is now open, once the page has moved.
+    pub(super) fn on_advanced_toggled(&self, toggled: impl Fn(bool) + 'static) {
         let page = self.clone();
-        self.0.recording.more_options.on().bn_clicked(move || {
-            let open = !page.0.more_options.get();
-            page.show_more_options(open);
+        self.0.recording.disclosure.on().bn_clicked(move || {
+            let open = !page.0.advanced_open.get();
+            page.show_advanced(open);
             toggled(open);
             Ok(())
         });
     }
 
-    /// Shows or hides More options' rows, moving everything below them.
-    fn show_more_options(&self, open: bool) {
-        if self.0.more_options.replace(open) == open {
+    /// Shows or hides Advanced's rows, moving everything below them.
+    fn show_advanced(&self, open: bool) {
+        if self.0.advanced_open.replace(open) == open {
             return;
         }
         let recording = &self.0.recording;
@@ -248,12 +269,11 @@ impl SettingsPage {
             layout::show(&**control, open);
         }
         let delta = gui::dpi_y(if open {
-            rows::MORE_OPTIONS_HEIGHT
+            rows::ADVANCED_HEIGHT
         } else {
-            -rows::MORE_OPTIONS_HEIGHT
+            -rows::ADVANCED_HEIGHT
         });
-        let below = recording.below.iter().chain(&self.0.general.controls);
-        for control in below {
+        for control in &self.0.general.controls {
             shift_by(control.hwnd(), delta);
         }
         if let [recording_frame, rest @ ..] = &self.0.frames[..] {
@@ -262,19 +282,24 @@ impl SettingsPage {
                 frame.shift(delta);
             }
         }
-        layout::set_text(
-            &recording.more_options,
-            if open {
-                text::FEWER_OPTIONS
-            } else {
-                text::MORE_OPTIONS
-            },
-        );
+        let _ = recording.disclosure.hwnd().InvalidateRect(None, true);
         let _ = self.0.page.hwnd().InvalidateRect(None, true);
     }
 
+    fn disclosure_events(&self, skin: &Skin) {
+        let page = self.clone();
+        let skin = skin.clone();
+        self.0
+            .recording
+            .disclosure
+            .on()
+            .nm_custom_draw(move |draw| {
+                Ok(skin.paint_disclosure(draw, text::ADVANCED, page.0.advanced_open.get()))
+            });
+    }
+
     pub(super) fn on_apply(&self, apply: impl Fn() + 'static) {
-        self.0.recording.apply.on().bn_clicked(move || {
+        self.0.footer.apply.on().bn_clicked(move || {
             apply();
             Ok(())
         });
@@ -341,7 +366,7 @@ impl SettingsPage {
     /// `None` clears the message.
     pub(super) fn show_settings_error(&self, error: Option<&SettingsError>) {
         let message = error.map(ToString::to_string).unwrap_or_default();
-        self.0.recording.error.set_text(&message);
+        self.0.footer.error.set_text(&message);
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
@@ -524,12 +549,12 @@ impl SettingsPage {
             check_for_updates: self.0.general.check_for_updates.is_checked(),
             container: chosen(&recording.choices.container, &Container::ALL),
             screenshot_format: chosen(&recording.choices.screenshot_format, &ScreenshotFormat::ALL),
-            more_options: self.0.more_options.get(),
+            more_options: self.0.advanced_open.get(),
         })
     }
 }
 
-/// A control that More options shows or that moves when it opens.
+/// A control that Advanced shows or that moves when it opens.
 type Control = Box<dyn GuiWindow>;
 
 struct RecordingControls {
@@ -543,14 +568,11 @@ struct RecordingControls {
     audio: gui::CheckBox,
     microphone: gui::CheckBox,
     cursor: gui::CheckBox,
-    more_options: gui::Button,
+    /// Opens and closes Advanced.
+    disclosure: gui::Button,
     estimate: TintedLabel,
-    apply: gui::Button,
-    error: TintedLabel,
-    /// More options' rows, captions included.
+    /// Advanced's rows, captions included.
     advanced: Vec<Control>,
-    /// The controls under More options' rows.
-    below: Vec<Control>,
 }
 
 impl RecordingControls {
@@ -606,32 +628,13 @@ impl RecordingControls {
             INNER_WIDTH,
             config.cursor,
         );
-        let more_options = button(
-            page,
-            text::FEWER_OPTIONS,
-            INNER_X,
-            rows::MORE_OPTIONS,
-            BUTTON_WIDTH,
-        );
-        skin_button(&more_options, skin);
+        let disclosure = button(page, text::ADVANCED, INNER_X, rows::ADVANCED, INNER_WIDTH);
         let estimate = TintedLabel::new(
             label(page, "", INNER_X, rows::ESTIMATE, INNER_WIDTH, 1),
             Tone::Muted,
         );
-        let apply = button(page, text::APPLY, INNER_X, rows::APPLY, BUTTON_WIDTH);
-        skin_button(&apply, skin);
-        let error = label(
-            page,
-            &codec_warning(config, codecs),
-            INNER_X + ERROR_X,
-            rows::APPLY - 2,
-            INNER_WIDTH - ERROR_X,
-            2,
-        );
-        let error = TintedLabel::new(error, Tone::Error);
         advanced.extend(choices.controls());
         advanced.push(Box::new(estimate.label().clone()));
-        let below: Vec<Control> = vec![Box::new(apply.clone()), Box::new(error.label().clone())];
         Self {
             encoding,
             hotkey,
@@ -643,13 +646,63 @@ impl RecordingControls {
             audio,
             microphone,
             cursor,
-            more_options,
+            disclosure,
             estimate,
-            apply,
-            error,
             advanced,
-            below,
         }
+    }
+}
+
+/// Apply and the message beside it, on the window in the strip under the tabs.
+pub(super) struct Footer {
+    apply: gui::Button,
+    error: TintedLabel,
+}
+
+impl Footer {
+    fn new(window: &(impl GuiParent + 'static), message: &str, skin: &Skin) -> Self {
+        let width = WINDOW_WIDTH + skin.extra_width();
+        let apply_x = width - MARGIN - BUTTON_WIDTH;
+        let apply = button(window, text::APPLY, apply_x, FOOTER_Y, BUTTON_WIDTH);
+        skin_button(&apply, skin);
+        // Sized for two lines, whose text fits the strip when the label starts at its top.
+        let error = label(
+            window,
+            message,
+            MARGIN,
+            FOOTER_Y - FOOTER_PADDING,
+            apply_x - FOOTER_GAP - MARGIN,
+            2,
+        );
+        Self {
+            apply,
+            error: TintedLabel::new(error, Tone::Error),
+        }
+    }
+
+    fn show(&self, shown: bool) {
+        layout::show(&self.apply, shown);
+        layout::show(self.error.label(), shown);
+    }
+
+    fn shift(&self, dy: i32) {
+        shift_by(self.apply.hwnd(), dy);
+        shift_by(self.error.label().hwnd(), dy);
+    }
+
+    fn widen(&self, dx: i32) {
+        slide_by(self.apply.hwnd(), dx);
+        resize_width_by(self.error.label().hwnd(), dx);
+    }
+}
+
+impl Painted for Footer {
+    fn frames(&self) -> &[Frame] {
+        &[]
+    }
+
+    fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
+        std::iter::once(&self.error)
     }
 }
 
@@ -676,7 +729,7 @@ fn hotkey_fields(page: &gui::TabPage, config: &Config) -> [gui::Edit; 2] {
     [hotkey, screenshot_hotkey]
 }
 
-/// The lists under More options besides the codec.
+/// The lists under Advanced besides the codec.
 struct AdvancedChoices {
     backend: gui::ComboBox,
     /// The backends offered, in the order of the backend list's items.
@@ -872,7 +925,7 @@ struct EncodingFields {
 }
 
 impl EncodingFields {
-    /// Also returns the fields under More options: bitrate and codec.
+    /// Also returns the fields under Advanced: bitrate and codec.
     fn new(page: &gui::TabPage, config: &Config, codecs: &[Codec]) -> (Self, Vec<Control>) {
         let (buffer_seconds, buffer_spin, _) = number_field(
             page,
@@ -932,7 +985,7 @@ struct GeneralControls {
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
     error: TintedLabel,
-    /// Every control in the group, which moves with it when More options opens or closes.
+    /// Every control in the group, which moves with it when Advanced opens or closes.
     controls: Vec<Control>,
 }
 
@@ -1218,7 +1271,7 @@ mod tests {
                 rows::FOLDER,
                 rows::AUDIO,
                 rows::CURSOR,
-                rows::MORE_OPTIONS,
+                rows::ADVANCED,
             ],
             [26, 54, 82, 110, 138, 160, 184]
         );
@@ -1231,13 +1284,12 @@ mod tests {
                 rows::SOUND_DEVICE,
                 rows::MICROPHONE_DEVICE,
                 rows::ESTIMATE,
-                rows::APPLY,
-                rows::MORE_OPTIONS_HEIGHT,
+                rows::ADVANCED_HEIGHT,
             ],
-            [216, 244, 272, 300, 328, 356, 384, 406, 190]
+            [216, 244, 272, 300, 328, 356, 384, 190]
         );
-        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 438));
-        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (444, 94));
+        assert_eq!((rows::RECORDING_FRAME, rows::RECORDING_HEIGHT), (6, 402));
+        assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (408, 94));
         assert_eq!(
             [
                 rows::THEME,
@@ -1245,7 +1297,7 @@ mod tests {
                 rows::CLOSE_TO_TRAY,
                 rows::STARTUP_ERROR
             ],
-            [464, 492, 514, 536]
+            [428, 456, 478, 500]
         );
     }
 
@@ -1253,9 +1305,9 @@ mod tests {
     fn closed_the_page_fits_the_window_and_open_it_grows_the_window_to_fit() {
         let bottom = rows::GENERAL_FRAME + rows::GENERAL_HEIGHT;
         let fill = layout::FILL_Y + layout::FILL_HEIGHT;
-        assert!(bottom - rows::MORE_OPTIONS_HEIGHT <= fill);
-        assert_eq!(MORE_OPTIONS_EXTRA, 118);
-        assert_eq!(bottom, fill + MORE_OPTIONS_EXTRA);
+        assert!(bottom - rows::ADVANCED_HEIGHT <= fill);
+        assert_eq!(ADVANCED_EXTRA, 82);
+        assert_eq!(bottom, fill + ADVANCED_EXTRA);
     }
 
     #[test]

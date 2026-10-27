@@ -11,6 +11,21 @@ const CORNER: i32 = 4;
 const FOCUS_INSET: i32 = 3;
 const TITLE_INDENT: i32 = 12;
 const TITLE_GAP: i32 = 4;
+/// Half the long side of a disclosure's arrow.
+const ARROW: i32 = 3;
+const ARROW_CENTRE: i32 = 4;
+const CAPTION_INDENT: i32 = 12;
+const RULE_GAP: i32 = 6;
+/// The height of the group box drawn to leave only its top edge as a rule, enough to keep its
+/// lower corners outside the clip.
+const RULE_FRAME_HEIGHT: i32 = 16;
+
+/// What draws a disclosure's rule.
+pub(super) enum Rule<'a> {
+    /// The system's group box edge, drawn for the control, so the rule matches the native frames.
+    Native(&'a w::HWND),
+    Colour(w::COLORREF),
+}
 
 struct TabFace {
     rect: w::RECT,
@@ -173,6 +188,114 @@ pub(super) fn button_colours(palette: &Palette, state: co::CDIS) -> (Fill, Edge,
         Fill::Accent
     };
     (fill, Edge::Accent, palette.on_accent)
+}
+
+/// Draws a disclosure in `rect`: an arrow that points down while `open`, the caption, and a rule
+/// from the caption out to the right edge. The background is left to the caller.
+pub(super) fn paint_disclosure(
+    hdc: &w::HDC,
+    rect: w::RECT,
+    text: &str,
+    open: bool,
+    ink: w::COLORREF,
+    focused: bool,
+    rule: &Rule,
+) {
+    let middle = rect.top.midpoint(rect.bottom);
+    paint_arrow(hdc, rect.left + gui::dpi_x(ARROW_CENTRE), middle, open, ink);
+
+    let caption_left = rect.left + gui::dpi_x(CAPTION_INDENT);
+    let (caption_width, caption_height) = hdc
+        .GetTextExtentPoint32(text)
+        .map_or((0, 0), |size| (size.cx, size.cy));
+    let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
+    let _ = hdc.SetTextColor(ink);
+    let mut caption = w::RECT {
+        left: caption_left,
+        right: caption_left + caption_width,
+        ..rect
+    };
+    let _ = hdc.DrawText(
+        text,
+        &mut caption,
+        co::DT::LEFT | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
+    );
+    if focused {
+        let inset = gui::dpi_x(2);
+        let _ = hdc.DrawFocusRect(w::RECT {
+            left: caption_left - inset,
+            top: middle - caption_height / 2 - 1,
+            right: caption_left + caption_width + inset,
+            bottom: middle + caption_height / 2 + 1,
+        });
+    }
+
+    let line = w::RECT {
+        left: caption_left + caption_width + gui::dpi_x(RULE_GAP),
+        top: middle,
+        right: rect.right,
+        bottom: middle + 1,
+    };
+    if line.left < line.right {
+        paint_rule(hdc, line, rule);
+    }
+}
+
+fn paint_arrow(hdc: &w::HDC, centre: i32, middle: i32, open: bool, ink: w::COLORREF) {
+    let long = gui::dpi_x(ARROW);
+    let short = long / 2;
+    let points = if open {
+        [
+            w::POINT::with(centre - long, middle - short),
+            w::POINT::with(centre + long, middle - short),
+            w::POINT::with(centre, middle + long - short),
+        ]
+    } else {
+        [
+            w::POINT::with(centre - short, middle - long),
+            w::POINT::with(centre + long - short, middle),
+            w::POINT::with(centre - short, middle + long),
+        ]
+    };
+    let (Ok(pen), Ok(brush)) = (
+        w::HPEN::GetStockObject(co::STOCK_PEN::DC),
+        w::HBRUSH::GetStockObject(co::STOCK_BRUSH::DC),
+    ) else {
+        return;
+    };
+    let _ = hdc.SetDCPenColor(ink);
+    let _ = hdc.SetDCBrushColor(ink);
+    let (Ok(_pen), Ok(_brush)) = (hdc.SelectObject(&pen), hdc.SelectObject(&brush)) else {
+        return;
+    };
+    let _ = hdc.Polygon(&points);
+}
+
+fn paint_rule(hdc: &w::HDC, line: w::RECT, rule: &Rule) {
+    match rule {
+        Rule::Native(control) => {
+            let Some(theme) = control.OpenThemeData("BUTTON") else {
+                return;
+            };
+            // Clipped to the line, a group box whose top edge lies on it leaves only that edge.
+            let reach = gui::dpi_x(CORNER) * 2;
+            let frame = w::RECT {
+                left: line.left - reach,
+                right: line.right + reach,
+                bottom: line.top + gui::dpi_y(RULE_FRAME_HEIGHT),
+                ..line
+            };
+            let _ =
+                theme.DrawThemeBackground(hdc, co::VS::BUTTON_GROUPBOX_NORMAL, frame, Some(line));
+        }
+        Rule::Colour(colour) => {
+            let Ok(brush) = w::HBRUSH::GetStockObject(co::STOCK_BRUSH::DC) else {
+                return;
+            };
+            let _ = hdc.SetDCBrushColor(*colour);
+            let _ = hdc.FillRect(line, &brush);
+        }
+    }
 }
 
 pub(super) fn round_rect(hdc: &w::HDC, rect: w::RECT, pen: &w::HPEN, brush: &w::HBRUSH) -> bool {

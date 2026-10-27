@@ -390,7 +390,7 @@ pub(crate) struct Config {
     pub(crate) check_for_updates: bool,
     pub(crate) container: Container,
     pub(crate) screenshot_format: ScreenshotFormat,
-    /// Whether Settings shows the options under More options.
+    /// Whether Settings shows the options under Advanced.
     pub(crate) more_options: bool,
 }
 

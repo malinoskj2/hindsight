@@ -85,8 +85,7 @@ pub(super) const SOUND_DEVICE: &str = "Sound from";
 pub(super) const MICROPHONE_DEVICE: &str = "Microphone";
 pub(super) const DEFAULT_DEVICE: &str = "Default device";
 // A command button that shows more in place takes a double chevron.
-pub(super) const MORE_OPTIONS: &str = "More options »";
-pub(super) const FEWER_OPTIONS: &str = "« Fewer options";
+pub(super) const ADVANCED: &str = "Advanced";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the replay length, bitrate and frame rate.";

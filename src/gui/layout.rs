@@ -29,7 +29,11 @@ pub(super) const FILL_HEIGHT: i32 = 414;
 /// The tab strip above the pages and the slack under their content.
 const TAB_CHROME: i32 = 36;
 pub(super) const TAB_HEIGHT: i32 = FILL_Y + FILL_HEIGHT + TAB_CHROME;
-pub(super) const WINDOW_HEIGHT: i32 = MARGIN + TAB_HEIGHT + MARGIN;
+/// The space above and below Apply in the strip under the tabs.
+pub(super) const FOOTER_PADDING: i32 = 4;
+/// The top of Apply, in the strip under the tabs.
+pub(super) const FOOTER_Y: i32 = MARGIN + TAB_HEIGHT + FOOTER_PADDING;
+pub(super) const WINDOW_HEIGHT: i32 = FOOTER_Y + BUTTON_HEIGHT + FOOTER_PADDING;
 
 /// The DPI the layout is designed at before `gui::dpi` scales it.
 const BASE_DPI: u32 = 96;
@@ -488,6 +492,14 @@ pub(super) fn set_text(control: &impl GuiWindow, value: &str) {
 }
 
 pub(super) fn shift_by(window: &w::HWND, delta: i32) {
+    move_by(window, 0, delta);
+}
+
+pub(super) fn slide_by(window: &w::HWND, delta: i32) {
+    move_by(window, delta, 0);
+}
+
+fn move_by(window: &w::HWND, dx: i32, dy: i32) {
     let Ok(parent) = window.GetParent() else {
         return;
     };
@@ -499,7 +511,7 @@ pub(super) fn shift_by(window: &w::HWND, delta: i32) {
     };
     let _ = window.SetWindowPos(
         w::HwndPlace::None,
-        w::POINT::with(rect.left, rect.top + delta),
+        w::POINT::with(rect.left + dx, rect.top + dy),
         w::SIZE::default(),
         co::SWP::NOSIZE | co::SWP::NOZORDER | co::SWP::NOACTIVATE | co::SWP::NOCOPYBITS,
     );
