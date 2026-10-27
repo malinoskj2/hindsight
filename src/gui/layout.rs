@@ -1,7 +1,7 @@
 //! Geometry shared by the pages, and the helpers that create, draw and move controls.
 
 use super::theme::{Skin, Surface, Tone};
-use crate::APP_NAME;
+use crate::{APP_NAME, sys::window};
 use anyhow::Result;
 use std::{cell::Cell, iter, rc::Rc};
 use winsafe::{self as w, co, gui, prelude::*};
@@ -249,6 +249,14 @@ pub(super) fn window_opts(width: i32, height: i32, icon: u16) -> gui::WindowMain
         size: gui::dpi(width, height),
         class_icon: gui::Icon::Id(icon),
         ..Default::default()
+    }
+}
+
+/// Colours the title bar of `hwnd` to match `skin`.
+pub(super) fn match_title_bar(hwnd: &w::HWND, skin: &Skin) {
+    match skin.title_bar_colours() {
+        Some((caption, text)) => window::paint_title_bar(hwnd, caption, text),
+        None => window::match_dialog_title_bar(hwnd),
     }
 }
 

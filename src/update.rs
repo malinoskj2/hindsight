@@ -3,10 +3,15 @@
 //! signature announces the version, and an installer is run only when that signature verifies
 //! against the release key built into the app.
 
+// The build script reads the changelog with this module, which the crate holds for its tests.
+#[cfg(test)]
+mod changelog;
 #[cfg(windows)]
 pub(crate) mod client;
+pub(crate) mod notes;
 
 use minisign_verify::{PublicKey, Signature};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{
     cmp::Ordering,
     fmt,
@@ -159,6 +164,20 @@ impl fmt::Display for Version {
     }
 }
 
+impl Serialize for Version {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("{0:?} is not a version")]
 pub(crate) struct VersionError(String);
@@ -250,6 +269,11 @@ pub(crate) fn latest_signature_url() -> String {
         "{}/releases/latest/download/{INSTALLER}.{SIGNATURE_EXTENSION}",
         repository()
     )
+}
+
+/// Where every release's notes are.
+pub(crate) fn releases_url() -> String {
+    format!("{}/releases", repository())
 }
 
 /// `CARGO_PKG_REPOSITORY` without a trailing slash or `.git`, either of which it may include.
@@ -443,6 +467,18 @@ trusted comment: hindsight-windows-x64.zip 0.2.1
     }
 
     #[test]
+    fn versions_are_stored_as_text() {
+        let stored = serde_json::to_string(&version("0.2.1-beta.1")).unwrap();
+        assert_eq!(stored, r#""0.2.1-beta.1""#);
+        assert_eq!(
+            serde_json::from_str::<Version>(&stored).unwrap(),
+            version("0.2.1-beta.1")
+        );
+        assert!(serde_json::from_str::<Version>(r#""0.2""#).is_err());
+        assert!(serde_json::from_str::<Version>("21").is_err());
+    }
+
+    #[test]
     fn the_switch_names_the_version_to_update_from() {
         assert_eq!(Version::chosen(Some("0.1.0")), version("0.1.0"));
         assert_eq!(Version::chosen(Some(" 0.1.0\r\n")), version("0.1.0"));
@@ -466,6 +502,10 @@ trusted comment: hindsight-windows-x64.zip 0.2.1
         assert_eq!(
             release.notes_url(),
             "https://github.com/malinoskj2/hindsight/releases/tag/v0.2.1"
+        );
+        assert_eq!(
+            releases_url(),
+            "https://github.com/malinoskj2/hindsight/releases"
         );
         assert_eq!(
             latest_signature_url(),

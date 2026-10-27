@@ -53,8 +53,12 @@ export const internals = [
     body: "It is encoded to AAC only when you save, on the saving thread. Long silences are dropped.",
   },
   {
+    title: "Screenshots cost nothing until you take one.",
+    body: "A screenshot is of the whole monitor in front, recording or not. It reuses the picture being recorded when there is one, and otherwise captures the monitor once, in the background.",
+  },
+  {
     title: "Saves run in the background.",
-    body: "At low CPU, I/O and memory priority, so they never compete with the game.",
+    body: "At low CPU, I/O and memory priority, on efficiency cores and low clocks, so they never compete with the game.",
   },
 ] as const satisfies readonly Point[];
 
@@ -164,7 +168,7 @@ export const settingGroups = [
         id: "updates",
         fields: ["Check for updates"],
         title: "Updates are one click.",
-        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again. Turn it off and nothing is checked until you select Check now.",
+        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again, showing what is new. Turn it off and nothing is checked until you select Check now.",
       },
     ],
   },

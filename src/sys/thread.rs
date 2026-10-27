@@ -1,12 +1,15 @@
 //! Scheduling of the application's own helper threads.
 
+use super::win32::cb_size;
 use windows::Win32::{
     Foundation::HANDLE,
     System::{
         Kernel::PROCESSOR_NUMBER,
         Threading::{
-            GetThreadIdealProcessorEx, SetThreadIdealProcessorEx, SetThreadPriority,
-            THREAD_MODE_BACKGROUND_BEGIN,
+            GetThreadIdealProcessorEx, SetThreadIdealProcessorEx, SetThreadInformation,
+            SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+            THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            THREAD_POWER_THROTTLING_STATE, ThreadPowerThrottling,
         },
     },
 };
@@ -47,6 +50,27 @@ fn prefer_processor(processor: u32) {
 pub(crate) fn enter_background_mode() -> windows::core::Result<()> {
     // SAFETY: the pseudo-handle names the calling thread, always valid and never closed.
     unsafe { SetThreadPriority(current_thread(), THREAD_MODE_BACKGROUND_BEGIN) }
+}
+
+/// Opts the calling thread into execution-speed power throttling, so that Windows runs it on
+/// efficiency cores and at low clocks: slower, but lighter on the processor the game shares. The
+/// setting is the thread's own, apart from the process's opt-out of throttling for capture.
+pub(crate) fn prefer_efficiency() -> windows::core::Result<()> {
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+    };
+    // SAFETY: the pseudo-handle names the calling thread, and `state` is a
+    // `THREAD_POWER_THROTTLING_STATE` of the size passed, live for the call.
+    unsafe {
+        SetThreadInformation(
+            current_thread(),
+            ThreadPowerThrottling,
+            (&raw const state).cast(),
+            cb_size::<THREAD_POWER_THROTTLING_STATE>(),
+        )
+    }
 }
 
 /// The calling thread's pseudo-handle, which need not be closed.

@@ -6,7 +6,7 @@ use super::{
     view::Sighting,
     win32::{cb_size, cb_size_u16},
 };
-use crate::service::{MonitorHandle, Target, Through, WindowHandle};
+use crate::service::{Front, MonitorHandle, Target, Through, WindowHandle};
 use std::{ffi::c_void, path::Path, rc::Rc};
 use windows::{
     Win32::{
@@ -134,6 +134,26 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
         rotated: is_rotated(&monitor),
         through: Through::Window,
     })
+}
+
+/// The window in front and its monitor, which is the primary monitor when no window is in front.
+pub(crate) fn in_front() -> Front {
+    let window = w::HWND::GetForegroundWindow();
+    let primary = w::HMONITOR::MonitorFromPoint(w::POINT::default(), co::MONITOR::DEFAULTTOPRIMARY);
+    let monitor = window.as_ref().map_or_else(
+        || primary.ptr(),
+        |window| {
+            window
+                .MonitorFromWindow(co::MONITOR::DEFAULTTOPRIMARY)
+                .ptr()
+        },
+    );
+    Front {
+        window: window.and_then(|window| WindowHandle::new(window.ptr().addr().cast_signed())),
+        monitor: (monitor != primary.ptr())
+            .then(|| MonitorHandle::new(monitor.addr().cast_signed()))
+            .flatten(),
+    }
 }
 
 /// A recorded app's window, looked at on the capture thread to tell whether its monitor still

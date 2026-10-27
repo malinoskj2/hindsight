@@ -154,9 +154,16 @@ fn save_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Save failed · {error}"))
 }
 
-pub(super) const NOTHING_TO_SHOOT: &str =
-    "Screenshot · nothing to take yet · capture has not started";
 pub(super) const ALREADY_SHOOTING: &str = "Screenshot · already in progress";
+
+pub(super) fn grabbing_instead(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Screenshot · not taken from the recording ({error}) · capturing the monitor"
+        )
+    })
+}
 
 pub(super) fn screenshot_saved(path: &Path) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Screenshot · {}", file_name(path)))
@@ -180,6 +187,11 @@ pub(super) fn background_save_failed(error: impl Display) -> impl Display {
     })
 }
 
+#[cfg(windows)]
+pub(super) fn efficiency_refused(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Save · EcoQoS refused ({error}) · full speed"))
+}
+
 pub(super) fn clip_size_unreadable(path: &Path, error: impl Display) -> impl Display {
     fmt::from_fn(move |f| {
         write!(
@@ -196,4 +208,8 @@ pub(super) fn load_totals_failed(error: impl Display) -> impl Display {
 
 pub(super) fn save_totals_failed(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Totals · not saved ({error})"))
+}
+
+pub(super) fn save_last_version_failed(error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Last version · not saved ({error})"))
 }
