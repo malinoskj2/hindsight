@@ -20,9 +20,12 @@ use thiserror::Error;
 
 const BYTES_PER_PIXEL: usize = 4;
 const JPEG_QUALITY: u8 = 92;
-const AVIF_QUALITY: f32 = 80.0;
-/// The fastest of ravif's speeds: about two seconds of one core for a 1440p picture.
-const AVIF_SPEED: u8 = 10;
+/// Close to the PNG on text and flat colour, in about the size speed 10 gave at quality 80.
+const AVIF_QUALITY: f32 = 90.0;
+/// The fastest speed that lets ravif split down to 8×8 blocks. At 9 and 10 every block is
+/// 16×16, which leaves text and edges blocky at any quality. About two seconds of one core for
+/// a 1080p picture, against 0.6 s at speed 10.
+const AVIF_SPEED: u8 = 8;
 
 /// A picture as the encoder receives it: 8-bit BGRA rows, top to bottom, with no padding.
 pub(crate) struct Still {
