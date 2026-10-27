@@ -1360,8 +1360,8 @@ impl Machine {
     }
 }
 
-/// Lowers the calling thread's priority and tags it EcoQoS, so that a save or a screenshot takes
-/// longer but does not compete with the game.
+/// Lowers the calling thread's priority and opts it into power throttling, so that a save or a
+/// screenshot takes longer but does not compete with the game.
 #[cfg(windows)]
 fn run_in_background() {
     if let Err(error) = sys::thread::enter_background_mode() {

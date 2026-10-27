@@ -52,9 +52,9 @@ pub(crate) fn enter_background_mode() -> windows::core::Result<()> {
     unsafe { SetThreadPriority(current_thread(), THREAD_MODE_BACKGROUND_BEGIN) }
 }
 
-/// Tags the calling thread EcoQoS, so that Windows runs it on efficiency cores and at low clocks:
-/// slower, but lighter on the processor the game shares. The tag is the thread's own, apart from
-/// the process's opt-out of throttling for capture.
+/// Opts the calling thread into execution-speed power throttling, so that Windows runs it on
+/// efficiency cores and at low clocks: slower, but lighter on the processor the game shares. The
+/// setting is the thread's own, apart from the process's opt-out of throttling for capture.
 pub(crate) fn prefer_efficiency() -> windows::core::Result<()> {
     let state = THREAD_POWER_THROTTLING_STATE {
         Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
