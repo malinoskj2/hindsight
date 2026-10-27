@@ -431,14 +431,17 @@ fn real_encoder_output_muxes_with_sound() {
 
 #[test]
 #[ignore = "needs ffmpeg"]
-fn ffmpeg_decodes_both_sound_tracks_with_every_codec_and_container() {
+fn ffmpeg_plays_the_mix_first_and_decodes_the_microphone_alone_in_every_container() {
     let directory = tempfile::tempdir().unwrap();
-    let system = audio::tests::aac_clip(audio::tests::encoded_fixture(), 1024);
+    let mixed = AudioClip {
+        kind: audio::TrackKind::Mixed,
+        ..audio::tests::aac_clip(audio::tests::encoded_fixture(), 1024)
+    };
     let microphone = AudioClip {
-        source: Source::Microphone,
+        kind: audio::TrackKind::Microphone,
         ..audio::tests::aac_clip(audio::tests::encoded_fixture()[..100].to_vec(), 1024)
     };
-    let tracks = [system, microphone];
+    let tracks = [mixed, microphone];
     for codec in Codec::ALL {
         let packets: Vec<_> = encoded_fixture(codec).into_iter().map(Arc::new).collect();
         for container in [Container::Mp4, Container::Mkv] {
@@ -486,14 +489,27 @@ fn ffmpeg_decodes_both_sound_tracks_with_every_codec_and_container() {
             assert_eq!(
                 found.lines().collect::<Vec<_>>(),
                 [video, "aac,1", "aac,0"],
+                "{codec} {container:?}: the mix is the default sound track"
+            );
+            let names = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", "a", "-show_entries"])
+                .args(["stream_tags=title,handler_name", "-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&names.stdout)
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["System sound and microphone", "Microphone"],
                 "{codec} {container:?}"
             );
 
-            let system = crate::audio::testing::decode_mono(&path, 0);
+            let mixed = crate::audio::testing::decode_mono(&path, 0);
             let microphone = crate::audio::testing::decode_mono(&path, 1);
-            assert!(!system.is_empty(), "{codec} {container:?}");
+            assert!(!mixed.is_empty(), "{codec} {container:?}");
             assert!(
-                microphone.len() < system.len(),
+                microphone.len() < mixed.len(),
                 "{codec} {container:?}: the microphone's track is the shorter"
             );
         }

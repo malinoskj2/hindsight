@@ -35,7 +35,7 @@ pub(crate) use audio::{
 };
 use audio::{AudioRings, tick_time};
 #[cfg(windows)]
-pub(crate) use audio::{PcmTrack, TrackFormat};
+pub(crate) use audio::{PcmTrack, SourceFormat};
 pub(crate) use clip_name::ClipName;
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;

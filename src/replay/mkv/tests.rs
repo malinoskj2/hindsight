@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::replay::{
-    Packet, Source,
-    audio::tests::aac_clip,
+    Packet,
+    audio::{TrackKind, tests::aac_clip},
     mp4::tests::{index as mp4_index, packet, stream},
 };
 use std::{assert_matches, sync::Arc};
@@ -247,13 +247,16 @@ fn the_microphone_gets_a_second_sound_track_with_its_own_lead() {
     let packets: Vec<_> = (0..120)
         .map(|index| packet(Codec::H264, index, index % 30 == 0))
         .collect();
-    let system = aac_clip(vec![Arc::from([1_u8; 12]); 100], 1500);
+    let mixed = AudioClip {
+        kind: TrackKind::Mixed,
+        ..aac_clip(vec![Arc::from([1_u8; 12]); 100], 1500)
+    };
     let microphone = AudioClip {
-        source: Source::Microphone,
+        kind: TrackKind::Microphone,
         channels: 1,
         ..aac_clip(vec![Arc::from([2_u8; 9]); 100], 500)
     };
-    let file = mkv(Codec::H264, &packets, &[system, microphone]);
+    let file = mkv(Codec::H264, &packets, &[mixed, microphone]);
     let segment = segment(&file);
 
     let entries = children(child(segment, TRACKS));
@@ -270,7 +273,10 @@ fn the_microphone_gets_a_second_sound_track_with_its_own_lead() {
         .collect();
     assert_eq!(
         described,
-        [(2, 1, "System sound", 2), (3, 0, "Microphone", 1)]
+        [
+            (2, 1, "System sound and microphone", 2),
+            (3, 0, "Microphone", 1)
+        ]
     );
 
     let found = blocks(segment);

@@ -11,7 +11,7 @@ use super::{
 use crate::{
     config::DeviceId,
     log,
-    replay::{AudioFormat, CLOCK_RATE, Live, Source, TrackFormat},
+    replay::{AudioFormat, CLOCK_RATE, Live, Source, SourceFormat},
     sys::{self, clock, com::Apartment},
 };
 use std::{
@@ -215,9 +215,9 @@ impl<'a> Pipeline<'a> {
         let anchor = clock::now();
         live.set_audio(AudioFormat {
             sample_rate: SAMPLE_RATE,
-            tracks: sources
+            sources: sources
                 .iter()
-                .map(|source| TrackFormat {
+                .map(|source| SourceFormat {
                     source,
                     channels: kept_in(source).count(),
                 })
@@ -748,20 +748,20 @@ mod tests {
             println!("{}", entry.line());
         }
         let tracks = crate::audio::encode(&live.clip().unwrap().audio.unwrap()).unwrap();
-        let [system, microphone] = &tracks[..] else {
+        let [mixed, microphone] = &tracks[..] else {
             panic!("expected two tracks");
         };
-        for audio in [system, microphone] {
+        for audio in [mixed, microphone] {
             println!(
-                "{:?}: {} frames for 10 s of video, lead {}",
-                audio.source,
+                "{}: {} frames for 10 s of video, lead {}",
+                audio.kind.name(),
                 audio.frames.len(),
                 audio.lead
             );
             assert!((469..=471).contains(&audio.frames.len()));
         }
         if let Some(path) = std::env::var_os("HINDSIGHT_AUDIO_OUTPUT") {
-            std::fs::write(path, crate::audio::testing::adts(&system.frames)).unwrap();
+            std::fs::write(path, crate::audio::testing::adts(&mixed.frames)).unwrap();
         }
     }
 }

@@ -287,7 +287,7 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<Vec<AudioClip>,
 /// video. The input runs `HELD_BACK` past the clip's end so that the encoder finishes the last
 /// frame.
 fn encode_track(clip: &PcmClip, track: &PcmTrack) -> std::result::Result<AudioClip, EncodeError> {
-    let (sample_rate, channels) = (clip.format.sample_rate.get(), track.format.channels.get());
+    let (sample_rate, channels) = (clip.format.sample_rate.get(), track.channels.get());
     let mut encoder =
         Encoder::open(sample_rate, channels).map_err(failed("open the AAC encoder"))?;
     let mut frames = Vec::with_capacity(clip.frames);
@@ -313,7 +313,7 @@ fn encode_track(clip: &PcmClip, track: &PcmTrack) -> std::result::Result<AudioCl
     }
     frames.truncate(clip.frames);
     Ok(AudioClip {
-        source: track.format.source,
+        kind: track.kind,
         sample_rate,
         channels,
         config: encoder.config(),
