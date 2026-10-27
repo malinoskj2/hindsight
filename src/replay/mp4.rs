@@ -3,22 +3,24 @@
 
 #[cfg(test)]
 use super::Packet;
-use super::{AudioClip, FRAME_SAMPLES, StoreError, Stream, configuration, sample_parts};
+use super::{
+    AudioClip, FRAME_SAMPLES, Stream,
+    mux::{self, DecoderConfig, MuxError, Packets, Sample, fit},
+    sample_parts,
+};
 use crate::config::Codec;
 #[cfg(test)]
 use mp4_atom::Decode;
 use mp4_atom::{
-    Audio, Av01, Av1c, Avc1, Avcc, Co64, Codec as SampleEntry, Colr, Dinf, Dref, Edts, Elst,
-    ElstEntry, Encode, Esds, FourCC, Ftyp, Hdlr, Hvc1, Hvcc, Mdhd, Mdia, Minf, Moov, Mp4a, Mvhd,
-    Smhd, Stbl, Stsc, StscEntry, Stsd, Stss, Stsz, StszSamples, Stts, SttsEntry, Tkhd, Trak, Url,
-    Visual, Vmhd,
+    Audio, Av01, Avc1, Co64, Codec as SampleEntry, Colr, Dinf, Dref, Edts, Elst, ElstEntry, Encode,
+    Esds, FourCC, Ftyp, Hdlr, Hvc1, Mdhd, Mdia, Minf, Moov, Mp4a, Mvhd, Smhd, Stbl, Stsc,
+    StscEntry, Stsd, Stss, Stsz, StszSamples, Stts, SttsEntry, Tkhd, Trak, Url, Visual, Vmhd,
     esds::{DecoderConfig as EsDecoderConfig, DecoderSpecific, EsDescriptor, SLConfig},
     u24,
 };
 #[cfg(test)]
 use std::sync::Arc;
 use std::{io, slice};
-use thiserror::Error;
 
 /// Media ticks per frame; the track time scale is the frame rate times this.
 const TICKS_PER_FRAME: u32 = 1000;
@@ -33,8 +35,6 @@ const CHUNK_SECONDS: u64 = 1;
 const OBJECT_TYPE_MPEG4_AUDIO: u8 = 0x40;
 const STREAM_TYPE_AUDIO: u8 = 0x05;
 const AUDIO_SAMPLE_BITS: u16 = 16;
-/// Length prefix on each NAL unit in a sample, as `avcC` and `hvcC` declare it.
-pub(super) const NAL_LENGTH_BYTES: u8 = 4;
 /// Atom size 1: a 64-bit size follows the type.
 const LARGE_SIZE: u32 = 1;
 /// `mdat` with a 64-bit size, so clips over 4 GB need no special case.
@@ -44,23 +44,6 @@ const FILE_TYPE_MINOR_VERSION: u32 = 0x200;
 const UNDETERMINED_LANGUAGE: &str = "und";
 const DATA_REFERENCE: u16 = 1;
 const BT709: u16 = 1;
-
-pub(super) struct Sample {
-    pub(super) index: u64,
-    /// Bytes in the media data, length prefixes included.
-    pub(super) size: u32,
-    /// Media ticks until the next sample.
-    duration: u32,
-    pub(super) keyframe: bool,
-}
-
-/// The decoder configuration record a video sample entry carries.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum DecoderConfig {
-    Avc(Avcc),
-    Hevc(Hvcc),
-    Av1(Av1c),
-}
 
 struct Track<'a> {
     stream: &'a Stream,
@@ -85,7 +68,7 @@ impl Durations {
         let media: u64 = track
             .samples
             .iter()
-            .map(|sample| u64::from(sample.duration))
+            .map(|sample| u64::from(sample.frames) * u64::from(TICKS_PER_FRAME))
             .sum();
         let movie = media * u64::from(MOVIE_TIMESCALE) / u64::from(timescale);
         Ok(Self {
@@ -245,42 +228,6 @@ fn runs(kind: Kind, samples: impl Iterator<Item = (u64, u64)>) -> Vec<(u64, Chun
     chunks
 }
 
-/// The reason a clip could not be written. The message names only what failed, and the cause is
-/// its `source()`.
-#[derive(Debug, Error)]
-pub(crate) enum MuxError {
-    #[error("the replay buffer is empty")]
-    Empty,
-    #[error("the buffered video has no sequence header")]
-    NoSequenceHeader,
-    #[error("the clip is too large to index")]
-    TooLarge,
-    #[error("the buffered video changed while it was being saved")]
-    Changed,
-    #[error("build the clip's index")]
-    Index(#[from] mp4_atom::Error),
-    #[error("write the clip")]
-    Io(#[from] io::Error),
-    #[error("read the buffer back")]
-    Read(#[from] StoreError),
-}
-
-pub(crate) type Visit<'a> = dyn FnMut(u64, bool, &[u8]) -> Result<(), MuxError> + 'a;
-
-/// A clip's packets, oldest first starting from a keyframe, visited twice: once for the index,
-/// then for the media.
-pub(crate) trait Packets {
-    fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError>;
-}
-
-#[cfg(test)]
-impl Packets for [Arc<Packet>] {
-    fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
-        self.iter()
-            .try_for_each(|packet| each(packet.index, packet.keyframe, &packet.data))
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn write(
     output: &mut impl io::Write,
@@ -308,7 +255,7 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     packets: &P,
     audio: &[AudioClip],
 ) -> Result<(), MuxError> {
-    let (decoder, samples) = index(stream.codec, packets)?;
+    let (decoder, samples) = mux::index(stream.codec, packets)?;
     let track = Track {
         stream,
         decoder: &decoder,
@@ -327,75 +274,10 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     Ok(())
 }
 
-/// The first pass. Returns the decoder record from the first packet carrying one, and a sample
-/// per packet.
-pub(super) fn index<P: Packets + ?Sized>(
-    codec: Codec,
-    packets: &P,
-) -> Result<(DecoderConfig, Vec<Sample>), MuxError> {
-    let mut seen = false;
-    let mut decoder = None;
-    let mut samples: Vec<Sample> = Vec::new();
-    packets.visit(&mut |index, keyframe, data| {
-        seen = true;
-        if decoder.is_none() {
-            decoder = configuration(codec, data);
-        }
-        add_sample(&mut samples, codec, index, keyframe, data)
-    })?;
-    if !seen {
-        return Err(MuxError::Empty);
-    }
-    let decoder = decoder.ok_or(MuxError::NoSequenceHeader)?;
-    if samples.is_empty() {
-        return Err(MuxError::Empty);
-    }
-    Ok((decoder, samples))
-}
-
-/// Adds a sample. A skipped frame index lengthens the previous sample.
-fn add_sample(
-    samples: &mut Vec<Sample>,
-    codec: Codec,
-    index: u64,
-    keyframe: bool,
-    data: &[u8],
-) -> Result<(), MuxError> {
-    let parts = sample_parts(codec, data);
-    if parts.is_empty() {
-        return Ok(());
-    }
-    let size = stored_size(&parts, prefix_bytes(codec))?;
-    if let Some(last) = samples.last_mut() {
-        last.duration = duration_between(last.index, index)?;
-    }
-    samples.push(Sample {
-        index,
-        size,
-        duration: TICKS_PER_FRAME,
-        keyframe,
-    });
-    Ok(())
-}
-
-pub(super) fn prefix_bytes(codec: Codec) -> usize {
-    if length_prefixed(codec) {
-        usize::from(NAL_LENGTH_BYTES)
-    } else {
-        0
-    }
-}
-
-pub(super) fn stored_size(parts: &[&[u8]], prefix: usize) -> Result<u32, MuxError> {
-    parts
-        .iter()
-        .map(|part| fit::<u32, _>(part.len() + prefix))
-        .sum()
-}
-
-fn duration_between(from: u64, to: u64) -> Result<u32, MuxError> {
-    let frames: u32 = fit(to.saturating_sub(from).max(1))?;
-    frames
+/// A sample's duration in media ticks.
+fn sample_ticks(sample: &Sample) -> Result<u32, MuxError> {
+    sample
+        .frames
         .checked_mul(TICKS_PER_FRAME)
         .ok_or(MuxError::TooLarge)
 }
@@ -449,24 +331,11 @@ impl<W: io::Write> MediaWriter<'_, W> {
         if parts.is_empty() {
             return Ok(());
         }
-        let indexed = self
-            .track
-            .samples
-            .get(self.written)
-            .map(|sample| sample.size);
-        if indexed != Some(stored_size(&parts, prefix_bytes(codec))?) {
-            return Err(MuxError::Changed);
-        }
+        mux::indexed(self.track.samples, self.written, codec, &parts)?;
         if self.written == self.chunk_end {
             self.next_video_chunk()?;
         }
-        for part in parts {
-            if length_prefixed(codec) {
-                let length: u32 = fit(part.len())?;
-                self.output.write_all(&length.to_be_bytes())?;
-            }
-            self.output.write_all(part)?;
-        }
+        mux::write_parts(self.output, codec, &parts)?;
         self.written += 1;
         Ok(())
     }
@@ -513,15 +382,6 @@ impl<W: io::Write> MediaWriter<'_, W> {
         }
         Ok(())
     }
-}
-
-/// H.264 and HEVC samples are length-prefixed NAL units; AV1 OBUs carry their own sizes.
-const fn length_prefixed(codec: Codec) -> bool {
-    !matches!(codec, Codec::Av1)
-}
-
-fn fit<T: TryFrom<U>, U>(value: U) -> Result<T, MuxError> {
-    T::try_from(value).map_err(|_| MuxError::TooLarge)
 }
 
 fn file_type(codec: Codec) -> Ftyp {
@@ -588,6 +448,10 @@ fn video_track(
         .filter(|(_, sample)| sample.keyframe)
         .map(|(number, _)| number)
         .collect();
+    let ticks = samples
+        .iter()
+        .map(sample_ticks)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Trak {
         tkhd: Tkhd {
             track_id: VIDEO_TRACK_ID,
@@ -608,7 +472,7 @@ fn video_track(
                     stsd: Stsd {
                         codecs: vec![visual_entry(track.stream, track.decoder)?],
                     },
-                    stts: time_to_sample(samples.iter().map(|sample| sample.duration)),
+                    stts: time_to_sample(ticks),
                     stss: Some(Stss { entries: keyframes }),
                     stsc: sample_to_chunk(&placement.counts),
                     stsz: sample_sizes(samples.iter().map(|sample| sample.size).collect()),

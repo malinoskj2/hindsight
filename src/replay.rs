@@ -25,6 +25,7 @@ mod h264;
 mod hevc;
 mod mkv;
 mod mp4;
+mod mux;
 mod ring;
 mod store;
 
@@ -37,7 +38,7 @@ use audio::{AudioRings, tick_time};
 pub(crate) use audio::{PcmTrack, SourceFormat};
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
-use mp4::{DecoderConfig, MuxError, Visit};
+use mux::{DecoderConfig, MuxError, Visit};
 use ring::Ring;
 use store::Entry;
 #[cfg(windows)]
@@ -377,7 +378,7 @@ impl Snapshot {
 }
 
 /// Stored packets are read back a run at a time on each pass, never all at once.
-impl mp4::Packets for [Arc<Entry>] {
+impl mux::Packets for [Arc<Entry>] {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
         store::each(self, &mut |entry, data| {
             each(entry.index, entry.keyframe, data)

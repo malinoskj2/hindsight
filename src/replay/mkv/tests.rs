@@ -1,10 +1,12 @@
 //! The Matroska layout, checked by reading the written elements back.
 
 use super::*;
+use crate::config::Codec;
 use crate::replay::{
     Packet,
     audio::{TrackKind, tests::aac_clip},
-    mp4::tests::{index as mp4_index, packet, stream},
+    mp4::{self, tests::index as mp4_index},
+    mux::tests::{packet, stream},
 };
 use std::{assert_matches, sync::Arc};
 
@@ -180,7 +182,11 @@ fn the_track_carries_the_codec_and_its_decoder_record() {
         let record = crate::replay::configuration(codec, &packets[0].data)
             .unwrap()
             .record();
-        assert_eq!(child(track, CODEC_PRIVATE), &record[8..], "{codec}");
+        assert_eq!(
+            child(track, CODEC_PRIVATE),
+            &record[BOX_HEADER_BYTES..],
+            "{codec}"
+        );
         let video = child(track, VIDEO);
         assert_eq!(
             (
