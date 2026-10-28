@@ -4,6 +4,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter},
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -14,6 +16,8 @@ pub(crate) use name::SavedName;
 const PARTIAL_EXTENSION: &str = "partial";
 /// The number of files saved within one second before a save gives up looking for a free name.
 const NAME_ATTEMPTS: u32 = 1000;
+const RENAME_ATTEMPTS: u32 = 10;
+const RENAME_RETRY: Duration = Duration::from_millis(200);
 pub(crate) const WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 /// The reason a file could not be saved. The message names only the failed step and the path,
@@ -38,6 +42,8 @@ impl WriteError {
 }
 
 /// The file is written under a `.partial` name and renamed to its final one only once complete.
+/// A complete file that cannot be renamed is kept under the `.partial` name, which the error
+/// gives, rather than lost.
 pub(crate) fn save_file<T, E: From<WriteError>>(
     directory: &Path,
     extension: &str,
@@ -48,15 +54,12 @@ pub(crate) fn save_file<T, E: From<WriteError>>(
     let partial = directory
         .join(name.file_name(extension))
         .with_extension(PARTIAL_EXTENSION);
-    let result = write(&partial).and_then(|written| {
-        claim_name(directory, name, extension, &partial)
-            .map(|path| (path, written))
-            .map_err(E::from)
-    });
-    if result.is_err() {
+    let written = write(&partial).inspect_err(|_| {
         let _ = fs::remove_file(&partial);
-    }
-    result
+    })?;
+    let path = claim_name(directory, name, extension, &partial)
+        .map_err(WriteError::at("name the finished file", &partial))?;
+    Ok((path, written))
 }
 
 /// Moves the finished `partial` to the first attempt of `name` that no file has. Each name is
@@ -66,32 +69,44 @@ fn claim_name(
     name: SavedName,
     extension: &str,
     partial: &Path,
-) -> Result<PathBuf, WriteError> {
+) -> io::Result<PathBuf> {
     let mut name = name;
     for _ in 0..NAME_ATTEMPTS {
         let path = directory.join(name.file_name(extension));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(claimed) => {
                 drop(claimed);
-                return match fs::rename(partial, &path) {
+                return match rename(partial, &path) {
                     Ok(()) => Ok(path),
                     Err(error) => {
                         let _ = fs::remove_file(&path);
-                        Err(WriteError::at("finish", &path)(error))
+                        Err(error)
                     }
                 };
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => name = name.next(),
-            Err(error) => return Err(WriteError::at("name", &path)(error)),
+            Err(error) => return Err(error),
         }
     }
-    Err(WriteError::at(
-        "name",
-        &directory.join(name.file_name(extension)),
-    )(io::Error::new(
+    Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "every name for this second is taken",
-    )))
+    ))
+}
+
+/// Renames `from` over the name just claimed, trying again for a while: an antivirus scanner,
+/// a sync client or Explorer can briefly hold the claimed file open after it appears.
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempts = 1;
+    loop {
+        match fs::rename(from, to) {
+            Err(_) if attempts < RENAME_ATTEMPTS => {
+                attempts += 1;
+                thread::sleep(RENAME_RETRY);
+            }
+            renamed => return renamed,
+        }
+    }
 }
 
 pub(crate) fn write_file<E: From<WriteError>>(
@@ -166,5 +181,36 @@ mod tests {
             Some("write")
         );
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_complete_file_that_cannot_be_renamed_is_kept() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("saved");
+
+        // The handle, shared only for reading, is returned so that it holds the file open while
+        // the save renames it.
+        let refused = save_file(&folder, "txt", |partial| {
+            fs::write(partial, b"complete").map_err(WriteError::at("write", partial))?;
+            OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(partial)
+                .map_err(WriteError::at("hold", partial))
+        });
+
+        let error = refused.unwrap_err();
+        assert!(error.to_string().starts_with("name the finished file"));
+        let kept: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].extension().unwrap(), PARTIAL_EXTENSION);
+        assert_eq!(fs::read(&kept[0]).unwrap(), b"complete");
     }
 }
