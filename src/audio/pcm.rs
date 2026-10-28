@@ -47,9 +47,6 @@ impl Channels {
         }
     }
 
-    /// Appends `data` to `output` in these channels. Mono input is doubled for stereo, and stereo
-    /// averaged for mono. `WaveFormat::layout` only accepts one- or two-channel formats; any
-    /// channels past two would be dropped.
     pub(super) fn append(self, output: &mut Vec<i16>, data: &[u8], layout: Layout) {
         let channels = usize::from(layout.channels);
         match layout.sample {

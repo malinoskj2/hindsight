@@ -1,5 +1,3 @@
-//! Which device a source is captured from: Windows' default, or the device chosen in Settings.
-
 use crate::config::DeviceId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -59,8 +59,6 @@ fn main() {
     resource
         .set_manifest(MANIFEST)
         .set("ProductName", env!("CARGO_PKG_NAME"))
-        // Windows names the app by its description in the taskbar's tray icon settings, Task
-        // Manager and the startup apps list.
         .set("FileDescription", env!("CARGO_PKG_NAME"))
         .set("ProductVersion", env!("CARGO_PKG_VERSION"));
     for table::IconEntry { ico, id, .. } in table::ICONS {

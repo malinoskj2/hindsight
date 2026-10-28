@@ -131,8 +131,6 @@ fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> OpenError {
     move |error| OpenError::Windows(step, error)
 }
 
-/// The endpoint each source is captured from: what an output device plays is captured by
-/// loopback.
 const fn flow(source: Source) -> EDataFlow {
     match source {
         Source::System => eRender,

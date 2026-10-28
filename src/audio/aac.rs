@@ -24,8 +24,6 @@ use windows::{
     core::{GUID, Result},
 };
 
-/// 192 kb/s for stereo and 96 kb/s for mono. The encoder accepts 12 000, 16 000, 20 000 and
-/// 24 000 bytes a second.
 const STEREO_BYTES_PER_SECOND: u32 = 24_000;
 const MONO_BYTES_PER_SECOND: u32 = 12_000;
 const AAC_LC_LEVEL_2: u32 = 0x29;
@@ -281,9 +279,6 @@ pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<Vec<AudioClip>,
         .collect()
 }
 
-/// A fresh encoder started at the clip's first sample keeps the track's frames in step with the
-/// video. The input runs `HELD_BACK` past the clip's end so that the encoder finishes the last
-/// frame.
 fn encode_track(clip: &PcmClip, track: &PcmTrack) -> std::result::Result<AudioClip, EncodeError> {
     let (sample_rate, channels) = (clip.format.sample_rate.get(), track.channels.get());
     let mut encoder =

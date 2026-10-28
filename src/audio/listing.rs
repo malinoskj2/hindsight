@@ -20,8 +20,6 @@ pub(crate) struct DeviceList {
 }
 
 impl DeviceList {
-    /// Opens the list in a single-threaded apartment, as the window's thread uses for the
-    /// shell's dialogs.
     pub(crate) fn open() -> windows::core::Result<Self> {
         let com = Apartment::single_threaded()?;
         let devices = Devices::new()?;
