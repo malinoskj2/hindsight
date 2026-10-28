@@ -2,7 +2,7 @@
 //! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
-    SAMPLE_RATE, Sources, StandIns, aac,
+    InputState, InputStates, SAMPLE_RATE, Sources, aac,
     choice::Picked,
     pcm::{Channels, Layout},
     timeline::{Frames, Ticks, Timeline},
@@ -18,12 +18,12 @@ use std::{
     any::Any,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED;
+use windows::Win32::{Foundation::E_ACCESSDENIED, Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED};
 
 /// Each read takes six 10 ms engine packets. The 200 ms capture buffer absorbs a late read.
 const READ_INTERVAL: Duration = Duration::from_millis(60);
@@ -36,7 +36,7 @@ const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Capture {
     stop: Arc<Signal>,
-    stand_ins: Arc<PerSource<AtomicBool>>,
+    states: Arc<PerSource<AtomicU8>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -46,8 +46,9 @@ impl Capture {
         self.join.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
-    pub(crate) fn stand_ins(&self) -> StandIns {
-        self.stand_ins.map(|flag| flag.load(Ordering::Relaxed))
+    pub(crate) fn input_states(&self) -> InputStates {
+        self.states
+            .map(|code| InputState::of_code(code.load(Ordering::Relaxed)))
     }
 }
 
@@ -82,15 +83,15 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
             return None;
         }
     };
-    let stand_ins = Arc::new(PerSource::<AtomicBool>::default());
-    let (live, signal, flags) = (Arc::clone(live), Arc::clone(&stop), Arc::clone(&stand_ins));
+    let states = Arc::new(PerSource::<AtomicU8>::default());
+    let (live, signal, codes) = (Arc::clone(live), Arc::clone(&stop), Arc::clone(&states));
     match thread::Builder::new()
         .name("audio".to_owned())
-        .spawn(move || record(&live, &sources, &signal, &flags))
+        .spawn(move || record(&live, &sources, &signal, &codes))
     {
         Ok(join) => Some(Capture {
             stop,
-            stand_ins,
+            states,
             join: Some(join),
         }),
         Err(error) => {
@@ -116,7 +117,7 @@ const fn names(source: Source) -> (&'static str, &'static str) {
     }
 }
 
-fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &PerSource<AtomicBool>) {
+fn record(live: &Live, sources: &Sources, stop: &Signal, states: &PerSource<AtomicU8>) {
     let Some(mut pipeline) = Pipeline::open(live, sources) else {
         return;
     };
@@ -140,9 +141,9 @@ fn record(live: &Live, sources: &Sources, stop: &Signal, stand_ins: &PerSource<A
         }
         for input in inputs.iter_mut() {
             input.device.update(devices, changes);
-            stand_ins
+            states
                 .get(input.device.source)
-                .store(input.device.standing_in(), Ordering::Relaxed);
+                .store(input.device.state() as u8, Ordering::Relaxed);
         }
         let interval = inputs
             .iter()
@@ -265,8 +266,9 @@ enum DeviceState {
     Closed {
         /// Why the device open before was picked, or `None` when none was.
         previous: Option<Picked>,
-        /// A failure to open has been logged since the last success, so another is not.
-        reported: bool,
+        /// How the source is silent, once a failure to open has been logged since the last
+        /// success, so that another is not.
+        failed: Option<InputState>,
     },
 }
 
@@ -277,21 +279,28 @@ impl Device {
             choice,
             state: DeviceState::Closed {
                 previous: None,
-                reported: false,
+                failed: None,
             },
             due: None,
         }
     }
 
-    fn standing_in(&self) -> bool {
-        matches!(&self.state, DeviceState::Open(stream) if stream.picked() == Picked::StandIn)
+    fn state(&self) -> InputState {
+        match &self.state {
+            DeviceState::Open(stream) if stream.picked() == Picked::StandIn => InputState::StandIn,
+            DeviceState::Open(_) | DeviceState::Closed { failed: None, .. } => InputState::Captured,
+            DeviceState::Closed {
+                failed: Some(silent),
+                ..
+            } => *silent,
+        }
     }
 
     fn close(&mut self) {
         if let DeviceState::Open(stream) = &self.state {
             self.state = DeviceState::Closed {
                 previous: Some(stream.picked()),
-                reported: false,
+                failed: None,
             };
         }
     }
@@ -356,7 +365,7 @@ impl Device {
     }
 
     fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
-        let DeviceState::Closed { previous, reported } = &mut self.state else {
+        let DeviceState::Closed { previous, failed } = &mut self.state else {
             return;
         };
         let (label, device) = names(self.source);
@@ -376,7 +385,7 @@ impl Device {
                 self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
             Err(error) => {
-                if !*reported {
+                if failed.is_none() {
                     match &error {
                         OpenError::NoDevice => {
                             log::info(format!("{label} · no {device} · silence until one appears"));
@@ -385,8 +394,8 @@ impl Device {
                             "{label} · cannot capture ({error}: {cause}) · retrying every second"
                         )),
                     }
-                    *reported = true;
                 }
+                *failed = Some(silent_for(&error));
                 self.due = Some(now + REOPEN_INTERVAL);
             }
         }
@@ -412,6 +421,34 @@ impl Device {
             track.packet(packet, layout);
             Ok(())
         })
+    }
+}
+
+/// How a source is silent while its device cannot be opened.
+fn silent_for(error: &OpenError) -> InputState {
+    match error {
+        OpenError::NoDevice => InputState::NoDevice,
+        // What Windows returns, at whichever step, while its privacy settings deny the device.
+        OpenError::Windows(_, cause) if cause.code() == E_ACCESSDENIED => InputState::Denied,
+        OpenError::Windows(..) => InputState::Unavailable,
+    }
+}
+
+impl InputState {
+    const ALL: [Self; 5] = [
+        Self::Captured,
+        Self::StandIn,
+        Self::NoDevice,
+        Self::Denied,
+        Self::Unavailable,
+    ];
+
+    /// Returns the state that `as u8` turned into `code`.
+    fn of_code(code: u8) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|state| *state as u8 == code)
+            .unwrap_or_default()
     }
 }
 
@@ -522,6 +559,38 @@ mod tests {
         sample: pcm::Sample::Int16,
         channels: 2,
     };
+
+    #[test]
+    fn an_input_state_survives_its_code() {
+        for state in InputState::ALL {
+            assert_eq!(InputState::of_code(state as u8), state);
+        }
+        assert_eq!(InputState::of_code(u8::MAX), InputState::Captured);
+    }
+
+    #[test]
+    fn a_device_that_cannot_open_says_how_the_source_is_silent() {
+        let denied = || {
+            OpenError::Windows(
+                "start the stream",
+                windows::core::Error::from(E_ACCESSDENIED),
+            )
+        };
+        let gone = OpenError::Windows(
+            "start the stream",
+            windows::core::Error::from(AUDCLNT_E_DEVICE_INVALIDATED),
+        );
+        assert_eq!(silent_for(&OpenError::NoDevice), InputState::NoDevice);
+        assert_eq!(silent_for(&denied()), InputState::Denied);
+        assert_eq!(silent_for(&gone), InputState::Unavailable);
+
+        let mut device = Device::new(Source::Microphone, None);
+        assert_eq!(device.state(), InputState::Captured, "until it fails");
+        device.opened(Err(denied()), Instant::now());
+        assert_eq!(device.state(), InputState::Denied);
+        device.opened(Err(OpenError::NoDevice), Instant::now());
+        assert_eq!(device.state(), InputState::NoDevice);
+    }
 
     /// The runs a track passed on, as (first frame, samples).
     #[derive(Default)]

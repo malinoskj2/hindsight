@@ -1,7 +1,7 @@
 //! The recording worker: keeps one capture session running, saves clips and screenshots.
 
 use crate::{
-    audio::{self, Sources, StandIns},
+    audio::{self, InputStates, Sources},
     config::{Backend, Config, Container, Memory, Mode, Preference},
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
@@ -280,7 +280,7 @@ pub(crate) struct Buffer {
 /// system sound or the microphone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
-    Recording(StandIns),
+    Recording(InputStates),
     /// Sound capture could not start or has stopped. The log gives the reason.
     Failed,
 }
@@ -1281,7 +1281,7 @@ impl Machine {
             .as_ref()
             .filter(|_| Sources::of(&self.config).any())?;
         Some(match &session.audio {
-            Some(capture) if !capture.has_stopped() => Sound::Recording(capture.stand_ins()),
+            Some(capture) if !capture.has_stopped() => Sound::Recording(capture.input_states()),
             _ => Sound::Failed,
         })
     }

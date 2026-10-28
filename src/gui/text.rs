@@ -2,6 +2,7 @@
 
 use crate::{
     APP_NAME,
+    audio::InputState,
     config::{Codec, Memory},
     gpu::{Adapter, ProbeError},
     replay::{Source, Stream},
@@ -16,11 +17,36 @@ pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab
 pub(super) const CLIP_WITHOUT_SOUND: &str =
     "The last clip was saved without sound; the Logs tab says why.";
 
-pub(super) const fn device_missing(source: Source) -> &'static str {
-    match source {
-        Source::System => "The chosen sound device is missing; the default is recorded for now.",
-        Source::Microphone => "The chosen microphone is missing; the default is recorded for now.",
-    }
+/// The notice for a recorded source that is not captured as chosen, if it is not.
+pub(super) const fn input_notice(source: Source, state: InputState) -> Option<&'static str> {
+    Some(match (source, state) {
+        (_, InputState::Captured) => return None,
+        (Source::System, InputState::StandIn) => {
+            "The chosen sound device is missing; the default is recorded for now."
+        }
+        (Source::Microphone, InputState::StandIn) => {
+            "The chosen microphone is missing; the default is recorded for now."
+        }
+        (Source::System, InputState::NoDevice) => {
+            "There is no sound device to record; sound is silent until one appears."
+        }
+        (Source::Microphone, InputState::NoDevice) => {
+            "There is no microphone to record; it is silent until one appears."
+        }
+        (Source::System, InputState::Denied) => {
+            "Windows denies access to the sound device, so sound is silent."
+        }
+        (Source::Microphone, InputState::Denied) => {
+            "Windows' privacy settings block the microphone, so it is silent.\r\n\
+             Allow desktop apps in Settings › Privacy & security › Microphone."
+        }
+        (Source::System, InputState::Unavailable) => {
+            "The sound device cannot be recorded for now; the Logs tab says why."
+        }
+        (Source::Microphone, InputState::Unavailable) => {
+            "The microphone cannot be recorded for now; the Logs tab says why."
+        }
+    })
 }
 
 const NO_VALUE: &str = "—";

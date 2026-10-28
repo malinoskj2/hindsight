@@ -78,17 +78,6 @@ impl<T> PerSource<T> {
     }
 }
 
-impl PerSource<bool> {
-    #[cfg_attr(
-        all(not(windows), test),
-        expect(dead_code, reason = "only the Windows window shows them")
-    )]
-    pub(crate) fn flagged(&self) -> impl Iterator<Item = Source> {
-        self.iter()
-            .filter_map(|(source, &flagged)| flagged.then_some(source))
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SourceFormat {
     pub(crate) source: Source,

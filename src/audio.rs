@@ -91,9 +91,31 @@ impl Sources {
     }
 }
 
-/// The sources recorded from Windows' default device because the device chosen for them in
-/// Settings is missing.
-pub(crate) type StandIns = PerSource<bool>;
+/// How a recorded source is captured, for the Status tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+#[cfg_attr(
+    all(not(windows), test),
+    expect(
+        dead_code,
+        reason = "only the Windows audio thread finds a source silent"
+    )
+)]
+pub(crate) enum InputState {
+    /// From the device chosen, or from Windows' default when none is. Also while a device opens.
+    #[default]
+    Captured,
+    /// From Windows' default, because the device chosen in Settings is missing.
+    StandIn,
+    /// Silent, as there is no device.
+    NoDevice,
+    /// Silent, as Windows' privacy settings deny desktop apps the device.
+    Denied,
+    /// Silent, as the device cannot be captured, for a reason the log gives.
+    Unavailable,
+}
+
+pub(crate) type InputStates = PerSource<InputState>;
 
 #[derive(Debug, Error)]
 pub(crate) enum EncodeError {
@@ -128,7 +150,7 @@ impl Capture {
         match *self {}
     }
 
-    pub(crate) fn stand_ins(&self) -> StandIns {
+    pub(crate) fn input_states(&self) -> InputStates {
         match *self {}
     }
 }

@@ -12,7 +12,7 @@ use super::{
 #[cfg(test)]
 use crate::service::{Problem, ProblemKind};
 use crate::{
-    audio::StandIns,
+    audio::InputStates,
     service::{Sound, State, Status},
 };
 use std::rc::Rc;
@@ -406,9 +406,9 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
             text::problem_cause(problem),
         ]
     });
-    let stand_ins = match status.sound {
-        Some(Sound::Recording(stand_ins)) => stand_ins,
-        Some(Sound::Failed) | None => StandIns::default(),
+    let inputs = match status.sound {
+        Some(Sound::Recording(inputs)) => inputs,
+        Some(Sound::Failed) | None => InputStates::default(),
     };
     let notices = window_notices
         .into_iter()
@@ -417,9 +417,9 @@ fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
             (status.sound == Some(Sound::Failed)).then_some(text::SOUND_FAILED),
         ])
         .chain(
-            stand_ins
-                .flagged()
-                .map(|source| Some(text::device_missing(source))),
+            inputs
+                .iter()
+                .map(|(source, &state)| text::input_notice(source, state)),
         )
         .chain([status
             .clip_without_sound
@@ -439,6 +439,7 @@ fn row_caption(page: &gui::TabPage, caption: &str, y: i32) -> gui::Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::InputState;
 
     #[test]
     fn the_rows_sit_where_they_were_laid_by_hand() {
@@ -493,15 +494,25 @@ mod tests {
             notice_text(&status, [None, None]),
             "●  Clip not saved at 14:03\r\nThe disk is full."
         );
-        status.sound = Some(Sound::Recording(StandIns {
-            system: true,
-            microphone: true,
+        status.sound = Some(Sound::Recording(InputStates {
+            system: InputState::StandIn,
+            microphone: InputState::StandIn,
         }));
         assert_eq!(
             notice_text(&status, [None, None]),
             "●  Clip not saved at 14:03\r\nThe disk is full.\r\n\
              The chosen sound device is missing; the default is recorded for now.\r\n\
              The chosen microphone is missing; the default is recorded for now."
+        );
+        status.sound = Some(Sound::Recording(InputStates {
+            system: InputState::Captured,
+            microphone: InputState::Denied,
+        }));
+        assert_eq!(
+            notice_text(&status, [None, None]),
+            "●  Clip not saved at 14:03\r\nThe disk is full.\r\n\
+             Windows' privacy settings block the microphone, so it is silent.\r\n\
+             Allow desktop apps in Settings › Privacy & security › Microphone."
         );
         status.nothing_to_save = true;
         status.sound = Some(Sound::Failed);
