@@ -1,7 +1,4 @@
-//! Updates from the project's GitHub releases. Each release carries a minisign signature of its
-//! installer, whose trusted comment names the installer and the version. The latest release's
-//! signature announces the version, and an installer is run only when that signature verifies
-//! against the release key built into the app.
+//! Updates from the project's GitHub releases.
 
 // The build script reads the changelog with this module, which the crate holds for its tests.
 #[cfg(test)]
@@ -23,19 +20,12 @@ use thiserror::Error;
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 pub(crate) const INSTALLER: &str = "hindsight-setup-x64.exe";
 const SIGNATURE_EXTENSION: &str = "minisig";
-/// The public half of the key the release workflow signs installers with, in minisign's own
-/// file format so that the workflow verifies against the same file.
 const RELEASE_KEY: &str = include_str!("../release.pub");
-/// The installer leaves its uninstaller beside the app; the portable zip has none.
 const UNINSTALLER: &str = "uninstall.exe";
-/// The environment variable that, set to a version, makes update checks take this copy for that
-/// version, so updating can be tried against the latest release while it is installed.
 #[cfg(windows)]
 pub(crate) const VERSION_SWITCH: &str = "HINDSIGHT_UPDATE_FROM";
-/// The installer's flags: silent, then waiting for this copy to exit and starting the new one.
 const INSTALLER_FLAGS: &str = "/S /UPDATE";
 
-/// A semantic version. Build metadata is dropped, since it does not order versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Version {
     major: u64,
@@ -51,20 +41,17 @@ enum Identifier {
 }
 
 impl Version {
-    /// The version of this build.
     pub(crate) fn running() -> Self {
         env!("CARGO_PKG_VERSION")
             .parse()
             .expect("Cargo requires the package version to be a semantic version")
     }
 
-    /// The version update checks compare the latest release with.
     #[cfg(windows)]
     pub(crate) fn for_updates() -> Self {
         Self::chosen(std::env::var(VERSION_SWITCH).ok().as_deref())
     }
 
-    /// The version `switch` names, or this build's when it names none.
     fn chosen(switch: Option<&str>) -> Self {
         switch
             .and_then(|version| version.trim().parse().ok())
@@ -187,12 +174,10 @@ pub(crate) struct VersionError(String);
 #[derive(Clone)]
 pub(crate) struct Release {
     version: Version,
-    /// Boxed, since it is several times the size of everything else that carries a release.
     signature: Box<Signature>,
 }
 
 impl Release {
-    /// Reads the release that an installer signature, the text of a `.minisig` file, names.
     pub(crate) fn announced(signature: &str) -> Result<Self, ReleaseError> {
         let signature = Signature::decode(signature).map_err(ReleaseError::Unreadable)?;
         let (file, version) = signature
@@ -221,8 +206,6 @@ impl Release {
         format!("{}/releases/tag/v{}", repository(), self.version)
     }
 
-    /// Checks that `installer` is the one this release's signature signs. The trusted comment,
-    /// and so the version, is covered by the same signature.
     pub(crate) fn verify(&self, installer: &[u8]) -> Result<(), ForgedInstaller> {
         self.verify_with(&release_key(), installer)
     }
@@ -262,8 +245,7 @@ pub(crate) enum ReleaseError {
 #[error("the downloaded installer is not the signed release")]
 pub(crate) struct ForgedInstaller(#[source] minisign_verify::Error);
 
-/// Where the latest release's installer signature is. GitHub redirects this to the newest
-/// release that is neither a draft nor a pre-release.
+/// GitHub redirects this to the newest release that is neither a draft nor a pre-release.
 pub(crate) fn latest_signature_url() -> String {
     format!(
         "{}/releases/latest/download/{INSTALLER}.{SIGNATURE_EXTENSION}",
@@ -271,12 +253,10 @@ pub(crate) fn latest_signature_url() -> String {
     )
 }
 
-/// Where every release's notes are.
 pub(crate) fn releases_url() -> String {
     format!("{}/releases", repository())
 }
 
-/// `CARGO_PKG_REPOSITORY` without a trailing slash or `.git`, either of which it may include.
 fn repository() -> &'static str {
     let root = REPOSITORY.trim_end_matches('/');
     root.strip_suffix(".git").unwrap_or(root)
@@ -286,7 +266,6 @@ fn release_key() -> PublicKey {
     PublicKey::decode(RELEASE_KEY).expect("release.pub is a valid minisign public key file")
 }
 
-/// What a check found.
 #[derive(Debug)]
 pub(crate) enum Check {
     Current,
@@ -303,12 +282,9 @@ impl Check {
     }
 }
 
-/// How this copy of hindsight was put on the machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Installation {
-    /// By the installer, into this folder, which an update installs over.
     Installed(PathBuf),
-    /// From the zip, which the installer does not update.
     Portable,
 }
 
@@ -323,13 +299,11 @@ impl Installation {
     }
 }
 
-/// The installer's command line for updating the copy in `folder`. NSIS requires `/D=` last and
-/// unquoted.
+/// NSIS requires `/D=` last and unquoted.
 pub(crate) fn installer_parameters(folder: &str) -> String {
     format!("{INSTALLER_FLAGS} /D={folder}")
 }
 
-/// Where updating stands, as the About tab shows it.
 #[derive(Clone, Debug)]
 pub(crate) enum State {
     Unchecked,
@@ -337,9 +311,7 @@ pub(crate) enum State {
     Current,
     Available(Release),
     Downloading(Release),
-    /// The check failed, with the reason.
     CheckFailed(String),
-    /// Downloading or starting the installer failed, with the reason.
     UpdateFailed(
         Release,
         #[cfg_attr(
@@ -351,7 +323,6 @@ pub(crate) enum State {
 }
 
 impl State {
-    /// Moves to `Checking` and reports `true`, unless a check or a download is under way.
     pub(crate) fn begin_check(&mut self) -> bool {
         if matches!(self, Self::Checking | Self::Downloading(_)) {
             return false;
@@ -368,7 +339,6 @@ impl State {
         };
     }
 
-    /// The release to download, after moving to `Downloading`, when one is on offer.
     pub(crate) fn begin_download(&mut self) -> Option<Release> {
         let (Self::Available(release) | Self::UpdateFailed(release, _)) = self else {
             return None;
@@ -378,7 +348,6 @@ impl State {
         Some(release)
     }
 
-    /// The release on offer, if there is one.
     pub(crate) fn release(&self) -> Option<&Release> {
         match self {
             Self::Available(release)

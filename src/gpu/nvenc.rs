@@ -472,7 +472,6 @@ impl Encoder {
         }
     }
 
-    /// The surface holding the picture NVENC was last given.
     pub(super) fn latest_surface(&self) -> Option<Surface> {
         match self.latest? {
             Input::Slot(slot) => self.slots[slot].texture.clone().map(Surface::Texture),

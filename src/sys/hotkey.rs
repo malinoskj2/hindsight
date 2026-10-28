@@ -1,5 +1,4 @@
-//! The global hotkeys that save a clip and take a screenshot, written as text such as
-//! `Alt+F7`.
+//! The global hotkeys that save a clip and take a screenshot.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, ops::BitOr, str::FromStr};
@@ -59,7 +58,6 @@ pub(crate) struct Hotkey {
     key: u16,
 }
 
-/// The modifier keys held down while another key is pressed, combined with `|`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Modifiers(u16);
 
@@ -91,9 +89,7 @@ impl Hotkey {
         key: VK_F1 + 7,
     };
 
-    /// Returns the hotkey a hotkey field enters when `key`, a virtual-key code, is pressed with
-    /// `modifiers` held, or `None` when the press is typing or editing instead. Shift alone is not
-    /// enough, so capitals still type and Shift+Home still selects.
+    /// Shift alone is not enough, so capitals still type and Shift+Home still selects.
     pub(crate) fn pressed(modifiers: Modifiers, key: u16) -> Option<Self> {
         let Modifiers(modifiers) = modifiers;
         let held = modifiers & !MOD_SHIFT != 0;
@@ -250,7 +246,6 @@ mod native {
     use thiserror::Error;
     use winsafe::{self as w, co};
 
-    /// What a hotkey does. Each is registered under an ID of its own.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Action {
         Save,
@@ -267,7 +262,6 @@ mod native {
             }
         }
 
-        /// The action registered under the ID a `WM_HOTKEY` message carries.
         pub(crate) fn from_id(id: usize) -> Option<Self> {
             Self::ALL
                 .into_iter()

@@ -1,5 +1,4 @@
-//! Screenshots: the picture a capture hands over, the one-slot request the capture thread looks
-//! for each frame, and writing the picture as PNG, JPEG, WebP or AVIF under a timestamped name.
+//! Screenshots: writing the picture as PNG, JPEG, WebP or AVIF under a timestamped name.
 
 use crate::{
     config::{Backend, ScreenshotFormat},
@@ -20,11 +19,8 @@ use thiserror::Error;
 
 const BYTES_PER_PIXEL: usize = 4;
 const JPEG_QUALITY: u8 = 92;
-/// Close to the PNG on text and flat colour, in about the size speed 10 gave at quality 80.
 const AVIF_QUALITY: f32 = 90.0;
-/// The fastest speed that lets ravif split down to 8×8 blocks. At 9 and 10 every block is
-/// 16×16, which leaves text and edges blocky at any quality. About two seconds of one core for
-/// a 1080p picture, against 0.6 s at speed 10.
+/// The fastest speed that lets ravif split down to 8×8 blocks.
 const AVIF_SPEED: u8 = 8;
 
 /// A picture as the encoder receives it: 8-bit BGRA rows, top to bottom, with no padding.
@@ -35,8 +31,6 @@ pub(crate) struct Still {
 }
 
 impl Still {
-    /// Copies `height` rows of `width` pixels that start `pitch` bytes apart in `bytes`. `None`
-    /// when the rows do not fit in `bytes` or overlap.
     pub(crate) fn from_pitched(
         width: u32,
         height: u32,
@@ -56,8 +50,7 @@ impl Still {
         })
     }
 
-    /// The pixels as RGB. Alpha is dropped: captured pictures are opaque, and some backends
-    /// leave it zero.
+    /// Alpha is dropped: captured pictures are opaque, and some backends leave it zero.
     fn rgb(&self) -> Vec<u8> {
         let (pixels, _) = self.bgra.as_chunks::<BYTES_PER_PIXEL>();
         pixels
@@ -67,8 +60,6 @@ impl Still {
     }
 }
 
-/// The bytes from the start of the first of `height` rows of `width` pixels, `pitch` bytes
-/// apart, to the end of the last. `None` for no pixels or rows that overlap.
 pub(crate) fn pitched_span(width: u32, height: u32, pitch: usize) -> Option<usize> {
     let row = usize::try_from(width).ok()?.checked_mul(BYTES_PER_PIXEL)?;
     let later_rows = usize::try_from(height).ok()?.checked_sub(1)?;
@@ -88,8 +79,8 @@ impl fmt::Debug for Still {
     }
 }
 
-/// A picture the capture thread has copied on the GPU. `finish` waits for the copy and reads it
-/// into memory on the thread that saves it, so the capture thread never waits.
+/// `finish` waits for the copy and reads it into memory on the thread that saves it, so the
+/// capture thread never waits.
 pub(crate) trait Readback: Send + fmt::Debug {
     fn finish(self: Box<Self>) -> Result<Still, StillError>;
 }
@@ -100,20 +91,16 @@ impl Readback for Still {
     }
 }
 
-/// What the capture thread answers a screenshot request with.
 pub(crate) type Taken = Result<Box<dyn Readback>, StillError>;
 
-/// A capture of one picture of a whole monitor, for a screenshot that no recording can serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Grab {
     /// `None` is the primary monitor.
     pub(crate) monitor: Option<MonitorHandle>,
-    /// The backend chosen for recording, which the grab prefers where it can.
     pub(crate) backend: Backend,
     pub(crate) cursor: bool,
 }
 
-/// Takes a [`Grab`] on the calling thread.
 pub(crate) type Grabber = fn(&Grab) -> Result<Still, StillError>;
 
 type Cause = Box<dyn Error + Send + Sync>;
@@ -142,8 +129,8 @@ pub(crate) enum StillError {
     Truncated { width: u32, height: u32 },
 }
 
-/// The answer to one screenshot request. Dropped unanswered, it answers
-/// [`StillError::Abandoned`], so whoever asked always hears back once.
+/// Dropped unanswered, it answers [`StillError::Abandoned`], so whoever asked always hears back
+/// once.
 pub(crate) struct Reply(Option<Box<dyn FnOnce(Taken) + Send>>);
 
 impl Reply {
@@ -176,7 +163,6 @@ pub(crate) struct Requests {
 }
 
 impl Requests {
-    /// A request still waiting is replaced, and answered as abandoned.
     pub(crate) fn ask(&self, reply: Reply) {
         let replaced = {
             let mut pending = self.pending();
@@ -194,7 +180,6 @@ impl Requests {
         self.withdraw()
     }
 
-    /// Removes the waiting request, for when nothing will take it.
     pub(crate) fn withdraw(&self) -> Option<Reply> {
         let mut pending = self.pending();
         self.wanted.store(false, Ordering::Relaxed);
@@ -236,8 +221,6 @@ pub(crate) enum EncodeError {
     TooLargeForJpeg { width: u32, height: u32 },
 }
 
-/// Reads the picture back and writes it to `directory` as `hindsight_<date>_<time>` in
-/// `format`.
 pub(crate) fn save(
     readback: Box<dyn Readback>,
     directory: &Path,
@@ -255,8 +238,7 @@ pub(crate) fn save(
     Ok(path)
 }
 
-/// The picture is sRGB: an HDR display's is tone-mapped to it before the encoder sees it. PNG
-/// and WebP are lossless.
+/// The picture is sRGB: an HDR display's is tone-mapped to it before the encoder sees it.
 fn encode(
     still: &Still,
     mut output: impl Write,
@@ -319,7 +301,6 @@ mod tests {
         sync::{Arc, mpsc},
     };
 
-    /// Two pixels across and two down, in rows padded to 12 bytes.
     const PITCHED: [u8; 20] = [
         1, 2, 3, 255, 4, 5, 6, 255, 0xEE, 0xEE, 0xEE, 0xEE, //
         7, 8, 9, 255, 10, 11, 12, 0,

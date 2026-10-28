@@ -32,7 +32,6 @@ const TEXT_WIDTH: i32 = INNER_WIDTH - LOGO - LOGO_GAP;
 const ROW_PITCH: i32 = 20;
 const BUTTON_GAP: i32 = 6;
 const BUTTON_COLUMNS: i32 = 3;
-/// A third of the group, so that a row of three buttons fills it.
 const BUTTON_WIDTH: i32 = (INNER_WIDTH - (BUTTON_COLUMNS - 1) * BUTTON_GAP) / BUTTON_COLUMNS;
 
 mod rows {
@@ -69,12 +68,10 @@ enum Link {
     LogFolder,
 }
 
-/// What each of the Updates group's buttons asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UpdateAction {
     Check,
     Install,
-    /// The notes of the release on offer, or of the running version when none is.
     Notes,
 }
 
@@ -260,7 +257,6 @@ fn details() -> [(&'static str, String); 4] {
     ]
 }
 
-/// The website sits on a row of its own, above the GitHub button.
 fn buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, Link)> {
     let website = (text::LINK_WEBSITE, Link::Website, 0, rows::WEBSITE);
     let row = [
@@ -299,7 +295,6 @@ fn update_buttons(page: &gui::TabPage, skin: &Skin) -> Vec<(gui::Button, UpdateA
     .collect()
 }
 
-/// The portable copy is not updated in place, so its button opens the release instead.
 fn install_caption(installation: &Installation) -> &'static str {
     match installation {
         Installation::Installed(_) => text::UPDATE_INSTALL,

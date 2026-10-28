@@ -1,5 +1,4 @@
-//! WASAPI capture of an output device, by loopback, and of a microphone, read on a timer a few
-//! packets at a time, and the devices there are.
+//! WASAPI capture of an output device, by loopback, and of a microphone, read on a timer.
 
 use super::{
     choice::{self, Endpoint, Picked},
@@ -150,7 +149,6 @@ const fn fallback_name(source: Source) -> &'static str {
 
 pub(super) struct Devices(IMMDeviceEnumerator);
 
-/// A device picked for a source, not yet opened.
 pub(super) struct Pick {
     device: IMMDevice,
     picked: Picked,
@@ -165,7 +163,6 @@ impl Pick {
         self.picked
     }
 
-    /// Opens the device and starts capturing `source` from it.
     pub(super) fn open(self, source: Source) -> Result<Stream, OpenError> {
         let Self { device, picked } = self;
         // SAFETY: activates an audio client on the live device.
@@ -209,7 +206,6 @@ impl Devices {
         unsafe { self.0.GetDevice(&id) }.ok()
     }
 
-    /// Returns the device with endpoint ID `id` if it is connected and enabled.
     fn active(&self, id: &DeviceId) -> Option<IMMDevice> {
         let device = self.device(id)?;
         // SAFETY: a query of a live device.
@@ -217,7 +213,6 @@ impl Devices {
         (state == DEVICE_STATE_ACTIVE).then_some(device)
     }
 
-    /// Picks the device `choice` names if it is present, or else the default for `source`.
     pub(super) fn pick(
         &self,
         source: Source,
@@ -228,7 +223,6 @@ impl Devices {
         Ok(Pick { device, picked })
     }
 
-    /// Returns the connected, enabled devices `source` can be captured from.
     pub(super) fn endpoints(&self, source: Source) -> windows::core::Result<Vec<Endpoint>> {
         // SAFETY: a query of the live enumerator; the call returns a new collection.
         let collection = unsafe { self.0.EnumAudioEndpoints(flow(source), DEVICE_STATE_ACTIVE) }?;
@@ -247,14 +241,10 @@ impl Devices {
         Ok(endpoints)
     }
 
-    /// Returns the name of the device with endpoint ID `id`, connected or not, if Windows knows
-    /// it.
     pub(super) fn name(&self, id: &DeviceId) -> Option<String> {
         friendly_name(&self.device(id)?)
     }
 
-    /// Calls `changed`, on a thread of Windows', whenever a device comes or goes, is enabled or
-    /// disabled, or becomes a default device, until the registration drops.
     pub(super) fn register(
         &self,
         changed: impl Fn() + Send + Sync + 'static,
@@ -268,7 +258,6 @@ impl Devices {
         })
     }
 
-    /// Watches for the changes `register` reports, as an event `wait` can wait on.
     pub(super) fn watch(&self) -> windows::core::Result<Watch> {
         let changed = Arc::new(Signal::pulse()?);
         let signal = Arc::clone(&changed);
@@ -295,8 +284,7 @@ impl Drop for Registration {
     }
 }
 
-/// The event pulsed when a device changes, and the registration that pulses it. The listener
-/// holds the signal through an `Arc` of its own, so neither field need drop first.
+/// The listener holds the signal through an `Arc` of its own, so neither field need drop first.
 pub(super) struct Watch {
     _registration: Registration,
     changed: Arc<Signal>,
@@ -322,8 +310,6 @@ mod listener {
         PROPERTYKEY, eCapture, eConsole, eRender, implement,
     };
 
-    /// Calls its function when a device comes or goes, is enabled or disabled, or becomes the
-    /// default output or recording device. A change of a device's properties does not count.
     #[implement(IMMNotificationClient)]
     pub(super) struct Listener(pub(super) Box<dyn Fn() + Send + Sync>);
 
@@ -598,7 +584,6 @@ pub(super) struct Packet<'a> {
     pub(super) time: Option<Ticks>,
 }
 
-/// A started capture stream of one device.
 pub(super) struct Stream {
     client: IAudioClient,
     capture: IAudioCaptureClient,

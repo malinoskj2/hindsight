@@ -184,17 +184,14 @@ impl Live {
         (processor != u32::MAX).then_some(processor)
     }
 
-    /// Asks the capture thread for the picture it last gave the encoder.
     pub(crate) fn request_still(&self, reply: Reply) {
         self.stills.ask(reply);
     }
 
-    /// Cheap enough to call every frame: a single atomic load while nothing is asked.
     pub(crate) fn take_still_request(&self) -> Option<Reply> {
         self.stills.take()
     }
 
-    /// Answers a request the capture thread did not take as abandoned.
     pub(crate) fn withdraw_still(&self) {
         drop(self.stills.withdraw());
     }
@@ -268,8 +265,6 @@ impl Live {
         }
     }
 
-    /// Adds sound captured from `source`. Sound from a source the format does not record is
-    /// dropped.
     pub(crate) fn push_audio(&self, source: Source, start: u64, data: Arc<[i16]>) {
         let Some(format) = self.audio.get() else {
             return;

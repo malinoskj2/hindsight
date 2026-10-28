@@ -211,8 +211,6 @@ impl Session {
         Ok(None)
     }
 
-    /// Starts copying the picture the encoder was last given, so a screenshot shows what the
-    /// clip does, tone-mapped alike.
     fn copy_still(&self) -> Taken {
         let surface = self.encoder.latest_surface().ok_or(StillError::NoPicture)?;
         let Settings { width, height, .. } = self.encoder.settings();

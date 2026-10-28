@@ -36,19 +36,14 @@ impl DeviceList {
         })
     }
 
-    /// Returns the connected devices `source` can be captured from.
     pub(crate) fn endpoints(&self, source: Source) -> windows::core::Result<Vec<Endpoint>> {
         self.devices.endpoints(source)
     }
 
-    /// Returns the name of the device with endpoint ID `id`, connected or not, if Windows knows
-    /// it.
     pub(crate) fn name(&self, id: &DeviceId) -> Option<String> {
         self.devices.name(id)
     }
 
-    /// Returns whether a device came or went, was enabled or disabled, or became a default since
-    /// the last call.
     pub(crate) fn changed(&self) -> bool {
         self.changed.swap(false, Ordering::Relaxed)
     }

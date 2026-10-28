@@ -1,7 +1,6 @@
 //! The system's sound and the microphone as 16-bit PCM, numbered on the video's QPC clock, kept
 //! as long as the video ring keeps its packets and cut to the video's first and last frame when a
-//! clip is saved. Each source has a ring of its own. A clip's first track mixes the sources, and
-//! with both recorded, a second holds the microphone alone.
+//! clip is saved.
 
 use std::{
     collections::VecDeque,
@@ -32,16 +31,12 @@ pub(crate) fn tick_time(origin: i64, frame_rate: u32, index: u64) -> i64 {
     origin.saturating_add(ticks_of(index, frame_rate))
 }
 
-/// Where a run of sound was captured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Source {
-    /// What the default output device plays.
     System,
-    /// The default recording device.
     Microphone,
 }
 
-/// A value for each source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PerSource<T> {
     pub(crate) system: T,
@@ -63,7 +58,6 @@ impl<T> PerSource<T> {
         }
     }
 
-    /// Each source's value, the system's first.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (Source, &T)> {
         [
             (Source::System, &self.system),
@@ -85,7 +79,6 @@ impl<T> PerSource<T> {
 }
 
 impl PerSource<bool> {
-    /// The sources whose flag is set.
     #[cfg_attr(
         all(not(windows), test),
         expect(dead_code, reason = "only the Windows window shows them")
@@ -96,24 +89,20 @@ impl PerSource<bool> {
     }
 }
 
-/// A source the session records, and the channels it is kept in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SourceFormat {
     pub(crate) source: Source,
     pub(crate) channels: NonZeroU16,
 }
 
-/// What a track of a clip holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrackKind {
     System,
     Microphone,
-    /// System sound with the microphone mixed in, the track players play.
     Mixed,
 }
 
 impl TrackKind {
-    /// The track's name, which players and editors list.
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::System => "System sound",
@@ -183,11 +172,9 @@ impl Chunk {
     }
 }
 
-/// A ring for each source recorded.
 pub(crate) struct AudioRings(PerSource<Option<AudioRing>>);
 
 impl AudioRings {
-    /// No rings, before the sound's format is known.
     pub(crate) const fn new() -> Self {
         Self(PerSource {
             system: None,
@@ -203,7 +190,6 @@ impl AudioRings {
         rings
     }
 
-    /// Returns the ring of `source`, or `None` when it is not recorded.
     pub(crate) fn ring(&mut self, source: Source) -> Option<&mut AudioRing> {
         self.0.get_mut(source).as_mut()
     }
@@ -311,7 +297,6 @@ impl AudioRing {
     }
 }
 
-/// One source's chunks in a clip.
 #[derive(Clone, Debug)]
 struct Captured {
     format: SourceFormat,
@@ -319,8 +304,6 @@ struct Captured {
 }
 
 impl Captured {
-    /// Adds the samples from sample `from` on to `output`, interleaved in `channels`. A source
-    /// with fewer channels than the track repeats its last one; mono plays on both sides.
     fn mix_into(&self, from: i64, output: &mut [i16], channels: usize) {
         let own = usize::from(self.format.channels.get());
         let to = from.saturating_add(i64::try_from(output.len() / channels).unwrap_or(i64::MAX));
@@ -350,7 +333,6 @@ impl Captured {
     }
 }
 
-/// A track of a clip: one source's sound, or several mixed.
 #[derive(Debug)]
 pub(crate) struct PcmTrack {
     pub(crate) kind: TrackKind,
@@ -367,9 +349,6 @@ impl PcmTrack {
         }
     }
 
-    /// Reads the samples from sample `from` on into `output`, interleaved in the track's
-    /// channels, clipping where the sources' sum leaves the 16-bit range. Where nothing was
-    /// captured reads as silence.
     pub(crate) fn read(&self, from: i64, output: &mut [i16]) {
         output.fill(0);
         let channels = usize::from(self.channels.get());
@@ -379,8 +358,8 @@ impl PcmTrack {
     }
 }
 
-/// The sound of a clip, cut to its video. With both sources recorded, the first track mixes them
-/// and the second holds the microphone alone, for editing; with one, it is the only track.
+/// With both sources recorded, the first track mixes them and the second holds the microphone
+/// alone.
 #[derive(Debug)]
 pub(crate) struct PcmClip {
     #[cfg_attr(
@@ -396,7 +375,6 @@ pub(crate) struct PcmClip {
     pub(crate) tracks: Vec<PcmTrack>,
 }
 
-/// One track of a clip's sound, encoded.
 #[derive(Debug)]
 pub(crate) struct AudioClip {
     pub(crate) kind: TrackKind,
@@ -458,7 +436,6 @@ pub(crate) mod tests {
         channels: MONO,
     };
 
-    /// System sound and the microphone, starting at clock time `anchor`.
     pub(crate) fn both(anchor: i64, priming: u32) -> AudioFormat {
         AudioFormat {
             sample_rate: RATE,

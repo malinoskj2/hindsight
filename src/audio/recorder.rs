@@ -32,12 +32,10 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(100);
 /// gap.
 const SILENCE_LAG: Ticks = Ticks(CLOCK_RATE / 2);
 const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
-/// How often the devices are checked when nothing reports their changes.
 const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Capture {
     stop: Arc<Signal>,
-    /// The audio thread's [`StandIns`], for the worker to read.
     stand_ins: Arc<PerSource<AtomicBool>>,
     join: Option<JoinHandle<()>>,
 }
@@ -104,8 +102,6 @@ pub(crate) fn start(live: &Arc<Live>, sources: Sources) -> Option<Capture> {
     }
 }
 
-/// The channels each source is kept and encoded in. The microphone is kept in mono, which halves
-/// its memory.
 const fn kept_in(source: Source) -> Channels {
     match source {
         Source::System => Channels::Stereo,
@@ -113,7 +109,6 @@ const fn kept_in(source: Source) -> Channels {
     }
 }
 
-/// The name log lines give a source, and the name of its device.
 const fn names(source: Source) -> (&'static str, &'static str) {
     match source {
         Source::System => ("Sound", "output device"),
@@ -235,26 +230,19 @@ fn watch_devices(devices: &Devices) -> Option<Watch> {
         .ok()
 }
 
-/// What is known of the devices since the last update.
 #[derive(Clone, Copy)]
 enum Changes {
-    /// The watch reported that a device came or went or a default changed, perhaps another
-    /// source's.
     Changed,
     Unchanged,
-    /// Nothing reports changes, so the devices are checked on a timer.
     Unwatched,
 }
 
-/// One source: its device and the track its sound is kept on.
 struct Input<'a> {
     track: Track<'a>,
     device: Device,
 }
 
 impl Input<'_> {
-    /// Reads what the device captured, and passes the track on up to `settled`, before which
-    /// whatever was not captured is silence.
     fn read(&mut self, settled: Ticks) {
         if let Err(error) = self.device.read(&mut self.track) {
             self.device.lost(&error);
@@ -266,7 +254,6 @@ impl Input<'_> {
 
 struct Device {
     source: Source,
-    /// The device chosen in Settings, or `None` to follow Windows' default.
     choice: Option<DeviceId>,
     state: DeviceState,
     /// When to next check the devices or try to open one. `None` means now.
@@ -276,8 +263,7 @@ struct Device {
 enum DeviceState {
     Open(wasapi::Stream),
     Closed {
-        /// Why the device open before was picked, or `None` when none was. Opening one after
-        /// another is logged as a return, and the default standing in is logged once.
+        /// Why the device open before was picked, or `None` when none was.
         previous: Option<Picked>,
         /// A failure to open has been logged since the last success, so another is not.
         reported: bool,
@@ -297,12 +283,10 @@ impl Device {
         }
     }
 
-    /// Whether the default device is open in place of the chosen one, which is missing.
     fn standing_in(&self) -> bool {
         matches!(&self.state, DeviceState::Open(stream) if stream.picked() == Picked::StandIn)
     }
 
-    /// Closes the open device, keeping why it was picked for the next open.
     fn close(&mut self) {
         if let DeviceState::Open(stream) = &self.state {
             self.state = DeviceState::Closed {
@@ -337,8 +321,6 @@ impl Device {
         }
     }
 
-    /// Switches to the device the source should be captured from if it is not the one open: the
-    /// chosen device when it is back, or the default when that changed and stands for the choice.
     fn follow(&mut self, devices: &Devices, now: Instant) {
         let DeviceState::Open(stream) = &self.state else {
             self.open(devices, now);
@@ -373,7 +355,6 @@ impl Device {
         self.opened(opened, now);
     }
 
-    /// Takes the stream an attempt to open a device made, while the state is closed.
     fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
         let DeviceState::Closed { previous, reported } = &mut self.state else {
             return;

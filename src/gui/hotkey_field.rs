@@ -13,10 +13,7 @@ pub(super) enum Capture {
     Ended,
 }
 
-/// Makes `field` enter the hotkey for a combination pressed in it, such as Ctrl+Alt+F10, in the
-/// text the hotkey parser reads. Presses that are not a hotkey, such as letters with or without
-/// Shift, Backspace, Delete and Tab, type, edit and move the focus as in any other field, so a
-/// hotkey can still be typed. Must be called before the field is created.
+/// Must be called before the field is created.
 pub(super) fn capture(field: &gui::Edit) {
     // Whether the last key pressed was entered, so the character it makes is not typed as well.
     // The character is posted straight after its key, so no other key comes between them.
@@ -94,7 +91,6 @@ fn held_modifiers() -> Modifiers {
     .fold(Modifiers::NONE, |held, (_, modifier)| held | modifier)
 }
 
-/// Selects the whole hotkey, so the next key typed replaces it and Backspace clears it.
 fn enter(field: &gui::Edit, hotkey: Hotkey) {
     layout::set_text(field, &hotkey.to_string());
     field.set_selection(0, -1);

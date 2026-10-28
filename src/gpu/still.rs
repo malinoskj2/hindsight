@@ -1,6 +1,4 @@
-//! One picture for a screenshot: copied out of a capture on the GPU and read back on the thread
-//! that saves it, or grabbed from a whole monitor on a device of its own when no recording
-//! shows it.
+//! One picture for a screenshot: copied out of a capture, or grabbed from a whole monitor.
 
 use crate::{
     config::Backend,
@@ -42,15 +40,11 @@ use windows::{
 };
 
 const POLL: Duration = Duration::from_millis(1);
-/// How long a new capture may take to deliver its first picture.
 const FIRST_PICTURE: Duration = Duration::from_secs(1);
-/// The update interval asked of Windows Graphics Capture. A grab takes one picture, so it only
-/// bounds how soon the first arrives.
 const GRAB_PERIOD: Duration = Duration::from_millis(16);
 
-/// Copies the top-left `width` × `height` of `surface` on the GPU, which the screenshot thread
-/// then reads back. The capture thread only queues the copy, except on CUDA, where it waits
-/// for the device-to-device copy before the grab may reuse the buffer.
+/// The capture thread only queues the copy, except on CUDA, where it waits for the
+/// device-to-device copy before the grab may reuse the buffer.
 pub(super) fn copy(
     device: &Device,
     surface: &Surface,
@@ -70,8 +64,6 @@ pub(super) fn copy(
     })
 }
 
-/// Captures one picture of a whole monitor on the calling thread, on a device of its own,
-/// tone-mapped on an HDR display as clips are.
 pub(crate) fn grab(grab: &Grab) -> Result<Still, StillError> {
     let device = Device::create().map_err(grab_failed)?;
     let target = Target::Monitor {
@@ -96,7 +88,7 @@ pub(crate) fn grab(grab: &Grab) -> Result<Still, StillError> {
 }
 
 /// Desktop Duplication when it is the backend chosen, and Windows Graphics Capture otherwise,
-/// since NvFBC clips HDR and costs more to open for one picture. Each falls back on the other.
+/// since NvFBC clips HDR and costs more to open for one picture.
 const fn grab_backends(chosen: Backend) -> [Backend; 2] {
     match chosen {
         Backend::Dxgi => [Backend::Dxgi, Backend::Wgc],
@@ -133,7 +125,6 @@ fn take_first(capture: &mut capture::Capture, target: CopyTarget<'_>) -> Result<
     }
 }
 
-/// A texture in the encoder's input format, which the capture copies or tone-maps into.
 #[expect(unsafe_code, reason = "calls ID3D11Device::CreateTexture2D")]
 fn picture_texture(
     device: &Device,
@@ -181,7 +172,6 @@ const fn truncated(width: u32, height: u32) -> StillError {
     StillError::Truncated { width, height }
 }
 
-/// A copy into a staging texture on the capture's Direct3D 11 device.
 #[derive(Debug)]
 struct TextureCopy {
     staging: ID3D11Texture2D,
@@ -409,7 +399,6 @@ fn region(width: u32, height: u32) -> windows::core::Result<RECT> {
     })
 }
 
-/// A copy into a device buffer of its own in the grab's CUDA context.
 #[derive(Debug)]
 struct CudaCopy {
     buffer: DeviceBuffer,

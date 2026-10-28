@@ -54,7 +54,6 @@ pub(crate) enum DownloadError {
     Forged(#[from] ForgedInstaller),
 }
 
-/// Dropping this closes the job channel, and the thread ends after its current job.
 pub(crate) struct Updater {
     jobs: Sender<Job>,
     done: Receiver<Done>,
@@ -78,29 +77,24 @@ impl Updater {
         let _ = self.jobs.send(Job::Download(release));
     }
 
-    /// The next finished job, if any.
     pub(crate) fn finished(&self) -> Option<Done> {
         self.done.try_recv().ok()
     }
 }
 
-/// A downloaded installer, verified as read through a handle that keeps it from being changed
-/// until it has been started.
 pub(crate) struct Installer {
     path: PathBuf,
     _lock: File,
 }
 
 impl Installer {
-    /// Starts the installer as administrator to update the copy in `folder`. Once it has
-    /// started, it waits for this process to exit.
+    /// Once it has started, it waits for this process to exit.
     pub(crate) fn launch(self, folder: &Path) -> Result<Elevation, ElevateError> {
         let folder = folder.to_str().ok_or(ElevateError::Path)?;
         shell::run_elevated(&self.path, &installer_parameters(folder))
     }
 }
 
-/// Serves jobs until the sender is dropped.
 fn serve(jobs: &Receiver<Job>, done: &Sender<Done>) {
     let _ = sys_thread::enter_background_mode();
     // Installers from earlier updates have done their work. One still running stays locked and

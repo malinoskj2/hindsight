@@ -1,20 +1,14 @@
-//! Which device a source is captured from: Windows' default, or the device chosen in Settings,
-//! for which the default stands in while it is missing. And the lists Settings offers.
+//! Which device a source is captured from: Windows' default, or the device chosen in Settings.
 
 use crate::config::DeviceId;
 
-/// Why a device is the one a source is captured from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Picked {
-    /// Windows' default device, which Settings leaves the choice to.
     Default,
-    /// The device chosen in Settings.
     Chosen,
-    /// Windows' default device, while the one chosen in Settings is missing.
     StandIn,
 }
 
-/// Returns the device `find` reports present for `choice`, or else the one `default` returns.
 pub(super) fn pick<D, E>(
     choice: Option<&DeviceId>,
     find: impl FnOnce(&DeviceId) -> Option<D>,
@@ -29,21 +23,18 @@ pub(super) fn pick<D, E>(
     }
 }
 
-/// A device that is connected and can be captured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Endpoint {
     pub(crate) id: DeviceId,
     pub(crate) name: String,
 }
 
-/// An entry of a device list in Settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Entry {
-    /// Windows' default device, whichever it is at the time.
     Default,
     Present(Endpoint),
     /// The device chosen, which is not connected. It stays listed so that applying the settings
-    /// keeps it. `name` is `None` when Windows no longer knows the device.
+    /// keeps it.
     Absent {
         id: DeviceId,
         name: Option<String>,
@@ -51,7 +42,6 @@ pub(crate) enum Entry {
 }
 
 impl Entry {
-    /// Returns the device the entry chooses, or `None` for the default.
     pub(crate) const fn device(&self) -> Option<&DeviceId> {
         match self {
             Self::Default => None,
@@ -61,9 +51,6 @@ impl Entry {
     }
 }
 
-/// Returns the entries of a device list, the default first and then the devices `present` by
-/// name, and the position of the one that chooses `selected`. A `selected` device that is not
-/// present comes last, named by `name_of`.
 pub(crate) fn entries(
     mut present: Vec<Endpoint>,
     selected: Option<&DeviceId>,

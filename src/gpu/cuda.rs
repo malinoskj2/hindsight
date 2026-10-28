@@ -475,7 +475,6 @@ impl DeviceBuffer {
         self.hold.make_current()
     }
 
-    /// Allocates another buffer in this buffer's context.
     pub(super) fn allocate_beside(&self, bytes: usize) -> Result<Self, CudaError> {
         self.hold.allocate(bytes)
     }

@@ -20,11 +20,8 @@ const BITS_PER_BYTE: u64 = 8;
 const CLIP_DIRECTORY: &str = "hindsight";
 const VIDEO_DIRECTORY: &str = "videos";
 const SCREENSHOT_DIRECTORY: &str = "screenshots";
-/// Installed memory from which the buffer defaults to RAM. Games of this generation want 8 to
-/// 16 GB of their own.
 const RAM_BUFFER_MEMORY: u64 = 32 << 30;
-/// Video memory from which the buffer defaults to VRAM. A 12 GB card reports a little under
-/// 12 GiB; on a card with 8 GB, a buffer pushes the game's textures out.
+/// A 12 GB card reports a little under 12 GiB.
 const VRAM_BUFFER_MEMORY: u64 = 11 << 30;
 
 macro_rules! display_by_name {
@@ -186,7 +183,6 @@ impl Theme {
     }
 }
 
-/// The file format clips are saved in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Container {
@@ -212,7 +208,6 @@ impl Container {
         }
     }
 
-    /// The container a file name's extension names, in any case.
     pub(crate) fn of_extension(extension: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -220,7 +215,6 @@ impl Container {
     }
 }
 
-/// The file format screenshots are saved in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ScreenshotFormat {
@@ -252,8 +246,6 @@ impl ScreenshotFormat {
         }
     }
 
-    /// The format a file name's extension names, in any case. `.jpeg` names JPEG as well as
-    /// `.jpg`, since pictures put in the folder by hand often use it.
     pub(crate) fn of_extension(extension: &str) -> Option<Self> {
         if extension.eq_ignore_ascii_case("jpeg") {
             return Some(Self::Jpeg);
@@ -274,14 +266,12 @@ display_by_name!(
     ScreenshotFormat
 );
 
-/// A sound device's endpoint ID, which Windows keeps for the device across reboots and while it
-/// is unplugged. Never empty.
+/// Never empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct DeviceId(String);
 
 impl DeviceId {
-    /// Returns `None` for an empty ID, which names no device.
     pub(crate) fn new(id: String) -> Option<Self> {
         (!id.is_empty()).then_some(Self(id))
     }
@@ -291,8 +281,6 @@ impl DeviceId {
     }
 }
 
-/// The machine, as far as the defaults depend on it. Each part is `None` when it could not be
-/// read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Machine {
     /// Installed system memory, in bytes.
@@ -303,8 +291,7 @@ pub(crate) struct Machine {
 }
 
 impl Machine {
-    /// NvFBC and Desktop Duplication see only displays attached to the NVIDIA GPU, which a laptop
-    /// whose display hangs off the integrated GPU has none of.
+    /// NvFBC and Desktop Duplication see only displays attached to the NVIDIA GPU.
     fn backend(self) -> Backend {
         if self.nvidia_drives_display == Some(false) {
             Backend::Wgc
@@ -327,8 +314,7 @@ impl Machine {
     }
 }
 
-/// A setting that applies at once, without restarting capture, so it is saved on its own while
-/// recording carries on.
+/// A setting that applies at once, without restarting capture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Preference {
     Theme(Theme),
@@ -370,27 +356,22 @@ pub(crate) struct Config {
     /// `None` for the default folder.
     pub(crate) clip_directory: Option<PathBuf>,
     pub(crate) theme: Theme,
-    /// Whether the system's sound is recorded.
     pub(crate) audio: bool,
-    /// Whether the microphone is recorded, mixed into the clip's sound and on a track of its own.
     pub(crate) microphone: bool,
-    /// The output device whose sound is recorded, or `None` for Windows' default as it changes.
+    /// `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) system_device: Option<DeviceId>,
-    /// The recording device the microphone is, or `None` for Windows' default as it changes.
+    /// `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) microphone_device: Option<DeviceId>,
     /// Whether the cursor is drawn, where the backend can draw it. Desktop Duplication never
     /// draws it.
     pub(crate) cursor: bool,
     pub(crate) buffer_memory: Memory,
-    /// Whether closing the window leaves hindsight running in the tray, rather than quitting.
     pub(crate) close_to_tray: bool,
-    /// Whether hindsight looks for a newer release when it starts and once a day.
     pub(crate) check_for_updates: bool,
     pub(crate) container: Container,
     pub(crate) screenshot_format: ScreenshotFormat,
-    /// Whether Settings shows the options under Advanced.
     pub(crate) more_options: bool,
 }
 
@@ -580,7 +561,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Returns the defaults for the settings that depend on the machine.
     pub(crate) fn for_machine(machine: Machine) -> Self {
         Self {
             backend: machine.backend(),
@@ -673,8 +653,6 @@ pub(crate) fn video_directories(clip_directory: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// The folders whose pictures the Screenshots tab lists: the screenshots folder, then the clip
-/// folder itself, where pictures may have been put by hand.
 pub(crate) fn screenshot_directories(clip_directory: &Path) -> [PathBuf; 2] {
     [
         clip_directory.join(SCREENSHOT_DIRECTORY),
@@ -699,7 +677,6 @@ fn apart_from(save: Hotkey, screenshot: Hotkey) -> Hotkey {
     instead
 }
 
-/// Treats an empty ID as the default device.
 fn device_or_none<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<DeviceId>, D::Error> {

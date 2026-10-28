@@ -18,8 +18,6 @@ const NOTES_HEIGHT: i32 = 240;
 const BUTTONS_Y: i32 = MARGIN + NOTES_HEIGHT + MARGIN;
 const DIALOG_HEIGHT: i32 = BUTTONS_Y + BUTTON_HEIGHT + MARGIN;
 
-/// Shows the notes in a modal dialog owned by `owner`, in `skin`'s look, and returns once it is
-/// closed.
 pub(super) fn show(owner: &impl GuiParent, skin: &Skin) {
     let version = Version::running();
     let dialog = gui::WindowModal::new(gui::WindowModalOpts {

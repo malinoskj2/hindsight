@@ -1,6 +1,4 @@
 //! A minimal Matroska writer: one H.264, HEVC or AV1 video track and the clip's AAC tracks.
-//! The first pass over the packets sizes every element, so the file is written front to back
-//! with its seek head and cues, and the packets are passed over twice, as for MP4.
 
 use super::{
     AudioClip, FRAME_SAMPLES, Stream,
@@ -61,16 +59,13 @@ const CUE_TRACK_POSITIONS: u32 = 0xB7;
 const CUE_TRACK: u32 = 0xF7;
 const CUE_CLUSTER_POSITION: u32 = 0xF1;
 
-/// Timestamps count milliseconds.
 const NANOSECONDS_PER_TICK: u64 = 1_000_000;
 const TICKS_PER_SECOND: u64 = 1000;
 const VIDEO_TRACK: u8 = 1;
-/// Sound tracks are numbered from this, in the order of the clip's tracks.
 const FIRST_AUDIO_TRACK: u8 = 2;
 const TRACK_TYPE_VIDEO: u64 = 1;
 const TRACK_TYPE_AUDIO: u64 = 2;
-/// A cluster ends at the next keyframe, or this long after it began. Block times are 16-bit
-/// offsets from the cluster's.
+/// Block times are 16-bit offsets from the cluster's.
 const MAX_CLUSTER_TICKS: u64 = 5000;
 /// A block's track number, as a one-byte size, then its 16-bit time and its flags.
 const BLOCK_HEADER_BYTES: u64 = 4;
@@ -82,8 +77,6 @@ const BT709: u64 = 1;
 const BROADCAST_RANGE: u64 = 1;
 const UNDETERMINED_LANGUAGE: &str = "und";
 
-/// Writes the video and a track for each of `audio` that has frames, the first of which is the
-/// default.
 pub(crate) fn write_from<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     stream: &Stream,
@@ -114,7 +107,6 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     Ok(())
 }
 
-/// What the media part of the file holds, in order.
 enum Item {
     Cluster {
         time: u64,
@@ -139,7 +131,6 @@ struct Layout {
     duration: u64,
 }
 
-/// A block before it is placed in a cluster.
 struct Block {
     time: u64,
     track: u8,
@@ -179,8 +170,7 @@ impl Layout {
                 keyframe: true,
             }));
         }
-        // Stable, so blocks of a track at the same time keep their order. The video comes first
-        // at a time, then the sound in track order.
+        // Stable, so blocks of a track at the same time keep their order.
         blocks.sort_by_key(|block| (block.time, block.track));
         let duration = samples
             .last()
@@ -271,9 +261,7 @@ impl Layout {
     }
 }
 
-/// A cluster being filled while the layout is planned.
 struct Cluster {
-    /// Its place among the items.
     at: usize,
     time: u64,
     body: u64,
@@ -296,7 +284,6 @@ impl Cluster {
             || block.time - self.time >= MAX_CLUSTER_TICKS
     }
 
-    /// Records the body size in the cluster's item and returns the cluster's size as an element.
     fn close(self, items: &mut [Item]) -> u64 {
         if let Some(Item::Cluster { body, .. }) = items.get_mut(self.at) {
             *body = self.body;
@@ -310,7 +297,6 @@ fn ticks(count: u64, rate: u64) -> u64 {
     (count * TICKS_PER_SECOND + rate / 2) / rate.max(1)
 }
 
-/// Everything before the clusters, and where the clusters start within the segment's data.
 struct Head {
     bytes: Vec<u8>,
     clusters_at: u64,
@@ -439,7 +425,6 @@ fn video_entry(stream: &Stream, decoder: &DecoderConfig) -> Result<Vec<u8>, MuxE
     ))
 }
 
-/// Only the first sound track is a default track, the one players choose.
 fn audio_entry(track: u8, clip: &AudioClip) -> Vec<u8> {
     master(
         TRACK_ENTRY,
@@ -553,7 +538,7 @@ impl<W: io::Write> BlockWriter<'_, W> {
     }
 }
 
-/// An element ID's bytes. IDs carry their own length marker, so leading zero bytes are dropped.
+/// IDs carry their own length marker, so leading zero bytes are dropped.
 fn id(value: u32) -> Vec<u8> {
     let bytes = value.to_be_bytes();
     let first = bytes.iter().position(|&byte| byte != 0).unwrap_or(3);
@@ -564,7 +549,7 @@ fn id_bytes(value: u32) -> u64 {
     id(value).len() as u64
 }
 
-/// A data size in the fewest bytes that hold it. All ones is reserved for unknown sizes.
+/// All ones is reserved for unknown sizes.
 fn size(value: u64) -> Vec<u8> {
     let length = (1..WIDE)
         .find(|&length| value < (1 << (7 * length)) - 1)
@@ -572,7 +557,6 @@ fn size(value: u64) -> Vec<u8> {
     sized(value, length)
 }
 
-/// A data size in eight bytes.
 fn wide_size(value: u64) -> Vec<u8> {
     sized(value, WIDE)
 }
@@ -582,7 +566,6 @@ fn sized(value: u64, length: usize) -> Vec<u8> {
     marked.to_be_bytes()[WIDE - length..].to_vec()
 }
 
-/// The size of an element with a `body`-byte body.
 fn element_bytes(element_id: u32, body: u64) -> u64 {
     id_bytes(element_id) + size(body).len() as u64 + body
 }

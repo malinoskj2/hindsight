@@ -27,8 +27,7 @@ const TICKS_PER_FRAME: u32 = 1000;
 const MOVIE_TIMESCALE: u32 = 1000;
 const VIDEO_TRACK_ID: u32 = 1;
 const FIRST_AUDIO_TRACK_ID: u32 = 2;
-/// Sound tracks are alternatives, so a player plays one of them: the enabled one, the first. This
-/// is the group ffmpeg puts sound in.
+/// Sound tracks are alternatives, so a player plays one of them: the enabled one, the first.
 const SOUND_GROUP: u16 = 1;
 const CHUNK_SECONDS: u64 = 1;
 /// `esds` object and stream types for AAC (ISO/IEC 14496-1).
@@ -117,7 +116,6 @@ impl<'a> Sound<'a> {
     }
 }
 
-/// A chunk's track: the video, or the sound track at this position.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Video,
@@ -247,8 +245,6 @@ pub(crate) fn write_with_audio(
     write_from(output, stream, packets, audio)
 }
 
-/// Writes the video and a track for each of `audio` that has frames, the first of which players
-/// play.
 pub(crate) fn write_from<P: Packets + ?Sized>(
     output: &mut impl io::Write,
     stream: &Stream,
@@ -274,7 +270,6 @@ pub(crate) fn write_from<P: Packets + ?Sized>(
     Ok(())
 }
 
-/// A sample's duration in media ticks.
 fn sample_ticks(sample: &Sample) -> Result<u32, MuxError> {
     sample
         .frames
@@ -589,7 +584,7 @@ fn sample_sizes(sizes: Vec<u32>) -> Stsz {
 }
 
 /// The edit list skips the lead so the sound starts with the video. Every AAC frame decodes on
-/// its own, so there is no `stss`. Only the first sound track is enabled.
+/// its own, so there is no `stss`.
 fn sound_track(
     sound: &Sound<'_>,
     position: usize,

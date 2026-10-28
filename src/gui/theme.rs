@@ -227,8 +227,6 @@ impl Skin {
         co::CDRF::SKIPDEFAULT
     }
 
-    /// Paints a push button as a disclosure that opens a section, which no common control draws,
-    /// so classic paints it too.
     pub(super) fn paint_disclosure(
         &self,
         draw: &w::NMCUSTOMDRAW,

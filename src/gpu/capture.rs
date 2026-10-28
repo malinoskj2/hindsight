@@ -129,7 +129,6 @@ trait Source {
 
 pub(super) struct Capture {
     backend: ByBackend,
-    /// The app a monitor capture records for, when the target is a window.
     app: Option<Watched>,
 }
 
@@ -170,8 +169,7 @@ impl Capture {
     }
 
     /// Copies the newest frame into `target`. There is no target when the encoder runs on CUDA
-    /// or reads the source's surfaces in place. A monitor recorded for an app reports
-    /// [`Frame::Unchanged`] while it shows something else, so the app's last picture is repeated.
+    /// or reads the source's surfaces in place.
     pub(super) fn take(&mut self, target: Option<CopyTarget<'_>>) -> Result<Frame, CaptureError> {
         if let Some(app) = &mut self.app {
             match app.decide() {
@@ -235,8 +233,6 @@ impl Capture {
     }
 }
 
-/// An app whose monitor is recorded. The monitor shows whatever is in front, so its pictures are
-/// recorded only while that is the app.
 struct Watched {
     window: AppWindow,
     view: View,
@@ -244,7 +240,6 @@ struct Watched {
 }
 
 impl Watched {
-    /// `None` unless the capture records a window target's monitor.
     fn of(target: &Target, captures_window: bool) -> Option<Self> {
         match target {
             Target::Window {
@@ -406,7 +401,6 @@ fn deliver(
     Ok(())
 }
 
-/// The monitor to record, which for a window target is the monitor it fills.
 fn monitor_of(target: &Target) -> HMONITOR {
     match *target {
         Target::Monitor { handle, .. } => monitor(handle),

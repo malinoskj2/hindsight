@@ -1,6 +1,4 @@
-//! What the MP4 and Matroska writers share: the first pass over the packets, which finds the
-//! decoder configuration and indexes a sample per packet, and writing a sample's parts behind
-//! the length prefixes the codec takes.
+//! What the MP4 and Matroska writers share.
 
 #[cfg(test)]
 use super::Packet;
@@ -12,14 +10,13 @@ use thiserror::Error;
 
 /// Length prefix on each NAL unit in a sample, as `avcC` and `hvcC` declare it.
 pub(super) const NAL_LENGTH_BYTES: u8 = 4;
-/// An atom's size and type, which a decoder configuration record is encoded behind.
 pub(super) const BOX_HEADER_BYTES: usize = 8;
 
 pub(super) struct Sample {
     pub(super) index: u64,
     /// Bytes in the media data, length prefixes included.
     pub(super) size: u32,
-    /// Frames until the next sample. A skipped frame index lengthens the previous sample.
+    /// Frames until the next sample.
     pub(super) frames: u32,
     pub(super) keyframe: bool,
 }
@@ -118,8 +115,6 @@ fn add_sample(
     Ok(())
 }
 
-/// The sample indexed at `position`, provided `parts` is what it was indexed from. The buffer
-/// changed under the save otherwise.
 pub(super) fn indexed<'a>(
     samples: &'a [Sample],
     position: usize,
@@ -133,7 +128,6 @@ pub(super) fn indexed<'a>(
     Ok(sample)
 }
 
-/// Writes a sample's parts, each behind its length prefix where the codec takes one.
 pub(super) fn write_parts(
     output: &mut impl io::Write,
     codec: Codec,
@@ -173,7 +167,6 @@ pub(super) fn fit<T: TryFrom<U>, U>(value: U) -> Result<T, MuxError> {
     T::try_from(value).map_err(|_| MuxError::TooLarge)
 }
 
-/// Packets and streams the writers' tests share.
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

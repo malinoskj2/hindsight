@@ -23,9 +23,7 @@ pub(super) const VALUE_WIDTH: i32 = INNER_WIDTH - CAPTION_WIDTH;
 const TITLE_LABEL_INDENT: i32 = 8;
 
 pub(super) const FILL_Y: i32 = 6;
-/// The height down to the bottom of Settings' Apply with Advanced closed, the tallest of the
-/// pages laid out by hand. The window grows past it only while a page needs more, as Settings
-/// does with Advanced open.
+/// The height down to the bottom of Settings' Apply with Advanced closed.
 pub(super) const FILL_HEIGHT: i32 = 380;
 /// The tab strip above the pages and the slack under their content.
 const TAB_CHROME: i32 = 36;
@@ -160,16 +158,13 @@ impl TintedLabel {
     }
 }
 
-/// The space under a message label.
 const MESSAGE_PADDING: i32 = 4;
 
-/// A group that grows while its message label is shown, by as many lines as the message
-/// takes, moving the controls declared below it.
+/// A group that grows while its message label is shown, moving the controls declared below it.
 pub(super) struct ExpandableGroup {
     /// The index of the growing frame among the page's frames. Those after it move down.
     frame: usize,
     message: gui::Label,
-    /// The lines the message label is sized for.
     lines: Cell<i32>,
     controls_below: Vec<Movable>,
     shown: Cell<i32>,
@@ -224,8 +219,6 @@ impl ExpandableGroup {
         self.shown.get()
     }
 
-    /// Shows `message`, or hides the label for `None`, and reports whether the group's height
-    /// changed.
     pub(super) fn set_message(&self, frames: &[Frame], message: Option<&str>) -> bool {
         set_text(&self.message, message.unwrap_or(""));
         let extra = message.map_or(0, |message| {
@@ -274,7 +267,6 @@ pub(super) fn window_opts(width: i32, height: i32, icon: u16) -> gui::WindowMain
     }
 }
 
-/// Colours the title bar of `hwnd` to match `skin`.
 pub(super) fn match_title_bar(hwnd: &w::HWND, skin: &Skin) {
     match skin.title_bar_colours() {
         Some((caption, text)) => window::paint_title_bar(hwnd, caption, text),

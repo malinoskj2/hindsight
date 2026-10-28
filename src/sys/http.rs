@@ -1,5 +1,4 @@
-//! HTTPS downloads through `WinHTTP`, which uses the system's certificate store and proxy settings
-//! and follows redirects, except from HTTPS to HTTP.
+//! HTTPS downloads through `WinHTTP`.
 
 use std::ffi::c_void;
 use thiserror::Error;
@@ -104,8 +103,6 @@ pub(crate) fn get(url: &str, limit: usize) -> Result<Vec<u8>, HttpError> {
     request.read_body(limit)
 }
 
-/// Splits an `https://` address into its host and the path with any query, which starts with
-/// `/`.
 fn split(url: &str) -> Option<(&str, &str)> {
     let rest = url.strip_prefix(SCHEME)?;
     let (host, path) = rest.find('/').map_or((rest, "/"), |at| rest.split_at(at));
@@ -125,7 +122,6 @@ fn network_failure(error: &windows::core::Error) -> String {
     reason.to_owned()
 }
 
-/// An open `WinHTTP` handle, closed on drop.
 struct Handle(*mut c_void);
 
 impl Handle {

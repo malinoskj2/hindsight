@@ -77,11 +77,9 @@ pub(crate) struct OpenError(usize);
 #[error("the shell could not start Explorer (code {0})")]
 pub(crate) struct RevealError(usize);
 
-/// Whether a program asked to run as administrator was started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Elevation {
     Started,
-    /// The user said no at the UAC prompt.
     Declined,
 }
 
@@ -188,8 +186,6 @@ pub(crate) fn reveal(path: &Path) -> Result<(), RevealError> {
     execute(&HSTRING::from("explorer.exe"), Some(&parameters)).map_err(RevealError)
 }
 
-/// Starts `program` as administrator, which shows the UAC prompt, and returns once it has
-/// started or the prompt was declined.
 pub(crate) fn run_elevated(program: &Path, parameters: &str) -> Result<Elevation, ElevateError> {
     let program = program.to_str().ok_or(ElevateError::Path)?;
     let started = w::ShellExecuteEx(&w::SHELLEXECUTEINFO {

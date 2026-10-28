@@ -1,11 +1,8 @@
-//! Reads a version's notes from `CHANGELOG.md`, where each version's section starts with a
-//! heading such as `## 0.2.1`. The build script embeds the running version's section with this.
+//! Reads a version's notes from `CHANGELOG.md`.
 
 const HEADING: &str = "## ";
 const NEXT_HEADING: &str = "\n## ";
 
-/// The notes under `version`'s heading, up to the next version's, without the blank lines
-/// around them. `None` when there is no such heading or nothing under it.
 pub(crate) fn section<'a>(changelog: &'a str, version: &str) -> Option<&'a str> {
     changelog
         .split(NEXT_HEADING)

@@ -29,7 +29,6 @@ const SHADER_STAGES: [(&str, &str, &str); 2] = [
 /// The value shown for a build fact that could not be determined.
 const UNKNOWN: &str = "unknown";
 const CHANGELOG: &str = "CHANGELOG.md";
-/// The file in `OUT_DIR` that `src/update/notes.rs` includes.
 const RELEASE_NOTES: &str = "release-notes.md";
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -110,8 +109,6 @@ fn record_build_info() {
     println!("cargo:rustc-env=HINDSIGHT_RUSTC={rustc}");
 }
 
-/// Writes this version's section of the changelog to `OUT_DIR`. A release build without one
-/// fails, so every installer carries its notes; any other build embeds no notes instead.
 fn embed_release_notes() {
     println!("cargo:rerun-if-changed={CHANGELOG}");
     let version = env!("CARGO_PKG_VERSION");

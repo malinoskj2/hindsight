@@ -18,7 +18,6 @@ use crate::{
 use std::rc::Rc;
 use winsafe::{gui, prelude::*};
 
-/// A problem's headline and its cause. The label grows with the notices it shows.
 const NOTICE_LINES: i32 = 2;
 const ROW_PITCH: i32 = 20;
 const CONTROL_COUNT: i32 = 5;
@@ -400,7 +399,6 @@ impl Row {
     }
 }
 
-/// A problem comes first, as a headline saying what failed and when, with its cause below.
 fn notice_text(status: &Status, window_notices: [Option<&str>; 2]) -> String {
     let problem = status.problem.as_ref().map(|problem| {
         [

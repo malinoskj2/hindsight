@@ -35,20 +35,14 @@ use winsafe::{co, gui, prelude::*};
 
 const FIELD_OFFSET: i32 = 96;
 const COLUMN_GAP: i32 = 12;
-/// Each of the two columns, which hold a caption and a field of the same widths.
 const COLUMN_WIDTH: i32 = (INNER_WIDTH - COLUMN_GAP) / 2;
 const COLUMN_X: i32 = INNER_X + COLUMN_WIDTH + COLUMN_GAP;
-// Each kind of field has one width: numbers small; the short lists and the hotkeys compact,
-// filling a column; the lists of choices medium; and paths and devices, whose values run long,
-// the rest of the row.
 const NUMBER_WIDTH: i32 = 52;
 const COMPACT_WIDTH: i32 = COLUMN_WIDTH - FIELD_OFFSET;
 const CHOICE_WIDTH: i32 = 190;
 /// The width of a field that reaches the group's right edge from the first column.
 const FULL_WIDTH: i32 = INNER_WIDTH - FIELD_OFFSET;
-/// The width of a check box in the second column, which has no caption beside it.
 const CHECK_COLUMN_WIDTH: i32 = INNER_WIDTH - (COLUMN_X - INNER_X);
-/// Browse and Apply.
 const SMALL_BUTTON_WIDTH: i32 = 76;
 const BROWSE_GAP: i32 = 6;
 /// The width of the clip folder field, which leaves room for the Browse button at the group's
@@ -57,18 +51,12 @@ const FOLDER_WIDTH: i32 = FULL_WIDTH - SMALL_BUTTON_WIDTH - BROWSE_GAP;
 const BROWSE_X: i32 = INNER_X + INNER_WIDTH - SMALL_BUTTON_WIDTH;
 const FIELD_PITCH: i32 = 28;
 const CHECK_PITCH: i32 = LINE + 4;
-/// The extra space between Advanced's groups of rows: capture, output and sound.
 const GROUP_GAP: i32 = 8;
-/// Apply lines up with the groups' right edge.
 const APPLY_X: i32 = GROUP_X + GROUP_WIDTH - SMALL_BUTTON_WIDTH;
-/// The space between Apply and the message beside it.
 const APPLY_GAP: i32 = 8;
-/// How much taller the window is with Advanced open: its rows push the page past the height
-/// the other tabs need.
 const ADVANCED_EXTRA: i32 = rows::APPLY + BUTTON_HEIGHT - (layout::FILL_Y + layout::FILL_HEIGHT);
 
-/// The rows as laid out with Advanced open. Closed, its rows are hidden and everything below
-/// them moves up by [`rows::ADVANCED_HEIGHT`].
+/// The rows as laid out with Advanced open.
 mod rows {
     use super::{BUTTON_HEIGHT, CHECK_PITCH, FIELD_PITCH, FIRST_FRAME, FIRST_ROW, GROUP_GAP, LINE};
 
@@ -82,7 +70,6 @@ mod rows {
     pub(super) const BACKEND: i32 = ADVANCED + BUTTON_HEIGHT + 8;
     pub(super) const ENCODING: i32 = BACKEND + FIELD_PITCH;
     pub(super) const MEMORY: i32 = ENCODING + FIELD_PITCH;
-    /// Right under Buffer in, which it describes.
     pub(super) const ESTIMATE: i32 = MEMORY + BUTTON_HEIGHT + 2;
     pub(super) const FORMATS: i32 = ESTIMATE + CHECK_PITCH + GROUP_GAP;
     pub(super) const SOUND_DEVICE: i32 = FORMATS + FIELD_PITCH + GROUP_GAP;
@@ -100,7 +87,6 @@ mod rows {
     pub(super) const CHECK_FOR_UPDATES: i32 = CLOSE_TO_TRAY + CHECK_PITCH;
     pub(super) const STARTUP_ERROR: i32 = CHECK_FOR_UPDATES + CHECK_PITCH;
     pub(super) const GENERAL_HEIGHT: i32 = CHECK_FOR_UPDATES + LINE + 6 - GENERAL_FRAME;
-    /// Under the groups, at the bottom of the page.
     pub(super) const APPLY: i32 = GENERAL_FRAME + GENERAL_HEIGHT + 6;
 }
 
@@ -132,11 +118,9 @@ struct Inner {
     apply: ApplyControls,
     /// The codecs offered, in the order of the codec list's items.
     codecs: Vec<Codec>,
-    /// `None` when the devices could not be listed, so only the default is offered.
     devices: Option<DeviceList>,
     /// Whether Advanced is open. The controls are created open.
     advanced_open: Cell<bool>,
-    /// Whether Advanced opens once the controls exist, as the settings left it.
     open_at_start: bool,
 }
 
@@ -237,8 +221,6 @@ impl SettingsPage {
         page
     }
 
-    /// Lists the devices again if any came or went since they were listed, keeping each list's
-    /// selection.
     pub(super) fn update_devices(&self) {
         let Some(devices) = self.0.devices.as_ref().filter(|devices| devices.changed()) else {
             return;
@@ -269,7 +251,6 @@ impl SettingsPage {
         });
     }
 
-    /// Shows or hides Advanced's rows, moving everything below them.
     fn show_advanced(&self, open: bool) {
         if self.0.advanced_open.replace(open) == open {
             return;
@@ -447,7 +428,6 @@ impl SettingsPage {
         }
     }
 
-    /// A source's device list is disabled while the source is not recorded.
     fn update_device_choices(&self) {
         let recording = &self.0.recording;
         let advanced = &recording.advanced;
@@ -569,7 +549,6 @@ impl SettingsPage {
     }
 }
 
-/// A control that Advanced shows or that moves when it opens.
 type Control = Box<dyn GuiWindow>;
 
 /// The Recording group's fields, created row by row, which is the order the keyboard visits them.
@@ -582,10 +561,8 @@ struct RecordingControls {
     audio: gui::CheckBox,
     microphone: gui::CheckBox,
     cursor: gui::CheckBox,
-    /// Opens and closes Advanced.
     disclosure: gui::Button,
     advanced: AdvancedFields,
-    /// Advanced's rows, captions included.
     advanced_rows: Vec<Control>,
     _spins: [gui::UpDown; 2],
 }
@@ -683,11 +660,9 @@ impl RecordingControls {
     }
 }
 
-/// The save and screenshot hotkeys, side by side, each taking a pressed combination.
 struct HotkeyControls {
     save: gui::Edit,
     screenshot: gui::Edit,
-    /// Every control in the group, which moves with it when Advanced opens or closes.
     controls: Vec<Control>,
 }
 
@@ -726,7 +701,7 @@ impl HotkeyControls {
     }
 }
 
-/// The fields under Advanced, created in its row order: capture, then output, then sound.
+/// The fields under Advanced, created in its row order.
 struct AdvancedFields {
     backend: gui::ComboBox,
     /// The backends offered, in the order of the backend list's items.
@@ -869,7 +844,6 @@ impl AdvancedFields {
     }
 }
 
-/// The system sound's and the microphone's device lists.
 fn device_fields(
     page: &gui::TabPage,
     config: &Config,
@@ -895,7 +869,6 @@ fn device_fields(
     ]
 }
 
-/// A list of the devices a source can be captured from, Windows' default first.
 struct DeviceField {
     source: Source,
     field: gui::ComboBox,
@@ -932,7 +905,6 @@ impl DeviceField {
         }
     }
 
-    /// Lists the devices there are now, selecting `selected`.
     fn refill(&self, devices: &DeviceList, selected: Option<&DeviceId>) {
         let (entries, position) = device_entries(self.source, Some(devices), selected);
         let labels: Vec<String> = entries.iter().map(entry_label).collect();
@@ -943,14 +915,12 @@ impl DeviceField {
         *self.entries.borrow_mut() = entries;
     }
 
-    /// Returns the device selected, or `None` for the default.
     fn chosen(&self) -> Option<DeviceId> {
         let index = usize::try_from(self.field.items().selected_index()?).ok()?;
         self.entries.borrow().get(index)?.device().cloned()
     }
 }
 
-/// Returns the entries of `source`'s device list and the position of `selected` among them.
 fn device_entries(
     source: Source,
     devices: Option<&DeviceList>,
@@ -980,7 +950,6 @@ struct GeneralControls {
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
     error: TintedLabel,
-    /// Every control in the group, which moves with it when Advanced opens or closes.
     controls: Vec<Control>,
 }
 
@@ -1042,11 +1011,9 @@ impl GeneralControls {
     }
 }
 
-/// Apply and the message beside it, under the groups at the page's bottom right.
 struct ApplyControls {
     apply: gui::Button,
     error: TintedLabel,
-    /// Both controls, which move with the groups above them when Advanced opens or closes.
     controls: Vec<Control>,
 }
 
@@ -1054,7 +1021,6 @@ impl ApplyControls {
     fn new(page: &gui::TabPage, message: &str, skin: &Skin) -> Self {
         let apply = button(page, text::APPLY, APPLY_X, rows::APPLY, SMALL_BUTTON_WIDTH);
         skin_button(&apply, skin);
-        // Two lines, which reach the page's bottom edge from just above Apply.
         let error = label(
             page,
             message,
@@ -1071,7 +1037,6 @@ impl ApplyControls {
         }
     }
 
-    /// Both controls, for the General group to move down while its message shows.
     fn movables(&self) -> [Movable; 2] {
         [self.apply.clone().into(), self.error.label().clone().into()]
     }

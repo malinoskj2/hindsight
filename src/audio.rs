@@ -1,6 +1,5 @@
 //! System sound and the microphone: WASAPI capture on its own thread, stamped on the video clock,
-//! and mixed and encoded to AAC-LC when a clip is saved, with the microphone also on a track of its
-//! own.
+//! and mixed and encoded to AAC-LC when a clip is saved.
 
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "calls Media Foundation's AAC encoder")]
@@ -44,12 +43,9 @@ const SAMPLE_RATE: NonZeroU32 = NonZeroU32::new(48_000).unwrap();
 )]
 const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 
-/// The device a source is captured from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceChoice {
-    /// Windows' default, as it changes.
     Default,
-    /// The device chosen in Settings.
     Chosen(DeviceId),
 }
 
@@ -66,8 +62,6 @@ impl DeviceChoice {
     }
 }
 
-/// The sources a session records, each with the device it is captured from, and `None` for a
-/// source it does not record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Sources(pub(crate) PerSource<Option<DeviceChoice>>);
 
@@ -90,7 +84,6 @@ impl Sources {
         self.recorded().next().is_some()
     }
 
-    /// The sources recorded, with their devices.
     pub(crate) fn recorded(&self) -> impl Iterator<Item = (Source, &DeviceChoice)> {
         self.0
             .iter()
@@ -99,7 +92,7 @@ impl Sources {
 }
 
 /// The sources recorded from Windows' default device because the device chosen for them in
-/// Settings is missing. They return to it once it is back.
+/// Settings is missing.
 pub(crate) type StandIns = PerSource<bool>;
 
 #[derive(Debug, Error)]
@@ -115,7 +108,6 @@ pub(crate) enum EncodeError {
     Unsupported,
 }
 
-/// Encodes each track of `clip`, in its order.
 #[cfg(windows)]
 pub(crate) fn encode(clip: &PcmClip) -> Result<Vec<AudioClip>, EncodeError> {
     aac::encode_clip(clip)

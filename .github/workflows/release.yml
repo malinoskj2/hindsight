@@ -72,7 +72,6 @@ jobs:
               --source-digest "$build_sha" --deny-self-hosted-runners
           done
 
-          # The release notes are the CHANGELOG.md section the build embedded in the app.
           notes=$(cat release/release-notes.md)
           [[ -n "$notes" ]] || { echo "The build at $build_sha carries no release notes" >&2; exit 1; }
 

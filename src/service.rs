@@ -1,5 +1,4 @@
-//! The recording worker: keeps one capture session running, saves clips from its buffer and
-//! screenshots of what it captures.
+//! The recording worker: keeps one capture session running, saves clips and screenshots.
 
 use crate::{
     audio::{self, Sources, StandIns},
@@ -34,7 +33,6 @@ const RATE_SPAN: Duration = Duration::from_secs(10);
 const FIRST_RATE_SPAN: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
-/// The problems that starting or stopping capture resolves.
 const CAPTURE_PROBLEMS: &[ProblemKind] = &[ProblemKind::CaptureFailed, ProblemKind::AppNotRecorded];
 
 /// A monitor's OS handle, which is never null. It is carried as an integer so the worker stays
@@ -91,13 +89,11 @@ pub(crate) enum Target {
     },
 }
 
-/// How a window target is recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Through {
     /// The window's own content, where the backend can capture a window, and its monitor
     /// otherwise.
     Window,
-    /// The monitor the window fills, as when the window cannot be captured itself.
     Monitor,
 }
 
@@ -124,13 +120,10 @@ impl PartialEq for Target {
 
 impl Eq for Target {}
 
-/// What is in front when a screenshot is asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Front {
-    /// `None` when no window is in front.
     pub(crate) window: Option<WindowHandle>,
-    /// The monitor the window in front is on. `None` is the primary monitor, as for
-    /// [`Target::Monitor`].
+    /// `None` is the primary monitor, as for [`Target::Monitor`].
     pub(crate) monitor: Option<MonitorHandle>,
 }
 
@@ -157,7 +150,6 @@ impl Target {
         }
     }
 
-    /// The same target, recorded through its monitor.
     fn through_monitor(&self) -> Self {
         let mut target = self.clone();
         if let Self::Window { through, .. } = &mut target {
@@ -288,7 +280,6 @@ pub(crate) struct Buffer {
 /// system sound or the microphone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
-    /// Recording, from the default device where a chosen one is missing.
     Recording(StandIns),
     /// Sound capture could not start or has stopped. The log gives the reason.
     Failed,
@@ -320,19 +311,16 @@ pub(crate) struct Status {
     pub(crate) last_screenshot: Option<PathBuf>,
     /// The last clip was saved without the sound that was buffered for it.
     pub(crate) clip_without_sound: bool,
-    /// What went wrong last, until the same work next succeeds.
     pub(crate) problem: Option<Problem>,
     /// A save was requested before the buffer held anything.
     pub(crate) nothing_to_save: bool,
 }
 
-/// Something that failed, as the Status tab reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Problem {
     pub(crate) kind: ProblemKind,
     /// The local time it failed, as `HH:MM`.
     pub(crate) at: String,
-    /// Why, as the log records it.
     pub(crate) cause: String,
 }
 
@@ -361,9 +349,7 @@ enum Command {
     /// Pauses while capturing and resumes while paused. The worker knows which state it is in.
     TogglePause,
     Restart,
-    /// Saves a setting that leaves recording alone.
     Remember(Preference),
-    /// Records the version as the last one that ran.
     VersionSeen(Version),
     Wake,
     Exit,
@@ -481,8 +467,6 @@ struct Saving {
     next_tick: Instant,
 }
 
-/// A screenshot under way: asked of the capture thread, then written on a thread of its own,
-/// which grabs the monitor itself when no recording shows it.
 enum Shot {
     Asked,
     Writing(Writing),
@@ -839,7 +823,6 @@ impl Machine {
         self.shot = Some(Shot::Asked);
     }
 
-    /// The recording, when it has a picture and that picture is all of `front`'s monitor.
     fn recording_of(&self, front: Front) -> Option<&Live> {
         self.session.as_ref()?;
         self.target.as_ref().filter(|target| target.shows(front))?;
@@ -857,7 +840,6 @@ impl Machine {
         })
     }
 
-    /// A picture the capture thread could not give is grabbed from the monitor instead.
     fn captured(&mut self, taken: Taken, monitor: Option<MonitorHandle>) {
         self.shot = None;
         let readback = match taken {
@@ -1049,8 +1031,6 @@ impl Machine {
         self.retry_at = Some(self.now() + self.services.retry_interval);
     }
 
-    /// Clears the problem shown when it is one of `kinds`, whose work has just succeeded. A
-    /// problem of another kind stays until its own work does.
     fn resolve(&mut self, kinds: &[ProblemKind]) {
         if self
             .problem
@@ -1348,9 +1328,7 @@ impl Machine {
     }
 }
 
-/// Lowers the calling thread's priority and opts it into power throttling, so that a save or a
-/// screenshot takes longer but does not compete with the game. `work` names the thread in the
-/// log.
+/// Lowers the calling thread's priority and opts it into power throttling.
 #[cfg(windows)]
 fn run_in_background(work: &str) {
     if let Err(error) = sys::thread::enter_background_mode() {

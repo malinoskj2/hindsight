@@ -1,6 +1,4 @@
-//! Saving a clip or a screenshot as a file named for the time: written under a `.partial` name
-//! and moved to a name no file has once it is complete, so a file is never half written or
-//! replaced.
+//! Saving a clip or a screenshot as a file named for the time.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -39,9 +37,7 @@ impl WriteError {
     }
 }
 
-/// Creates `directory` and has `write` fill a file in it named for the time now with
-/// `extension`. The file is written under a `.partial` name and renamed to its final one only
-/// once complete.
+/// The file is written under a `.partial` name and renamed to its final one only once complete.
 pub(crate) fn save_file<T, E: From<WriteError>>(
     directory: &Path,
     extension: &str,
@@ -98,7 +94,6 @@ fn claim_name(
     )))
 }
 
-/// Creates `path`, has `write` fill it through a buffer and syncs it to disk.
 pub(crate) fn write_file<E: From<WriteError>>(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> Result<(), E>,

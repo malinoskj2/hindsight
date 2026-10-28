@@ -1,5 +1,5 @@
 //! Full-screen app detection: windows whose client area covers their monitor, watched through
-//! event hooks. Once an app is recorded, whether it is still in front of its monitor.
+//! event hooks.
 
 use super::{
     callback::Slot,
@@ -136,7 +136,6 @@ pub(crate) fn fullscreen_app() -> Option<Target> {
     })
 }
 
-/// The window in front and its monitor, which is the primary monitor when no window is in front.
 pub(crate) fn in_front() -> Front {
     let window = w::HWND::GetForegroundWindow();
     let primary = w::HMONITOR::MonitorFromPoint(w::POINT::default(), co::MONITOR::DEFAULTTOPRIMARY);
@@ -156,13 +155,9 @@ pub(crate) fn in_front() -> Front {
     }
 }
 
-/// A recorded app's window, looked at on the capture thread to tell whether its monitor still
-/// shows it.
 pub(crate) struct AppWindow {
     window: w::HWND,
     process: u32,
-    /// `None` when the bounds cannot be read, so that any other app's window in front counts as
-    /// covering the monitor.
     monitor: Option<w::RECT>,
 }
 
@@ -181,8 +176,6 @@ impl AppWindow {
         }
     }
 
-    /// Called every frame, so the usual case, the app in front, is settled before the costlier
-    /// checks.
     pub(crate) fn sight(&self) -> Sighting {
         if !self.window.IsWindow() {
             return Sighting::Closed;
@@ -207,8 +200,6 @@ impl AppWindow {
         }
     }
 
-    /// Whether `front` overlaps the app's monitor. The desktop spans every monitor, so it always
-    /// does.
     fn is_covered_by(&self, front: &w::HWND) -> bool {
         let Some(monitor) = self.monitor else {
             return true;

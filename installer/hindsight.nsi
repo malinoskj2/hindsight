@@ -14,10 +14,8 @@ Unicode true
 !endif
 
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Hindsight"
-# How long an update waits for the running copy to exit: 300 tries 200 ms apart.
 !define UPDATE_WAIT_TRIES 300
 
-# 1 when hindsight started this installer to update itself, with /UPDATE.
 Var IsUpdate
 
 Name "hindsight"
@@ -79,7 +77,6 @@ Function .onInit
   ${EndIf}
 FunctionEnd
 
-# An update starts the new copy, and a failed one starts the copy it left in place.
 Function .onInstSuccess
   ${If} $IsUpdate == 1
     Call LaunchApplication
@@ -92,8 +89,7 @@ Function .onInstFailed
   ${EndIf}
 FunctionEnd
 
-# Waits until no running copy holds hindsight.exe, which Windows keeps from being replaced. An
-# update waits for the copy that started it to exit; otherwise the user is asked to quit it.
+# Waits until no running copy holds hindsight.exe, which Windows keeps from being replaced.
 Function WaitForApp
   ${IfNot} ${FileExists} "$INSTDIR\hindsight.exe"
     Return
@@ -147,12 +143,9 @@ Function un.onInit
   ready:
 FunctionEnd
 
-# hindsight keeps per-user state outside $INSTDIR: its "Start with Windows" value in the user's
-# Run key, and its settings, totals, log and buffer in that user's %LOCALAPPDATA%\Hindsight.
 # The uninstaller is elevated, so HKCU and $LOCALAPPDATA here can belong to the administrator who
 # approved the prompt rather than to the user who runs hindsight. Every logged-on user's hive is
-# loaded under HKU, so this walks those instead and cleans each one; a user who is not logged on
-# keeps a dead Run value until they next open Settings. Saved clips are the user's and stay.
+# loaded under HKU, so this walks those instead and cleans each one.
 Function un.RemoveUserState
   StrCpy $0 0
   ${Do}

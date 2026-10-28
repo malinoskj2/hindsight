@@ -1,22 +1,18 @@
-//! The running version's release notes, which the build embeds from `CHANGELOG.md`, and when a
-//! start shows them.
+//! The running version's release notes.
 
 use super::Version;
 use std::cmp::Ordering;
 
-/// Empty when a development build's changelog has no section for its version. A release build
-/// fails instead.
+/// Empty when a development build's changelog has no section for its version.
 const EMBEDDED: &str = include_str!(concat!(env!("OUT_DIR"), "/release-notes.md"));
 const BULLET: &str = "- ";
 const SHOWN_BULLET: &str = "• ";
 
-/// The running version's notes, in the changelog's Markdown.
 pub(crate) fn running() -> Option<&'static str> {
     (!EMBEDDED.is_empty()).then_some(EMBEDDED)
 }
 
-/// The notes as plain text for a multi-line edit control, which needs CRLF line breaks and draws
-/// no Markdown, so list items get a bullet character instead of their dash.
+/// The notes as plain text for a multi-line edit control, which needs CRLF line breaks.
 pub(crate) fn displayed(notes: &str) -> String {
     notes
         .lines()
@@ -28,15 +24,10 @@ pub(crate) fn displayed(notes: &str) -> String {
         .join("\r\n")
 }
 
-/// What a start does about the running version's notes, given the version that ran before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arrival {
-    /// This version has run here before.
     Again,
-    /// A first run, or a downgrade, whose notes would describe nothing new. The version is
-    /// recorded straight away.
     Unannounced,
-    /// An upgrade. The notes are shown once the window is, and the version recorded after.
     Upgraded,
 }
 

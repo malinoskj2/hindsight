@@ -30,7 +30,6 @@ pub(crate) struct Totals {
     pub(crate) saved_bytes: u64,
 }
 
-/// What a run leaves for the next one.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct LastRun {
@@ -56,15 +55,13 @@ impl Store {
         Ok(Self { root, _lock: lock })
     }
 
-    /// Returns the settings the user chose, with `defaults` for the rest.
     pub(crate) fn load_config(&self, defaults: &Config) -> Result<Config, StorageError> {
         let mut settings = settings(defaults)?;
         settings.extend(self.chosen_settings()?);
         Ok(serde_json::from_value(Value::Object(settings))?)
     }
 
-    /// Writes the settings that `config` changes from `previous`, keeping those chosen before. A
-    /// setting the user never changed is left out, so it keeps following the machine's defaults.
+    /// A setting the user never changed is left out, so it keeps following the machine's defaults.
     pub(crate) fn save_config(
         &self,
         previous: &Config,
@@ -94,7 +91,6 @@ impl Store {
         self.write(TOTALS_FILE, totals)
     }
 
-    /// The version that ran last, or `None` before the first run that records one.
     pub(crate) fn load_last_version(&self) -> Result<Option<Version>, StorageError> {
         Ok(self
             .read::<LastRun>(LAST_RUN_FILE)?

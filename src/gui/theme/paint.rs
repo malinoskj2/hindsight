@@ -11,7 +11,6 @@ const CORNER: i32 = 4;
 const FOCUS_INSET: i32 = 3;
 const TITLE_INDENT: i32 = 12;
 const TITLE_GAP: i32 = 4;
-/// Half the long side of a disclosure's arrow.
 const ARROW: i32 = 3;
 const ARROW_CENTRE: i32 = 4;
 const CAPTION_INDENT: i32 = 12;
@@ -20,9 +19,7 @@ const RULE_GAP: i32 = 6;
 /// lower corners outside the clip.
 const RULE_FRAME_HEIGHT: i32 = 16;
 
-/// What draws a disclosure's rule.
 pub(super) enum Rule<'a> {
-    /// The system's group box edge, drawn for the control, so the rule matches the native frames.
     Native(&'a w::HWND),
     Colour(w::COLORREF),
 }
@@ -190,8 +187,6 @@ pub(super) fn button_colours(palette: &Palette, state: co::CDIS) -> (Fill, Edge,
     (fill, Edge::Accent, palette.on_accent)
 }
 
-/// Draws a disclosure in `rect`: an arrow that points down while `open`, the caption, and a rule
-/// from the caption out to the right edge. The background is left to the caller.
 pub(super) fn paint_disclosure(
     hdc: &w::HDC,
     rect: w::RECT,

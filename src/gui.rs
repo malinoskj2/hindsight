@@ -67,10 +67,9 @@ const UPDATE_TIMER: usize = 4;
 /// The first check waits, since at sign-in the network may not be up yet.
 const FIRST_UPDATE_CHECK_MS: u32 = 60 * 1000;
 const UPDATE_INTERVAL_MS: u32 = 24 * 60 * 60 * 1000;
-/// Runs while the update thread has a job.
 const UPDATE_POLL_TIMER: usize = 5;
 const UPDATE_POLL_MS: u32 = 250;
-/// Shows the notes after an upgrade, once the window that was just shown has painted.
+/// Shows the notes once the window that was just shown has painted.
 const WHATS_NEW_TIMER: usize = 6;
 
 pub(crate) fn run(startup: Result<(Worker, Config, Arrival)>, start_hidden: bool) -> Result<()> {
@@ -103,17 +102,14 @@ struct Inner {
     /// The full-screen app seen most recently, offered to the worker once it has stayed in front.
     pending_target: RefCell<Option<Target>>,
     quitting: Cell<bool>,
-    /// Indexed by [`Action::index`].
     hotkey_errors: RefCell<[Option<String>; 2]>,
     tray_error: OnceCell<String>,
     initial_startup_error: Cell<Option<String>>,
     /// The height the pages have grown by to show their messages.
     extra: Cell<i32>,
-    /// `None` when its thread could not start.
     updater: Option<Updater>,
     update_state: RefCell<State>,
     installation: Installation,
-    /// `Upgraded` until the notes have been shown, which waits for the window to be.
     arrival: Cell<Arrival>,
 }
 
@@ -440,7 +436,6 @@ impl Main {
         }
     }
 
-    /// Shows the notes after an upgrade, then records the version so they are not shown again.
     fn on_whats_new_timer(&self) {
         let _ = self.0.main_window.hwnd().KillTimer(WHATS_NEW_TIMER);
         if !self.0.main_window.hwnd().IsWindowVisible()
@@ -608,15 +603,11 @@ impl Main {
         }
     }
 
-    /// Applies a setting that leaves recording alone to the window's copy of the settings and
-    /// has the worker save it.
     fn remember(&self, preference: Preference) {
         preference.apply_to(&mut self.0.config.borrow_mut());
         self.0.worker.remember(preference);
     }
 
-    /// Checks a minute after starting, if checks are on, and then once a day while hindsight
-    /// runs.
     fn start_update_checks(&self) {
         let _ = self
             .0
@@ -670,8 +661,6 @@ impl Main {
         self.show_update();
     }
 
-    /// Asks before downloading, since installing closes hindsight. The portable copy opens the
-    /// release's page instead, which has the zip.
     fn install_update(&self) {
         let Some(release) = self.0.update_state.borrow().release().cloned() else {
             return;
@@ -736,7 +725,6 @@ impl Main {
         self.0.update_state.borrow_mut().checked(found);
     }
 
-    /// Starts a downloaded installer and quits, so the installer can replace this copy.
     fn downloaded(&self, release: Release, installer: Result<Installer, DownloadError>) {
         let Installation::Installed(folder) = &self.0.installation else {
             *self.0.update_state.borrow_mut() = State::Available(release);
@@ -803,8 +791,6 @@ impl Main {
         resize_width_by(self.0.main_window.hwnd(), delta);
     }
 
-    /// Sets the hotkeys aside while a hotkey field has the keyboard, so pressing either there
-    /// enters it instead of saving a clip or a screenshot.
     fn on_hotkey_capture(&self, capture: Capture) {
         match capture {
             Capture::Began => {
@@ -816,8 +802,6 @@ impl Main {
         }
     }
 
-    /// Switches to `config`'s hotkeys when both can be registered, and back to the configured
-    /// ones otherwise.
     fn switch_hotkeys(&self, config: &Config) -> Result<(), RegisterError> {
         let [save, screenshot] = self.register_hotkeys(config);
         let result = save.and(screenshot);
@@ -999,9 +983,7 @@ extern "system" fn destroy_window(window: w::HWND, _: co::WM, id: usize, _: u32)
 mod tests {
     use super::*;
 
-    /// More than any character of Segoe UI 9 pt averages at 96 DPI, which is about 6 pixels.
     const CHARACTER_WIDTH: i32 = 7;
-    /// The tab control's padding on both sides of a title, and the selected tab's overhang.
     const TAB_PADDING: i32 = 24;
 
     #[test]

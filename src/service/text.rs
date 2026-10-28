@@ -139,7 +139,6 @@ pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Saved without sound · {error}"))
 }
 
-/// The log line for a problem.
 pub(super) fn problem(kind: ProblemKind, cause: &str) -> String {
     match kind {
         ProblemKind::ClipNotSaved => save_failed(cause).to_string(),

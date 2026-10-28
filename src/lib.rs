@@ -185,7 +185,6 @@ fn startup() -> Result<(service::Worker, config::Config, update::notes::Arrival)
     Ok((worker, config, arrival))
 }
 
-/// Compares the version that ran last with this one.
 #[cfg(windows)]
 fn arrival(store: &storage::Store) -> update::notes::Arrival {
     let last = store
@@ -198,7 +197,6 @@ fn arrival(store: &storage::Store) -> update::notes::Arrival {
     update::notes::Arrival::of(last.as_ref(), &update::Version::running())
 }
 
-/// Reads what the defaults depend on. A part that cannot be read is logged and left unknown.
 #[cfg(windows)]
 fn machine() -> config::Machine {
     let memory = sys::memory::installed()

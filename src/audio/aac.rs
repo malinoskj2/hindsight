@@ -1,5 +1,4 @@
-//! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over each track of a
-//! clip's PCM.
+//! AAC-LC encoding with Media Foundation's AAC MFT, run on the save thread over each track.
 
 use super::EncodeError;
 use crate::{
@@ -273,7 +272,6 @@ fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> EncodeErro
     move |error| EncodeError::Windows(step, error)
 }
 
-/// Encodes each track of a clip's PCM as AAC frames, in the clip's order.
 pub(super) fn encode_clip(clip: &PcmClip) -> std::result::Result<Vec<AudioClip>, EncodeError> {
     let _com = Apartment::multi_threaded().map_err(failed("initialise COM"))?;
     let _media = MediaFoundation::start().map_err(failed("start Media Foundation"))?;

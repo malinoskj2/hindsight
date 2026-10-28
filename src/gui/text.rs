@@ -16,8 +16,6 @@ pub(super) const SOUND_FAILED: &str = "Sound is not being recorded; the Logs tab
 pub(super) const CLIP_WITHOUT_SOUND: &str =
     "The last clip was saved without sound; the Logs tab says why.";
 
-/// The notice line for a source recorded from the default device because the chosen one is
-/// missing.
 pub(super) const fn device_missing(source: Source) -> &'static str {
     match source {
         Source::System => "The chosen sound device is missing; the default is recorded for now.",
@@ -85,7 +83,6 @@ pub(super) const SCREENSHOT_FORMAT: &str = "Image format";
 pub(super) const SOUND_DEVICE: &str = "Sound from";
 pub(super) const MICROPHONE_DEVICE: &str = "Microphone";
 pub(super) const DEFAULT_DEVICE: &str = "Default device";
-// A command button that shows more in place takes a double chevron.
 pub(super) const ADVANCED: &str = "Advanced";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
@@ -145,7 +142,6 @@ pub(super) fn problem_headline(problem: &Problem) -> String {
     format!("●  {failed} at {}", problem.at)
 }
 
-/// The cause as a sentence.
 pub(super) fn problem_cause(problem: &Problem) -> String {
     let cause = capitalised(problem.cause.trim_end_matches('.'));
     format!("{cause}.")
@@ -175,7 +171,6 @@ pub(super) fn not_listed(tab: &str, path: &Path, error: impl Display) -> String 
     format!("{tab} · {} not listed ({error})", file_name(path))
 }
 
-/// A chosen device that is not connected, by its name when Windows still knows it.
 pub(super) fn absent_device(name: Option<&str>) -> String {
     match name {
         Some(name) => format!("{name} (not connected)"),

@@ -10,7 +10,6 @@ use crate::replay::{
 };
 use std::{assert_matches, sync::Arc};
 
-/// An element read back: its ID, where it starts within its parent's body, and its body.
 struct Read<'a> {
     id: u32,
     at: usize,
@@ -81,7 +80,6 @@ fn mkv(codec: Codec, packets: &[Arc<Packet>], audio: &[AudioClip]) -> Vec<u8> {
     file
 }
 
-/// Each block's track, time within the file and payload, in file order.
 fn blocks(segment: &[u8]) -> Vec<(u8, u64, bool, &[u8])> {
     let mut found = Vec::new();
     for cluster in children(segment)

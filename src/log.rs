@@ -214,7 +214,6 @@ fn timestamp() -> String {
     format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second)
 }
 
-/// The local time as `HH:MM`.
 pub(crate) fn clock() -> String {
     let now = local_time();
     format!("{:02}:{:02}", now.hour, now.minute)

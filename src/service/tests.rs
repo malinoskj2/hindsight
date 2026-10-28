@@ -49,7 +49,6 @@ fn steady(config: &Config, _: &Target, live: &Live, stop: &AtomicBool) -> Result
     Ok(Ended::Stopped)
 }
 
-/// Records like `steady` but never takes a screenshot request.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "keeps the session function's signature"
@@ -142,9 +141,6 @@ fn steady_until_closed(config: &Config, live: &Live, stop: &AtomicBool) {
     });
 }
 
-/// A picture one pixel high and as wide as 3 plus the monitor's handle, or 3 for the primary
-/// monitor, so that the file tells which monitor was grabbed and that it is not a capture's 2×2
-/// picture.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "keeps the grab function's signature"
@@ -418,8 +414,6 @@ fn full_screen_mode_waits_for_an_app_and_follows_it() {
 
 static MONITOR_ONLY_SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
-/// Records a window only through its monitor, as Windows Graphics Capture records an exclusive
-/// full-screen game.
 fn monitor_only(config: &Config, target: &Target, live: &Live, stop: &AtomicBool) -> Result<Ended> {
     MONITOR_ONLY_SESSIONS.fetch_add(1, Ordering::Relaxed);
     match target {
@@ -678,7 +672,6 @@ fn spawn_listening(
     spawn_grabbing(record, grabbed, clock, write, config)
 }
 
-/// Like `spawn_listening`, grabbing monitors with `grab`.
 fn spawn_grabbing(
     record: Recorder,
     grab: Grabber,
@@ -832,7 +825,6 @@ fn on_monitor(monitor: isize) -> Front {
     }
 }
 
-/// The width and height of each screenshot taken, smallest width first.
 fn screenshot_sizes(directory: &Path) -> Vec<(u32, u32)> {
     let mut sizes: Vec<_> = files_in(&directory.join("screenshots"))
         .iter()
@@ -847,7 +839,6 @@ fn screenshot_sizes(directory: &Path) -> Vec<(u32, u32)> {
     sizes
 }
 
-/// Asks for a screenshot of `front` and waits for its tone.
 fn shoot(worker: &Worker, heard: &Heard, front: Front) {
     let before = tones(heard).len();
     worker.screenshot(front);

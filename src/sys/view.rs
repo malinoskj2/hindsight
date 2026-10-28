@@ -1,5 +1,4 @@
-//! Whether the monitor recorded for an app shows that app, decided from what its window looks
-//! like each frame, so that another window over it is held out of the clip.
+//! Whether the monitor recorded for an app shows that app.
 
 use std::time::{Duration, Instant};
 
@@ -7,16 +6,11 @@ use std::time::{Duration, Instant};
 /// minimizing, restoring or fading out over it is left out of the clip.
 const RETURN_DELAY: Duration = Duration::from_millis(250);
 
-/// What a recorded app's window looks like at one moment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sighting {
-    /// The window no longer exists.
     Closed,
-    /// Minimized, hidden, or cloaked as on another virtual desktop.
     Hidden,
-    /// Another app's window has the foreground and overlaps the app's monitor.
     Covered,
-    /// The app has the foreground, or the window that does lies on other monitors.
     Uncovered,
     /// No window has the foreground, as briefly while it changes hands.
     Unsettled,
@@ -24,21 +18,17 @@ pub(crate) enum Sighting {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
-    /// The monitor shows the app.
     Record,
-    /// The monitor shows something else, so the app's last picture is kept instead.
     Hold,
     Closed,
 }
 
-/// Whether the monitor recorded for an app shows that app.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum View {
     /// Where a session starts, since an app is recorded only once it has settled in front.
     #[default]
     Shown,
     Away,
-    /// Back in front since `since`, but not yet for `RETURN_DELAY`.
     Returning {
         since: Instant,
     },

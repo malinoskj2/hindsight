@@ -1,6 +1,4 @@
-//! The Clips and Screenshots tabs: the clip folder's videos or pictures shown as thumbnails,
-//! newest first. Each tab reads the folder and has the shell make its thumbnails on a thread of
-//! its own.
+//! The Clips and Screenshots tabs.
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
@@ -45,7 +43,6 @@ const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 /// folder answers well within this time, and a slow network folder no longer freezes the window.
 const LISTING_WAIT: Duration = Duration::from_millis(200);
 
-/// What a media tab lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Media {
     Clips,
@@ -81,7 +78,6 @@ impl Media {
         }
     }
 
-    /// Whether a file with this extension, in any case, is one of the tab's.
     fn admits(self, extension: &str) -> bool {
         match self {
             Self::Clips => Container::of_extension(extension).is_some(),
@@ -688,8 +684,6 @@ fn serve(media: Media, size: (i32, i32), jobs: &Receiver<Job>, done: &Sender<Don
     }
 }
 
-/// A clip or a screenshot. Those hindsight named are captioned by the time they were saved,
-/// and the rest by their file name.
 #[derive(Debug, PartialEq, Eq)]
 struct MediaFile {
     path: PathBuf,

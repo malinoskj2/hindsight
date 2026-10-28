@@ -1,5 +1,4 @@
-//! Converts WASAPI's float or 16-bit samples to the interleaved 16-bit stereo the encoder takes,
-//! or to 16-bit mono.
+//! Converts WASAPI's float or 16-bit samples to the 16-bit stereo or mono the encoder takes.
 
 use std::num::NonZeroU16;
 
@@ -34,7 +33,6 @@ impl Layout {
     }
 }
 
-/// The channels a track keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Channels {
     Mono,
