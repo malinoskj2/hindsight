@@ -226,8 +226,9 @@ impl Source for Capture {
                 log::info(
                     "NvFBC · the app's frames are not the monitor's size · grabbing the monitor",
                 );
-                self.process = None;
+                // The session goes first: the driver holds the process target's address.
                 self.session = None;
+                self.process = None;
                 return self.reopen();
             }
             Grabbed::Resized => return Ok(Frame::Resized),
