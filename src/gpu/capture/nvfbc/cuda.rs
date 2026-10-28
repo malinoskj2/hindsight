@@ -65,6 +65,7 @@ impl Capture {
             d3d9: _,
             size,
             monitor,
+            set_global_flags: _,
         } = prepare_capture(device, target, "NVIDIA NvFBC to CUDA")?;
         let cuda = Arc::new(open_primary_context(device)?);
 

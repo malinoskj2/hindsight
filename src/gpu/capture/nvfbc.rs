@@ -8,7 +8,12 @@ use super::{
     CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
     monitor_of,
 };
-use crate::{gpu::device::Device, log, service::Target, sys::win32::cb_size};
+use crate::{
+    gpu::device::Device,
+    log,
+    service::{Target, WindowHandle},
+    sys::win32::cb_size,
+};
 use std::{
     ffi::c_void,
     ptr::{self, NonNull},
@@ -30,6 +35,7 @@ use windows::{
             },
             Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
         },
+        UI::WindowsAndMessaging::GetWindowThreadProcessId,
     },
     core::{BOOL, Interface, s, w},
 };
@@ -46,6 +52,9 @@ const SLOTS: usize = SLOT_COUNT as usize;
 pub(super) struct Capture {
     /// Declared first: released before the surfaces it grabs into and their device.
     session: Option<Session>,
+    /// The full-screen app whose own frames are grabbed, or `None` to grab the monitor. Boxed so
+    /// that its address stays fixed for the driver.
+    process: Option<Box<ffi::ProcessTarget>>,
     create: ffi::CreateEx,
     key: Key,
     device: IDirect3DDevice9Ex,
@@ -76,7 +85,9 @@ impl Capture {
             d3d9,
             size,
             monitor,
+            set_global_flags,
         } = prepare_capture(device, target, "NVIDIA NvFBC")?;
+        let process = process_target(target, set_global_flags);
         let d3d9_device = create_device(&d3d9, adapter)?;
         let slots = [
             create_slot(&d3d9_device, size)?,
@@ -86,6 +97,7 @@ impl Capture {
 
         let mut capture = Self {
             session: None,
+            process,
             create,
             key,
             device: d3d9_device,
@@ -99,7 +111,17 @@ impl Capture {
             cursor,
             library,
         };
-        capture.session = Some(capture.open_session()?);
+        let session = match capture.open_session() {
+            Err(error) if capture.process.is_some() => {
+                log::info(format!(
+                    "NvFBC · cannot grab the app's own frames ({error}) · grabbing the monitor"
+                ));
+                capture.process = None;
+                capture.open_session()?
+            }
+            opened => opened?,
+        };
+        capture.session = Some(session);
         Ok(capture)
     }
 
@@ -125,7 +147,11 @@ impl Capture {
         params.device = self.device.as_raw();
         params.private_data = self.key.as_ptr().cast();
         params.private_data_size = KEY_BYTES;
-        // SAFETY: the device and the key outlive the call.
+        if let Some(process) = &self.process {
+            params.private_data2 = (&raw const **process).cast();
+            params.private_data2_size = cb_size::<ffi::ProcessTarget>();
+        }
+        // SAFETY: the device, the key and the process target outlive the call.
         unsafe { (self.create)(&raw mut params) }.ok()?;
         Object::new(params.nvfbc, &self.library).ok_or(Status::UNSUPPORTED)
     }
@@ -175,6 +201,16 @@ impl Source for Capture {
         let collected = self.pending.take();
         match self.grab()? {
             Grabbed::Frame | Grabbed::Withheld => {}
+            // The app presents at a size other than the monitor's, which the monitor's surfaces
+            // cannot hold.
+            Grabbed::Resized if self.process.is_some() => {
+                log::info(
+                    "NvFBC · the app's frames are not the monitor's size · grabbing the monitor",
+                );
+                self.process = None;
+                self.session = None;
+                return self.reopen();
+            }
             Grabbed::Resized => return Ok(Frame::Resized),
             // Deliver the collected frame first; reopen on the next tick.
             Grabbed::Lost if collected.is_some() => self.session = None,
@@ -221,6 +257,8 @@ struct Prepared {
     d3d9: IDirect3D9Ex,
     size: (u32, u32),
     monitor: HMONITOR,
+    /// `None` when the library does not export it.
+    set_global_flags: Option<ffi::SetGlobalFlags>,
 }
 
 /// Finds the monitor on the encoding GPU, loads the library and turns NvFBC on if necessary.
@@ -246,6 +284,7 @@ fn prepare_capture(
     }
     // Detached from the borrow: each capture keeps the library in its last field.
     let create = *entry_points.create;
+    let set_global_flags = entry_points.set_global_flags.as_deref().copied();
     Ok(Prepared {
         library: Arc::new(library),
         create,
@@ -254,7 +293,40 @@ fn prepare_capture(
         d3d9,
         size,
         monitor,
+        set_global_flags,
     })
+}
+
+/// Targets the full-screen app's process, so that NvFBC grabs the frames the app presents rather
+/// than the monitor. The NVIDIA driver already loaded in the app makes the copy; nothing is
+/// injected into it.
+fn process_target(
+    target: &Target,
+    set_global_flags: Option<ffi::SetGlobalFlags>,
+) -> Option<Box<ffi::ProcessTarget>> {
+    let Target::Window { window, name, .. } = target else {
+        return None;
+    };
+    let process_id = process_of(*window)?;
+    if let Some(set_global_flags) = set_global_flags {
+        // SAFETY: `NvFBC_SetGlobalFlags` from the library the caller holds; the flags go by value.
+        let _ = unsafe { set_global_flags(ffi::GLOBAL_FLAGS_NO_INITIAL_REFRESH) };
+    }
+    log::info(format!("NvFBC · grabbing the frames {name} presents"));
+    let mut process = Box::new(ffi::ProcessTarget::zeroed());
+    process.version = ffi::PROCESS_TARGET_VER;
+    process.capture_mode = ffi::CAPTURE_MODE_PROCESS;
+    process.process_id = process_id;
+    Some(process)
+}
+
+fn process_of(window: WindowHandle) -> Option<u32> {
+    let mut process_id = 0;
+    // SAFETY: GetWindowThreadProcessId accepts any handle and writes the id only for a live one.
+    unsafe {
+        GetWindowThreadProcessId(HWND(window.get() as *mut c_void), Some(&raw mut process_id))
+    };
+    (process_id != 0).then_some(process_id)
 }
 
 fn load_library() -> Result<Library, CaptureError> {
@@ -269,6 +341,7 @@ struct EntryPoints<'lib> {
     get_status: Symbol<'lib, ffi::GetStatusEx>,
     create: Symbol<'lib, ffi::CreateEx>,
     enable: Symbol<'lib, ffi::Enable>,
+    set_global_flags: Option<Symbol<'lib, ffi::SetGlobalFlags>>,
 }
 
 impl<'lib> EntryPoints<'lib> {
@@ -287,10 +360,13 @@ impl<'lib> EntryPoints<'lib> {
         // SAFETY: declared `NVFBCRESULT NVFBCAPI (NVFBC_STATE)` in NvFBC.h.
         let enable =
             unsafe { library.export(s!("NvFBC_Enable")) }.ok_or_else(|| missing("NvFBC_Enable"))?;
+        // SAFETY: `NVFBCRESULT NVFBCAPI (DWORD)`, as NVIDIA's capture engine calls it.
+        let set_global_flags = unsafe { library.export(s!("NvFBC_SetGlobalFlags")) };
         Ok(Self {
             get_status,
             create,
             enable,
+            set_global_flags,
         })
     }
 }

@@ -24,12 +24,15 @@ pub(super) const CREATE_PARAMS_VER: u32 = struct_version(size_of::<CreateParams>
 pub(super) const TODX9VID_SETUP_PARAMS_VER: u32 = struct_version(size_of::<SetupParams>(), 3);
 pub(super) const TODX9VID_GRAB_FRAME_PARAMS_VER: u32 =
     struct_version(size_of::<GrabFrameParams>(), 1);
+pub(super) const PROCESS_TARGET_VER: u32 = struct_version(size_of::<ProcessTarget>(), 1);
 
 // The values the header's macros evaluate to.
 const _: () = assert!(STATUS_VER == 0x7002_0200);
 const _: () = assert!(CREATE_PARAMS_VER == 0x7002_0200);
 const _: () = assert!(TODX9VID_SETUP_PARAMS_VER == 0x7003_0100);
 const _: () = assert!(TODX9VID_GRAB_FRAME_PARAMS_VER == 0x7001_0100);
+// The value NVIDIA's own Instant Replay passes.
+const _: () = assert!(PROCESS_TARGET_VER == 0x7001_00C8);
 
 /// `NVFBC_TO_DX9_VID`.
 pub(super) const TO_DX9_VID: u32 = 0x2003;
@@ -39,6 +42,11 @@ pub(super) const STATE_ENABLE: u32 = 1;
 pub(super) const TODX9VID_ARGB: u32 = 0;
 /// `NVFBC_TODX9VID_NOWAIT`.
 pub(super) const TODX9VID_NOWAIT: u32 = 0x1;
+
+/// `NvFBC_SetGlobalFlags`: the session does not make the desktop redraw when it starts.
+pub(super) const GLOBAL_FLAGS_NO_INITIAL_REFRESH: u32 = 2;
+/// [`ProcessTarget::capture_mode`]: grab the target process's own presented frames.
+pub(super) const CAPTURE_MODE_PROCESS: u32 = 1;
 
 /// `NvFBCStatusEx::bIsCapturePossible`.
 pub(super) const STATUS_CAPTURE_POSSIBLE: u32 = 1 << 0;
@@ -92,6 +100,8 @@ pub(super) type GetStatusEx = unsafe extern "system" fn(*mut StatusEx) -> Status
 pub(super) type CreateEx = unsafe extern "system" fn(*mut CreateParams) -> Status;
 /// `NvFBC_Enable`.
 pub(super) type Enable = unsafe extern "system" fn(u32) -> Status;
+/// `NvFBC_SetGlobalFlags`.
+pub(super) type SetGlobalFlags = unsafe extern "system" fn(u32) -> Status;
 
 /// `NvFBCStatusEx`.
 #[repr(C)]
@@ -128,8 +138,9 @@ pub(super) struct CreateParams {
     pub(super) adapter_index: u32,
     pub(super) nvfbc_version: u32,
     _cuda_context: *mut c_void,
-    _private_data2: *const c_void,
-    _private_data2_size: u32,
+    /// A [`ProcessTarget`], or null to grab the whole display.
+    pub(super) private_data2: *const c_void,
+    pub(super) private_data2_size: u32,
     _reserved: [u32; 55],
     _reserved_pointers: [*mut c_void; 27],
 }
@@ -141,8 +152,21 @@ const _: () = assert!(offset_of!(CreateParams, interface_version) == 36);
 const _: () = assert!(offset_of!(CreateParams, nvfbc) == 40);
 const _: () = assert!(offset_of!(CreateParams, adapter_index) == 48);
 const _: () = assert!(offset_of!(CreateParams, nvfbc_version) == 52);
-const _: () = assert!(offset_of!(CreateParams, _private_data2) == 64);
+const _: () = assert!(offset_of!(CreateParams, private_data2) == 64);
+const _: () = assert!(offset_of!(CreateParams, private_data2_size) == 72);
 const _: () = assert!(offset_of!(CreateParams, _reserved) == 76);
+
+/// The undocumented block NVIDIA's Instant Replay passes as `pPrivateData2` to grab one process's
+/// presented frames rather than the display, recovered from its capture engine.
+#[repr(C)]
+#[derive(Zeroable)]
+pub(super) struct ProcessTarget {
+    pub(super) version: u32,
+    pub(super) capture_mode: u32,
+    pub(super) process_id: u32,
+    _reserved: [u32; 47],
+}
+const _: () = assert!(size_of::<ProcessTarget>() == 0xC8);
 
 /// `NVFBC_TODX9VID_OUT_BUF`.
 #[repr(C)]
