@@ -52,10 +52,7 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
             worth keeping happens, press <KeyCombo :keys="hotkey" /> and what you just played is
             saved as a video. No need to hit record first.
           </p>
-          <p>
-            Like NVIDIA's Instant Replay, with less overhead: captured and encoded on the GPU. No
-            overlay, no launcher, no account.
-          </p>
+          <p>Captured and encoded on the GPU. No overlay, no launcher, no account.</p>
         </div>
         <DownloadCard :release="release" />
       </div>
@@ -124,7 +121,7 @@ const attestCommand = `gh attestation verify ${installerName} --repo ${repositor
       id="settings"
       :index="4"
       label="Settings"
-      title="Each setting, in the order the app shows it."
+      title="What each setting costs, in short."
     >
       <div class="settings">
         <section

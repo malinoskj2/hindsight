@@ -77,46 +77,16 @@ export const settingGroups = [
     name: "Recording",
     settings: [
       {
-        id: "length",
-        fields: ["Replay length (s)"],
-        title: "Replay length costs room, not CPU.",
-        body: "The buffer holds bitrate × replay length: 30 s at 50 Mb/s is about 190 MB.",
-      },
-      {
         id: "frame-rate",
         fields: ["Frame rate"],
         title: "Record at the frame rate your clips need.",
         body: "Cost scales with frames captured, not with codec or bitrate. 60 fps costs about a third of what 240 fps does.",
       },
       {
-        id: "hotkeys",
-        fields: ["Save hotkey", "Screenshot key"],
-        title: "Set one hotkey for clips and one for screenshots.",
-        body: "Alt+F7 saves a clip and Alt+F8 a screenshot. To change one, click its field and press the keys, or type them.",
-      },
-      {
-        id: "mode",
-        fields: ["Record"],
-        title: "Record full-screen apps, the default.",
-        body: "Nothing runs while none is in front. The other choice records the whole primary monitor all the time.",
-      },
-      {
-        id: "folder",
-        fields: ["Clip folder"],
-        title: "Pick where clips and screenshots go.",
-        body: "Clips land in the folder's videos subfolder, screenshots in its screenshots subfolder.",
-      },
-      {
         id: "sound",
-        fields: ["Record system sound", "Record the microphone"],
-        title: "Turn off sound you never use.",
-        body: "System sound is cheap, under a fifth of the video's CPU, but not free. Leave the microphone off unless you want your voice in the clips, where it is mixed into the sound and also kept on a track of its own for editing.",
-      },
-      {
-        id: "cursor",
-        fields: ["Record the mouse cursor"],
-        title: "The cursor is free either way.",
-        body: "Recording it makes no measurable difference.",
+        fields: ["Record system sound"],
+        title: "Turn off system sound if you never use it.",
+        body: "It is cheap, under a fifth of the video's CPU, but not free.",
       },
     ],
   },
@@ -124,51 +94,22 @@ export const settingGroups = [
     name: "Advanced",
     settings: [
       {
-        id: "codec",
-        fields: ["Bitrate (Mbps)", "Codec"],
-        title: "Pick the best codec your card offers.",
-        body: "They all cost the same CPU; they differ in picture per bit. A higher bitrate makes the buffer larger, not slower.",
-      },
-      {
         id: "backend",
         fields: ["Backend"],
         title: "Keep the NVIDIA NvFBC backend.",
         body: "It is the default and costs the game least. Switch to Windows Graphics Capture for a laptop whose display hangs off the integrated GPU, or for HDR.",
       },
       {
+        id: "codec",
+        fields: ["Codec"],
+        title: "Pick the best codec your card offers.",
+        body: "They all cost the same CPU; they differ in picture per bit.",
+      },
+      {
         id: "memory",
         fields: ["Buffer in"],
         title: "Keep the buffer in RAM if you have the room.",
-        body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD.",
-      },
-      {
-        id: "formats",
-        fields: ["Clip format", "Image format"],
-        title: "Save clips as MP4 or MKV, screenshots as PNG, JPEG, WebP or AVIF.",
-        body: "MP4 plays everywhere. PNG and WebP keep every pixel; JPEG and AVIF are smaller, and AVIF takes a second or two of one core to save.",
-      },
-      {
-        id: "devices",
-        fields: ["Sound from", "Microphone"],
-        title: "Record the devices Windows uses, or pick your own.",
-        body: "Default device follows Windows as you switch outputs or microphones. If a device you picked is unplugged, the default stands in, the Status tab says so, and your device is used again once it is back.",
-      },
-    ],
-  },
-  {
-    name: "General",
-    settings: [
-      {
-        id: "tray",
-        fields: ["Close to tray"],
-        title: "Closing the window keeps it recording.",
-        body: "Close to tray is on by default, so hindsight stays in the tray. Turn it off and closing the window quits.",
-      },
-      {
-        id: "updates",
-        fields: ["Check for updates"],
-        title: "Updates are one click.",
-        body: "hindsight looks for a newer release when it starts and once a day. The About tab's Update button installs it and starts hindsight again, showing what is new. Turn it off and nothing is checked until you select Check now.",
+        body: "Otherwise VRAM if the card has the room, otherwise Disk on an SSD. Its size is bitrate × length: 30 s at 50 Mb/s is about 190 MB.",
       },
     ],
   },
