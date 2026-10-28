@@ -13,6 +13,8 @@
 - Settings shows the common options first. Advanced opens the rest.
 - The replay buffer and capture method now suit the machine until you choose: the buffer goes in RAM, video memory or on disk depending on how much there is, and a laptop whose display runs on the integrated GPU uses Windows Graphics Capture.
 - After you alt-tab out of a full-screen game, the replay holds the game's last picture rather than recording the desktop.
+- Recording with NvFBC costs a game fewer frames, now fewer than NVIDIA's Instant Replay: in Counter-Strike 2 at 1080p and 240 fps, 3% of its frame rate, against 5% before and 4% for Instant Replay.
+- With Record set to full-screen apps, NvFBC grabs the game's own frames rather than the monitor, as Instant Replay does. Nothing is added to the game.
 - hindsight checks for updates and installs them from the About tab. Installers are signed, and hindsight only runs one it can verify. After an update it shows what is new, and About's What's new shows it again.
 - A new setting quits hindsight when you close its window, rather than hiding it in the tray.
 - The Status tab says what failed and when.
