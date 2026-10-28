@@ -22,10 +22,9 @@ use windows::{
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                 AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioCaptureClient,
-                IAudioClient, IAudioSessionControl, IAudioSessionControl2, IMMDevice,
-                IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-                MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture,
-                eConsole, eRender,
+                IAudioClient, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
+                IMMNotificationClient_Impl, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
+                WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
             },
             MediaFoundation::{MFAudioFormat_Float, MFAudioFormat_PCM},
         },
@@ -37,7 +36,7 @@ use windows::{
             Threading::WaitForMultipleObjects,
         },
     },
-    core::{GUID, HRESULT, HSTRING, Interface, PCWSTR, implement},
+    core::{GUID, HRESULT, HSTRING, PCWSTR, implement},
 };
 use winsafe::{HEVENT, guard::CloseHandleGuard};
 
@@ -177,9 +176,6 @@ impl Pick {
         // new reference.
         let capture: IAudioCaptureClient =
             unsafe { client.GetService() }.map_err(failed("get the capture client"))?;
-        if source == Source::Microphone {
-            keep_others_loud(&client)?;
-        }
         // SAFETY: the client is initialised, which starting requires.
         unsafe { client.Start() }.map_err(failed("start the audio capture"))?;
         Ok(Stream {
@@ -477,20 +473,6 @@ fn initialize(client: &IAudioClient, source: Source) -> Result<Layout, OpenError
         sample: Sample::Float,
         channels: super::CHANNELS.get(),
     })
-}
-
-/// Opts the client's session out of Windows' ducking, which would otherwise turn the game down
-/// while the microphone is open on the default communications device.
-fn keep_others_loud(client: &IAudioClient) -> Result<(), OpenError> {
-    // SAFETY: the client is initialised, which a session service requires. The call returns a new
-    // reference.
-    let session: IAudioSessionControl =
-        unsafe { client.GetService() }.map_err(failed("get the audio session"))?;
-    let session: IAudioSessionControl2 = session
-        .cast()
-        .map_err(failed("get the audio session's ducking control"))?;
-    // SAFETY: a plain setting of the live session, made before the stream starts.
-    unsafe { session.SetDuckingPreference(true) }.map_err(failed("opt out of ducking"))
 }
 
 fn initialize_as(client: &IAudioClient, format: &WaveFormat, flags: u32) -> Result<(), OpenError> {
