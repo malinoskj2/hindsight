@@ -7,7 +7,7 @@ use super::{
     win32::{cb_size, cb_size_u16},
 };
 use crate::service::{Front, MonitorHandle, Target, Through, WindowHandle};
-use std::{ffi::c_void, path::Path, rc::Rc};
+use std::{cell::RefCell, ffi::c_void, path::Path, rc::Rc};
 use windows::{
     Win32::{
         Foundation::HWND,
@@ -39,46 +39,78 @@ const SHELL_PROCESSES: [&str; 6] = [
     "SearchHost.exe",
     "LockApp.exe",
 ];
+/// The process ID that hooks every process's events, and that no process has.
+const ALL_PROCESSES: u32 = 0;
 
 thread_local! {
     static HANDLER: Slot<dyn Fn()> = const { Slot::new() };
+    /// The location hook, on the foreground window's process alone, so that the moves of every
+    /// other window and of the cursor do not wake this thread. It moves as the foreground does.
+    static LOCATION: RefCell<Option<LocationHook>> = const { RefCell::new(None) };
 }
 
 /// Hooks on foreground and location changes. The location hook detects a game that goes full
 /// screen while it is already the foreground window.
 pub(crate) struct ForegroundHook {
     _foreground: EventHook,
-    _location: EventHook,
 }
 
 impl ForegroundHook {
     pub(crate) fn install(on_change: impl Fn() + 'static) -> Option<Self> {
-        HANDLER.with(|slot| slot.set(Rc::new(on_change)));
-        let (Some(foreground), Some(location)) = (
-            EventHook::set(EVENT_SYSTEM_FOREGROUND),
-            EventHook::set(EVENT_OBJECT_LOCATIONCHANGE),
-        ) else {
-            HANDLER.with(Slot::clear);
+        let Some(foreground) = EventHook::set(EVENT_SYSTEM_FOREGROUND, ALL_PROCESSES) else {
             crate::log::warning("Foreground hook · not installed · apps noticed every second");
             return None;
         };
+        HANDLER.with(|slot| slot.set(Rc::new(on_change)));
+        follow(w::HWND::GetForegroundWindow().as_ref());
         Some(Self {
             _foreground: foreground,
-            _location: location,
         })
     }
 }
 
 impl Drop for ForegroundHook {
     fn drop(&mut self) {
+        LOCATION.with(RefCell::take);
         HANDLER.with(Slot::clear);
     }
+}
+
+struct LocationHook {
+    process: u32,
+    _hook: EventHook,
+}
+
+/// Moves the location hook to the process of `front`, the window brought to the front. None is
+/// set while this app or no window is in front, or when the process refuses one.
+///
+/// The window is the one the foreground event names, not the one in front by the time the event
+/// is handled: the foreground can have passed on and back again by then without a later event.
+fn follow(front: Option<&w::HWND>) {
+    let process = front
+        .map(|window| window.GetWindowThreadProcessId().1)
+        .filter(|&process| process != ALL_PROCESSES && process != w::GetCurrentProcessId());
+    LOCATION.with(|location| {
+        let mut location = location.borrow_mut();
+        if location.as_ref().map(|hook| hook.process) == process {
+            return;
+        }
+        // The old hook goes first, so that at most one is set.
+        *location = None;
+        *location = process.and_then(|process| {
+            EventHook::set(EVENT_OBJECT_LOCATIONCHANGE, process).map(|hook| LocationHook {
+                process,
+                _hook: hook,
+            })
+        });
+    });
 }
 
 struct EventHook(HWINEVENTHOOK);
 
 impl EventHook {
-    fn set(event: u32) -> Option<Self> {
+    /// Hooks `event` from `process`, or from every process but this one.
+    fn set(event: u32, process: u32) -> Option<Self> {
         // SAFETY: an out-of-context hook takes no module handle, and the callback only reads
         // thread-local state.
         let hook = unsafe {
@@ -87,7 +119,7 @@ impl EventHook {
                 event,
                 None,
                 Some(on_event),
-                0,
+                process,
                 0,
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
@@ -299,12 +331,19 @@ extern "system" fn on_event(
     _thread: u32,
     _time: u32,
 ) {
-    if event == EVENT_OBJECT_LOCATIONCHANGE && !is_foreground_window(window, object, child) {
+    // Events queued before the hooks went are dropped, so no hook is set after them.
+    let Some(handler) = HANDLER.with(Slot::get) else {
+        return;
+    };
+    if event == EVENT_SYSTEM_FOREGROUND {
+        // SAFETY: a window handle is not owned, and a stale one makes each call fail, not
+        // misbehave.
+        let front = unsafe { w::HWND::from_ptr(window.0) };
+        follow(Some(&front));
+    } else if !is_foreground_window(window, object, child) {
         return;
     }
-    if let Some(handler) = HANDLER.with(Slot::get) {
-        handler();
-    }
+    handler();
 }
 
 fn is_foreground_window(window: HWND, object: i32, child: i32) -> bool {
