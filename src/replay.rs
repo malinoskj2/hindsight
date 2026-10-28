@@ -39,7 +39,7 @@ pub(crate) use audio::{PcmTrack, SourceFormat};
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
 use mux::{DecoderConfig, MuxError, Visit};
-use ring::Ring;
+use ring::{Ring, StoreChange};
 use store::Entry;
 #[cfg(windows)]
 pub(crate) use store::{
@@ -256,16 +256,22 @@ impl Live {
 
     fn push_entry(&self, entry: Entry, picture: Picture) {
         let bytes = entry.length();
-        let (oldest, refused) = {
+        let (oldest, change) = {
             let mut ring = self.ring();
-            let refused = ring.push(entry).err();
-            (ring.first_index(), refused)
+            let change = ring.push(entry);
+            (ring.first_index(), change)
         };
-        if let Some(error) = refused {
-            log::warning(format!(
+        match change {
+            Some(StoreChange::FellBehind(error)) => log::warning(format!(
+                "Buffer · {} · frames stay in RAM until it catches up",
+                log::chain(&error)
+            )),
+            Some(StoreChange::CaughtUp) => log::info("Buffer · caught up · frames leave RAM again"),
+            Some(StoreChange::Failed(error)) => log::warning(format!(
                 "Buffer · lost its place outside RAM ({}) · continues in RAM",
                 log::chain(&error)
-            ));
+            )),
+            None => {}
         }
         self.counters.frame(bytes, oldest, picture);
     }

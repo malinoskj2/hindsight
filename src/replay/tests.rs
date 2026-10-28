@@ -106,11 +106,11 @@ fn a_buffer_in_a_store_saves_the_same_clip() {
     let in_memory = live_with(100).clip().unwrap();
     let mut expected = Vec::new();
     mp4::write(&mut expected, &in_memory.stream, &in_memory.packets).unwrap();
-    for (piece, fail_after) in [(1000, usize::MAX), (7, usize::MAX), (7, 50)] {
+    for (piece, refused) in [(1000, 0..0), (7, 0..0), (7, 50..usize::MAX)] {
         let live = Live::new(60);
         live.set_stream(STREAM);
         let mut memory_store = store::tests::MemoryStore::new(1 << 16, piece);
-        memory_store.fail_after = fail_after;
+        memory_store.refused = refused.clone();
         live.set_store(Box::new(memory_store));
         push_frames(&live, 100);
         let snapshot = live.snapshot().unwrap();
@@ -120,7 +120,7 @@ fn a_buffer_in_a_store_saves_the_same_clip() {
             .iter()
             .map(|entry| matches!(entry.data, Data::Memory(_)))
             .collect();
-        assert_eq!(kinds.contains(&true), fail_after != usize::MAX);
+        assert_eq!(kinds.contains(&true), !refused.is_empty());
         assert!(!kinds[0], "the oldest packets are in the store");
 
         let directory = tempfile::tempdir().unwrap();
@@ -262,7 +262,7 @@ fn real_encoder_output_muxes_for_every_codec() {
 
         let mut ring = Ring::new(40);
         for packet in packets {
-            ring.push(packet.into()).unwrap();
+            assert!(ring.push(packet.into()).is_none());
         }
         let clip = Clip {
             stream: fixture_stream(codec),

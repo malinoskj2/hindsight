@@ -2,7 +2,7 @@
 //! a keyframe.
 
 use super::store::{Data, Entry, Store, StoreError};
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, mem, sync::Arc};
 
 pub(super) struct Ring {
     packets: VecDeque<Arc<Entry>>,
@@ -11,6 +11,20 @@ pub(super) struct Ring {
     span: u64,
     bytes: usize,
     store: Option<Box<dyn Store>>,
+    /// Whether the store refused the latest packet it was offered.
+    behind: bool,
+}
+
+/// A change in where new packets are kept.
+#[derive(Debug)]
+pub(super) enum StoreChange {
+    /// The store refused a packet for now. It stays in RAM, as does every later packet the store
+    /// refuses.
+    FellBehind(StoreError),
+    /// The store takes packets again.
+    CaughtUp,
+    /// The store failed and is given up, so this and every later packet stay in RAM.
+    Failed(StoreError),
 }
 
 impl Ring {
@@ -21,20 +35,21 @@ impl Ring {
             span: span.max(1),
             bytes: 0,
             store: None,
+            behind: false,
         }
     }
 
     pub(super) fn set_store(&mut self, store: Box<dyn Store>) {
         self.store = Some(store);
+        self.behind = false;
     }
 
-    /// Pushes a packet. An error means the store refused it, and it and every later packet stay
-    /// in memory.
-    pub(super) fn push(&mut self, mut entry: Entry) -> Result<(), StoreError> {
+    /// Pushes a packet, and returns how its placement changed where packets are kept.
+    pub(super) fn push(&mut self, mut entry: Entry) -> Option<StoreChange> {
         if self.packets.is_empty() && !entry.keyframe {
-            return Ok(());
+            return None;
         }
-        let refused = self.place(&mut entry);
+        let change = self.place(&mut entry);
         if entry.keyframe {
             self.keyframes.push_back(entry.index);
         }
@@ -42,10 +57,10 @@ impl Ring {
         let latest = entry.index;
         self.packets.push_back(Arc::new(entry));
         self.drop_covered_groups(latest);
-        refused.map_or(Ok(()), Err)
+        change
     }
 
-    fn place(&mut self, entry: &mut Entry) -> Option<StoreError> {
+    fn place(&mut self, entry: &mut Entry) -> Option<StoreChange> {
         let store = self.store.as_mut()?;
         let Data::Memory(data) = &entry.data else {
             return None;
@@ -53,11 +68,15 @@ impl Ring {
         match store.put(data) {
             Ok(slot) => {
                 entry.data = Data::Stored(slot);
-                None
+                mem::take(&mut self.behind).then_some(StoreChange::CaughtUp)
+            }
+            Err(error @ StoreError::Refused(_)) => {
+                (!mem::replace(&mut self.behind, true)).then_some(StoreChange::FellBehind(error))
             }
             Err(error) => {
                 self.store = None;
-                Some(error)
+                self.behind = false;
+                Some(StoreChange::Failed(error))
             }
         }
     }
@@ -108,6 +127,7 @@ impl Ring {
 mod tests {
     use super::{super::store::tests::MemoryStore, *};
     use crate::replay::{Packet, store::fetch};
+    use std::assert_matches;
 
     fn packet(index: u64, gop: u64) -> Entry {
         Packet {
@@ -122,7 +142,7 @@ mod tests {
     fn keeps_at_least_the_span_starting_on_a_keyframe() {
         let mut ring = Ring::new(10);
         for index in 0..100 {
-            ring.push(packet(index, 4)).unwrap();
+            assert!(ring.push(packet(index, 4)).is_none());
             let snapshot = ring.snapshot();
             assert!(snapshot[0].keyframe);
             assert!(ring.frames() >= (index + 1).min(10));
@@ -135,12 +155,12 @@ mod tests {
     #[test]
     fn waits_for_a_keyframe_before_buffering() {
         let mut ring = Ring::new(10);
-        ring.push(packet(1, 4)).unwrap();
-        ring.push(packet(2, 4)).unwrap();
+        assert!(ring.push(packet(1, 4)).is_none());
+        assert!(ring.push(packet(2, 4)).is_none());
         assert_eq!(ring.frames(), 0);
 
-        ring.push(packet(4, 4)).unwrap();
-        ring.push(packet(5, 4)).unwrap();
+        assert!(ring.push(packet(4, 4)).is_none());
+        assert!(ring.push(packet(5, 4)).is_none());
         assert_eq!(ring.frames(), 2);
         assert_eq!(ring.snapshot()[0].index, 4);
     }
@@ -149,12 +169,12 @@ mod tests {
     fn skipped_frame_indices_count_towards_the_span() {
         let mut ring = Ring::new(10);
         for index in [0, 1, 2, 3, 20, 21, 22, 23, 24] {
-            ring.push(packet(index, 4)).unwrap();
+            assert!(ring.push(packet(index, 4)).is_none());
         }
         assert_eq!(ring.snapshot()[0].index, 0);
 
-        ring.push(packet(28, 4)).unwrap();
-        ring.push(packet(29, 4)).unwrap();
+        assert!(ring.push(packet(28, 4)).is_none());
+        assert!(ring.push(packet(29, 4)).is_none());
         assert_eq!(ring.snapshot()[0].index, 20);
     }
 
@@ -165,7 +185,7 @@ mod tests {
         for index in 0..40 {
             let mut packet = packet(index, 4);
             packet.data = Data::Memory(vec![u8::try_from(index).unwrap(); 10].into());
-            ring.push(packet).unwrap();
+            assert!(ring.push(packet).is_none());
         }
         let snapshot = ring.snapshot();
         assert!(
@@ -184,22 +204,46 @@ mod tests {
         assert!(packets[0].keyframe);
     }
 
+    fn in_memory(ring: &Ring) -> Vec<bool> {
+        ring.snapshot()
+            .iter()
+            .map(|entry| matches!(entry.data, Data::Memory(_)))
+            .collect()
+    }
+
     #[test]
-    fn a_refused_packet_stays_in_memory_and_the_store_is_given_up() {
+    fn refused_packets_stay_in_memory_until_the_store_takes_them_again() {
         let mut ring = Ring::new(10);
         let mut store = MemoryStore::new(100, 7);
-        store.fail_after = 2;
+        store.refused = 2..4;
         ring.set_store(Box::new(store));
-        ring.push(packet(0, 4)).unwrap();
-        ring.push(packet(1, 4)).unwrap();
-        assert!(ring.push(packet(2, 4)).is_err());
-        ring.push(packet(3, 4)).unwrap();
+        assert!(ring.push(packet(0, 4)).is_none());
+        assert!(ring.push(packet(1, 4)).is_none());
+        assert_matches!(ring.push(packet(2, 4)), Some(StoreChange::FellBehind(_)));
+        assert!(ring.push(packet(3, 4)).is_none(), "reported once");
+        assert_matches!(ring.push(packet(4, 4)), Some(StoreChange::CaughtUp));
+        assert!(ring.push(packet(5, 4)).is_none());
 
-        let snapshot = ring.snapshot();
-        assert!(matches!(snapshot[1].data, Data::Stored(_)));
-        assert!(matches!(snapshot[2].data, Data::Memory(_)));
-        assert!(matches!(snapshot[3].data, Data::Memory(_)));
-        assert_eq!(fetch(&snapshot).unwrap().len(), 4);
+        assert_eq!(in_memory(&ring), [false, false, true, true, false, false]);
+        assert_eq!(fetch(&ring.snapshot()).unwrap().len(), 6);
+        assert!(ring.store.is_some());
+    }
+
+    #[test]
+    fn a_store_that_fails_is_given_up() {
+        let mut ring = Ring::new(10);
+        ring.set_store(Box::new(MemoryStore::new(10, 7)));
+        assert!(ring.push(packet(0, 4)).is_none());
+        let mut large = packet(1, 4);
+        large.data = Data::Memory(vec![0; 11].into());
+        assert_matches!(
+            ring.push(large),
+            Some(StoreChange::Failed(StoreError::TooLarge(11)))
+        );
+        assert!(ring.push(packet(2, 4)).is_none());
+
+        assert_eq!(in_memory(&ring), [false, true, true]);
+        assert_eq!(fetch(&ring.snapshot()).unwrap().len(), 3);
         assert!(ring.store.is_none());
     }
 }

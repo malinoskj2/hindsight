@@ -179,6 +179,7 @@ impl Store for DiskStore {
         let Self {
             shared, pages, end, ..
         } = self;
+        shared.admit(data.len())?;
         let page_bytes = shared.layout.page as u64;
         let (page, offset) = pages.place(data.len(), || {
             // This page is past the end of the file. The writer's first block there extends the
@@ -233,6 +234,8 @@ struct Staging {
     queued_bytes: usize,
     spare: Vec<Aligned>,
     failed: Option<Arc<io::Error>>,
+    /// Whether the latest packet was refused.
+    refusing: bool,
     closing: bool,
     /// Holds the writer back.
     #[cfg(test)]
@@ -281,6 +284,34 @@ impl Shared {
         self.staging.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Refuses `length` bytes while staging them could queue more than the queue holds, and
+    /// after a refusal until the queue has drained to half. It refuses before anything is placed,
+    /// so the store is as it was and takes later packets once the drive catches up. Only the
+    /// capture thread puts, and the writer only shortens the queue, so the staging that follows
+    /// cannot overfill it.
+    fn admit(&self, length: usize) -> Result<(), StoreError> {
+        let mut staging = self.staging();
+        if let Some(error) = &staging.failed {
+            return Err(StoreError::call("write the buffer file")(Arc::clone(error)));
+        }
+        let limit = if staging.refusing {
+            self.layout.max_queued / 2
+        } else {
+            self.layout.max_queued
+        };
+        // Each whole block of the bytes fills one, and the block being filled is queued either
+        // when they fill it or when they start elsewhere.
+        let blocks = length / self.layout.block + usize::from(staging.filling.is_some());
+        staging.refusing = staging.queued_bytes + blocks * self.layout.block > limit;
+        if staging.refusing {
+            return Err(StoreError::Refused(format!(
+                "the drive fell {} MiB behind the buffer",
+                staging.queued_bytes / MEBIBYTE
+            )));
+        }
+        Ok(())
+    }
+
     fn stage(&self, mut position: u64, mut data: &[u8]) -> Result<(), StoreError> {
         let mut staging = self.staging();
         if let Some(error) = &staging.failed {
@@ -288,13 +319,13 @@ impl Shared {
         }
         let queued = staging.queue.len();
         while !data.is_empty() {
-            let block = staging.block_at(position, &self.layout)?;
+            let block = staging.block_at(position, &self.layout);
             let taken = block.append(data);
             let full = block.is_full();
             position += taken as u64;
             data = &data[taken..];
             if full {
-                staging.queue_filling(&self.layout)?;
+                staging.queue_filling(&self.layout);
             }
         }
         if staging.queue.len() > queued {
@@ -419,17 +450,17 @@ impl Staging {
 
     /// Returns the block being filled at `position`. A page's packets are contiguous, so a new
     /// block starts only where a page does.
-    fn block_at(&mut self, position: u64, layout: &Layout) -> Result<&mut Block, StoreError> {
+    fn block_at(&mut self, position: u64, layout: &Layout) -> &mut Block {
         let follows = self
             .filling
             .as_ref()
             .is_some_and(|block| block.end() == position);
         if !follows {
-            self.queue_filling(layout)?;
+            self.queue_filling(layout);
         }
         // After `queue_filling` nothing is being filled, so a block that does not follow starts
         // here.
-        Ok(self.filling.get_or_insert_with(|| {
+        self.filling.get_or_insert_with(|| {
             debug_assert!(position.is_multiple_of(SECTOR_BYTES as u64));
             Block {
                 position,
@@ -439,25 +470,22 @@ impl Staging {
                     .unwrap_or_else(|| Aligned::new(layout.block)),
                 used: 0,
             }
-        }))
+        })
     }
 
-    /// Queues the block being filled. Refuses when the queue is full, and the block then stays
-    /// where it is so reads still find its bytes.
-    fn queue_filling(&mut self, layout: &Layout) -> Result<(), StoreError> {
+    /// Queues the block being filled. [`Shared::admit`] has made room for it.
+    fn queue_filling(&mut self, layout: &Layout) {
         let Some(block) = self.filling.take() else {
-            return Ok(());
+            return;
         };
-        if self.queued_bytes + block.memory.len() > layout.max_queued {
-            self.filling = Some(block);
-            return Err(StoreError::Refused(format!(
-                "the drive fell {} MiB behind the buffer",
-                self.queued_bytes / MEBIBYTE
-            )));
-        }
         self.queued_bytes += block.memory.len();
+        debug_assert!(
+            self.queued_bytes <= layout.max_queued,
+            "{} bytes queued, past the {} the queue holds",
+            self.queued_bytes,
+            layout.max_queued
+        );
         self.queue.push_back(Arc::new(block));
-        Ok(())
     }
 }
 
@@ -800,6 +828,34 @@ pub(crate) mod tests {
             Err(StoreError::Refused(_))
         );
         assert_eq!(read_back(&[kept]), [packet(0, 2 * SECTOR_BYTES)]);
+    }
+
+    #[test]
+    fn a_refused_packet_leaves_the_store_as_it_was_for_the_next() {
+        let folder = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            max_queued: 2 * SECTOR_BYTES,
+            ..SMALL
+        };
+        let mut store = DiskStore::sized(folder.path(), 2, layout);
+        store.control().hold(true);
+        let first = put(&mut store, 0, &packet(0, 1000));
+        let second = put(&mut store, 1, &packet(1, SECTOR_BYTES));
+        assert_matches!(
+            store.put(&packet(2, SECTOR_BYTES)),
+            Err(StoreError::Refused(_))
+        );
+        assert_eq!(store.control().queued(), 1);
+
+        store.control().hold(false);
+        store.control().settle();
+        let third = put(&mut store, 3, &packet(3, 1500));
+        let entries = [first, second, third];
+        let packets = [packet(0, 1000), packet(1, SECTOR_BYTES), packet(3, 1500)];
+        assert_eq!(read_back(&entries), packets);
+
+        drop(store);
+        assert_eq!(read_back(&entries), packets, "from the file");
     }
 
     #[test]

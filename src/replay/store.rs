@@ -385,6 +385,7 @@ pub(crate) mod tests {
     use super::*;
     use std::{
         assert_matches,
+        ops::Range,
         sync::{
             Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -439,8 +440,9 @@ pub(crate) mod tests {
         pages: Pages<MemoryPage>,
         page_bytes: usize,
         piece: usize,
-        pub(crate) fail_after: usize,
-        put: usize,
+        /// The attempts to put a packet, counted from 0, that are refused.
+        pub(crate) refused: Range<usize>,
+        attempts: usize,
         reads: Arc<AtomicUsize>,
     }
 
@@ -450,8 +452,8 @@ pub(crate) mod tests {
                 pages: Pages::new(page_bytes, Vec::new()),
                 page_bytes,
                 piece,
-                fail_after: usize::MAX,
-                put: 0,
+                refused: 0..0,
+                attempts: 0,
                 reads: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -468,7 +470,9 @@ pub(crate) mod tests {
 
     impl Store for MemoryStore {
         fn put(&mut self, data: &[u8]) -> Result<Slot, StoreError> {
-            if self.put >= self.fail_after {
+            let attempt = self.attempts;
+            self.attempts += 1;
+            if self.refused.contains(&attempt) {
                 return Err(StoreError::Refused("the store is full".to_owned()));
             }
             let (page_bytes, piece) = (self.page_bytes, self.piece);
@@ -481,7 +485,6 @@ pub(crate) mod tests {
                 })
             })?;
             page.bytes.lock().unwrap()[offset..offset + data.len()].copy_from_slice(data);
-            self.put += 1;
             Ok(Slot::new(page, offset, data.len()))
         }
     }
@@ -615,7 +618,7 @@ pub(crate) mod tests {
     fn a_store_can_refuse_a_packet() {
         let mut store = MemoryStore::new(4, 2);
         assert_matches!(store.put(&[0; 5]), Err(StoreError::TooLarge(5)));
-        store.fail_after = 0;
+        store.refused = 0..usize::MAX;
         assert_matches!(store.put(&[0; 1]), Err(StoreError::Refused(_)));
     }
 }
