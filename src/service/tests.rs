@@ -7,7 +7,7 @@ use crate::{
     replay::{Matrix, Packet, Picture},
     saving::WriteError,
 };
-use std::sync::atomic::AtomicUsize;
+use std::{fs, sync::atomic::AtomicUsize};
 
 #[expect(
     clippy::unnecessary_wraps,
@@ -607,6 +607,55 @@ fn choosing_a_look_is_saved_and_leaves_recording_alone() {
     assert_eq!(
         saved,
         Config {
+            theme: Theme::Nova,
+            ..config
+        }
+    );
+}
+
+#[test]
+fn settings_whose_write_failed_still_apply_and_go_with_the_next_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let config = config_in(directory.path());
+    let worker = spawn(
+        steady,
+        RETRY_INTERVAL,
+        Some(Store::at(state.clone()).unwrap()),
+        config.clone(),
+    );
+    wait_for(&worker, |status| {
+        matches!(status.state, State::Recording(_))
+    });
+    // A folder where the settings are first written makes the write fail.
+    let blocked = state.join("config.pending");
+    fs::create_dir(&blocked).unwrap();
+
+    worker.start(Config {
+        frame_rate: 30,
+        ..config.clone()
+    });
+    let status = wait_for(&worker, |status| {
+        status
+            .buffer
+            .and_then(|buffer| buffer.stream)
+            .is_some_and(|stream| stream.frame_rate == 30)
+    });
+    assert_eq!(
+        status.problem.map(|problem| problem.kind),
+        Some(ProblemKind::SettingsNotSaved)
+    );
+
+    fs::remove_dir(&blocked).unwrap();
+    worker.remember(Preference::Theme(Theme::Nova));
+    wait_for(&worker, |status| status.problem.is_none());
+    drop(worker);
+
+    let saved = Store::at(state).unwrap().load_config(&config).unwrap();
+    assert_eq!(
+        saved,
+        Config {
+            frame_rate: 30,
             theme: Theme::Nova,
             ..config
         }

@@ -519,19 +519,24 @@ struct Reading {
     sample: Sample,
 }
 
-/// The bytes buffered and saved: this run's, and the lifetime totals kept in the store.
+/// The bytes buffered and saved: this run's, and the lifetime totals kept in the store. Also the
+/// settings as the store holds them.
 struct Ledger {
     store: Option<Store>,
+    /// The settings last written, or read at the start. A change is compared with these rather
+    /// than with the settings in use, so one whose write failed is written with the next.
+    stored_config: Config,
     totals: Option<Totals>,
     session_buffered: u64,
     session_saved: u64,
 }
 
 impl Ledger {
-    fn new(store: Option<Store>) -> Self {
+    fn new(store: Option<Store>, config: Config) -> Self {
         let totals = store.as_ref().and_then(load_totals);
         Self {
             store,
+            stored_config: config,
             totals,
             session_buffered: 0,
             session_saved: 0,
@@ -542,10 +547,12 @@ impl Ledger {
         self.totals
     }
 
-    fn save_config(&self, previous: &Config, config: &Config) -> Result<(), StorageError> {
-        self.store
-            .as_ref()
-            .map_or(Ok(()), |store| store.save_config(previous, config))
+    fn save_config(&mut self, config: &Config) -> Result<(), StorageError> {
+        if let Some(store) = &self.store {
+            store.save_config(&self.stored_config, config)?;
+        }
+        self.stored_config = config.clone();
+        Ok(())
     }
 
     fn save_last_version(&self, version: &Version) {
@@ -625,7 +632,7 @@ impl Machine {
     ) -> Self {
         Self {
             services,
-            ledger: Ledger::new(store),
+            ledger: Ledger::new(store, config.clone()),
             config,
             output,
             phase: Phase::Starting,
@@ -696,9 +703,7 @@ impl Machine {
     }
 
     fn apply(&mut self, config: Config) {
-        if self.save_settings(&config).is_err() {
-            return;
-        }
+        self.save_settings(&config);
         log::info(text::settings_applied(&config));
         self.config = config;
         self.paused = false;
@@ -899,17 +904,17 @@ impl Machine {
     fn remember(&mut self, preference: Preference) {
         let mut config = self.config.clone();
         preference.apply_to(&mut config);
-        // The failure is reported, and the change still holds for this run.
-        let _ = self.save_settings(&config);
+        self.save_settings(&config);
         self.config = config;
     }
 
-    /// Reports a failure on the Status tab as well as returning it.
-    fn save_settings(&mut self, config: &Config) -> Result<(), StorageError> {
-        self.ledger
-            .save_config(&self.config, config)
-            .inspect(|()| self.resolve(&[ProblemKind::SettingsNotSaved]))
-            .inspect_err(|error| self.report(ProblemKind::SettingsNotSaved, log::chain(error)))
+    /// Writes the settings, and reports a failure on the Status tab. The settings still hold for
+    /// this run, and the next write that succeeds includes them.
+    fn save_settings(&mut self, config: &Config) {
+        match self.ledger.save_config(config) {
+            Ok(()) => self.resolve(&[ProblemKind::SettingsNotSaved]),
+            Err(error) => self.report(ProblemKind::SettingsNotSaved, log::chain(&error)),
+        }
     }
 
     fn begin(&mut self) {
