@@ -69,6 +69,7 @@ pub(super) const INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
 pub(super) const INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER: u32 = 1;
 /// Blue in the low byte: `DXGI_FORMAT_B8G8R8A8_UNORM`.
 pub(super) const BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
+pub(super) const BUFFER_FORMAT_NV12: u32 = 0x1;
 pub(super) const BUFFER_FORMAT_U8: u32 = 0x4000_0000;
 pub(super) const INPUT_IMAGE: u32 = 0;
 pub(super) const OUTPUT_BITSTREAM: u32 = 2;

@@ -213,8 +213,13 @@ impl Session {
 
     fn copy_still(&self) -> Taken {
         let surface = self.encoder.latest_surface().ok_or(StillError::NoPicture)?;
-        let Settings { width, height, .. } = self.encoder.settings();
-        still::copy(&self.device, &surface, width, height)
+        let Settings {
+            width,
+            height,
+            matrix,
+            ..
+        } = self.encoder.settings();
+        still::copy(&self.device, &surface, (width, height), matrix)
     }
 
     fn submit_surface(

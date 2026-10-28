@@ -4,7 +4,7 @@
 use crate::{
     config::Codec,
     gpu::{
-        capture::{EncoderDevice, Surface},
+        capture::{EncoderDevice, Format, Surface},
         cuda::{DeviceBuffer, DevicePointer},
         cuda_output::{CudaRing, StagingId, StagingLayout},
         device::{Locked, null_output},
@@ -397,12 +397,16 @@ impl Encoder {
     fn register_d3d9_surface(
         &self,
         surface: &IDirect3DSurface9,
+        format: Format,
     ) -> Result<ffi::Registered, NvencError> {
         self.register_resource(
             ffi::INPUT_RESOURCE_TYPE_DIRECTX,
             surface.as_raw(),
             0,
-            ffi::BUFFER_FORMAT_ARGB,
+            match format {
+                Format::Bgra => ffi::BUFFER_FORMAT_ARGB,
+                Format::Nv12 => ffi::BUFFER_FORMAT_NV12,
+            },
         )
     }
 
@@ -467,7 +471,7 @@ impl Encoder {
             Input::Slot(slot) => self.slots[slot].texture.as_ref(),
             Input::Surface(surface) => match &self.registered_surface(surface).handle {
                 Surface::Texture(texture) => Some(texture),
-                Surface::CudaBuffer { .. } | Surface::Direct3D9(_) => None,
+                Surface::CudaBuffer { .. } | Surface::Direct3D9 { .. } => None,
             },
         }
     }
@@ -501,7 +505,9 @@ impl Encoder {
         let registered = match handle {
             Surface::Texture(texture) => self.register_texture(texture)?,
             Surface::CudaBuffer { buffer, pitch } => self.register_cuda_buffer(buffer, *pitch)?,
-            Surface::Direct3D9(surface) => self.register_d3d9_surface(surface)?,
+            Surface::Direct3D9 { surface, format } => {
+                self.register_d3d9_surface(surface, *format)?
+            }
         };
         if self.surfaces.len() <= surface {
             self.surfaces.resize_with(surface + 1, || None);

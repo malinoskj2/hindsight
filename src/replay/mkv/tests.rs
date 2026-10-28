@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::Codec;
 use crate::replay::{
-    Packet,
+    Matrix, Packet,
     audio::{TrackKind, tests::aac_clip},
     mp4::{self, tests::index as mp4_index},
     mux::tests::{packet, stream},
@@ -194,6 +194,32 @@ fn the_track_carries_the_codec_and_its_decoder_record() {
             (1920, 1080)
         );
         assert_eq!(number(child(track, DEFAULT_DURATION)), 16_666_666);
+    }
+}
+
+#[test]
+fn the_colour_carries_the_stream_matrix_in_bt709_limited_range() {
+    for (matrix, code) in [(Matrix::Bt709, 1), (Matrix::Bt601, 6)] {
+        let stream = Stream {
+            matrix,
+            ..stream(Codec::Av1)
+        };
+        let packets = [packet(Codec::Av1, 0, true)];
+        let mut file = Vec::new();
+        write_from(&mut file, &stream, &packets[..], &[]).unwrap();
+        let track = child(child(segment(&file), TRACKS), TRACK_ENTRY);
+        let colour = child(child(track, VIDEO), COLOUR);
+        assert_eq!(
+            [
+                MATRIX_COEFFICIENTS,
+                RANGE,
+                TRANSFER_CHARACTERISTICS,
+                PRIMARIES
+            ]
+            .map(|id| number(child(colour, id))),
+            [code, BROADCAST_RANGE, 1, 1],
+            "{matrix:?}"
+        );
     }
 }
 

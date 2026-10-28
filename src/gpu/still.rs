@@ -3,12 +3,13 @@
 use crate::{
     config::Backend,
     gpu::{
-        capture::{self, CopyTarget, Frame, Surface},
+        capture::{self, CopyTarget, D3DFMT_NV12, Format, Frame, Surface},
         cuda::{CudaError, DeviceBuffer},
         device::{Device, Locked, null_output},
     },
     log,
-    screenshot::{Grab, Readback, Still, StillError, pitched_span},
+    replay::Matrix,
+    screenshot::{Grab, Readback, Still, StillError, nv12_span, pitched_span},
     service::Target,
 };
 use std::{
@@ -22,7 +23,8 @@ use windows::{
         Graphics::{
             Direct3D9::{
                 D3DFMT_A8R8G8B8, D3DLOCK_READONLY, D3DLOCKED_RECT, D3DMULTISAMPLE_NONE,
-                D3DPOOL_SYSTEMMEM, D3DTEXF_NONE, IDirect3DDevice9, IDirect3DSurface9,
+                D3DPOOL_DEFAULT, D3DPOOL_SYSTEMMEM, D3DTEXF_NONE, IDirect3DDevice9,
+                IDirect3DSurface9,
             },
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT,
@@ -48,16 +50,16 @@ const GRAB_PERIOD: Duration = Duration::from_millis(16);
 pub(super) fn copy(
     device: &Device,
     surface: &Surface,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    matrix: Matrix,
 ) -> Result<Box<dyn Readback>, StillError> {
     Ok(match surface {
         Surface::Texture(texture) => {
             Box::new(TextureCopy::start(device, texture, width, height).map_err(copy_failed)?)
         }
-        Surface::Direct3D9(surface) => {
-            Box::new(Direct3D9Copy::start(surface, width, height).map_err(copy_failed)?)
-        }
+        Surface::Direct3D9 { surface, format } => Box::new(
+            Direct3D9Copy::start(surface, *format, matrix, width, height).map_err(copy_failed)?,
+        ),
         Surface::CudaBuffer { buffer, pitch } => {
             Box::new(CudaCopy::start(buffer, *pitch, width, height)?)
         }
@@ -280,12 +282,14 @@ impl Readback for TextureCopy {
     }
 }
 
-/// A copy into a render target of its own on NvFBC's Direct3D 9 device, which the grabs never
-/// draw into.
+/// A copy into a surface of its own on NvFBC's Direct3D 9 device, which the grabs never draw
+/// into: a render target for BGRA, and for NV12 a plain surface, which can be locked.
 #[derive(Debug)]
 struct Direct3D9Copy {
     device: IDirect3DDevice9,
     copy: IDirect3DSurface9,
+    format: Format,
+    matrix: Matrix,
     width: u32,
     height: u32,
 }
@@ -301,28 +305,48 @@ unsafe impl Send for Direct3D9Copy {}
 
 #[expect(unsafe_code, reason = "calls Direct3D 9 to copy and lock the picture")]
 impl Direct3D9Copy {
-    fn start(source: &IDirect3DSurface9, width: u32, height: u32) -> windows::core::Result<Self> {
+    fn start(
+        source: &IDirect3DSurface9,
+        format: Format,
+        matrix: Matrix,
+        width: u32,
+        height: u32,
+    ) -> windows::core::Result<Self> {
         // SAFETY: a live surface; the device comes back with a reference of its own.
         let device = unsafe { source.GetDevice() }?;
         let mut copy = None;
-        // SAFETY: an unshared render target, so the handle pointer may be null. The
-        // out-parameter is written on success.
-        unsafe {
-            device.CreateRenderTarget(
-                width,
-                height,
-                D3DFMT_A8R8G8B8,
-                D3DMULTISAMPLE_NONE,
-                0,
-                false,
-                &raw mut copy,
-                ptr::null_mut(),
-            )
+        match format {
+            // SAFETY: an unshared render target, so the handle pointer may be null. The
+            // out-parameter is written on success.
+            Format::Bgra => unsafe {
+                device.CreateRenderTarget(
+                    width,
+                    height,
+                    D3DFMT_A8R8G8B8,
+                    D3DMULTISAMPLE_NONE,
+                    0,
+                    false,
+                    &raw mut copy,
+                    ptr::null_mut(),
+                )
+            },
+            // SAFETY: an unshared surface, so the handle pointer may be null. The
+            // out-parameter is written on success.
+            Format::Nv12 => unsafe {
+                device.CreateOffscreenPlainSurface(
+                    width,
+                    height,
+                    D3DFMT_NV12,
+                    D3DPOOL_DEFAULT,
+                    &raw mut copy,
+                    ptr::null_mut(),
+                )
+            },
         }?;
         let copy = copy.ok_or_else(null_output)?;
         let region = region(width, height)?;
-        // SAFETY: two live surfaces of this device in NvFBC's format; the region lies within
-        // each, so nothing is scaled.
+        // SAFETY: two live surfaces of this device in the grab's format; the region lies within
+        // each, so nothing is scaled or converted.
         unsafe {
             device.StretchRect(
                 source,
@@ -335,12 +359,46 @@ impl Direct3D9Copy {
         Ok(Self {
             device,
             copy,
+            format,
+            matrix,
             width,
             height,
         })
     }
 
     fn read(&self) -> windows::core::Result<Option<Still>> {
+        match self.format {
+            Format::Bgra => self.read_render_target(),
+            Format::Nv12 => self.read_nv12(),
+        }
+    }
+
+    fn read_nv12(&self) -> windows::core::Result<Option<Still>> {
+        let mut locked = D3DLOCKED_RECT::default();
+        // SAFETY: locks the whole surface for reading, once the copy into it has finished;
+        // `locked` outlives the call.
+        unsafe {
+            self.copy.LockRect(
+                &raw mut locked,
+                ptr::null(),
+                D3DLOCK_READONLY.cast_unsigned(),
+            )
+        }?;
+        let pitch = usize::try_from(locked.Pitch).ok();
+        let still = pitch.and_then(|pitch| {
+            let span = nv12_span(self.width, self.height, pitch)?;
+            // SAFETY: while locked, the surface's luma rows and then its rows of colour
+            // differences lie `Pitch` bytes apart from `pBits`, so `span` bytes are readable.
+            // They are converted before the unlock below.
+            let bytes = unsafe { slice::from_raw_parts(locked.pBits.cast::<u8>(), span) };
+            Still::from_nv12(self.width, self.height, pitch, bytes, self.matrix)
+        });
+        // SAFETY: undoes the lock above; nothing points into the surface any more.
+        unsafe { self.copy.UnlockRect() }?;
+        Ok(still)
+    }
+
+    fn read_render_target(&self) -> windows::core::Result<Option<Still>> {
         let mut memory = None;
         // SAFETY: an unshared surface in system memory, so the handle pointer may be null. The
         // out-parameter is written on success.

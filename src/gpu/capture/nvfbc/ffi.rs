@@ -40,6 +40,8 @@ pub(super) const TO_DX9_VID: u32 = 0x2003;
 pub(super) const STATE_ENABLE: u32 = 1;
 /// `NVFBC_TODX9VID_ARGB`: `D3DFMT_A8R8G8B8`.
 pub(super) const TODX9VID_ARGB: u32 = 0;
+/// `NVFBC_TODX9VID_NV12`: BT.601, limited range.
+pub(super) const TODX9VID_NV12: u32 = 1;
 /// `NVFBC_TODX9VID_NOWAIT`.
 pub(super) const TODX9VID_NOWAIT: u32 = 0x1;
 

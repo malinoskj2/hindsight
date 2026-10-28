@@ -5,12 +5,13 @@ mod cuda;
 mod ffi;
 
 use super::{
-    CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
-    monitor_of,
+    CaptureError, CopyTarget, D3DFMT_NV12, EncoderDevice, Format, Frame, ReopenThrottle, Source,
+    Surface, failed, monitor_of,
 };
 use crate::{
     gpu::device::Device,
     log,
+    replay::Matrix,
     service::{Target, WindowHandle},
     sys::win32::cb_size,
 };
@@ -34,6 +35,10 @@ use windows::{
                 IDirect3DTexture9,
             },
             Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
+        },
+        Media::MediaFoundation::{
+            DXVA2_VideoDecoderRenderTarget, DXVA2CreateVideoService,
+            IDirectXVideoAccelerationService,
         },
         UI::WindowsAndMessaging::GetWindowThreadProcessId,
     },
@@ -59,6 +64,7 @@ pub(super) struct Capture {
     key: Key,
     device: IDirect3DDevice9Ex,
     slots: [Slot; SLOTS],
+    format: Format,
     /// The slot whose grab is in flight, delivered on the next tick.
     pending: Option<usize>,
     next: u32,
@@ -89,11 +95,7 @@ impl Capture {
         } = prepare_capture(device, target, "NVIDIA NvFBC")?;
         let process = process_target(target, set_global_flags);
         let d3d9_device = create_device(&d3d9, adapter)?;
-        let slots = [
-            create_slot(&d3d9_device, size)?,
-            create_slot(&d3d9_device, size)?,
-            create_slot(&d3d9_device, size)?,
-        ];
+        let (format, slots) = create_slots(&d3d9_device, size)?;
 
         let mut capture = Self {
             session: None,
@@ -102,6 +104,7 @@ impl Capture {
             key,
             device: d3d9_device,
             slots,
+            format,
             pending: None,
             next: 0,
             handed_over: false,
@@ -111,18 +114,34 @@ impl Capture {
             cursor,
             library,
         };
-        let session = match capture.open_session() {
-            Err(error) if capture.process.is_some() => {
-                log::info(format!(
-                    "NvFBC · cannot grab the app's own frames ({error}) · grabbing the monitor"
-                ));
-                capture.process = None;
-                capture.open_session()?
-            }
-            opened => opened?,
-        };
-        capture.session = Some(session);
+        capture.session = Some(capture.open_first_session()?);
         Ok(capture)
+    }
+
+    /// Gives up grabbing the app's own frames, then grabbing NV12, if the session cannot open
+    /// with them.
+    fn open_first_session(&mut self) -> Result<Session, CaptureError> {
+        let mut opened = self.open_session();
+        if let Err(error) = &opened
+            && self.process.is_some()
+        {
+            log::info(format!(
+                "NvFBC · cannot grab the app's own frames ({error}) · grabbing the monitor"
+            ));
+            self.process = None;
+            opened = self.open_session();
+        }
+        if let Err(error) = &opened
+            && self.format == Format::Nv12
+        {
+            log::info(format!(
+                "NvFBC · cannot grab NV12 ({error}) · grabbing BGRA"
+            ));
+            self.slots = texture_slots(&self.device, self.size)?;
+            self.format = Format::Bgra;
+            opened = self.open_session();
+        }
+        opened
     }
 
     fn open_session(&self) -> Result<Session, CaptureError> {
@@ -135,7 +154,7 @@ impl Capture {
             buffers: OutputTable::new(output_buffers(&self.slots)),
         };
         session
-            .set_up(self.cursor)
+            .set_up(self.cursor, self.format)
             .map_err(nvfbc_failed("set the NvFBC session up"))?;
         Ok(session)
     }
@@ -222,7 +241,10 @@ impl Source for Capture {
         Ok(
             collected.map_or(Frame::Unchanged, |index| Frame::InSurface {
                 index,
-                surface: Surface::Direct3D9(self.slots[index].surface.clone()),
+                surface: Surface::Direct3D9 {
+                    surface: self.slots[index].surface.clone(),
+                    format: self.format,
+                },
             }),
         )
     }
@@ -244,6 +266,13 @@ impl Capture {
 
     pub(super) fn encoder_device(&self) -> EncoderDevice {
         EncoderDevice::Direct3D9(self.device.clone())
+    }
+
+    pub(super) const fn colour_matrix(&self) -> Matrix {
+        match self.format {
+            Format::Bgra => Matrix::Bt709,
+            Format::Nv12 => Matrix::Bt601,
+        }
     }
 }
 
@@ -409,8 +438,8 @@ impl<V: ffi::Vtable> Drop for Object<V> {
 
 struct Slot {
     surface: IDirect3DSurface9,
-    /// Keeps the surface's parent texture alive.
-    _texture: IDirect3DTexture9,
+    /// Keeps a BGRA surface's parent texture alive.
+    _texture: Option<IDirect3DTexture9>,
 }
 
 struct Session {
@@ -443,11 +472,14 @@ impl Drop for OutputTable {
 }
 
 impl Session {
-    fn set_up(&self, cursor: bool) -> Result<(), Status> {
+    fn set_up(&self, cursor: bool, format: Format) -> Result<(), Status> {
         let mut setup = ffi::SetupParams::zeroed();
         setup.version = ffi::TODX9VID_SETUP_PARAMS_VER;
         setup.flags = if cursor { ffi::SETUP_WITH_HW_CURSOR } else { 0 };
-        setup.mode = ffi::TODX9VID_ARGB;
+        setup.mode = match format {
+            Format::Bgra => ffi::TODX9VID_ARGB,
+            Format::Nv12 => ffi::TODX9VID_NV12,
+        };
         setup.buffer_count = SLOT_COUNT;
         setup.buffers = self.buffers.as_mut_ptr();
         // SAFETY: a live object; the surfaces are on its device and outlive the session.
@@ -661,14 +693,85 @@ fn create_device(d3d9: &IDirect3D9Ex, adapter: u32) -> Result<IDirect3DDevice9Ex
     .map_err(failed("create the Direct3D 9 device for NvFBC"))
 }
 
-fn create_slot(d3d9: &IDirect3DDevice9Ex, size: (u32, u32)) -> Result<Slot, CaptureError> {
+/// NV12 surfaces of the kind video decoders write, which NVENC reads as they are. From BGRA, or
+/// from NV12 in plain surfaces, NVENC first runs a pass of its own on the 3D engine, which costs
+/// a GPU-bound game frames.
+fn create_slots(
+    d3d9: &IDirect3DDevice9Ex,
+    size: (u32, u32),
+) -> Result<(Format, [Slot; SLOTS]), CaptureError> {
+    match video_slots(d3d9, size) {
+        Ok(slots) => Ok((Format::Nv12, slots)),
+        Err(error) => {
+            log::info(format!(
+                "NvFBC · no NV12 surfaces ({error}) · grabbing BGRA"
+            ));
+            Ok((Format::Bgra, texture_slots(d3d9, size)?))
+        }
+    }
+}
+
+fn video_slots(
+    d3d9: &IDirect3DDevice9Ex,
+    (width, height): (u32, u32),
+) -> Result<[Slot; SLOTS], CaptureError> {
+    let step = "create NV12 surfaces for NvFBC";
+    let mut service = ptr::null_mut();
+    // SAFETY: a live device; the out-parameter is written on success.
+    unsafe {
+        DXVA2CreateVideoService(
+            d3d9,
+            &IDirectXVideoAccelerationService::IID,
+            &raw mut service,
+        )
+    }
+    .map_err(failed(step))?;
+    // SAFETY: the call succeeded, so `service` is an owned IDirectXVideoAccelerationService.
+    let service = unsafe { IDirectXVideoAccelerationService::from_raw(service) };
+    let mut surfaces: [Option<IDirect3DSurface9>; SLOTS] = Default::default();
+    // SAFETY: the array has room for the back buffers and the front one; no shared handle.
+    unsafe {
+        service.CreateSurface(
+            width,
+            height,
+            SLOT_COUNT - 1,
+            D3DFMT_NV12,
+            D3DPOOL_DEFAULT,
+            0,
+            DXVA2_VideoDecoderRenderTarget,
+            surfaces.as_mut_ptr(),
+            None,
+        )
+    }
+    .map_err(failed(step))?;
+    let [Some(first), Some(second), Some(third)] = surfaces else {
+        return Err(failed(step)(windows::core::Error::empty()));
+    };
+    Ok([first, second, third].map(|surface| Slot {
+        surface,
+        _texture: None,
+    }))
+}
+
+fn texture_slots(
+    d3d9: &IDirect3DDevice9Ex,
+    size: (u32, u32),
+) -> Result<[Slot; SLOTS], CaptureError> {
+    Ok([
+        texture_slot(d3d9, size)?,
+        texture_slot(d3d9, size)?,
+        texture_slot(d3d9, size)?,
+    ])
+}
+
+fn texture_slot(d3d9: &IDirect3DDevice9Ex, size: (u32, u32)) -> Result<Slot, CaptureError> {
     let texture = create_texture(d3d9, size)?;
     // SAFETY: the texture has one level.
     let surface =
         unsafe { texture.GetSurfaceLevel(0) }.map_err(failed("open the NvFBC surface"))?;
     Ok(Slot {
         surface,
-        _texture: texture,
+        _texture: Some(texture),
     })
 }
 

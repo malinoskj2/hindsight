@@ -79,6 +79,8 @@ pub(crate) enum Matrix {
     /// The matrix NVENC converts BGRA input with.
     #[default]
     Bt709,
+    /// The matrix NvFBC converts its NV12 grabs with.
+    Bt601,
 }
 
 impl Matrix {
@@ -87,6 +89,16 @@ impl Matrix {
     pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Bt709 => 1,
+            // SMPTE 170M, whose matrix is BT.601's.
+            Self::Bt601 => 6,
+        }
+    }
+
+    /// The weights of red and blue in luma.
+    pub(crate) const fn red_and_blue_weights(self) -> (f64, f64) {
+        match self {
+            Self::Bt709 => (0.2126, 0.0722),
+            Self::Bt601 => (0.299, 0.114),
         }
     }
 }

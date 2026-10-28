@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::replay::{
+    Matrix,
     audio::TrackKind,
     av1, h264, hevc,
     mux::{
@@ -222,6 +223,35 @@ fn describes_the_stream_and_its_decoder_configuration() {
         decoder_record(track),
         record(&h264::configuration(&h264::tests::keyframe()).unwrap())
     );
+}
+
+#[test]
+fn every_codec_is_tagged_with_the_stream_matrix() {
+    for codec in Codec::ALL {
+        let stream = Stream {
+            matrix: Matrix::Bt601,
+            ..stream(codec)
+        };
+        let mut file = Vec::new();
+        write(&mut file, &stream, &[packet(codec, 0, true)]).unwrap();
+        let (moov, _) = index(&file);
+        let colr = match &moov.trak[0].mdia.minf.stbl.stsd.codecs[..] {
+            [SampleEntry::Avc1(entry)] => entry.colr.clone(),
+            [SampleEntry::Hvc1(entry)] => entry.colr.clone(),
+            [SampleEntry::Av01(entry)] => entry.colr.clone(),
+            entries => panic!("expected one video entry, found {entries:?}"),
+        };
+        assert_eq!(
+            colr,
+            Some(Colr::Nclx {
+                colour_primaries: 1,
+                transfer_characteristics: 1,
+                matrix_coefficients: 6,
+                full_range_flag: false,
+            }),
+            "{codec}"
+        );
+    }
 }
 
 #[test]

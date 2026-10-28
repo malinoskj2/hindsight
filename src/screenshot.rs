@@ -2,6 +2,7 @@
 
 use crate::{
     config::{Backend, ScreenshotFormat},
+    replay::Matrix,
     saving::{self, WriteError},
     service::MonitorHandle,
 };
@@ -50,6 +51,49 @@ impl Still {
         })
     }
 
+    /// Converts limited-range NV12 in `matrix`: `height` rows of luma `pitch` bytes apart, then
+    /// half as many rows of interleaved colour differences at the same pitch. Each colour
+    /// difference is centred on its 2×2 pixels and interpolated between them.
+    pub(crate) fn from_nv12(
+        width: u32,
+        height: u32,
+        pitch: usize,
+        bytes: &[u8],
+        matrix: Matrix,
+    ) -> Option<Self> {
+        let span = nv12_span(width, height, pitch)?;
+        let bytes = bytes.get(..span)?;
+        let width = usize::try_from(width).ok()?;
+        let height = usize::try_from(height).ok()?;
+        let (pairs, chroma_rows) = (width.div_ceil(2), height.div_ceil(2));
+        let (luma, chroma) = bytes.split_at(pitch * height);
+        let convert = YuvToRgb::new(matrix);
+        let mut bgra = Vec::with_capacity(width.checked_mul(height)?.checked_mul(BYTES_PER_PIXEL)?);
+        // Each colour difference three parts its nearer row of samples, one part the other.
+        let mut blended = vec![0; 2 * pairs];
+        for (y, line) in luma.chunks(pitch).enumerate() {
+            let nearer = y / 2;
+            let other = neighbour(y, chroma_rows);
+            let nearer = &chroma[nearer * pitch..][..2 * pairs];
+            let other = &chroma[other * pitch..][..2 * pairs];
+            for ((sum, &nearer), &other) in blended.iter_mut().zip(nearer).zip(other) {
+                *sum = 3 * u16::from(nearer) + u16::from(other);
+            }
+            for (x, &luma) in line[..width].iter().enumerate() {
+                let (nearer, other) = (2 * (x / 2), 2 * neighbour(x, pairs));
+                let interpolate = |offset: usize| {
+                    (3 * blended[nearer + offset] + blended[other + offset] + 8) >> 4
+                };
+                bgra.extend_from_slice(&convert.bgra(luma, interpolate(0), interpolate(1)));
+            }
+        }
+        Some(Self {
+            width: u32::try_from(width).ok()?,
+            height: u32::try_from(height).ok()?,
+            bgra,
+        })
+    }
+
     /// Alpha is dropped: captured pictures are opaque, and some backends leave it zero.
     fn rgb(&self) -> Vec<u8> {
         let (pixels, _) = self.bgra.as_chunks::<BYTES_PER_PIXEL>();
@@ -67,6 +111,75 @@ pub(crate) fn pitched_span(width: u32, height: u32, pitch: usize) -> Option<usiz
         return None;
     }
     pitch.checked_mul(later_rows)?.checked_add(row)
+}
+
+/// The bytes from the first luma row to the end of the last row of colour differences.
+pub(crate) fn nv12_span(width: u32, height: u32, pitch: usize) -> Option<usize> {
+    let row = usize::try_from(width).ok()?.div_ceil(2).checked_mul(2)?;
+    let height = usize::try_from(height).ok()?;
+    let later_chroma_rows = height.div_ceil(2).checked_sub(1)?;
+    if row == 0 || pitch < row {
+        return None;
+    }
+    pitch
+        .checked_mul(height)?
+        .checked_add(pitch.checked_mul(later_chroma_rows)?)?
+        .checked_add(row)
+}
+
+/// The colour-difference sample on the far side of `pixel` from its nearer one, which is the
+/// nearer one itself at an edge.
+fn neighbour(pixel: usize, samples: usize) -> usize {
+    let nearer = pixel / 2;
+    if pixel.is_multiple_of(2) {
+        nearer.saturating_sub(1)
+    } else {
+        (nearer + 1).min(samples - 1)
+    }
+}
+
+/// Limited-range YUV to full-range RGB, in fixed point with 16 fractional bits.
+struct YuvToRgb {
+    luma: i32,
+    red_from_v: i32,
+    green_from_u: i32,
+    green_from_v: i32,
+    blue_from_u: i32,
+}
+
+impl YuvToRgb {
+    fn new(matrix: Matrix) -> Self {
+        let (red, blue) = matrix.red_and_blue_weights();
+        let green = 1.0 - red - blue;
+        let chroma = 255.0 / 224.0;
+        Self {
+            luma: fixed(255.0 / 219.0),
+            red_from_v: fixed(2.0 * (1.0 - red) * chroma),
+            green_from_u: fixed(2.0 * blue * (1.0 - blue) / green * chroma),
+            green_from_v: fixed(2.0 * red * (1.0 - red) / green * chroma),
+            blue_from_u: fixed(2.0 * (1.0 - blue) * chroma),
+        }
+    }
+
+    fn bgra(&self, y: u8, u: u16, v: u16) -> [u8; BYTES_PER_PIXEL] {
+        let luma = self.luma * (i32::from(y) - 16) + (1 << 15);
+        let (u, v) = (i32::from(u) - 128, i32::from(v) - 128);
+        let byte = |value: i32| u8::try_from((value >> 16).clamp(0, 255)).unwrap_or(u8::MAX);
+        [
+            byte(luma + self.blue_from_u * u),
+            byte(luma - self.green_from_u * u - self.green_from_v * v),
+            byte(luma + self.red_from_v * v),
+            u8::MAX,
+        ]
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the coefficients are below 3, far inside i32 at 16 fractional bits"
+)]
+fn fixed(value: f64) -> i32 {
+    (value * 65_536.0).round() as i32
 }
 
 impl fmt::Debug for Still {
@@ -325,6 +438,114 @@ mod tests {
             Still::from_pitched(u32::MAX, u32::MAX, usize::MAX, &PITCHED).map(|_| ()),
             None
         );
+    }
+
+    /// `rgb` in limited-range YUV, rounded, by the textbook formulas in floating point.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "limited-range values lie within 16..=240"
+    )]
+    fn yuv(rgb: [u8; 3], matrix: Matrix) -> [u8; 3] {
+        let (red_weight, blue_weight) = matrix.red_and_blue_weights();
+        let [red, green, blue] = rgb.map(|component| f64::from(component) / 255.0);
+        let luma = red_weight * red + (1.0 - red_weight - blue_weight) * green + blue_weight * blue;
+        let blue_difference = (blue - luma) / (2.0 * (1.0 - blue_weight));
+        let red_difference = (red - luma) / (2.0 * (1.0 - red_weight));
+        [
+            16.0 + 219.0 * luma,
+            128.0 + 224.0 * blue_difference,
+            128.0 + 224.0 * red_difference,
+        ]
+        .map(|value| value.round() as u8)
+    }
+
+    /// A `width` × `height` NV12 picture, `pitch` bytes a row, of one colour.
+    fn flat_nv12(width: usize, height: usize, pitch: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
+        let mut bytes = vec![0xEE; pitch * (height + height / 2)];
+        for row in bytes.chunks_mut(pitch).take(height) {
+            row[..width].fill(y);
+        }
+        for row in bytes.chunks_mut(pitch).skip(height) {
+            for pair in row[..width].chunks_mut(2) {
+                pair.copy_from_slice(&[u, v]);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn nv12_comes_back_as_the_colour_it_was_made_from() {
+        let colours = [
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [0, 255, 255],
+            [255, 0, 255],
+            [128, 128, 128],
+            [200, 120, 40],
+        ];
+        for matrix in [Matrix::Bt601, Matrix::Bt709] {
+            for rgb in colours {
+                let bytes = flat_nv12(4, 2, 6, yuv(rgb, matrix));
+                let still = Still::from_nv12(4, 2, 6, &bytes, matrix).unwrap();
+                let [r, g, b] = rgb;
+                for pixel in still.bgra.chunks(4) {
+                    let distance = pixel
+                        .iter()
+                        .zip([b, g, r, 255])
+                        .map(|(&got, wanted)| got.abs_diff(wanted))
+                        .max();
+                    // A colour rounded to 219 or 224 levels comes back within two of 255.
+                    assert!(
+                        distance <= Some(2),
+                        "{matrix:?} {rgb:?} came back as {pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nv12_colour_is_interpolated_between_pairs_of_pixels() {
+        // Two pairs of pixels, the second bluer than the first.
+        let mut bytes = flat_nv12(4, 2, 4, [126, 100, 128]);
+        bytes[10] = 200;
+        let still = Still::from_nv12(4, 2, 4, &bytes, Matrix::Bt601).unwrap();
+        let blue_of = |u| {
+            Still::from_nv12(2, 2, 2, &flat_nv12(2, 2, 2, [126, u, 128]), Matrix::Bt601)
+                .unwrap()
+                .bgra[0]
+        };
+        let blues: Vec<_> = still.bgra.chunks(4).take(4).map(|pixel| pixel[0]).collect();
+        // Each pixel takes three parts of its own pair's sample and one of the other's, except
+        // at the edges.
+        assert_eq!(
+            blues,
+            [blue_of(100), blue_of(125), blue_of(175), blue_of(200)]
+        );
+        assert_eq!(still.bgra[..16], still.bgra[16..], "both rows alike");
+    }
+
+    #[test]
+    fn nv12_must_hold_both_planes() {
+        assert_eq!(nv12_span(4, 2, 6), Some(6 * 2 + 4));
+        assert_eq!(nv12_span(4, 4, 6), Some(6 * 4 + 6 + 4));
+        assert_eq!(
+            nv12_span(3, 4, 4),
+            Some(4 * 4 + 4 + 4),
+            "odd widths round up"
+        );
+        assert_eq!(nv12_span(4, 2, 3), None);
+        assert_eq!(nv12_span(0, 2, 6), None);
+        assert_eq!(nv12_span(4, 0, 6), None);
+        assert_eq!(nv12_span(u32::MAX, u32::MAX, usize::MAX), None);
+        let bytes = flat_nv12(4, 2, 6, [16, 128, 128]);
+        assert!(Still::from_nv12(4, 2, 6, &bytes[..15], Matrix::Bt601).is_none());
+        assert!(Still::from_nv12(4, 2, 6, &bytes[..16], Matrix::Bt601).is_some());
     }
 
     #[test]

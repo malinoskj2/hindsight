@@ -37,7 +37,7 @@ use std::{
 };
 use thiserror::Error;
 use windows::Win32::Graphics::{
-    Direct3D9::{IDirect3DDevice9Ex, IDirect3DSurface9},
+    Direct3D9::{D3DFORMAT, IDirect3DDevice9Ex, IDirect3DSurface9},
     Direct3D11::ID3D11Texture2D,
     Gdi::HMONITOR,
 };
@@ -69,9 +69,23 @@ pub(super) enum Surface {
         buffer: Arc<DeviceBuffer>,
         pitch: u32,
     },
-    /// BGRA on the source's Direct3D 9Ex device.
-    Direct3D9(IDirect3DSurface9),
+    /// On the source's Direct3D 9Ex device.
+    Direct3D9 {
+        surface: IDirect3DSurface9,
+        format: Format,
+    },
 }
+
+/// How a [`Surface::Direct3D9`] holds its picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Format {
+    Bgra,
+    /// A luma plane, then the two colour differences interleaved at half the size each way, in
+    /// the capture's [`colour_matrix`](Capture::colour_matrix) and limited range.
+    Nv12,
+}
+
+pub(super) const D3DFMT_NV12: D3DFORMAT = D3DFORMAT(u32::from_le_bytes(*b"NV12"));
 
 pub(super) enum EncoderDevice {
     Direct3D,
@@ -193,14 +207,13 @@ impl Capture {
         }
     }
 
-    /// The colour matrix for YUV surfaces. Every backend delivers BGRA, which NVENC converts
-    /// with BT.709.
-    #[expect(
-        clippy::unused_self,
-        reason = "a backend delivering YUV would answer for itself"
-    )]
+    /// The colour matrix the encoded pictures are in: NVENC converts BGRA with BT.709, and a
+    /// backend that delivers YUV answers for itself.
     pub(super) const fn colour_matrix(&self) -> Matrix {
-        Matrix::Bt709
+        match &self.backend {
+            ByBackend::Nvfbc(capture) => capture.colour_matrix(),
+            ByBackend::Wgc(_) | ByBackend::Dxgi(_) | ByBackend::NvfbcCuda(_) => Matrix::Bt709,
+        }
     }
 
     /// Switches to leaving each picture in a surface of its own, reported as
