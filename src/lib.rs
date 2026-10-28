@@ -167,6 +167,16 @@ fn log_panics() {
 fn startup() -> Result<(service::Worker, config::Config, update::notes::Arrival)> {
     let store = storage::Store::open().context("open application state")?;
     mirror_log();
+    match store.adopt_first_release() {
+        Ok(true) => {
+            log::info("State · from 0.1.0 · its default capture and buffer suit the machine");
+        }
+        Ok(false) => {}
+        Err(error) => log::warning(format!(
+            "State · from 0.1.0 not adopted ({})",
+            log::chain(&error)
+        )),
+    }
     let arrival = arrival(&store);
     let defaults = config::Config::for_machine(machine());
     log::info(format!(

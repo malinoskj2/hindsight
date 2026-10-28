@@ -20,6 +20,9 @@ const LAST_RUN_FILE: &str = "last_run.json";
 #[cfg(windows)]
 const BUFFER_FILE: &str = "buffer.bin";
 const PENDING_EXTENSION: &str = "pending";
+const FIRST_RELEASE: &str = "0.1.0";
+/// The settings now suited to the machine, with the values 0.1.0 wrote for them by default.
+const FIRST_RELEASE_DEFAULTS: [(&str, &str); 2] = [("backend", "nvfbc"), ("buffer_memory", "ram")];
 
 /// Lifetime totals, kept across runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +92,30 @@ impl Store {
 
     pub(crate) fn save_totals(&self, totals: &Totals) -> Result<(), StorageError> {
         self.write(TOTALS_FILE, totals)
+    }
+
+    /// Records state that 0.1.0 left as 0.1.0's, since it kept no record of the version that ran.
+    /// 0.1.0 also wrote every setting, chosen or not, so the settings now suited to the machine
+    /// are left to the machine where they hold 0.1.0's defaults. Returns whether there was such
+    /// state.
+    pub(crate) fn adopt_first_release(&self) -> Result<bool, StorageError> {
+        let exists = |name| self.root.join(name).try_exists();
+        if exists(LAST_RUN_FILE)? || !(exists(CONFIG_FILE)? || exists(TOTALS_FILE)?) {
+            return Ok(false);
+        }
+        if let Some(mut chosen) = self.read::<Map<String, Value>>(CONFIG_FILE)? {
+            for (name, default) in FIRST_RELEASE_DEFAULTS {
+                if chosen.get(name).and_then(Value::as_str) == Some(default) {
+                    chosen.remove(name);
+                }
+            }
+            self.write(CONFIG_FILE, &chosen)?;
+        }
+        let first = FIRST_RELEASE
+            .parse()
+            .expect("the first release's version is a semantic version");
+        self.save_last_version(&first)?;
+        Ok(true)
     }
 
     pub(crate) fn load_last_version(&self) -> Result<Option<Version>, StorageError> {
@@ -255,6 +282,87 @@ mod tests {
                 .load_last_version()
                 .unwrap(),
             Some(version)
+        );
+    }
+
+    #[test]
+    fn state_from_the_first_release_is_adopted_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        // As 0.1.0 wrote it, every setting included.
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            br#"{
+  "mode": "fullscreen",
+  "backend": "nvfbc",
+  "codec": "av1",
+  "buffer_seconds": 90,
+  "frame_rate": 60,
+  "bitrate_mbps": 50,
+  "hotkey": "Alt+F10",
+  "clip_directory": null,
+  "theme": "classic",
+  "audio": true,
+  "cursor": false,
+  "buffer_memory": "ram"
+}"#,
+        )
+        .unwrap();
+        let machine = Config {
+            backend: Backend::Wgc,
+            buffer_memory: Memory::Disk,
+            ..Config::default()
+        };
+
+        assert!(store.adopt_first_release().unwrap());
+        assert_eq!(
+            store.load_last_version().unwrap(),
+            Some(FIRST_RELEASE.parse().unwrap())
+        );
+        let config = store.load_config(&machine).unwrap();
+        assert_eq!(config.backend, Backend::Wgc);
+        assert_eq!(config.buffer_memory, Memory::Disk);
+        assert_eq!(config.codec, crate::config::Codec::Av1);
+        assert_eq!(config.buffer_seconds, 90);
+        assert_eq!(config.hotkey.to_string(), "Alt+F10");
+
+        assert!(!store.adopt_first_release().unwrap(), "only once");
+    }
+
+    #[test]
+    fn a_first_release_choice_other_than_its_default_stays() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        fs::write(
+            directory.path().join(CONFIG_FILE),
+            br#"{"backend": "dxgi", "buffer_memory": "vram"}"#,
+        )
+        .unwrap();
+        let machine = Config {
+            backend: Backend::Wgc,
+            buffer_memory: Memory::Disk,
+            ..Config::default()
+        };
+
+        assert!(store.adopt_first_release().unwrap());
+        let config = store.load_config(&machine).unwrap();
+        assert_eq!(config.backend, Backend::Dxgi);
+        assert_eq!(config.buffer_memory, Memory::Vram);
+    }
+
+    #[test]
+    fn a_first_run_and_a_later_one_adopt_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().to_owned()).unwrap();
+        assert!(!store.adopt_first_release().unwrap());
+        assert_eq!(store.load_last_version().unwrap(), None);
+
+        store.save_totals(&Totals::default()).unwrap();
+        store.save_last_version(&"0.2.0".parse().unwrap()).unwrap();
+        assert!(!store.adopt_first_release().unwrap());
+        assert_eq!(
+            store.load_last_version().unwrap(),
+            Some("0.2.0".parse().unwrap())
         );
     }
 
