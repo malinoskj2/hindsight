@@ -121,7 +121,7 @@ export const settingGroups = [
     ],
   },
   {
-    name: "More options",
+    name: "Advanced",
     settings: [
       {
         id: "codec",
