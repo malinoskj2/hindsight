@@ -7,6 +7,7 @@ use super::{
         LINE, Movable, Painted, TintedLabel, button, hidden_label, label, saturating_i32, shift_by,
         skin_button,
     },
+    modal,
     pane::{self, FIRST_FRAME, FIRST_ROW, Pane},
     text,
     theme::{Skin, Tone},
@@ -465,7 +466,7 @@ impl SettingsPage {
         let page_window = self.0.page.hwnd();
         let root = page_window.GetAncestor(co::GA::ROOT);
         let owner = root.as_ref().unwrap_or(page_window);
-        match shell::pick_folder(owner, Some(&entered)) {
+        match modal::run(|| shell::pick_folder(owner, Some(&entered))) {
             Ok(Some(chosen)) => layout::set_text(folder, &chosen.display().to_string()),
             Ok(None) => {}
             Err(error) => log::warning(text::folder_pick_failed(log::chain(&error))),

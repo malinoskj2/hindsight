@@ -2,7 +2,7 @@
 
 use super::{
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
-    open,
+    modal, open,
     pane::{self, Pane},
     text,
     theme::Skin,
@@ -256,18 +256,20 @@ impl MediaPage {
             .and_then(|()| menu.SetMenuDefaultItem(w::IdPos::Id(FileCommand::Open.id())))
             .and_then(|()| w::GetCursorPos())
             .and_then(|at| {
-                menu.TrackPopupMenu(
-                    co::TPM::RETURNCMD | co::TPM::NONOTIFY | co::TPM::RIGHTBUTTON,
-                    at,
-                    self.0.list.hwnd(),
-                )
+                modal::run(|| {
+                    menu.TrackPopupMenu(
+                        co::TPM::RETURNCMD | co::TPM::NONOTIFY | co::TPM::RIGHTBUTTON,
+                        at,
+                        self.0.list.hwnd(),
+                    )
+                })
             });
         let _ = menu.DestroyMenu();
         Ok(chosen?.and_then(FileCommand::from_id))
     }
 
     fn delete(&self, path: &Path) {
-        if let Err(error) = shell::recycle(path, self.0.list.hwnd()) {
+        if let Err(error) = modal::run(|| shell::recycle(path, self.0.list.hwnd())) {
             log::warning(text::recycle_failed(path, error));
             return;
         }

@@ -3,7 +3,7 @@
 use super::{
     about,
     layout::{self, BUTTON_HEIGHT, BUTTON_WIDTH, MARGIN, button, skin_button},
-    text,
+    modal, text,
     theme::{Skin, Surface},
 };
 use crate::{
@@ -87,7 +87,7 @@ pub(super) fn show(owner: &impl GuiParent, skin: &Skin) {
         Ok(())
     });
 
-    if let Err(error) = dialog.show_modal(owner) {
+    if let Err(error) = modal::run(|| dialog.show_modal(owner)) {
         log::warning(text::whats_new_failed(error));
     }
 }

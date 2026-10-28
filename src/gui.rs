@@ -46,6 +46,7 @@ mod hotkey_field;
 mod layout;
 mod logs;
 mod media;
+mod modal;
 mod pane;
 mod settings;
 mod startup_error;
@@ -61,6 +62,8 @@ const CLIPS_TAB: u32 = 1;
 const SCREENSHOTS_TAB: u32 = 2;
 const PANES: usize = 6;
 const DESTROY_TIMER: usize = 2;
+/// How often a close waits to find the modal loop that held it up ended.
+const MODAL_WAIT_MS: u32 = 100;
 const SETTLE_TIMER: usize = 3;
 const SETTLE_MS: u32 = 500;
 const UPDATE_TIMER: usize = 4;
@@ -481,8 +484,8 @@ impl Main {
         if !self.0.quitting.get() {
             log::info(text::QUIT_ON_CLOSE);
         }
-        // winsafe frees its handlers, this one included, when the window is destroyed. The
-        // timer callback is dispatched straight from the message loop, so no handler is running.
+        // winsafe frees its handlers, this one included, when the window is destroyed, so the
+        // timer callback destroys it once no handler is running.
         let _ = self
             .0
             .main_window
@@ -670,11 +673,13 @@ impl Main {
             about::open_link(&release.notes_url());
             return;
         };
-        let answer = self.0.main_window.hwnd().MessageBox(
-            &text::update_confirmation(release.version()),
-            APP_NAME,
-            co::MB::OKCANCEL | co::MB::ICONINFORMATION,
-        );
+        let answer = modal::run(|| {
+            self.0.main_window.hwnd().MessageBox(
+                &text::update_confirmation(release.version()),
+                APP_NAME,
+                co::MB::OKCANCEL | co::MB::ICONINFORMATION,
+            )
+        });
         if answer != Ok(co::DLGID::OK) {
             return;
         }
@@ -973,8 +978,15 @@ fn startup_setting() -> (bool, Option<String>) {
     }
 }
 
-/// A one-shot timer callback that destroys the main window once no winsafe handler is running.
+/// A timer callback that destroys the main window once no winsafe handler is running.
+///
+/// Dispatched from the message loop, none is. Dispatched from a modal loop, the handler that
+/// opened it is, and the timer fires again later.
 extern "system" fn destroy_window(window: w::HWND, _: co::WM, id: usize, _: u32) {
+    if modal::is_open() {
+        let _ = window.SetTimer(id, MODAL_WAIT_MS, Some(destroy_window));
+        return;
+    }
     let _ = window.KillTimer(id);
     let _ = window.DestroyWindow();
 }
