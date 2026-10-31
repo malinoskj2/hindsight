@@ -3,6 +3,8 @@
 #[cfg(windows)]
 pub(crate) mod callback;
 #[cfg(windows)]
+pub(crate) mod clipboard;
+#[cfg(windows)]
 pub(crate) mod clock;
 #[cfg(windows)]
 pub(crate) mod com;

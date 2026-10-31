@@ -320,6 +320,7 @@ pub(crate) enum Preference {
     Theme(Theme),
     CloseToTray(bool),
     CheckForUpdates(bool),
+    CopyToClipboard(bool),
     MoreOptions(bool),
 }
 
@@ -329,6 +330,7 @@ impl Preference {
             Self::Theme(theme) => config.theme = theme,
             Self::CloseToTray(close_to_tray) => config.close_to_tray = close_to_tray,
             Self::CheckForUpdates(check) => config.check_for_updates = check,
+            Self::CopyToClipboard(copy) => config.copy_to_clipboard = copy,
             Self::MoreOptions(open) => config.more_options = open,
         }
     }
@@ -370,6 +372,8 @@ pub(crate) struct Config {
     pub(crate) buffer_memory: Memory,
     pub(crate) close_to_tray: bool,
     pub(crate) check_for_updates: bool,
+    /// Whether each saved clip and screenshot is put on the clipboard as a file, ready to paste.
+    pub(crate) copy_to_clipboard: bool,
     pub(crate) container: Container,
     pub(crate) screenshot_format: ScreenshotFormat,
     pub(crate) more_options: bool,
@@ -405,6 +409,7 @@ struct RawConfig {
     buffer_memory: Memory,
     close_to_tray: bool,
     check_for_updates: bool,
+    copy_to_clipboard: bool,
     container: Container,
     screenshot_format: ScreenshotFormat,
     more_options: bool,
@@ -438,6 +443,7 @@ impl Default for RawConfig {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            copy_to_clipboard,
             container,
             screenshot_format,
             more_options,
@@ -461,6 +467,7 @@ impl Default for RawConfig {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            copy_to_clipboard,
             container,
             screenshot_format,
             more_options,
@@ -492,6 +499,7 @@ impl TryFrom<RawConfig> for Config {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            copy_to_clipboard,
             container,
             screenshot_format,
             more_options,
@@ -523,6 +531,7 @@ impl TryFrom<RawConfig> for Config {
             buffer_memory,
             close_to_tray,
             check_for_updates,
+            copy_to_clipboard,
             container,
             screenshot_format,
             more_options,
@@ -553,6 +562,7 @@ impl Default for Config {
             buffer_memory: Memory::Ram,
             close_to_tray: true,
             check_for_updates: true,
+            copy_to_clipboard: false,
             container: Container::Mp4,
             screenshot_format: ScreenshotFormat::Png,
             more_options: false,
@@ -975,6 +985,25 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains(r#""check_for_updates":false"#), "{json}");
+        assert_eq!(parse(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn copying_to_the_clipboard_stays_off_unless_turned_on() {
+        let parse = |json: &str| serde_json::from_str::<Config>(json);
+
+        assert!(!Config::default().copy_to_clipboard);
+        assert!(
+            !parse(r#"{"buffer_seconds":120}"#)
+                .unwrap()
+                .copy_to_clipboard
+        );
+        let config = Config {
+            copy_to_clipboard: true,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""copy_to_clipboard":true"#), "{json}");
         assert_eq!(parse(&json).unwrap(), config);
     }
 

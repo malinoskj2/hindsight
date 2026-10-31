@@ -139,6 +139,10 @@ pub(super) fn saved_without_sound(error: impl Display) -> impl Display {
     fmt::from_fn(move |f| write!(f, "Saved without sound · {error}"))
 }
 
+pub(super) fn not_copied(path: &Path, error: impl Display) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "Clipboard · {} not copied ({error})", file_name(path)))
+}
+
 pub(super) fn problem(kind: ProblemKind, cause: &str) -> String {
     match kind {
         ProblemKind::ClipNotSaved => save_failed(cause).to_string(),

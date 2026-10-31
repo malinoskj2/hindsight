@@ -368,6 +368,14 @@ impl SettingsPage {
         });
     }
 
+    pub(super) fn on_clipboard_toggled(&self, toggled: impl Fn(bool) + 'static) {
+        let copy_to_clipboard = self.0.general.copy_to_clipboard.clone();
+        self.0.general.copy_to_clipboard.on().bn_clicked(move || {
+            toggled(copy_to_clipboard.is_checked());
+            Ok(())
+        });
+    }
+
     pub(super) fn on_update_checks_toggled(&self, toggled: impl Fn(bool) + 'static) {
         let check_for_updates = self.0.general.check_for_updates.clone();
         self.0.general.check_for_updates.on().bn_clicked(move || {
@@ -576,6 +584,7 @@ impl SettingsPage {
             theme: chosen(&self.0.general.theme, &Theme::ALL),
             close_to_tray: self.0.general.close_to_tray.is_checked(),
             check_for_updates: self.0.general.check_for_updates.is_checked(),
+            copy_to_clipboard: self.0.general.copy_to_clipboard.is_checked(),
             container: chosen(&advanced.container, &Container::ALL),
             screenshot_format: chosen(&advanced.screenshot_format, &ScreenshotFormat::ALL),
             more_options: self.0.advanced_open.get(),
@@ -989,6 +998,7 @@ struct GeneralControls {
     theme: gui::ComboBox,
     theme_caption: gui::Label,
     start_with_windows: gui::CheckBox,
+    copy_to_clipboard: gui::CheckBox,
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
     error: TintedLabel,
@@ -1011,8 +1021,16 @@ impl GeneralControls {
             text::START_WITH_WINDOWS,
             INNER_X,
             rows::START_WITH_WINDOWS,
-            INNER_WIDTH,
+            COLUMN_X - INNER_X,
             start_with_windows,
+        );
+        let copy_to_clipboard = check_box(
+            page,
+            text::COPY_TO_CLIPBOARD,
+            COLUMN_X,
+            rows::START_WITH_WINDOWS,
+            CHECK_COLUMN_WIDTH,
+            config.copy_to_clipboard,
         );
         let close_to_tray = check_box(
             page,
@@ -1038,6 +1056,7 @@ impl GeneralControls {
             Box::new(theme.clone()),
             Box::new(theme_caption.clone()),
             Box::new(start_with_windows.clone()),
+            Box::new(copy_to_clipboard.clone()),
             Box::new(close_to_tray.clone()),
             Box::new(check_for_updates.clone()),
             Box::new(error.label().clone()),
@@ -1046,6 +1065,7 @@ impl GeneralControls {
             theme,
             theme_caption,
             start_with_windows,
+            copy_to_clipboard,
             close_to_tray,
             check_for_updates,
             error,
@@ -1053,11 +1073,12 @@ impl GeneralControls {
         }
     }
 
-    fn movables(&self) -> [Movable; 6] {
+    fn movables(&self) -> [Movable; 7] {
         [
             self.theme.clone().into(),
             self.theme_caption.clone().into(),
             self.start_with_windows.clone().into(),
+            self.copy_to_clipboard.clone().into(),
             self.close_to_tray.clone().into(),
             self.check_for_updates.clone().into(),
             self.error.label().clone().into(),

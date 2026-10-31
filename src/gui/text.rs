@@ -116,6 +116,7 @@ pub(super) const NUMBER_REQUIRED: &str =
     "Enter whole numbers for the replay length, bitrate and frame rate.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
+pub(super) const COPY_TO_CLIPBOARD: &str = "Copy saves to the clipboard";
 pub(super) const CLOSE_TO_TRAY: &str = "Close to tray";
 pub(super) const CHECK_FOR_UPDATES: &str = "Check for updates";
 

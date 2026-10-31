@@ -358,6 +358,11 @@ impl Main {
         let this = self.clone();
         self.0
             .settings
+            .on_clipboard_toggled(move |copy| this.on_clipboard_toggled(copy));
+
+        let this = self.clone();
+        self.0
+            .settings
             .on_advanced_toggled(move |open| this.on_advanced_toggled(open));
     }
 
@@ -595,6 +600,10 @@ impl Main {
 
     fn on_close_to_tray_toggled(&self, close_to_tray: bool) {
         self.remember(Preference::CloseToTray(close_to_tray));
+    }
+
+    fn on_clipboard_toggled(&self, copy: bool) {
+        self.remember(Preference::CopyToClipboard(copy));
     }
 
     fn on_advanced_toggled(&self, open: bool) {

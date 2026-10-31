@@ -165,6 +165,7 @@ fn services(record: Recorder, retry_interval: Duration) -> Services {
         audio: |_, _| None,
         write: replay::save,
         chime: Box::new(|_| {}),
+        copy: Box::new(|_| Ok(())),
         retry_interval,
         clock: Box::new(Instant::now),
     }
@@ -688,6 +689,7 @@ fn each_setting_that_applies_at_once_is_saved() {
         Preference::CloseToTray(false),
         Preference::MoreOptions(true),
         Preference::CheckForUpdates(false),
+        Preference::CopyToClipboard(true),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
@@ -707,6 +709,62 @@ fn each_setting_that_applies_at_once_is_saved() {
         preference.apply_to(&mut expected);
         assert_eq!(saved, expected, "{preference:?}");
     }
+}
+
+type Copied = Arc<Mutex<Vec<PathBuf>>>;
+
+/// Spawns a worker whose clipboard records each file put on it, or refuses them all.
+fn spawn_copying(config: Config, refuse: bool) -> (Worker, Copied) {
+    let copied = Copied::default();
+    let clipboard = Arc::clone(&copied);
+    let services = Services {
+        copy: Box::new(move |path| {
+            anyhow::ensure!(!refuse, "the clipboard is held open by another program");
+            clipboard.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }),
+        ..services(steady, RETRY_INTERVAL)
+    };
+    (Worker::spawn_with(services, None, config).unwrap(), copied)
+}
+
+#[test]
+fn saves_go_on_the_clipboard_once_the_setting_is_turned_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let (worker, copied) = spawn_copying(config_in(directory.path()), false);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
+
+    worker.save();
+    let first = wait_for(&worker, |status| status.last_clip.is_some()).last_clip;
+    assert_eq!(*copied.lock().unwrap(), Vec::<PathBuf>::new());
+
+    worker.remember(Preference::CopyToClipboard(true));
+    worker.screenshot(PRIMARY);
+    let shot = wait_for(&worker, |status| status.last_screenshot.is_some())
+        .last_screenshot
+        .unwrap();
+    worker.save();
+    let clip = wait_for(&worker, |status| status.last_clip != first)
+        .last_clip
+        .unwrap();
+    assert_eq!(*copied.lock().unwrap(), [shot, clip]);
+}
+
+#[test]
+fn a_save_the_clipboard_refuses_is_still_saved_without_a_problem() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Config {
+        copy_to_clipboard: true,
+        ..config_in(directory.path())
+    };
+    let (worker, copied) = spawn_copying(config, true);
+    wait_for(&worker, |status| status.bytes.session_written > 0);
+
+    worker.save();
+    let status = wait_for(&worker, |status| status.last_clip.is_some());
+    assert!(status.last_clip.unwrap().exists());
+    assert!(status.problem.is_none());
+    assert!(copied.lock().unwrap().is_empty());
 }
 
 type Heard = Arc<Mutex<Vec<Tone>>>;

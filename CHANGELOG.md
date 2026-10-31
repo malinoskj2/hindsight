@@ -5,6 +5,7 @@
 - A hotkey field says "Press keys…" when you click it and shows the modifiers as you hold them. Nothing typed goes into it, and Esc keeps the hotkey there was.
 - If another app already uses the keys you press as its hotkey, Settings says so under the hotkey fields. It also says when a key needs Ctrl, Alt or Win held with it.
 - Insert can be a hotkey on its own, as the function keys, Print Screen, Pause and Scroll Lock already could.
+- A new setting, Copy saves to the clipboard, puts each clip and screenshot on the clipboard as it is saved, so Ctrl+V pastes it into Discord, a chat or a folder.
 
 ## 0.2.0
 

@@ -178,6 +178,8 @@ type Recorder = fn(&Config, &Target, &Live, &AtomicBool) -> Result<Ended>;
 type Audio = fn(&Arc<Live>, Sources) -> Option<audio::Capture>;
 type Writer = fn(&Snapshot, &Path, Container) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
+/// Puts a saved file on the clipboard.
+type Copier = Box<dyn Fn(&Path) -> Result<()> + Send>;
 /// The clock the worker uses to schedule retries and save ticks.
 type Clock = Box<dyn Fn() -> Instant + Send>;
 
@@ -191,6 +193,11 @@ const GRABBER: Grabber = crate::gpu::grab;
 #[cfg(not(windows))]
 const GRABBER: Grabber = |_| Err(StillError::Grab("capture requires Windows".into()));
 
+#[cfg(windows)]
+const COPIER: fn(&Path) -> Result<()> = |path| Ok(sys::clipboard::copy_file(path)?);
+#[cfg(not(windows))]
+const COPIER: fn(&Path) -> Result<()> = |_| anyhow::bail!("the clipboard requires Windows");
+
 /// The services the worker depends on. Tests replace any of them with a stand-in.
 struct Services {
     record: Recorder,
@@ -198,6 +205,7 @@ struct Services {
     audio: Audio,
     write: Writer,
     chime: Chime,
+    copy: Copier,
     retry_interval: Duration,
     clock: Clock,
 }
@@ -213,6 +221,7 @@ impl Services {
             chime: Box::new(move |tone| {
                 let _ = sounds.send(tone);
             }),
+            copy: Box::new(COPIER),
             retry_interval: RETRY_INTERVAL,
             clock: Box::new(Instant::now),
         }
@@ -886,6 +895,7 @@ impl Machine {
         match writing.join.join() {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
+                self.copy_if_asked(&path);
                 self.last_screenshot = Some(path);
                 self.resolve(&[ProblemKind::ScreenshotNotSaved]);
                 (self.services.chime)(Tone::Saved);
@@ -1195,9 +1205,21 @@ impl Machine {
         }
         self.clip_without_sound = saved.sound_error.is_some();
         self.ledger.add_saved(&saved.path);
+        self.copy_if_asked(&saved.path);
         self.last_clip = Some(saved.path);
         self.resolve(&[ProblemKind::ClipNotSaved]);
         (self.services.chime)(Tone::Saved);
+    }
+
+    /// Puts a saved file on the clipboard when the settings ask for it. A failure is only logged,
+    /// since the file itself was saved.
+    fn copy_if_asked(&self, path: &Path) {
+        if !self.config.copy_to_clipboard {
+            return;
+        }
+        if let Err(error) = (self.services.copy)(path) {
+            log::warning(text::not_copied(path, format_args!("{error:#}")));
+        }
     }
 
     fn report_failed_save(&mut self, kind: ProblemKind, cause: impl Display) {
