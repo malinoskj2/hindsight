@@ -348,6 +348,9 @@ impl Main {
             .on_hotkey_capture(move |capture| this.on_hotkey_capture(capture));
 
         let this = self.clone();
+        self.0.settings.on_hotkey_refused(move || this.fit_window());
+
+        let this = self.clone();
         self.0
             .settings
             .on_update_checks_toggled(move |check| this.on_update_checks_toggled(check));

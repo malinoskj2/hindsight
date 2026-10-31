@@ -1,7 +1,7 @@
 //! The Settings tab.
 
 use super::{
-    hotkey_field::{self, Capture},
+    hotkey_field::{Capture, HotkeyField, Refusal},
     layout::{
         self, BUTTON_HEIGHT, ExpandableGroup, Frame, GROUP_WIDTH, GROUP_X, INNER_WIDTH, INNER_X,
         LINE, Movable, Painted, TintedLabel, button, hidden_label, label, saturating_i32, shift_by,
@@ -80,6 +80,7 @@ mod rows {
     pub(super) const RECORDING_HEIGHT: i32 = ADVANCED_END + 2 - RECORDING_FRAME;
     pub(super) const HOTKEYS_FRAME: i32 = RECORDING_FRAME + RECORDING_HEIGHT;
     pub(super) const HOTKEYS: i32 = HOTKEYS_FRAME + FIRST_ROW;
+    pub(super) const HOTKEY_MESSAGE: i32 = HOTKEYS + FIELD_PITCH;
     pub(super) const HOTKEYS_HEIGHT: i32 = HOTKEYS + FIELD_PITCH + 2 - HOTKEYS_FRAME;
     pub(super) const GENERAL_FRAME: i32 = HOTKEYS_FRAME + HOTKEYS_HEIGHT;
     pub(super) const THEME: i32 = GENERAL_FRAME + FIRST_ROW;
@@ -112,6 +113,7 @@ pub(super) struct SettingsPage(Rc<Inner>);
 struct Inner {
     page: gui::TabPage,
     frames: Vec<Frame>,
+    hotkeys_group: ExpandableGroup,
     general_group: ExpandableGroup,
     recording: RecordingControls,
     hotkeys: HotkeyControls,
@@ -133,6 +135,7 @@ impl Painted for Inner {
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
         [
             &self.recording.advanced.estimate,
+            &self.hotkeys.message,
             &self.general.error,
             &self.apply.error,
         ]
@@ -197,11 +200,15 @@ impl SettingsPage {
         let general = GeneralControls::new(&page, config, start_with_windows);
         let apply = ApplyControls::new(&page, &codec_warning(config, codecs), skin);
         let frames = vec![recording_frame, hotkeys_frame, general_frame];
+        let hotkeys_group = ExpandableGroup::new(1, hotkeys.message.label().clone(), 1)
+            .moving(general.movables())
+            .moving(apply.movables());
         let general_group =
             ExpandableGroup::new(2, general.error.label().clone(), 1).moving(apply.movables());
         let inner = Rc::new(Inner {
             page,
             frames,
+            hotkeys_group,
             general_group,
             recording,
             hotkeys,
@@ -238,7 +245,7 @@ impl SettingsPage {
         } else {
             0
         };
-        self.0.general_group.extra() + advanced
+        self.0.hotkeys_group.extra() + self.0.general_group.extra() + advanced
     }
 
     /// `toggled` is called with whether Advanced is now open, once the page has moved.
@@ -325,7 +332,7 @@ impl SettingsPage {
 
     pub(super) fn on_hotkey_capture(&self, capture: impl Fn(Capture) + 'static) {
         let capture = Rc::new(capture);
-        for field in self.hotkey_fields() {
+        for field in self.hotkey_fields().map(HotkeyField::edit) {
             let began = Rc::clone(&capture);
             field.on().en_set_focus(move || {
                 began(Capture::Began);
@@ -335,6 +342,20 @@ impl SettingsPage {
             field.on().en_kill_focus(move || {
                 ended(Capture::Ended);
                 Ok(())
+            });
+        }
+    }
+
+    /// `resized` is called when a refused hotkey changed the Hotkeys group's height.
+    pub(super) fn on_hotkey_refused(&self, resized: impl Fn() + 'static) {
+        let resized = Rc::new(resized);
+        for field in self.hotkey_fields() {
+            let page = self.clone();
+            let resized = Rc::clone(&resized);
+            field.on_refused(move |refusal| {
+                if page.show_refusal(refusal) {
+                    resized();
+                }
             });
         }
     }
@@ -369,11 +390,11 @@ impl SettingsPage {
     }
 
     pub(super) fn show_hotkey(&self, hotkey: &str) {
-        layout::set_text(&self.0.hotkeys.save, hotkey);
+        layout::set_text(self.0.hotkeys.save.edit(), hotkey);
     }
 
     pub(super) fn show_screenshot_hotkey(&self, hotkey: &str) {
-        layout::set_text(&self.0.hotkeys.screenshot, hotkey);
+        layout::set_text(self.0.hotkeys.screenshot.edit(), hotkey);
     }
 
     /// Reports whether the General group changed height.
@@ -381,8 +402,20 @@ impl SettingsPage {
         self.0.general_group.set_message(&self.0.frames, message)
     }
 
-    fn hotkey_fields(&self) -> [&gui::Edit; 2] {
+    fn hotkey_fields(&self) -> [&HotkeyField; 2] {
         [&self.0.hotkeys.save, &self.0.hotkeys.screenshot]
+    }
+
+    /// Reports whether the Hotkeys group changed height.
+    fn show_refusal(&self, refusal: Option<&Refusal>) -> bool {
+        self.0.hotkeys.message.set_tone(match refusal {
+            Some(Refusal::NeedsModifier(_)) => Tone::Muted,
+            Some(Refusal::Unavailable(_)) | None => Tone::Error,
+        });
+        let message = refusal.map(ToString::to_string);
+        self.0
+            .hotkeys_group
+            .set_message(&self.0.frames, message.as_deref())
     }
 
     fn estimate_events(&self) {
@@ -518,8 +551,8 @@ impl SettingsPage {
         let required = |field: &gui::Edit| number(field).ok_or(SettingsError::NumberRequired);
         let recording = &self.0.recording;
         let advanced = &recording.advanced;
-        let hotkey = self.0.hotkeys.save.text().unwrap_or_default();
-        let screenshot_hotkey = self.0.hotkeys.screenshot.text().unwrap_or_default();
+        let hotkey = self.0.hotkeys.save.edit().text().unwrap_or_default();
+        let screenshot_hotkey = self.0.hotkeys.screenshot.edit().text().unwrap_or_default();
         let folder = recording.folder.text().unwrap_or_default();
         Ok(Config {
             mode: chosen(&recording.mode, &Mode::ALL),
@@ -662,8 +695,10 @@ impl RecordingControls {
 }
 
 struct HotkeyControls {
-    save: gui::Edit,
-    screenshot: gui::Edit,
+    save: HotkeyField,
+    screenshot: HotkeyField,
+    /// Why the keys last pressed in either field were not taken.
+    message: TintedLabel,
     controls: Vec<Control>,
 }
 
@@ -677,6 +712,7 @@ impl HotkeyControls {
             COMPACT_WIDTH,
             &config.hotkey.to_string(),
         );
+        let save = HotkeyField::new(save);
         let (screenshot, screenshot_caption) = text_field(
             page,
             text::SCREENSHOT_HOTKEY,
@@ -685,18 +721,22 @@ impl HotkeyControls {
             COMPACT_WIDTH,
             &config.screenshot_hotkey.to_string(),
         );
-        for field in [&save, &screenshot] {
-            hotkey_field::capture(field);
-        }
+        let screenshot = HotkeyField::new(screenshot);
+        let message = TintedLabel::new(
+            hidden_label(page, INNER_X, rows::HOTKEY_MESSAGE, INNER_WIDTH, 1),
+            Tone::Error,
+        );
         let controls: Vec<Control> = vec![
-            Box::new(save.clone()),
+            Box::new(save.edit().clone()),
             Box::new(save_caption),
-            Box::new(screenshot.clone()),
+            Box::new(screenshot.edit().clone()),
             Box::new(screenshot_caption),
+            Box::new(message.label().clone()),
         ];
         Self {
             save,
             screenshot,
+            message,
             controls,
         }
     }
@@ -947,6 +987,7 @@ fn entry_label(entry: &Entry) -> String {
 
 struct GeneralControls {
     theme: gui::ComboBox,
+    theme_caption: gui::Label,
     start_with_windows: gui::CheckBox,
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
@@ -995,7 +1036,7 @@ impl GeneralControls {
         );
         let controls: Vec<Control> = vec![
             Box::new(theme.clone()),
-            Box::new(theme_caption),
+            Box::new(theme_caption.clone()),
             Box::new(start_with_windows.clone()),
             Box::new(close_to_tray.clone()),
             Box::new(check_for_updates.clone()),
@@ -1003,12 +1044,24 @@ impl GeneralControls {
         ];
         Self {
             theme,
+            theme_caption,
             start_with_windows,
             close_to_tray,
             check_for_updates,
             error,
             controls,
         }
+    }
+
+    fn movables(&self) -> [Movable; 6] {
+        [
+            self.theme.clone().into(),
+            self.theme_caption.clone().into(),
+            self.start_with_windows.clone().into(),
+            self.close_to_tray.clone().into(),
+            self.check_for_updates.clone().into(),
+            self.error.label().clone().into(),
+        ]
     }
 }
 
@@ -1285,6 +1338,7 @@ mod tests {
             (rows::HOTKEYS_FRAME, rows::HOTKEYS, rows::HOTKEYS_HEIGHT),
             (394, 414, 50)
         );
+        assert_eq!(rows::HOTKEY_MESSAGE, 442);
         assert_eq!((rows::GENERAL_FRAME, rows::GENERAL_HEIGHT), (444, 116));
         assert_eq!(
             [

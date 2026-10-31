@@ -96,6 +96,7 @@ pub(super) const REPLAY_LENGTH: &str = "Replay length (s)";
 pub(super) const BITRATE: &str = "Bitrate (Mbps)";
 pub(super) const HOTKEY: &str = "Save replay";
 pub(super) const SCREENSHOT_HOTKEY: &str = "Take screenshot";
+pub(super) const HOTKEY_PROMPT: &str = "Press keys…";
 pub(super) const MODE: &str = "Record";
 pub(super) const BACKEND: &str = "Backend";
 pub(super) const FOLDER: &str = "Clip folder";
@@ -195,6 +196,18 @@ pub(super) fn thumbnail_failed(tab: &str, path: &Path, error: impl Display) -> S
 
 pub(super) fn not_listed(tab: &str, path: &Path, error: impl Display) -> String {
     format!("{tab} · {} not listed ({error})", file_name(path))
+}
+
+pub(super) fn hotkey_taken(hotkey: impl Display) -> String {
+    format!("{hotkey} is already used by another app.")
+}
+
+pub(super) fn hotkey_refused(hotkey: impl Display, error: impl Display) -> String {
+    format!("Windows refused {hotkey}: {error}")
+}
+
+pub(super) fn hotkey_needs_modifier(key: &str) -> String {
+    format!("Hold Ctrl, Alt or Win with {key}.")
 }
 
 pub(super) fn absent_device(name: Option<&str>) -> String {

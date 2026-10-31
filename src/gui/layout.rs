@@ -171,29 +171,17 @@ pub(super) struct ExpandableGroup {
 }
 
 /// A control under an expandable group, moved down when the group grows.
-pub(super) enum Movable {
-    Label(gui::Label),
-    Button(gui::Button),
-}
+pub(super) struct Movable(Box<dyn GuiWindow>);
 
 impl Movable {
     fn hwnd(&self) -> &w::HWND {
-        match self {
-            Self::Label(label) => label.hwnd(),
-            Self::Button(button) => button.hwnd(),
-        }
+        self.0.hwnd()
     }
 }
 
-impl From<gui::Label> for Movable {
-    fn from(label: gui::Label) -> Self {
-        Self::Label(label)
-    }
-}
-
-impl From<gui::Button> for Movable {
-    fn from(button: gui::Button) -> Self {
-        Self::Button(button)
+impl<T: GuiWindow + 'static> From<T> for Movable {
+    fn from(control: T) -> Self {
+        Self(Box::new(control))
     }
 }
 

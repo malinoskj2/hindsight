@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- A hotkey field says "Press keys…" when you click it and shows the modifiers as you hold them. Nothing typed goes into it, and Esc keeps the hotkey there was.
+- If another app already uses the keys you press as its hotkey, Settings says so under the hotkey fields. It also says when a key needs Ctrl, Alt or Win held with it.
+- Insert can be a hotkey on its own, as the function keys, Print Screen, Pause and Scroll Lock already could.
+
 ## 0.2.0
 
 - Screenshots: Alt+F8 saves a picture of the whole monitor in front, whether or not hindsight is recording. Screenshots go into a `screenshots` folder and clips into a `videos` folder, both in the clip folder.

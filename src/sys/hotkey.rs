@@ -23,9 +23,10 @@ const NUMPAD_DIGIT_COUNT: u16 = 10;
 const VK_PRINT_SCREEN: u16 = 0x2C;
 const VK_PAUSE: u16 = 0x13;
 const VK_SCROLL_LOCK: u16 = 0x91;
+const VK_INSERT: u16 = 0x2D;
 const NAMED_KEYS: [(u16, &str); 11] = [
     (0x20, "Space"),
-    (0x2D, "Insert"),
+    (VK_INSERT, "Insert"),
     (0x2E, "Delete"),
     (0x24, "Home"),
     (0x23, "End"),
@@ -36,8 +37,19 @@ const NAMED_KEYS: [(u16, &str); 11] = [
     (VK_SCROLL_LOCK, "ScrollLock"),
     (0xC0, "`"),
 ];
-/// Keys that never type text when pressed, so they may be used without a modifier.
-const STANDALONE_KEYS: [u16; 3] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK];
+/// Keys that type, edit or move through no text, so they may be used without a modifier. A hotkey
+/// takes its key from every app, so Home, End and the like still need one.
+const STANDALONE_KEYS: [u16; 4] = [VK_PRINT_SCREEN, VK_PAUSE, VK_SCROLL_LOCK, VK_INSERT];
+
+/// What a key pressed with `Modifiers` held makes of a hotkey.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Press {
+    Hotkey(Hotkey),
+    /// A key the hotkey can use only with Ctrl, Alt or Win, named.
+    NeedsModifier(String),
+    /// A modifier, or a key no hotkey uses.
+    Ignored,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum ParseError {
@@ -69,6 +81,18 @@ impl Modifiers {
     pub(crate) const WIN: Self = Self(MOD_WIN);
 }
 
+/// Written as the start of a hotkey, such as `Ctrl+Alt+`.
+impl fmt::Display for Modifiers {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (flag, name) in MODIFIERS {
+            if self.0 & flag != 0 {
+                write!(formatter, "{name}+")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl BitOr for Modifiers {
     type Output = Self;
 
@@ -90,10 +114,16 @@ impl Hotkey {
     };
 
     /// Shift alone is not enough, so capitals still type and Shift+Home still selects.
-    pub(crate) fn pressed(modifiers: Modifiers, key: u16) -> Option<Self> {
+    pub(crate) fn pressed(modifiers: Modifiers, key: u16) -> Press {
         let Modifiers(modifiers) = modifiers;
         let held = modifiers & !MOD_SHIFT != 0;
-        (is_known_key(key) && (held || may_stand_alone(key))).then_some(Self { modifiers, key })
+        if !is_known_key(key) {
+            Press::Ignored
+        } else if held || may_stand_alone(key) {
+            Press::Hotkey(Self { modifiers, key })
+        } else {
+            Press::NeedsModifier(key_label(key))
+        }
     }
 }
 
@@ -133,12 +163,12 @@ impl FromStr for Hotkey {
 
 impl fmt::Display for Hotkey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (flag, name) in MODIFIERS {
-            if self.modifiers & flag != 0 {
-                write!(formatter, "{name}+")?;
-            }
-        }
-        formatter.write_str(&key_label(self.key))
+        write!(
+            formatter,
+            "{}{}",
+            Modifiers(self.modifiers),
+            key_label(self.key)
+        )
     }
 }
 
@@ -238,7 +268,7 @@ const fn is_numpad_digit(key: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use native::{Action, RegisterError, register, unregister};
+pub(crate) use native::{Action, RegisterError, available, register, unregister};
 
 #[cfg(windows)]
 mod native {
@@ -276,6 +306,9 @@ mod native {
         }
     }
 
+    /// Registered only for as long as `available` takes to find out whether it can be.
+    pub(super) const PROBE_ID: i32 = 3;
+
     #[derive(Debug, Error)]
     pub(crate) enum RegisterError {
         #[error("{0} is already used by another application; choose another hotkey in Settings")]
@@ -293,17 +326,30 @@ mod native {
         let _ = window.UnregisterHotKey(action.id());
         window
             .RegisterHotKey(action.id(), modifiers, key)
-            .map_err(|error| {
-                if error == co::ERROR::HOTKEY_ALREADY_REGISTERED {
-                    RegisterError::Taken(hotkey)
-                } else {
-                    RegisterError::System(hotkey, error)
-                }
-            })
+            .map_err(|error| refused(hotkey, error))
+    }
+
+    fn refused(hotkey: Hotkey, error: co::ERROR) -> RegisterError {
+        if error == co::ERROR::HOTKEY_ALREADY_REGISTERED {
+            RegisterError::Taken(hotkey)
+        } else {
+            RegisterError::System(hotkey, error)
+        }
     }
 
     pub(crate) fn unregister(window: &w::HWND, action: Action) {
         let _ = window.UnregisterHotKey(action.id());
+    }
+
+    /// Whether `hotkey` could be registered now. Windows never says which app holds a taken one.
+    pub(crate) fn available(window: &w::HWND, hotkey: Hotkey) -> Result<(), RegisterError> {
+        let (modifiers, key) = system_codes(hotkey);
+        window
+            .RegisterHotKey(PROBE_ID, modifiers, key)
+            .map(|()| {
+                let _ = window.UnregisterHotKey(PROBE_ID);
+            })
+            .map_err(|error| refused(hotkey, error))
     }
 
     #[expect(unsafe_code, reason = "builds winsafe's MOD and VK from raw values")]
@@ -345,6 +391,7 @@ mod tests {
         assert_eq!(parse("Ctrl+PageDown").unwrap().key, 0x22);
         assert_eq!(parse("F24").unwrap().key, VK_F1 + 23);
         assert_eq!(parse("Pause").unwrap().modifiers, 0);
+        assert_eq!(parse("Insert").unwrap().modifiers, 0);
     }
 
     #[test]
@@ -363,6 +410,7 @@ mod tests {
                 Some(action)
             );
             assert_eq!(Action::ALL[action.index()], action);
+            assert_ne!(action.id(), native::PROBE_ID);
         }
         assert_eq!(Action::from_id(0), None);
     }
@@ -417,7 +465,7 @@ mod tests {
         ];
         for modifiers in held {
             for key in 0..=u16::from(u8::MAX) {
-                if let Some(hotkey) = Hotkey::pressed(modifiers, key) {
+                if let Press::Hotkey(hotkey) = Hotkey::pressed(modifiers, key) {
                     assert_eq!(parse(&hotkey.to_string()).unwrap(), hotkey);
                 }
             }
@@ -436,8 +484,10 @@ mod tests {
         let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
         let shift = Modifiers::SHIFT;
         let nothing = Modifiers::NONE;
-        let entered =
-            |modifiers, key| Hotkey::pressed(modifiers, key).map(|hotkey| hotkey.to_string());
+        let entered = |modifiers, key| match Hotkey::pressed(modifiers, key) {
+            Press::Hotkey(hotkey) => Some(hotkey.to_string()),
+            Press::NeedsModifier(_) | Press::Ignored => None,
+        };
 
         assert_eq!(
             entered(ctrl_alt, VK_F1 + 9).as_deref(),
@@ -449,6 +499,7 @@ mod tests {
             entered(nothing, VK_PRINT_SCREEN).as_deref(),
             Some("PrintScreen")
         );
+        assert_eq!(entered(nothing, VK_INSERT).as_deref(), Some("Insert"));
         assert_eq!(
             entered(ctrl_alt, u16::from(b'S')).as_deref(),
             Some("Ctrl+Alt+S")
@@ -467,6 +518,24 @@ mod tests {
             (shift, VK_OEM_PLUS),
         ] {
             assert_eq!(entered(modifiers, key), None, "{modifiers:?} {key:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_key_that_needs_a_modifier_is_named_and_others_are_ignored() {
+        const VK_CONTROL: u16 = 0x11;
+        const VK_ESCAPE: u16 = 0x1B;
+        const VK_HOME: u16 = 0x24;
+        assert_eq!(
+            Hotkey::pressed(Modifiers::SHIFT, u16::from(b'S')),
+            Press::NeedsModifier("S".to_owned())
+        );
+        assert_eq!(
+            Hotkey::pressed(Modifiers::NONE, VK_HOME),
+            Press::NeedsModifier("Home".to_owned())
+        );
+        for key in [VK_CONTROL, VK_ESCAPE] {
+            assert_eq!(Hotkey::pressed(Modifiers::CTRL, key), Press::Ignored);
         }
     }
 }
