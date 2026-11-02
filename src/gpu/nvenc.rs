@@ -403,10 +403,7 @@ impl Encoder {
             ffi::INPUT_RESOURCE_TYPE_DIRECTX,
             surface.as_raw(),
             0,
-            match format {
-                Format::Bgra => ffi::BUFFER_FORMAT_ARGB,
-                Format::Nv12 => ffi::BUFFER_FORMAT_NV12,
-            },
+            buffer_format(format),
         )
     }
 
@@ -414,12 +411,13 @@ impl Encoder {
         &self,
         buffer: &DeviceBuffer,
         pitch: u32,
+        format: Format,
     ) -> Result<ffi::Registered, NvencError> {
         self.register_resource(
             ffi::INPUT_RESOURCE_TYPE_CUDA_DEVICE_POINTER,
             buffer.pointer().as_api_pointer(),
             pitch,
-            ffi::BUFFER_FORMAT_ARGB,
+            buffer_format(format),
         )
     }
 
@@ -504,7 +502,11 @@ impl Encoder {
         );
         let registered = match handle {
             Surface::Texture(texture) => self.register_texture(texture)?,
-            Surface::CudaBuffer { buffer, pitch } => self.register_cuda_buffer(buffer, *pitch)?,
+            Surface::CudaBuffer {
+                buffer,
+                pitch,
+                format,
+            } => self.register_cuda_buffer(buffer, *pitch, *format)?,
             Surface::Direct3D9 { surface, format } => {
                 self.register_d3d9_surface(surface, *format)?
             }
@@ -821,6 +823,13 @@ impl Drop for Encoder {
         }
         // Under the device lock, which `Drop` alone would not hold.
         self.session.destroy();
+    }
+}
+
+const fn buffer_format(format: Format) -> u32 {
+    match format {
+        Format::Bgra => ffi::BUFFER_FORMAT_ARGB,
+        Format::Nv12 => ffi::BUFFER_FORMAT_NV12,
     }
 }
 

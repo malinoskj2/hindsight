@@ -5,9 +5,10 @@ use crate::{
     audio::InputState,
     config::{Codec, Memory},
     gpu::{Adapter, ProbeError},
-    replay::{Source, Stream},
+    replay::{CLOCK_RATE, Source, Stream},
     service::{Problem, ProblemKind, State, Status},
     sys::release::Release,
+    trim::Cut,
 };
 use std::{fmt::Display, path::Path};
 
@@ -89,6 +90,18 @@ pub(super) const NO_SCREENSHOTS: &str = "No screenshots yet — press the screen
 pub(super) const MENU_OPEN: &str = "&Open";
 pub(super) const MENU_REVEAL: &str = "Show in &Explorer";
 pub(super) const MENU_DELETE: &str = "&Delete";
+pub(super) const MENU_TRIM: &str = "&Trim";
+
+pub(super) const TRIM_PLAY: &str = "Play";
+pub(super) const TRIM_PAUSE: &str = "Pause";
+pub(super) const TRIM_SET_START: &str = "Set start";
+pub(super) const TRIM_SET_END: &str = "Set end";
+pub(super) const TRIM_BACK: &str = "Back";
+pub(super) const TRIM_CANCEL: &str = "Cancel";
+pub(super) const TRIM_SAVE: &str = "Save trim";
+pub(super) const TRIM_OPENING: &str = "Opening the clip…";
+pub(super) const TRIM_CANCELLED: &str = "The trim was cancelled.";
+pub(super) const TRIM_STOPPED: &str = "the trim stopped unexpectedly";
 
 pub(super) const CODEC: &str = "Codec";
 pub(super) const FRAME_RATE: &str = "Frame rate";
@@ -244,6 +257,66 @@ pub(super) fn recycle_failed(path: &Path, error: impl Display) -> String {
 
 pub(super) fn menu_failed(tab: &str, error: impl Display) -> String {
     format!("{tab} · menu not shown ({error})")
+}
+
+/// A time in clock ticks as minutes, seconds and hundredths, as `1:05.25`.
+pub(super) fn clip_time(ticks: i64) -> String {
+    let hundredths = ticks.max(0) / (CLOCK_RATE / 100);
+    format!(
+        "{}:{:02}.{:02}",
+        hundredths / 6000,
+        hundredths / 100 % 60,
+        hundredths % 100
+    )
+}
+
+pub(super) fn trim_position(position: i64, duration: i64) -> String {
+    format!("{} / {}", clip_time(position), clip_time(duration))
+}
+
+pub(super) fn trim_cut(cut: Cut) -> String {
+    format!(
+        "Keeps {} to {} · {}",
+        clip_time(cut.start),
+        clip_time(cut.end),
+        clip_time(cut.end - cut.start)
+    )
+}
+
+pub(super) fn trim_progress(percent: u32) -> String {
+    format!("Saving the trim… {percent}%")
+}
+
+pub(super) fn trim_saved(path: &Path) -> String {
+    format!("Saved as {}", file_name(path))
+}
+
+pub(super) fn trim_failed(reason: &str) -> String {
+    format!("Could not save the trim · {reason}")
+}
+
+pub(super) fn trim_unplayable(reason: &str) -> String {
+    format!("Could not play the clip · {reason}")
+}
+
+pub(super) fn trim_saved_log(source: &Path, saved: &Path) -> String {
+    format!(
+        "Trim · {} saved from {}",
+        file_name(saved),
+        file_name(source)
+    )
+}
+
+pub(super) fn trim_failed_log(source: &Path, reason: &str) -> String {
+    format!("Trim · {} not trimmed ({reason})", file_name(source))
+}
+
+pub(super) fn trim_unplayable_log(source: &Path, reason: &str) -> String {
+    format!("Trim · {} not played ({reason})", file_name(source))
+}
+
+pub(super) fn not_copied(path: &Path, error: impl Display) -> String {
+    format!("Clipboard · {} not copied ({error})", file_name(path))
 }
 
 pub(super) fn caption(title: &str, bytes: u64) -> String {
@@ -713,6 +786,23 @@ mod tests {
             name_and_version(),
             format!("hindsight {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn clip_times_read_as_minutes_seconds_and_hundredths() {
+        assert_eq!(clip_time(0), "0:00.00");
+        assert_eq!(clip_time(-5), "0:00.00");
+        assert_eq!(clip_time(CLOCK_RATE * 65 + CLOCK_RATE / 4), "1:05.25");
+        assert_eq!(clip_time(CLOCK_RATE / 100 - 1), "0:00.00");
+        assert_eq!(clip_time(CLOCK_RATE * 600), "10:00.00");
+        assert_eq!(
+            trim_cut(Cut {
+                start: CLOCK_RATE,
+                end: CLOCK_RATE * 3 + CLOCK_RATE / 2
+            }),
+            "Keeps 0:01.00 to 0:03.50 · 0:02.50"
+        );
+        assert_eq!(trim_progress(42), "Saving the trim… 42%");
     }
 
     #[test]

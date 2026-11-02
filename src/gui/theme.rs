@@ -7,7 +7,7 @@
 use self::{
     cache::{Ready, Resources},
     paint::{
-        Rule, buffered, button_colours, draw_centred, draw_focus, paint_disclosure, paint_frame,
+        Rule, button_colours, draw_centred, draw_focus, paint_disclosure, paint_frame,
         paint_tab_strip, round_rect,
     },
     palette::{Fill, Palette, classic_tint, colour, palette},
@@ -20,7 +20,7 @@ use std::{
 };
 use winsafe::{self as w, co, gui, prelude::*};
 
-pub(super) use self::paint::paint_tabs_natively;
+pub(super) use self::paint::{buffered, paint_tabs_natively};
 
 mod cache;
 mod paint;
@@ -60,6 +60,15 @@ impl Surface {
             Self::Page => co::COLOR::WINDOW,
         }
     }
+}
+
+/// The colours the trim view's timeline paints with.
+#[derive(Clone, Copy)]
+pub(super) struct TimelineColours {
+    pub(super) background: w::COLORREF,
+    pub(super) groove: w::COLORREF,
+    pub(super) cut: w::COLORREF,
+    pub(super) playhead: w::COLORREF,
 }
 
 #[derive(Clone)]
@@ -118,6 +127,24 @@ impl Skin {
     pub(super) fn list_colours(&self) -> Option<(w::COLORREF, w::COLORREF)> {
         self.palette()
             .map(|palette| (colour(palette.panel), colour(palette.text)))
+    }
+
+    /// The timeline's colours: the theme's, or the system's in classic.
+    pub(super) fn timeline_colours(&self) -> TimelineColours {
+        match self.palette() {
+            Some(palette) => TimelineColours {
+                background: colour(palette.background),
+                groove: colour(palette.border),
+                cut: colour(palette.accent),
+                playhead: colour(palette.text),
+            },
+            None => TimelineColours {
+                background: w::GetSysColor(co::COLOR::BTNFACE),
+                groove: w::GetSysColor(co::COLOR::BTNSHADOW),
+                cut: w::GetSysColor(co::COLOR::HIGHLIGHT),
+                playhead: w::GetSysColor(co::COLOR::WINDOWTEXT),
+            },
+        }
     }
 
     /// The brush for `WM_CTLCOLORSTATIC`, which passes the brush to the label by value.

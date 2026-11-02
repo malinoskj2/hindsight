@@ -10,7 +10,8 @@ use super::{
 use crate::{
     gpu::{
         capture::{
-            CaptureError, CopyTarget, EncoderDevice, Frame, ReopenThrottle, Source, Surface, failed,
+            CaptureError, CopyTarget, EncoderDevice, Format, Frame, ReopenThrottle, Source,
+            Surface, failed,
         },
         cuda::{Context, ContextHold, CudaError, Device as CudaDevice, DeviceBuffer, Driver},
         device::Device,
@@ -293,6 +294,7 @@ impl Capture {
             surface: Surface::CudaBuffer {
                 buffer: Arc::clone(&self.buffers[slot]),
                 pitch,
+                format: Format::Bgra,
             },
         })
     }

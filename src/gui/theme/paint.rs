@@ -329,7 +329,7 @@ pub(super) fn draw_focus(hdc: &w::HDC, rect: w::RECT) {
     });
 }
 
-pub(super) fn buffered(
+pub(in crate::gui) fn buffered(
     hdc: &w::HDC,
     (width, height): (i32, i32),
     keep_out: Option<w::RECT>,

@@ -20,6 +20,7 @@ use thiserror::Error;
 mod annexb;
 mod audio;
 mod av1;
+mod demux;
 mod disk;
 mod h264;
 mod hevc;
@@ -29,6 +30,8 @@ mod mux;
 mod ring;
 mod store;
 
+#[cfg(test)]
+pub(crate) use audio::TrackKind;
 pub(crate) use audio::{
     AudioClip, AudioFormat, CLOCK_RATE, FRAME_SAMPLES, PcmClip, PerSource, Source, samples_of,
     ticks_of,
@@ -36,6 +39,11 @@ pub(crate) use audio::{
 use audio::{AudioRings, tick_time};
 #[cfg(windows)]
 pub(crate) use audio::{PcmTrack, SourceFormat};
+#[cfg(windows)]
+pub(crate) use demux::{DemuxError, Movie};
+#[cfg(test)]
+pub(crate) use demux::{Place, VideoSample};
+pub(crate) use demux::{Sound, Video, read_place};
 #[cfg(windows)]
 pub(crate) use disk::DiskStore;
 use mux::{DecoderConfig, MuxError, Visit};
@@ -478,6 +486,31 @@ pub(crate) fn save(
         write_file(snapshot, partial, container)
     })?;
     Ok(Saved { path, sound_error })
+}
+
+/// Writes a cut of a clip, its video encoded afresh, to `directory` under a name of its own, as
+/// [`save`] names a clip.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows trim saves cuts")
+)]
+pub(crate) fn save_cut(
+    directory: &Path,
+    container: Container,
+    stream: &Stream,
+    packets: &[Arc<Packet>],
+    audio: &[AudioClip],
+) -> Result<PathBuf, SaveError> {
+    let (path, ()) = saving::save_file(directory, container.extension(), |partial| {
+        saving::write_file(partial, |output| {
+            match container {
+                Container::Mp4 => mp4::write_from(output, stream, packets, audio),
+                Container::Mkv => mkv::write_from(output, stream, packets, audio),
+            }
+            .map_err(SaveError::from)
+        })
+    })?;
+    Ok(path)
 }
 
 /// Writes the clip to `path` and returns the reason the buffered sound was left out, if it was.

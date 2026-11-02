@@ -1,8 +1,6 @@
 //! What the MP4 and Matroska writers share.
 
-#[cfg(test)]
-use super::Packet;
-use super::{StoreError, configuration, sample_parts};
+use super::{Packet, StoreError, configuration, sample_parts};
 use crate::config::Codec;
 use mp4_atom::{Av1c, Avcc, Hvcc};
 use std::io;
@@ -57,7 +55,6 @@ pub(crate) trait Packets {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError>;
 }
 
-#[cfg(test)]
 impl Packets for [std::sync::Arc<Packet>] {
     fn visit(&self, each: &mut Visit<'_>) -> Result<(), MuxError> {
         self.iter()

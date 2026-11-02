@@ -13,6 +13,7 @@ use crate::{
     saving::SavedName,
     service::Status,
     sys::{
+        callback::Slot,
         com::Apartment,
         shell::{self, Thumbnail, ThumbnailError},
         thread as sys_thread,
@@ -101,6 +102,7 @@ struct Inner {
     page: gui::TabPage,
     list: gui::ListView,
     state: RefCell<State>,
+    trim: Slot<dyn Fn(&Path)>,
 }
 
 impl Pane for MediaPage {
@@ -146,6 +148,7 @@ impl MediaPage {
             page,
             list,
             state: RefCell::default(),
+            trim: Slot::new(),
         }));
         page.events();
         page
@@ -159,6 +162,11 @@ impl MediaPage {
             )
         });
         self.set_colours(background, text);
+    }
+
+    /// Called with the clip chosen to trim.
+    pub(super) fn on_trim(&self, handler: impl Fn(&Path) + 'static) {
+        self.0.trim.set(Rc::new(handler));
     }
 
     /// Rereads the folder when the tab comes into view, the folder changes or a file of the
@@ -231,6 +239,11 @@ impl MediaPage {
         // is why `path` was resolved first.
         match self.choose_command() {
             Ok(Some(FileCommand::Open)) => open(&path),
+            Ok(Some(FileCommand::Trim)) => {
+                if let Some(trim) = self.0.trim.get() {
+                    trim(&path);
+                }
+            }
             Ok(Some(FileCommand::Reveal)) => {
                 if let Err(error) = shell::reveal(&path) {
                     log::warning(text::reveal_failed(&path, error));
@@ -246,6 +259,7 @@ impl MediaPage {
         let mut menu = w::HMENU::CreatePopupMenu()?;
         let items: Vec<w::MenuItem> = FileCommand::ALL
             .iter()
+            .filter(|command| command.offered(self.0.media))
             .map(|command| w::MenuItem::Entry {
                 cmd_id: command.id(),
                 text: command.text(),
@@ -601,12 +615,14 @@ impl Thumbnails {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileCommand {
     Open,
+    Trim,
     Reveal,
     Delete,
 }
 
 impl FileCommand {
-    const ALL: [Self; 3] = [Self::Open, Self::Reveal, Self::Delete];
+    /// In menu order.
+    const ALL: [Self; 4] = [Self::Open, Self::Trim, Self::Reveal, Self::Delete];
 
     /// The menu command id, counted from 1, because the menu reports no choice as 0.
     fn id(self) -> u16 {
@@ -614,7 +630,12 @@ impl FileCommand {
             Self::Open => 1,
             Self::Reveal => 2,
             Self::Delete => 3,
+            Self::Trim => 4,
         }
+    }
+
+    fn offered(self, media: Media) -> bool {
+        self != Self::Trim || media == Media::Clips
     }
 
     fn from_id(id: i32) -> Option<Self> {
@@ -628,6 +649,7 @@ impl FileCommand {
             Self::Open => text::MENU_OPEN,
             Self::Reveal => text::MENU_REVEAL,
             Self::Delete => text::MENU_DELETE,
+            Self::Trim => text::MENU_TRIM,
         }
     }
 }
@@ -941,14 +963,30 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_offers_open_reveal_and_delete_each_under_an_id_of_its_own() {
+    fn the_menu_offers_each_command_under_an_id_of_its_own_and_trim_only_for_clips() {
         for command in FileCommand::ALL {
             assert_ne!(command.id(), 0, "{command:?} would read as no choice");
             assert_eq!(FileCommand::from_id(command.id().into()), Some(command));
         }
         assert_eq!(FileCommand::from_id(0), None);
-        assert_eq!(FileCommand::from_id(4), None);
+        assert_eq!(FileCommand::from_id(5), None);
         assert_eq!(FileCommand::ALL[0], FileCommand::Open);
+        let offered = |media| {
+            FileCommand::ALL
+                .into_iter()
+                .filter(|command| command.offered(media))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            offered(Media::Clips),
+            [
+                FileCommand::Open,
+                FileCommand::Trim,
+                FileCommand::Reveal,
+                FileCommand::Delete
+            ]
+        );
+        assert!(!offered(Media::Screenshots).contains(&FileCommand::Trim));
     }
 
     #[test]

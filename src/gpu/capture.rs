@@ -64,10 +64,11 @@ pub(super) enum CaptureError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Surface {
     Texture(ID3D11Texture2D),
-    /// BGRA rows `pitch` bytes apart in the source's CUDA context.
+    /// Rows `pitch` bytes apart in the source's CUDA context.
     CudaBuffer {
         buffer: Arc<DeviceBuffer>,
         pitch: u32,
+        format: Format,
     },
     /// On the source's Direct3D 9Ex device.
     Direct3D9 {
@@ -76,7 +77,7 @@ pub(super) enum Surface {
     },
 }
 
-/// How a [`Surface::Direct3D9`] holds its picture.
+/// How a [`Surface::Direct3D9`] or a [`Surface::CudaBuffer`] holds its picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Format {
     Bgra,

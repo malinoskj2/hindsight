@@ -10,6 +10,7 @@ use self::{
     settings::{SettingsError, SettingsPage},
     status::{Control, StatusPage},
     theme::{Skin, Surface},
+    trim::{Session, TrimView},
 };
 use crate::{
     APP_NAME,
@@ -17,6 +18,7 @@ use crate::{
     gpu, log,
     service::{Target, Worker},
     sys::{
+        clipboard,
         foreground::{self, ForegroundHook},
         hotkey::{self, Action, RegisterError},
         icon, instance,
@@ -53,6 +55,7 @@ mod startup_error;
 mod status;
 mod text;
 mod theme;
+mod trim;
 mod whats_new;
 
 const ICON_RESOURCE: u16 = icon::resource(Theme::Classic);
@@ -97,6 +100,7 @@ struct Inner {
     settings: SettingsPage,
     logs: LogsPage,
     about: AboutPage,
+    trim: TrimView,
     skin: Skin,
     worker: Worker,
     config: RefCell<Config>,
@@ -110,6 +114,8 @@ struct Inner {
     initial_startup_error: Cell<Option<String>>,
     /// The height the pages have grown by to show their messages.
     extra: Cell<i32>,
+    /// While a clip is trimmed, how much wider and taller the window is than with the tabs.
+    trimming: Cell<Option<(i32, i32)>>,
     updater: Option<Updater>,
     update_state: RefCell<State>,
     installation: Installation,
@@ -129,6 +135,7 @@ impl Main {
         main.status_events();
         main.settings_events();
         main.update_events();
+        main.trim_events();
         main.run(start_hidden)
     }
 
@@ -144,6 +151,7 @@ impl Main {
         let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&main_window, &skin);
         let about = AboutPage::new(&main_window, &skin);
+        let trim = TrimView::new(&main_window, &skin);
         let panes: [&dyn Pane; PANES] = [&status, &clips, &screenshots, &settings, &logs, &about];
         let tab_pages = panes.map(|pane| (pane.title(), pane.page().clone()));
         let tab = gui::Tab::new(
@@ -164,6 +172,7 @@ impl Main {
             settings,
             logs,
             about,
+            trim,
             skin,
             worker,
             config: RefCell::new(config),
@@ -175,6 +184,7 @@ impl Main {
             tray_error: OnceCell::new(),
             initial_startup_error: Cell::new(startup_error),
             extra: Cell::new(0),
+            trimming: Cell::new(None),
             updater: Updater::start()
                 .inspect_err(|error| log::warning(text::updates_unavailable(error)))
                 .ok(),
@@ -373,6 +383,87 @@ impl Main {
             .on_update_action(move |action| this.on_update_action(action));
     }
 
+    fn trim_events(&self) {
+        let this = self.clone();
+        self.0.clips.on_trim(move |clip| this.open_trim(clip));
+
+        let this = self.clone();
+        self.0.trim.on_leave(move || this.close_trim());
+
+        let this = self.clone();
+        self.0.trim.on_saved(move |cut| this.on_trim_saved(cut));
+
+        // Escape pressed on a button of the trim view.
+        let this = self.clone();
+        self.0
+            .main_window
+            .on()
+            .wm_command(co::DLGID::CANCEL, co::BN::CLICKED, move || {
+                if this.0.trimming.get().is_some() {
+                    this.0.trim.back();
+                }
+                Ok(())
+            });
+    }
+
+    /// Hides the tabs and fits the window to the trim view, which shows `clip`.
+    fn open_trim(&self, clip: &Path) {
+        if self.0.trimming.get().is_some() {
+            return;
+        }
+        let Ok(client) = self.0.main_window.hwnd().GetClientRect() else {
+            return;
+        };
+        let session = {
+            let config = self.0.config.borrow();
+            Session {
+                clip: clip.to_owned(),
+                directory: config.video_directory(),
+                recorded: (config.bitrate(), config.frame_rate),
+            }
+        };
+        let delta = (
+            gui::dpi_x(trim::WIDTH) - client.right,
+            gui::dpi_y(trim::HEIGHT) - client.bottom,
+        );
+        for window in self.tab_and_pages() {
+            window.ShowWindow(co::SW::HIDE);
+        }
+        self.0.trimming.set(Some(delta));
+        resize_centred(self.0.main_window.hwnd(), delta);
+        self.0.trim.hwnd().ShowWindow(co::SW::SHOW);
+        self.0.trim.open(session);
+        self.refresh();
+    }
+
+    /// Puts the tabs back as they were before the trim view was opened.
+    fn close_trim(&self) {
+        let Some((width, height)) = self.0.trimming.take() else {
+            return;
+        };
+        self.0.trim.close();
+        self.0.trim.hwnd().ShowWindow(co::SW::HIDE);
+        resize_centred(self.0.main_window.hwnd(), (-width, -height));
+        self.0.tab.hwnd().ShowWindow(co::SW::SHOW);
+        let selected = self.0.tab.items().selected().map(|item| item.index());
+        if let Some(pane) =
+            selected.and_then(|index| self.panes().into_iter().nth(usize::try_from(index).ok()?))
+        {
+            pane.page().hwnd().ShowWindow(co::SW::SHOW);
+        }
+        let _ = self.0.tab.hwnd().SetFocus();
+        self.refresh();
+        self.redraw();
+    }
+
+    fn on_trim_saved(&self, cut: &Path) {
+        if self.0.config.borrow().copy_to_clipboard
+            && let Err(error) = clipboard::copy_file(cut)
+        {
+            log::warning(text::not_copied(cut, error));
+        }
+    }
+
     fn run(&self, start_hidden: bool) -> Result<()> {
         let show = if start_hidden {
             co::SW::HIDE
@@ -444,6 +535,7 @@ impl Main {
             self.refresh();
         } else {
             let _ = self.0.main_window.hwnd().KillTimer(STATUS_TIMER);
+            self.0.trim.pause();
         }
     }
 
@@ -805,7 +897,10 @@ impl Main {
         for window in self.tab_and_pages() {
             resize_width_by(window, delta);
         }
-        resize_width_by(self.0.main_window.hwnd(), delta);
+        match self.0.trimming.get() {
+            Some((width, height)) => self.0.trimming.set(Some((width - delta, height))),
+            None => resize_width_by(self.0.main_window.hwnd(), delta),
+        }
     }
 
     fn on_hotkey_capture(&self, capture: Capture) {
@@ -886,8 +981,10 @@ impl Main {
         self.0.settings.update_devices();
     }
 
+    /// The trim view hides every tab.
     fn tab_in_view(&self, index: u32) -> bool {
-        self.0.main_window.hwnd().IsWindowVisible()
+        self.0.trimming.get().is_none()
+            && self.0.main_window.hwnd().IsWindowVisible()
             && self
                 .0
                 .tab
@@ -906,7 +1003,11 @@ impl Main {
             for pane in self.panes() {
                 pane.grow(delta);
             }
-            resize_height_by(self.0.main_window.hwnd(), delta);
+            // The window takes the tabs' height back when the trim view closes.
+            match self.0.trimming.get() {
+                Some((width, height)) => self.0.trimming.set(Some((width, height - delta))),
+                None => resize_height_by(self.0.main_window.hwnd(), delta),
+            }
         }
         // Moved controls keep stale pixels otherwise.
         self.redraw();
@@ -956,6 +1057,22 @@ fn application_window(width: i32, start_hidden: bool) -> gui::WindowMain {
             | visibility,
         ..layout::window_opts(width, WINDOW_HEIGHT, ICON_RESOURCE)
     })
+}
+
+/// Grows the window by `width` and `height`, keeping it centred where it was across.
+fn resize_centred(window: &w::HWND, (width, height): (i32, i32)) {
+    let Ok(rect) = window.GetWindowRect() else {
+        return;
+    };
+    let _ = window.SetWindowPos(
+        w::HwndPlace::None,
+        w::POINT::with(rect.left - width / 2, rect.top),
+        w::SIZE::with(
+            rect.right - rect.left + width,
+            rect.bottom - rect.top + height,
+        ),
+        co::SWP::NOZORDER | co::SWP::NOACTIVATE,
+    );
 }
 
 fn open(path: &Path) {

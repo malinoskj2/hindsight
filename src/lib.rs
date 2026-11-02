@@ -94,6 +94,14 @@ mod sys;
         reason = "off Windows `run` only refuses, so nothing reaches this module"
     )
 )]
+mod trim;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "off Windows `run` only refuses, so nothing reaches this module"
+    )
+)]
 mod update;
 
 #[cfg(windows)]

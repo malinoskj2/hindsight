@@ -60,7 +60,7 @@ pub(super) fn copy(
         Surface::Direct3D9 { surface, format } => Box::new(
             Direct3D9Copy::start(surface, *format, matrix, width, height).map_err(copy_failed)?,
         ),
-        Surface::CudaBuffer { buffer, pitch } => {
+        Surface::CudaBuffer { buffer, pitch, .. } => {
             Box::new(CudaCopy::start(buffer, *pitch, width, height)?)
         }
     })

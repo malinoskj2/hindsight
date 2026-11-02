@@ -7,15 +7,19 @@ mod cuda_output;
 mod device;
 #[expect(unsafe_code, reason = "loads the NVIDIA driver's libraries")]
 mod ffi;
+#[expect(unsafe_code, reason = "binds NVDEC")]
+mod nvdec;
 mod nvenc;
 mod pacer;
 mod pipeline;
 mod priority;
 mod still;
+mod trim;
 mod vram;
 
 pub(crate) use pipeline::record;
 pub(crate) use still::grab;
+pub(crate) use trim::{Frame, Job, PROGRESS_SCALE, Preview, TrimError, export};
 
 use crate::config::Codec;
 use thiserror::Error;

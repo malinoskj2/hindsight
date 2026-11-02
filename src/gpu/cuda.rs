@@ -332,6 +332,19 @@ impl Driver {
         })
     }
 
+    /// Copies the `into.len()` bytes at the device address `from`, which another API lent.
+    ///
+    /// # Safety
+    /// Those bytes must be device memory of the current context that stays mapped for the call.
+    pub(super) unsafe fn copy_address_to_host(
+        &self,
+        into: &mut [u8],
+        from: u64,
+    ) -> Result<(), CudaError> {
+        // SAFETY: the caller vouches for the device range.
+        unsafe { self.copy_to_host(into, DevicePointer(from)) }
+    }
+
     /// # Safety
     /// The `bytes` bytes starting at `to` and the `bytes` bytes starting at `from` must each lie
     /// within one live allocation, and nothing else may rely on the previous contents of `to`.
@@ -510,6 +523,26 @@ impl DeviceBuffer {
         // SAFETY: both ranges were just checked to lie within their live allocations, and the
         // owner of this buffer decides what its bytes are for.
         unsafe { self.hold.driver.copy_on_device(to, from, length) }
+    }
+
+    /// Copies `length` bytes at the device address `from`, which another API lent, to the start
+    /// of this buffer, queued on the null stream. The buffer's context must be current.
+    ///
+    /// # Safety
+    /// Those bytes must be device memory of the buffer's context that stays mapped until the copy
+    /// completes.
+    pub(super) unsafe fn copy_from_address(
+        &self,
+        from: u64,
+        length: usize,
+    ) -> Result<(), CudaError> {
+        self.check_range(0, length)?;
+        // SAFETY: this buffer's range was just checked, and the caller vouches for the other.
+        unsafe {
+            self.hold
+                .driver
+                .copy_on_device(self.pointer, DevicePointer(from), length)
+        }
     }
 
     fn check_range(&self, offset: usize, length: usize) -> Result<(), CudaError> {
