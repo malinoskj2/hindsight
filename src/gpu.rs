@@ -19,7 +19,7 @@ mod vram;
 
 pub(crate) use pipeline::record;
 pub(crate) use still::grab;
-pub(crate) use trim::{Frame, Job, PROGRESS_SCALE, Preview, TrimError, export};
+pub(crate) use trim::{Frame, Job, PROGRESS_SCALE, Preview, Quality, TrimError, export, share};
 
 use crate::config::Codec;
 use thiserror::Error;

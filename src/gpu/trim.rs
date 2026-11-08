@@ -2,7 +2,7 @@
 //! decoded and encoded afresh with NVENC, its sound copied.
 
 use crate::{
-    config::Codec,
+    config::{Codec, Container},
     gpu::{
         capture::{EncoderDevice, Format, Surface},
         cuda::{ContextHold, CudaError, Driver},
@@ -13,7 +13,8 @@ use crate::{
     },
     log,
     replay::{self, DemuxError, Movie, Packet, SaveError, Stream, read_place},
-    trim::{self, Cut, nv12_to_bgra},
+    share,
+    trim::{self, Cut, Timeline, nv12_to_bgra},
 };
 use std::{
     collections::VecDeque,
@@ -229,13 +230,18 @@ impl Preview {
     }
 }
 
+/// The encoding policy for an export.
+pub(crate) enum Quality {
+    Recorded(u32, u32),
+    Share(u32),
+}
+
 /// A cut to encode and save beside the clips.
 pub(crate) struct Job {
     pub(crate) source: PathBuf,
     pub(crate) cut: Cut,
     pub(crate) directory: PathBuf,
-    /// The bitrate and frame rate the settings record at, which set the cut's bitrate.
-    pub(crate) recorded: (u32, u32),
+    pub(crate) quality: Quality,
 }
 
 /// Encodes the cut and saves it, reporting its progress in thousandths. Returns the saved file.
@@ -255,8 +261,32 @@ pub(crate) fn export(
     let _current = hold
         .make_current()
         .map_err(cuda_failed("make the CUDA context current"))?;
-    let mut decoder = Decoder::open(Arc::clone(&hold), video.stream.codec, None, Output::Device)?;
-    let bitrate = trim::bitrate(job.recorded.0, job.recorded.1, video);
+    let (source, bounds, bitrate, container, sounds) = match job.quality {
+        Quality::Recorded(bitrate, rate) => (
+            video.stream,
+            None,
+            trim::bitrate(bitrate, rate, video),
+            movie.container,
+            &movie.sounds[..],
+        ),
+        Quality::Share(bitrate) => (
+            Stream {
+                codec: Codec::H264,
+                frame_rate: video.stream.frame_rate.min(60),
+                ..video.stream
+            },
+            Some((1920, 1080)),
+            bitrate,
+            Container::Mp4,
+            &movie.sounds[..movie.sounds.len().min(1)],
+        ),
+    };
+    let mut decoder = Decoder::open(
+        Arc::clone(&hold),
+        video.stream.codec,
+        bounds,
+        Output::Device,
+    )?;
     let mut encoding: Option<Encoding> = None;
     let total = range.len();
     for (done, number) in range.enumerate() {
@@ -272,7 +302,7 @@ pub(crate) fn export(
             job.cut,
             &device,
             &hold,
-            video.stream,
+            source,
             bitrate,
         )?;
         progress.store(permille(done + 1, total), Ordering::Relaxed);
@@ -284,19 +314,22 @@ pub(crate) fn export(
         job.cut,
         &device,
         &hold,
-        video.stream,
+        source,
         bitrate,
     )?;
     let (stream, packets) = encoding
         .ok_or(TrimError(TrimFailure::Empty))?
         .finish(&mut decoder)?;
     let mut audio = Vec::new();
-    for sound in &movie.sounds {
+    for sound in sounds {
         if let Some(clip) = job.cut.read_sound(&mut file, sound)? {
             audio.push(clip);
         }
     }
-    replay::save_cut(&job.directory, movie.container, &stream, &packets, &audio)
+    if cancel.load(Ordering::Relaxed) {
+        return Err(TrimError(TrimFailure::Cancelled));
+    }
+    replay::save_cut(&job.directory, container, &stream, &packets, &audio)
         .map_err(|error| TrimError(TrimFailure::Save(error)))
 }
 
@@ -460,4 +493,35 @@ fn collect(codec: Codec, packets: &mut Vec<Arc<Packet>>, encoded: Encoded) {
             data,
         }));
     }
+}
+
+/// Makes a complete, size-checked MP4 for pasting. NVDEC scales on the GPU and NVENC writes
+/// H.264; the first AAC track carries the mix, without the separate editing-only microphone.
+pub(crate) fn share(path: &Path, limit: u64, cancel: &AtomicBool) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+
+    let (movie, _) = Movie::open(path).context("read the saved clip")?;
+    let audio_bytes = movie.sounds.first().map_or(0, |sound| {
+        sound.frames.iter().map(|frame| u64::from(frame.size)).sum()
+    });
+    let cut = Timeline::of(&movie.video).whole();
+    let directory = path
+        .parent()
+        .context("find the clip's folder")?
+        .join("shareable");
+    share::encode_with_limit(
+        limit,
+        audio_bytes,
+        movie.video.duration,
+        cancel,
+        |bitrate| {
+            let job = Job {
+                source: path.to_owned(),
+                cut,
+                directory: directory.clone(),
+                quality: Quality::Share(bitrate),
+            };
+            Ok(export(&job, &AtomicU32::new(0), cancel)?)
+        },
+    )
 }

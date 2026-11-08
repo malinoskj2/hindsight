@@ -16,8 +16,9 @@ use crate::{
     audio::{self, DeviceList, Entry},
     config::{
         self, Backend, Codec, Config, ConfigError, Container, DeviceId, MAX_BITRATE_MBPS,
-        MAX_BUFFER_SECONDS, MAX_FRAME_RATE, MIN_BITRATE_MBPS, MIN_BUFFER_SECONDS, MIN_FRAME_RATE,
-        Memory, Mode, ScreenshotFormat, Theme,
+        MAX_BUFFER_SECONDS, MAX_FRAME_RATE, MAX_SHARE_LIMIT_MB, MIN_BITRATE_MBPS,
+        MIN_BUFFER_SECONDS, MIN_FRAME_RATE, MIN_SHARE_LIMIT_MB, Memory, Mode, ScreenshotFormat,
+        Theme,
     },
     log,
     replay::Source,
@@ -585,6 +586,7 @@ impl SettingsPage {
             close_to_tray: self.0.general.close_to_tray.is_checked(),
             check_for_updates: self.0.general.check_for_updates.is_checked(),
             copy_to_clipboard: self.0.general.copy_to_clipboard.is_checked(),
+            share_limit_mb: required(&self.0.general.share_limit)?,
             container: chosen(&advanced.container, &Container::ALL),
             screenshot_format: chosen(&advanced.screenshot_format, &ScreenshotFormat::ALL),
             more_options: self.0.advanced_open.get(),
@@ -999,6 +1001,9 @@ struct GeneralControls {
     theme_caption: gui::Label,
     start_with_windows: gui::CheckBox,
     copy_to_clipboard: gui::CheckBox,
+    share_limit: gui::Edit,
+    share_limit_spin: gui::UpDown,
+    share_limit_caption: gui::Label,
     close_to_tray: gui::CheckBox,
     check_for_updates: gui::CheckBox,
     error: TintedLabel,
@@ -1037,8 +1042,16 @@ impl GeneralControls {
             text::CLOSE_TO_TRAY,
             INNER_X,
             rows::CLOSE_TO_TRAY,
-            INNER_WIDTH,
+            COLUMN_X - INNER_X,
             config.close_to_tray,
+        );
+        let (share_limit, share_limit_spin, share_limit_caption) = number_field(
+            page,
+            text::SHARE_LIMIT,
+            COLUMN_X,
+            rows::CLOSE_TO_TRAY,
+            (MIN_SHARE_LIMIT_MB, MAX_SHARE_LIMIT_MB),
+            config.share_limit_mb,
         );
         let check_for_updates = check_box(
             page,
@@ -1057,6 +1070,9 @@ impl GeneralControls {
             Box::new(theme_caption.clone()),
             Box::new(start_with_windows.clone()),
             Box::new(copy_to_clipboard.clone()),
+            Box::new(share_limit.clone()),
+            Box::new(share_limit_spin.clone()),
+            Box::new(share_limit_caption.clone()),
             Box::new(close_to_tray.clone()),
             Box::new(check_for_updates.clone()),
             Box::new(error.label().clone()),
@@ -1066,6 +1082,9 @@ impl GeneralControls {
             theme_caption,
             start_with_windows,
             copy_to_clipboard,
+            share_limit,
+            share_limit_spin,
+            share_limit_caption,
             close_to_tray,
             check_for_updates,
             error,
@@ -1073,12 +1092,15 @@ impl GeneralControls {
         }
     }
 
-    fn movables(&self) -> [Movable; 7] {
+    fn movables(&self) -> [Movable; 10] {
         [
             self.theme.clone().into(),
             self.theme_caption.clone().into(),
             self.start_with_windows.clone().into(),
             self.copy_to_clipboard.clone().into(),
+            self.share_limit.clone().into(),
+            self.share_limit_spin.clone().into(),
+            self.share_limit_caption.clone().into(),
             self.close_to_tray.clone().into(),
             self.check_for_updates.clone().into(),
             self.error.label().clone().into(),

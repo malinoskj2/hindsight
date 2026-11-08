@@ -227,7 +227,7 @@ impl State {
             source: session.clip.clone(),
             cut: self.cut?,
             directory: session.directory.clone(),
-            recorded: session.recorded,
+            quality: crate::gpu::Quality::Recorded(session.recorded.0, session.recorded.1),
         })
     }
 }

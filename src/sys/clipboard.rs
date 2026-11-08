@@ -66,6 +66,11 @@ fn file_list(path: &Path) -> Vec<u8> {
         .collect()
 }
 
+/// Changes whenever any application changes the clipboard's contents.
+pub(crate) fn revision() -> u32 {
+    w::HCLIPBOARD::NULL.GetClipboardSequenceNumber()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

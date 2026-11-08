@@ -18,7 +18,6 @@ use crate::{
     gpu, log,
     service::{Target, Worker},
     sys::{
-        clipboard,
         foreground::{self, ForegroundHook},
         hotkey::{self, Action, RegisterError},
         icon, instance,
@@ -387,6 +386,11 @@ impl Main {
         let this = self.clone();
         self.0.clips.on_trim(move |clip| this.open_trim(clip));
 
+        for page in [&self.0.clips, &self.0.screenshots] {
+            let this = self.clone();
+            page.on_copy(move |path, copy| this.0.worker.copy(path, copy));
+        }
+
         let this = self.clone();
         self.0.trim.on_leave(move || this.close_trim());
 
@@ -457,10 +461,8 @@ impl Main {
     }
 
     fn on_trim_saved(&self, cut: &Path) {
-        if self.0.config.borrow().copy_to_clipboard
-            && let Err(error) = clipboard::copy_file(cut)
-        {
-            log::warning(text::not_copied(cut, error));
+        if self.0.config.borrow().copy_to_clipboard {
+            self.0.worker.copy(cut, crate::share::Copy::Shareable);
         }
     }
 

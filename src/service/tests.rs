@@ -165,7 +165,7 @@ fn services(record: Recorder, retry_interval: Duration) -> Services {
         audio: |_, _| None,
         write: replay::save,
         chime: Box::new(|_| {}),
-        copy: Box::new(|_| Ok(())),
+        copy: Box::new(|_, _, _| Ok(())),
         retry_interval,
         clock: Box::new(Instant::now),
     }
@@ -718,7 +718,7 @@ fn spawn_copying(config: Config, refuse: bool) -> (Worker, Copied) {
     let copied = Copied::default();
     let clipboard = Arc::clone(&copied);
     let services = Services {
-        copy: Box::new(move |path| {
+        copy: Box::new(move |path, _, _| {
             anyhow::ensure!(!refuse, "the clipboard is held open by another program");
             clipboard.lock().unwrap().push(path.to_path_buf());
             Ok(())
@@ -765,6 +765,72 @@ fn a_save_the_clipboard_refuses_is_still_saved_without_a_problem() {
     assert!(status.last_clip.unwrap().exists());
     assert!(status.problem.is_none());
     assert!(copied.lock().unwrap().is_empty());
+}
+
+#[test]
+fn manual_copy_uses_the_chosen_version_and_limit_even_with_auto_copy_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sent, requests) = mpsc::channel();
+    let services = Services {
+        copy: Box::new(move |path, copy, limit| {
+            assert!(path.exists(), "a copy must follow the original save");
+            sent.send((path.to_owned(), copy, limit)).unwrap();
+            Ok(())
+        }),
+        ..services(steady, RETRY_INTERVAL)
+    };
+    let config = Config {
+        share_limit_mb: 10,
+        ..config_in(directory.path())
+    };
+    let worker = Worker::spawn_with(services, None, config).unwrap();
+    let path = directory.path().join("clip.mp4");
+    fs::write(&path, b"original").unwrap();
+    for copy in [Copy::Original, Copy::Shareable] {
+        worker.copy(&path, copy);
+        assert_eq!(
+            requests.recv_timeout(Duration::from_secs(3)).unwrap(),
+            (path.clone(), copy, 10)
+        );
+    }
+    assert_eq!(fs::read(path).unwrap(), b"original");
+}
+
+#[test]
+fn automatic_copy_requests_a_shareable_clip_only_after_saving_the_original() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sent, requests) = mpsc::channel();
+    let services = Services {
+        copy: Box::new(move |path, copy, limit| {
+            assert!(path.exists());
+            sent.send((path.to_owned(), copy, limit)).unwrap();
+            Ok(())
+        }),
+        ..services(steady, RETRY_INTERVAL)
+    };
+    let config = Config {
+        copy_to_clipboard: true,
+        share_limit_mb: 10,
+        ..config_in(directory.path())
+    };
+    let worker = Worker::spawn_with(services, None, config).unwrap();
+    wait_for(&worker, |status| status.bytes.session_written > 0);
+    worker.save();
+    let original = wait_for(&worker, |status| status.last_clip.is_some())
+        .last_clip
+        .unwrap();
+    assert_eq!(
+        requests.recv_timeout(Duration::from_secs(3)).unwrap(),
+        (original, Copy::Shareable, 10)
+    );
+    worker.screenshot(PRIMARY);
+    let shot = wait_for(&worker, |status| status.last_screenshot.is_some())
+        .last_screenshot
+        .unwrap();
+    assert_eq!(
+        requests.recv_timeout(Duration::from_secs(3)).unwrap(),
+        (shot, Copy::Original, 10)
+    );
 }
 
 type Heard = Arc<Mutex<Vec<Tone>>>;

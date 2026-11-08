@@ -12,6 +12,7 @@ use crate::{
     log,
     saving::SavedName,
     service::Status,
+    share::Copy,
     sys::{
         callback::Slot,
         com::Apartment,
@@ -97,12 +98,15 @@ impl Media {
 #[derive(Clone)]
 pub(super) struct MediaPage(Rc<Inner>);
 
+type CopyFile = dyn Fn(&Path, Copy);
+
 struct Inner {
     media: Media,
     page: gui::TabPage,
     list: gui::ListView,
     state: RefCell<State>,
     trim: Slot<dyn Fn(&Path)>,
+    copy: Slot<CopyFile>,
 }
 
 impl Pane for MediaPage {
@@ -149,6 +153,7 @@ impl MediaPage {
             list,
             state: RefCell::default(),
             trim: Slot::new(),
+            copy: Slot::new(),
         }));
         page.events();
         page
@@ -167,6 +172,10 @@ impl MediaPage {
     /// Called with the clip chosen to trim.
     pub(super) fn on_trim(&self, handler: impl Fn(&Path) + 'static) {
         self.0.trim.set(Rc::new(handler));
+    }
+
+    pub(super) fn on_copy(&self, handler: impl Fn(&Path, Copy) + 'static) {
+        self.0.copy.set(Rc::new(handler));
     }
 
     /// Rereads the folder when the tab comes into view, the folder changes or a file of the
@@ -242,6 +251,18 @@ impl MediaPage {
             Ok(Some(FileCommand::Trim)) => {
                 if let Some(trim) = self.0.trim.get() {
                     trim(&path);
+                }
+            }
+            Ok(Some(command @ (FileCommand::Copy | FileCommand::CopyShareable))) => {
+                if let Some(copy) = self.0.copy.get() {
+                    copy(
+                        &path,
+                        if command == FileCommand::Copy {
+                            Copy::Original
+                        } else {
+                            Copy::Shareable
+                        },
+                    );
                 }
             }
             Ok(Some(FileCommand::Reveal)) => {
@@ -616,13 +637,22 @@ impl Thumbnails {
 enum FileCommand {
     Open,
     Trim,
+    Copy,
+    CopyShareable,
     Reveal,
     Delete,
 }
 
 impl FileCommand {
     /// In menu order.
-    const ALL: [Self; 4] = [Self::Open, Self::Trim, Self::Reveal, Self::Delete];
+    const ALL: [Self; 6] = [
+        Self::Open,
+        Self::Trim,
+        Self::Copy,
+        Self::CopyShareable,
+        Self::Reveal,
+        Self::Delete,
+    ];
 
     /// The menu command id, counted from 1, because the menu reports no choice as 0.
     fn id(self) -> u16 {
@@ -631,11 +661,16 @@ impl FileCommand {
             Self::Reveal => 2,
             Self::Delete => 3,
             Self::Trim => 4,
+            Self::Copy => 5,
+            Self::CopyShareable => 6,
         }
     }
 
     fn offered(self, media: Media) -> bool {
-        self != Self::Trim || media == Media::Clips
+        match self {
+            Self::Trim | Self::CopyShareable => media == Media::Clips,
+            Self::Open | Self::Copy | Self::Reveal | Self::Delete => true,
+        }
     }
 
     fn from_id(id: i32) -> Option<Self> {
@@ -650,6 +685,8 @@ impl FileCommand {
             Self::Reveal => text::MENU_REVEAL,
             Self::Delete => text::MENU_DELETE,
             Self::Trim => text::MENU_TRIM,
+            Self::Copy => text::MENU_COPY,
+            Self::CopyShareable => text::MENU_COPY_SHAREABLE,
         }
     }
 }
@@ -969,7 +1006,7 @@ mod tests {
             assert_eq!(FileCommand::from_id(command.id().into()), Some(command));
         }
         assert_eq!(FileCommand::from_id(0), None);
-        assert_eq!(FileCommand::from_id(5), None);
+        assert_eq!(FileCommand::from_id(7), None);
         assert_eq!(FileCommand::ALL[0], FileCommand::Open);
         let offered = |media| {
             FileCommand::ALL
@@ -982,6 +1019,8 @@ mod tests {
             [
                 FileCommand::Open,
                 FileCommand::Trim,
+                FileCommand::Copy,
+                FileCommand::CopyShareable,
                 FileCommand::Reveal,
                 FileCommand::Delete
             ]

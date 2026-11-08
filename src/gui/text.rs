@@ -90,6 +90,8 @@ pub(super) const NO_SCREENSHOTS: &str = "No screenshots yet — press the screen
 pub(super) const MENU_OPEN: &str = "&Open";
 pub(super) const MENU_REVEAL: &str = "Show in &Explorer";
 pub(super) const MENU_DELETE: &str = "&Delete";
+pub(super) const MENU_COPY: &str = "&Copy";
+pub(super) const MENU_COPY_SHAREABLE: &str = "Copy &shareable";
 pub(super) const MENU_TRIM: &str = "&Trim";
 
 pub(super) const TRIM_PLAY: &str = "Play";
@@ -126,9 +128,10 @@ pub(super) const DEFAULT_DEVICE: &str = "Default device";
 pub(super) const ADVANCED: &str = "Advanced";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =
-    "Enter whole numbers for the replay length, bitrate and frame rate.";
+    "Enter whole numbers for the replay length, bitrate, frame rate and share limit.";
 pub(super) const THEME: &str = "Theme";
 pub(super) const START_WITH_WINDOWS: &str = "Start with Windows";
+pub(super) const SHARE_LIMIT: &str = "Share limit (MB)";
 pub(super) const COPY_TO_CLIPBOARD: &str = "Copy saves to the clipboard";
 pub(super) const CLOSE_TO_TRAY: &str = "Close to tray";
 pub(super) const CHECK_FOR_UPDATES: &str = "Check for updates";
@@ -313,10 +316,6 @@ pub(super) fn trim_failed_log(source: &Path, reason: &str) -> String {
 
 pub(super) fn trim_unplayable_log(source: &Path, reason: &str) -> String {
     format!("Trim · {} not played ({reason})", file_name(source))
-}
-
-pub(super) fn not_copied(path: &Path, error: impl Display) -> String {
-    format!("Clipboard · {} not copied ({error})", file_name(path))
 }
 
 pub(super) fn caption(title: &str, bytes: u64) -> String {

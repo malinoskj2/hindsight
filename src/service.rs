@@ -6,6 +6,7 @@ use crate::{
     log,
     replay::{self, Held, Live, SaveError, Saved, Snapshot, Stream},
     screenshot::{self, Grab, Grabber, Readback, Reply, ScreenshotError, Still, StillError, Taken},
+    share::{self, Copy},
     storage::{StorageError, Store, Totals},
     sys::{self, sound::Tone},
     update::Version,
@@ -179,7 +180,7 @@ type Audio = fn(&Arc<Live>, Sources) -> Option<audio::Capture>;
 type Writer = fn(&Snapshot, &Path, Container) -> Result<Saved, SaveError>;
 type Chime = Box<dyn Fn(Tone) + Send>;
 /// Puts a saved file on the clipboard.
-type Copier = Box<dyn Fn(&Path) -> Result<()> + Send>;
+type Copier = Box<dyn Fn(&Path, Copy, u32) -> Result<()> + Send>;
 /// The clock the worker uses to schedule retries and save ticks.
 type Clock = Box<dyn Fn() -> Instant + Send>;
 
@@ -192,11 +193,6 @@ const RECORDER: Recorder = |_, _, _, _| anyhow::bail!("capture requires Windows"
 const GRABBER: Grabber = crate::gpu::grab;
 #[cfg(not(windows))]
 const GRABBER: Grabber = |_| Err(StillError::Grab("capture requires Windows".into()));
-
-#[cfg(windows)]
-const COPIER: fn(&Path) -> Result<()> = |path| Ok(sys::clipboard::copy_file(path)?);
-#[cfg(not(windows))]
-const COPIER: fn(&Path) -> Result<()> = |_| anyhow::bail!("the clipboard requires Windows");
 
 /// The services the worker depends on. Tests replace any of them with a stand-in.
 struct Services {
@@ -211,9 +207,10 @@ struct Services {
 }
 
 impl Services {
-    fn real() -> Self {
+    fn real() -> io::Result<Self> {
+        let clipboard = share::Worker::start()?;
         let sounds = sys::sound::start();
-        Self {
+        Ok(Self {
             record: RECORDER,
             grab: GRABBER,
             audio: audio::start,
@@ -221,10 +218,10 @@ impl Services {
             chime: Box::new(move |tone| {
                 let _ = sounds.send(tone);
             }),
-            copy: Box::new(COPIER),
+            copy: Box::new(move |path, copy, limit| clipboard.request(path, copy, limit)),
             retry_interval: RETRY_INTERVAL,
             clock: Box::new(Instant::now),
-        }
+        })
     }
 }
 
@@ -349,6 +346,7 @@ enum Command {
     Target(Target),
     Save,
     Screenshot(Front),
+    Copy(PathBuf, Copy),
     /// The capture thread's answer to a screenshot request. Without a picture, `monitor` is
     /// grabbed instead.
     Captured {
@@ -376,7 +374,7 @@ impl Worker {
         expect(dead_code, reason = "only the Windows window starts the real worker")
     )]
     pub(crate) fn spawn(store: Store, config: Config) -> io::Result<Self> {
-        Self::spawn_with(Services::real(), Some(store), config)
+        Self::spawn_with(Services::real()?, Some(store), config)
     }
 
     fn spawn_with(services: Services, store: Option<Store>, config: Config) -> io::Result<Self> {
@@ -419,6 +417,10 @@ impl Worker {
 
     pub(crate) fn screenshot(&self, front: Front) {
         self.request(Command::Screenshot(front));
+    }
+
+    pub(crate) fn copy(&self, path: &Path, copy: Copy) {
+        self.request(Command::Copy(path.to_owned(), copy));
     }
 
     pub(crate) fn toggle_pause(&self) {
@@ -673,6 +675,7 @@ impl Machine {
                 Ok(Command::Target(target)) => self.offer(target),
                 Ok(Command::Save) => self.save(),
                 Ok(Command::Screenshot(front)) => self.screenshot(front),
+                Ok(Command::Copy(path, copy)) => self.copy(&path, copy),
                 Ok(Command::Captured { taken, monitor }) => self.captured(taken, monitor),
                 Ok(Command::TogglePause) => self.toggle_pause(),
                 Ok(Command::Restart) => self.restart(),
@@ -895,7 +898,7 @@ impl Machine {
         match writing.join.join() {
             Ok(Ok(path)) => {
                 log::info(text::screenshot_saved(&path));
-                self.copy_if_asked(&path);
+                self.copy_if_asked(&path, Copy::Original);
                 self.last_screenshot = Some(path);
                 self.resolve(&[ProblemKind::ScreenshotNotSaved]);
                 (self.services.chime)(Tone::Saved);
@@ -1205,7 +1208,7 @@ impl Machine {
         }
         self.clip_without_sound = saved.sound_error.is_some();
         self.ledger.add_saved(&saved.path);
-        self.copy_if_asked(&saved.path);
+        self.copy_if_asked(&saved.path, Copy::Shareable);
         self.last_clip = Some(saved.path);
         self.resolve(&[ProblemKind::ClipNotSaved]);
         (self.services.chime)(Tone::Saved);
@@ -1213,11 +1216,15 @@ impl Machine {
 
     /// Puts a saved file on the clipboard when the settings ask for it. A failure is only logged,
     /// since the file itself was saved.
-    fn copy_if_asked(&self, path: &Path) {
+    fn copy_if_asked(&self, path: &Path, copy: Copy) {
         if !self.config.copy_to_clipboard {
             return;
         }
-        if let Err(error) = (self.services.copy)(path) {
+        self.copy(path, copy);
+    }
+
+    fn copy(&self, path: &Path, copy: Copy) {
+        if let Err(error) = (self.services.copy)(path, copy, self.config.share_limit_mb) {
             log::warning(text::not_copied(path, format_args!("{error:#}")));
         }
     }

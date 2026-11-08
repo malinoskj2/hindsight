@@ -15,6 +15,8 @@ pub(crate) const MIN_FRAME_RATE: u32 = 24;
 pub(crate) const MAX_FRAME_RATE: u32 = 240;
 pub(crate) const MIN_BITRATE_MBPS: u32 = 5;
 pub(crate) const MAX_BITRATE_MBPS: u32 = 150;
+pub(crate) const MIN_SHARE_LIMIT_MB: u32 = 1;
+pub(crate) const MAX_SHARE_LIMIT_MB: u32 = 10_000;
 const BITS_PER_MEGABIT: u32 = 1_000_000;
 const BITS_PER_BYTE: u64 = 8;
 const CLIP_DIRECTORY: &str = "hindsight";
@@ -374,6 +376,8 @@ pub(crate) struct Config {
     pub(crate) check_for_updates: bool,
     /// Whether each saved clip and screenshot is put on the clipboard as a file, ready to paste.
     pub(crate) copy_to_clipboard: bool,
+    /// Maximum size in decimal MB of a clip copied for sharing. Originals are kept.
+    pub(crate) share_limit_mb: u32,
     pub(crate) container: Container,
     pub(crate) screenshot_format: ScreenshotFormat,
     pub(crate) more_options: bool,
@@ -410,6 +414,7 @@ struct RawConfig {
     close_to_tray: bool,
     check_for_updates: bool,
     copy_to_clipboard: bool,
+    share_limit_mb: u32,
     container: Container,
     screenshot_format: ScreenshotFormat,
     more_options: bool,
@@ -444,6 +449,7 @@ impl Default for RawConfig {
             close_to_tray,
             check_for_updates,
             copy_to_clipboard,
+            share_limit_mb,
             container,
             screenshot_format,
             more_options,
@@ -468,6 +474,7 @@ impl Default for RawConfig {
             close_to_tray,
             check_for_updates,
             copy_to_clipboard,
+            share_limit_mb,
             container,
             screenshot_format,
             more_options,
@@ -500,6 +507,7 @@ impl TryFrom<RawConfig> for Config {
             close_to_tray,
             check_for_updates,
             copy_to_clipboard,
+            share_limit_mb,
             container,
             screenshot_format,
             more_options,
@@ -532,6 +540,7 @@ impl TryFrom<RawConfig> for Config {
             close_to_tray,
             check_for_updates,
             copy_to_clipboard,
+            share_limit_mb,
             container,
             screenshot_format,
             more_options,
@@ -563,6 +572,7 @@ impl Default for Config {
             close_to_tray: true,
             check_for_updates: true,
             copy_to_clipboard: false,
+            share_limit_mb: 25,
             container: Container::Mp4,
             screenshot_format: ScreenshotFormat::Png,
             more_options: false,
@@ -588,6 +598,9 @@ impl Config {
         }
         if !(MIN_BITRATE_MBPS..=MAX_BITRATE_MBPS).contains(&self.bitrate_mbps) {
             return Err(ConfigError::Bitrate);
+        }
+        if !(MIN_SHARE_LIMIT_MB..=MAX_SHARE_LIMIT_MB).contains(&self.share_limit_mb) {
+            return Err(ConfigError::ShareLimit);
         }
         if self.screenshot_hotkey == self.hotkey {
             return Err(ConfigError::SameHotkeys);
@@ -648,6 +661,8 @@ pub(crate) enum ConfigError {
         MAX_BITRATE_MBPS
     )]
     Bitrate,
+    #[error("share limit must be between 1 and 10000 MB")]
+    ShareLimit,
     #[error("the screenshot hotkey must differ from the save hotkey")]
     SameHotkeys,
     #[error("the clip folder must be an absolute path such as D:\\Clips")]
@@ -722,6 +737,25 @@ fn videos_directory() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::assert_matches;
+
+    #[test]
+    fn share_limits_default_for_old_settings_and_round_trip_with_newer_keys() {
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.share_limit_mb, 25);
+        let config: Config =
+            serde_json::from_str(r#"{"share_limit_mb":10,"future_option":true}"#).unwrap();
+        assert_eq!(config.share_limit_mb, 10);
+        assert_eq!(
+            serde_json::from_str::<Config>(&serde_json::to_string(&config).unwrap()).unwrap(),
+            config
+        );
+        for limit in [0, MAX_SHARE_LIMIT_MB + 1] {
+            assert!(
+                serde_json::from_str::<Config>(&format!(r#"{{"share_limit_mb":{limit}}}"#))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn defaults_fill_missing_settings_and_unknown_ones_are_ignored() {

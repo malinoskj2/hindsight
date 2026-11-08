@@ -32,6 +32,14 @@ You need **64-bit Windows 10 version 1903 or newer**, and an **NVIDIA GPU** with
 3. Play. When something happens that you want to keep, press **Alt+F7** (or the hotkey you set) to save what just happened as a clip, or **Alt+F8** to save a screenshot. Clips go into the `videos` folder and screenshots into the `screenshots` folder of the clip folder, `Videos\hindsight` unless you choose another. The Clips and Screenshots tabs list them newest first: click one to open it, or right-click it to show it in Explorer or delete it.
 4. Optional: read [Getting the best performance](docs/performance.md) for what each setting costs and what to choose for your hardware.
 
+Clips copied automatically use **Share limit (MB)** in Settings (25 MB by default). A clip over
+that limit is saved first, then a separate H.264 MP4 is made with NVENC in the clip's
+`shareable` subfolder, at up to 1080p and 60 fps with the main audio mix. The finished file is
+checked against the limit before it goes on the clipboard. Right-click a clip and choose
+**Copy** for the original or **Copy shareable** for the size-limited version. Screenshots are
+copied as saved. If the limit cannot accommodate a clip's sound and duration, the Journal
+explains the failure; increase the limit and try again.
+
 hindsight looks for a newer release when it starts and once a day, and the About tab's **Update** button installs it. Each installer is signed, and hindsight runs only one whose signature it can verify. After an update it shows what is new in that version, and the About tab's **What's new** shows it again. Turn **Check for updates** off in Settings to stop the checks.
 
 ## How it stays light

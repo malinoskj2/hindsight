@@ -73,6 +73,11 @@ mod screenshot;
 mod service;
 #[cfg_attr(
     all(not(windows), not(test)),
+    expect(dead_code, reason = "only Windows copies files for sharing")
+)]
+mod share;
+#[cfg_attr(
+    all(not(windows), not(test)),
     expect(
         dead_code,
         reason = "off Windows `run` only refuses, so nothing reaches this module"
