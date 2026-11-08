@@ -572,7 +572,7 @@ impl Default for Config {
             close_to_tray: true,
             check_for_updates: true,
             copy_to_clipboard: false,
-            share_limit_mb: 25,
+            share_limit_mb: 20,
             container: Container::Mp4,
             screenshot_format: ScreenshotFormat::Png,
             more_options: false,
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn share_limits_default_for_old_settings_and_round_trip_with_newer_keys() {
         let old: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(old.share_limit_mb, 25);
+        assert_eq!(old.share_limit_mb, 20);
         let config: Config =
             serde_json::from_str(r#"{"share_limit_mb":10,"future_option":true}"#).unwrap();
         assert_eq!(config.share_limit_mb, 10);
