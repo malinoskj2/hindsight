@@ -153,7 +153,6 @@ fn a_saved_cut_opens_again_from_its_own_file_beside_the_clips() {
         .unwrap();
         assert_eq!(path.parent(), Some(directory.path()));
         let (movie, mut file) = Movie::open(&path).unwrap();
-        assert_eq!(movie.container, container);
         assert_eq!(movie.video.stream.codec, Codec::Hevc);
         assert_eq!(movie.video.samples.len(), packets.len());
         let first = movie.video.samples[0];

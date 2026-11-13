@@ -105,6 +105,10 @@ pub(super) const TRIM_SET_END: &str = "Set end";
 pub(super) const TRIM_BACK: &str = "Back";
 pub(super) const TRIM_CANCEL: &str = "Cancel";
 pub(super) const TRIM_SAVE: &str = "Save trim";
+pub(super) const TRIM_FORMAT: &str = "Format";
+pub(super) const TRIM_CODEC: &str = "Codec";
+pub(super) const TRIM_BY_BITRATE: &str = "Bitrate (Mbps)";
+pub(super) const TRIM_BY_SIZE: &str = "File size (MB)";
 pub(super) const TRIM_OPENING: &str = "Opening the clip…";
 pub(super) const TRIM_CANCELLED: &str = "The trim was cancelled.";
 pub(super) const TRIM_STOPPED: &str = "the trim stopped unexpectedly";
@@ -289,6 +293,15 @@ pub(super) fn trim_cut(cut: Cut) -> String {
         clip_time(cut.end),
         clip_time(cut.end - cut.start)
     )
+}
+
+pub(super) fn trim_rate_invalid(by_size: bool) -> String {
+    let ((minimum, maximum), what, unit) = if by_size {
+        (crate::trim::Rate::SIZE_RANGE, "a file size", "MB")
+    } else {
+        (crate::trim::Rate::BITRATE_RANGE, "a bitrate", "Mbps")
+    };
+    format!("Enter {what} from {minimum} to {maximum} {unit}.")
 }
 
 pub(super) fn trim_progress(percent: u32) -> String {

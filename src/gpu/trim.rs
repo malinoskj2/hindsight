@@ -13,8 +13,8 @@ use crate::{
     },
     log,
     replay::{self, DemuxError, Movie, Packet, SaveError, Stream, read_place},
-    share,
-    trim::{self, Cut, Timeline, nv12_to_bgra},
+    share::{self, ShareError},
+    trim::{Cut, Output as Encode, Rate, Timeline, nv12_to_bgra},
 };
 use std::{
     collections::VecDeque,
@@ -62,6 +62,12 @@ enum TrimFailure {
     Empty,
     #[error("the trim was cancelled")]
     Cancelled,
+    #[error("the size is too small for this cut's length and sound")]
+    SizeTooSmall,
+    #[error("NVENC could not fit the cut within the size")]
+    TooLarge,
+    #[error("keep the cut within the size")]
+    Size(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("save the cut")]
     Save(#[source] SaveError),
 }
@@ -232,7 +238,9 @@ impl Preview {
 
 /// The encoding policy for an export.
 pub(crate) enum Quality {
-    Recorded(u32, u32),
+    Trim(Encode),
+    /// H.264 in MP4 at this many bits per second, at most 1080p and 60 fps, with the main sound
+    /// alone.
     Share(u32),
 }
 
@@ -244,9 +252,84 @@ pub(crate) struct Job {
     pub(crate) quality: Quality,
 }
 
+/// One encoding of a cut.
+#[derive(Clone, Copy)]
+struct Plan {
+    codec: Codec,
+    container: Container,
+    bitrate: u32,
+    bounds: Option<(u32, u32)>,
+    max_frame_rate: Option<u32>,
+    main_sound_only: bool,
+}
+
+impl Plan {
+    const fn trim(output: Encode, bitrate: u32) -> Self {
+        Self {
+            codec: output.codec,
+            container: output.container,
+            bitrate,
+            bounds: None,
+            max_frame_rate: None,
+            main_sound_only: false,
+        }
+    }
+
+    const fn share(bitrate: u32) -> Self {
+        Self {
+            codec: Codec::H264,
+            container: Container::Mp4,
+            bitrate,
+            bounds: Some((1920, 1080)),
+            max_frame_rate: Some(60),
+            main_sound_only: true,
+        }
+    }
+}
+
 /// Encodes the cut and saves it, reporting its progress in thousandths. Returns the saved file.
+/// A cut held to a size is encoded again at a lower bitrate while it comes out larger.
 pub(crate) fn export(
     job: &Job,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, TrimError> {
+    let output = match job.quality {
+        Quality::Share(bitrate) => return encode(job, Plan::share(bitrate), progress, cancel),
+        Quality::Trim(output) => output,
+    };
+    let megabytes = match output.rate {
+        Rate::Bitrate(mbps) => {
+            let bitrate = mbps.saturating_mul(1_000_000);
+            return encode(job, Plan::trim(output, bitrate), progress, cancel);
+        }
+        Rate::Size(megabytes) => megabytes,
+    };
+    let (movie, _) = Movie::open(&job.source)?;
+    share::encode_with_limit(
+        share::limit_bytes(megabytes),
+        job.cut.sound_bytes(&movie.sounds),
+        job.cut.duration(),
+        cancel,
+        |bitrate| Ok(encode(job, Plan::trim(output, bitrate), progress, cancel)?),
+    )
+    .map_err(|error| {
+        let error = match error.downcast::<TrimError>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        TrimError(match error.downcast_ref::<ShareError>() {
+            Some(ShareError::Budget) => TrimFailure::SizeTooSmall,
+            Some(ShareError::TooLarge) => TrimFailure::TooLarge,
+            Some(ShareError::Cancelled) => TrimFailure::Cancelled,
+            None => TrimFailure::Size(error.into()),
+        })
+    })
+}
+
+fn encode(
+    job: &Job,
+    plan: Plan,
     progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, TrimError> {
@@ -261,26 +344,21 @@ pub(crate) fn export(
     let _current = hold
         .make_current()
         .map_err(cuda_failed("make the CUDA context current"))?;
-    let (source, bounds, bitrate, container, sounds) = match job.quality {
-        Quality::Recorded(bitrate, rate) => (
-            video.stream,
-            None,
-            trim::bitrate(bitrate, rate, video),
-            movie.container,
-            &movie.sounds[..],
-        ),
-        Quality::Share(bitrate) => (
-            Stream {
-                codec: Codec::H264,
-                frame_rate: video.stream.frame_rate.min(60),
-                ..video.stream
-            },
-            Some((1920, 1080)),
-            bitrate,
-            Container::Mp4,
-            &movie.sounds[..movie.sounds.len().min(1)],
-        ),
+    let source = Stream {
+        codec: plan.codec,
+        frame_rate: plan.max_frame_rate.map_or(video.stream.frame_rate, |most| {
+            video.stream.frame_rate.min(most)
+        }),
+        ..video.stream
     };
+    let (bounds, bitrate) = (plan.bounds, plan.bitrate);
+    let container = plan.container;
+    let sounds = if plan.main_sound_only {
+        &movie.sounds[..movie.sounds.len().min(1)]
+    } else {
+        &movie.sounds[..]
+    };
+    progress.store(0, Ordering::Relaxed);
     let mut decoder = Decoder::open(
         Arc::clone(&hold),
         video.stream.codec,

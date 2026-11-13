@@ -78,7 +78,6 @@ pub(crate) struct Sound {
 }
 
 pub(crate) struct Movie {
-    pub(crate) container: Container,
     pub(crate) video: Video,
     pub(crate) sounds: Vec<Sound>,
 }
@@ -106,11 +105,7 @@ impl Movie {
         if video.samples.is_empty() {
             return Err(DemuxError::Empty);
         }
-        Ok(Self {
-            container,
-            video,
-            sounds,
-        })
+        Ok(Self { video, sounds })
     }
 }
 

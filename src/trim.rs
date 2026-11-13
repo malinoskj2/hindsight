@@ -1,8 +1,9 @@
-//! Trimming a clip: the samples a cut between two times needs, the sound it keeps, the bitrate
-//! it is encoded at, and its pictures converted for display.
+//! Trimming a clip: the samples a cut between two times needs, the sound it keeps, how it is
+//! encoded, and its pictures converted for display.
 
-use crate::replay::{
-    AudioClip, CLOCK_RATE, FRAME_SAMPLES, Matrix, Sound, Video, read_place, samples_of,
+use crate::{
+    config::{Codec, Container, MAX_BITRATE_MBPS, MAX_SHARE_LIMIT_MB, MIN_SHARE_LIMIT_MB},
+    replay::{AudioClip, CLOCK_RATE, FRAME_SAMPLES, Matrix, Sound, Video, read_place, samples_of},
 };
 use std::{
     io::{self, Read, Seek},
@@ -10,8 +11,6 @@ use std::{
     sync::Arc,
 };
 
-/// Bits per second below which a cut is never encoded.
-const MIN_BITRATE: u64 = 2_000_000;
 /// The fixed point the colour conversion computes in.
 const FRACTION_BITS: u32 = 16;
 const LIMITED_BLACK: i32 = 16;
@@ -71,6 +70,26 @@ impl Cut {
             usize::try_from(first).ok()?..usize::try_from(last).ok()?,
             u32::try_from(lead).ok()?,
         ))
+    }
+
+    pub(crate) const fn duration(&self) -> i64 {
+        self.end - self.start
+    }
+
+    /// The bytes of the sound's frames the cut keeps, in each of `sounds`.
+    pub(crate) fn sound_bytes(&self, sounds: &[Sound]) -> u64 {
+        sounds
+            .iter()
+            .filter_map(|sound| {
+                let (frames, _) = self.sound(sound)?;
+                Some(
+                    sound.frames[frames]
+                        .iter()
+                        .map(|place| u64::from(place.size))
+                        .sum::<u64>(),
+                )
+            })
+            .sum()
     }
 
     /// Reads the sound's frames in the cut, ready for the writers.
@@ -166,29 +185,41 @@ impl Timeline {
     }
 }
 
-/// The bits per second a cut is encoded at: the bits per frame the settings record at, at the
-/// clip's frame rate, but no more than the clip itself spends, since more cannot add back what
-/// its encoding lost.
-pub(crate) fn bitrate(recorded: u32, recorded_frame_rate: u32, video: &Video) -> u32 {
-    let per_frame = u64::from(recorded) / u64::from(recorded_frame_rate.max(1));
-    let wanted = per_frame * u64::from(video.stream.frame_rate);
-    let spent = video_bitrate(video);
-    let chosen = if spent > 0 { wanted.min(spent) } else { wanted };
-    u32::try_from(chosen.max(MIN_BITRATE)).unwrap_or(u32::MAX)
+/// How a cut is encoded and saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    all(not(windows), test),
+    expect(dead_code, reason = "only the Windows trim view and encoder use it")
+)]
+pub(crate) struct Output {
+    pub(crate) container: Container,
+    /// Encoded in H.264 instead when this GPU's NVENC has no encoder for it.
+    pub(crate) codec: Codec,
+    pub(crate) rate: Rate,
 }
 
-fn video_bitrate(video: &Video) -> u64 {
-    let bytes: u64 = video
-        .samples
-        .iter()
-        .map(|sample| u64::from(sample.place.size))
-        .sum();
-    let duration = u64::try_from(video.duration).unwrap_or(0);
-    if duration == 0 {
-        return 0;
+/// What the encoder spends on the cut's video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rate {
+    /// Megabits per second.
+    Bitrate(u32),
+    /// The largest the saved file may be, in decimal megabytes, sound included.
+    Size(u32),
+}
+
+impl Rate {
+    pub(crate) const BITRATE_RANGE: (u32, u32) = (1, MAX_BITRATE_MBPS);
+    pub(crate) const SIZE_RANGE: (u32, u32) = (MIN_SHARE_LIMIT_MB, MAX_SHARE_LIMIT_MB);
+
+    /// The rate, if `value` is within its kind's range.
+    pub(crate) fn new(by_size: bool, value: u32) -> Option<Self> {
+        let ((minimum, maximum), rate) = if by_size {
+            (Self::SIZE_RANGE, Self::Size(value))
+        } else {
+            (Self::BITRATE_RANGE, Self::Bitrate(value))
+        };
+        (minimum..=maximum).contains(&value).then_some(rate)
     }
-    let bits = u128::from(bytes) * 8 * u128::from(CLOCK_RATE.unsigned_abs());
-    u64::try_from(bits / u128::from(duration)).unwrap_or(u64::MAX)
 }
 
 /// The largest size of `size`'s shape within `bounds`, but no larger than `size`, in even

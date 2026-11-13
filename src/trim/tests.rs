@@ -106,23 +106,30 @@ fn the_sound_read_for_a_cut_is_its_frames_in_order() {
 }
 
 #[test]
-fn the_bitrate_follows_the_settings_per_frame_but_never_exceeds_the_clip() {
-    // 50 fps of 100 kB frames is 40 Mbps.
-    let samples = (0..10)
-        .map(|number| VideoSample {
-            place: Place {
-                offset: 0,
-                size: 100_000,
-            },
-            time: number * SECOND / 50,
-            keyframe: number == 0,
-        })
-        .collect();
-    let video = Video::of_samples(50, samples);
-    assert_eq!(bitrate(30_000_000, 60, &video), 25_000_000);
-    assert_eq!(bitrate(30_000_000, 30, &video), 40_000_000);
-    assert_eq!(bitrate(100_000_000, 50, &video), 40_000_000);
-    assert_eq!(bitrate(1_000_000, 60, &video), 2_000_000);
+fn the_size_a_cut_s_sound_takes_counts_the_frames_it_keeps() {
+    let frames = |count: i64| count * i64::from(FRAME_SAMPLES) * SECOND / 48_000;
+    let cut = Cut {
+        start: frames(4) + 100,
+        end: frames(6) - 100,
+    };
+    // Frames 3 to 5 of each: the one before the cut and the two in it.
+    assert_eq!(cut.sound_bytes(&[sound(0, 10), sound(0, 10)]), 6);
+    assert_eq!(cut.sound_bytes(&[sound(0, 4)]), 1);
+    assert_eq!(cut.sound_bytes(&[]), 0);
+    assert_eq!(cut.duration(), frames(6) - frames(4) - 200);
+}
+
+#[test]
+fn a_rate_is_kept_only_within_its_kind_s_range() {
+    assert_eq!(Rate::new(false, 50), Some(Rate::Bitrate(50)));
+    assert_eq!(Rate::new(true, 20), Some(Rate::Size(20)));
+    assert_eq!(Rate::new(false, 0), None);
+    assert_eq!(Rate::new(false, Rate::BITRATE_RANGE.1 + 1), None);
+    assert_eq!(
+        Rate::new(true, Rate::SIZE_RANGE.1),
+        Some(Rate::Size(Rate::SIZE_RANGE.1))
+    );
+    assert_eq!(Rate::new(true, 0), None);
 }
 
 fn pixel(y: u8, u: u8, v: u8, matrix: Matrix) -> [u8; 4] {

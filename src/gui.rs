@@ -150,7 +150,7 @@ impl Main {
         let settings = SettingsPage::new(&main_window, &config, &codecs, start_with_windows, &skin);
         let logs = LogsPage::new(&main_window, &skin);
         let about = AboutPage::new(&main_window, &skin);
-        let trim = TrimView::new(&main_window, &skin);
+        let trim = TrimView::new(&main_window, &skin, &codecs);
         let panes: [&dyn Pane; PANES] = [&status, &clips, &screenshots, &settings, &logs, &about];
         let tab_pages = panes.map(|pane| (pane.title(), pane.page().clone()));
         let tab = gui::Tab::new(
@@ -423,7 +423,7 @@ impl Main {
             Session {
                 clip: clip.to_owned(),
                 directory: config.video_directory(),
-                recorded: (config.bitrate(), config.frame_rate),
+                rates: (config.bitrate_mbps, config.share_limit_mb),
             }
         };
         let delta = (

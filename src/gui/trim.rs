@@ -10,14 +10,15 @@ use super::{
     theme::{Skin, Surface, Tone},
 };
 use crate::{
-    gpu::{self, Frame, Job},
+    config::{Codec, Container},
+    gpu::{self, Frame, Job, Quality},
     log,
     replay::CLOCK_RATE,
     sys::{callback::Slot, thread as sys_thread},
-    trim::{Cut, Timeline},
+    trim::{Cut, Output, Rate, Timeline},
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     iter,
     path::{Path, PathBuf},
     rc::Rc,
@@ -39,7 +40,8 @@ pub(super) const WIDTH: i32 = MARGIN + SCREEN_WIDTH + MARGIN;
 const SCRUBBER_Y: i32 = MARGIN + SCREEN_HEIGHT + 8;
 const SCRUBBER_HEIGHT: i32 = 32;
 const CONTROLS_Y: i32 = SCRUBBER_Y + SCRUBBER_HEIGHT + 8;
-const ACTIONS_Y: i32 = CONTROLS_Y + BUTTON_HEIGHT + 8;
+const OPTIONS_Y: i32 = CONTROLS_Y + BUTTON_HEIGHT + 8;
+const ACTIONS_Y: i32 = OPTIONS_Y + BUTTON_HEIGHT + 8;
 pub(super) const HEIGHT: i32 = ACTIONS_Y + BUTTON_HEIGHT + MARGIN;
 const PLAY_WIDTH: i32 = 80;
 const ACTION_WIDTH: i32 = 96;
@@ -49,6 +51,19 @@ const LEFT_X: i32 = RIGHT_X - GAP - ACTION_WIDTH;
 /// Centres a line of text on a button's row.
 const TEXT_DROP: i32 = (BUTTON_HEIGHT - LINE) / 2;
 const TIME_X: i32 = MARGIN + PLAY_WIDTH + 2 * GAP;
+const FORMAT_CAPTION_WIDTH: i32 = 44;
+const FORMAT_X: i32 = MARGIN + FORMAT_CAPTION_WIDTH;
+const FORMAT_WIDTH: i32 = 64;
+const CODEC_CAPTION_X: i32 = FORMAT_X + FORMAT_WIDTH + 2 * GAP;
+const CODEC_CAPTION_WIDTH: i32 = 40;
+const CODEC_X: i32 = CODEC_CAPTION_X + CODEC_CAPTION_WIDTH;
+const CODEC_WIDTH: i32 = 72;
+const RATE_KIND_X: i32 = CODEC_X + CODEC_WIDTH + 2 * GAP;
+const RATE_KIND_WIDTH: i32 = 116;
+const RATE_X: i32 = RATE_KIND_X + RATE_KIND_WIDTH + GAP;
+const RATE_WIDTH: i32 = 72;
+/// The rate kinds in the order of their list's items: the bitrate, then the size.
+const RATE_KINDS: [&str; 2] = [text::TRIM_BY_BITRATE, text::TRIM_BY_SIZE];
 const EXPORT_TIMER: usize = 1;
 const EXPORT_POLL_MS: u32 = 100;
 
@@ -58,8 +73,9 @@ type Action = fn(&TrimView);
 pub(super) struct Session {
     pub(super) clip: PathBuf,
     pub(super) directory: PathBuf,
-    /// The bitrate and frame rate the settings record at.
-    pub(super) recorded: (u32, u32),
+    /// The bitrate and the size the encoding options start at: the bitrate the settings record
+    /// at and their share limit, in Mbps and MB.
+    pub(super) rates: (u32, u32),
 }
 
 /// The main window's face while a clip is trimmed: the clip playing, its timeline with the cut
@@ -79,6 +95,7 @@ struct Inner {
     message: TintedLabel,
     back: gui::Button,
     save: gui::Button,
+    options: Options,
     state: RefCell<State>,
     leave: Slot<dyn Fn()>,
     saved: Slot<dyn Fn(&Path)>,
@@ -91,6 +108,188 @@ impl Painted for Inner {
 
     fn tinted(&self) -> impl Iterator<Item = &TintedLabel> {
         iter::once(&self.message)
+    }
+}
+
+/// How cuts are encoded. The choices last from one trim to the next while the app runs.
+struct Options {
+    container: gui::ComboBox,
+    codec: gui::ComboBox,
+    /// The codecs offered, in the order of the codec list's items.
+    codecs: Vec<Codec>,
+    rate_kind: gui::ComboBox,
+    rate: gui::Edit,
+    rate_spin: gui::UpDown,
+    _captions: [gui::Label; 2],
+    /// The bitrate and the size, in Mbps and MB, as last shown. The field may since hold another
+    /// value for the kind it shows.
+    rates: Cell<Option<(u32, u32)>>,
+}
+
+impl Options {
+    fn new(control: &gui::WindowControl, codecs: &[Codec]) -> Self {
+        let codecs = if codecs.is_empty() {
+            Codec::ALL.to_vec()
+        } else {
+            codecs.to_vec()
+        };
+        let combo = |x: i32, width: i32, items: &[&str], selected: usize| {
+            gui::ComboBox::new(
+                control,
+                gui::ComboBoxOpts {
+                    position: gui::dpi(x, OPTIONS_Y),
+                    width: gui::dpi_x(width),
+                    items,
+                    selected_item: u32::try_from(selected).ok(),
+                    ..Default::default()
+                },
+            )
+        };
+        let caption = |caption: &str, x: i32, width: i32| {
+            layout::label(control, caption, x, OPTIONS_Y + TEXT_DROP, width, 1)
+        };
+        let container = combo(
+            FORMAT_X,
+            FORMAT_WIDTH,
+            &Container::ALL.map(Container::name),
+            0,
+        );
+        let codec = combo(
+            CODEC_X,
+            CODEC_WIDTH,
+            &codecs.iter().map(|codec| codec.name()).collect::<Vec<_>>(),
+            codecs
+                .iter()
+                .position(|&codec| codec == Codec::H264)
+                .unwrap_or(0),
+        );
+        let rate_kind = combo(RATE_KIND_X, RATE_KIND_WIDTH, &RATE_KINDS, 0);
+        let rate = gui::Edit::new(
+            control,
+            gui::EditOpts {
+                position: gui::dpi(RATE_X, OPTIONS_Y + 1),
+                width: gui::dpi_x(RATE_WIDTH),
+                control_style: co::ES::NUMBER | co::ES::AUTOHSCROLL | co::ES::NOHIDESEL,
+                ..Default::default()
+            },
+        );
+        let (minimum, maximum) = Rate::BITRATE_RANGE;
+        let rate_spin = gui::UpDown::new(
+            control,
+            gui::UpDownOpts {
+                range: (
+                    layout::saturating_i32(minimum),
+                    layout::saturating_i32(maximum),
+                ),
+                // No thousands separators, because the field is parsed back as a plain number.
+                control_style: co::UDS::AUTOBUDDY
+                    | co::UDS::SETBUDDYINT
+                    | co::UDS::ALIGNRIGHT
+                    | co::UDS::ARROWKEYS
+                    | co::UDS::HOTTRACK
+                    | co::UDS::NOTHOUSANDS,
+                ..Default::default()
+            },
+        );
+        Self {
+            container,
+            codec,
+            codecs,
+            rate_kind,
+            rate,
+            rate_spin,
+            _captions: [
+                caption(text::TRIM_FORMAT, MARGIN, FORMAT_CAPTION_WIDTH),
+                caption(text::TRIM_CODEC, CODEC_CAPTION_X, CODEC_CAPTION_WIDTH),
+            ],
+            rates: Cell::new(None),
+        }
+    }
+
+    fn by_size(&self) -> bool {
+        self.rate_kind.items().selected_index() == Some(1)
+    }
+
+    fn typed_rate(&self) -> Option<u32> {
+        self.rate.text().ok()?.trim().parse().ok()
+    }
+
+    /// Fills the rate fields with the session's starting values, the first time a clip is opened.
+    fn prime(&self, (bitrate, size): (u32, u32)) {
+        if self.rates.get().is_none() {
+            self.rates.set(Some((bitrate, size)));
+            self.show_rate();
+        }
+    }
+
+    /// Keeps the value the field held for the kind it showed, and shows the other kind's.
+    fn switch_rate(&self) {
+        let Some((mut bitrate, mut size)) = self.rates.get() else {
+            return;
+        };
+        if let Some(typed) = self.typed_rate() {
+            if self.by_size() {
+                bitrate = typed;
+            } else {
+                size = typed;
+            }
+        }
+        self.rates.set(Some((bitrate, size)));
+        self.show_rate();
+    }
+
+    fn show_rate(&self) {
+        let Some((bitrate, size)) = self.rates.get() else {
+            return;
+        };
+        let ((minimum, maximum), value) = if self.by_size() {
+            (Rate::SIZE_RANGE, size)
+        } else {
+            (Rate::BITRATE_RANGE, bitrate)
+        };
+        self.rate_spin.set_range(
+            layout::saturating_i32(minimum),
+            layout::saturating_i32(maximum),
+        );
+        layout::set_text(&self.rate, &value.to_string());
+    }
+
+    /// How a cut is to be encoded, or why the rate typed cannot be used.
+    fn output(&self) -> Result<Output, String> {
+        let by_size = self.by_size();
+        let rate = self
+            .typed_rate()
+            .and_then(|value| Rate::new(by_size, value))
+            .ok_or_else(|| text::trim_rate_invalid(by_size))?;
+        let selected = |field: &gui::ComboBox| {
+            field
+                .items()
+                .selected_index()
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(0)
+        };
+        Ok(Output {
+            container: Container::ALL
+                .get(selected(&self.container))
+                .copied()
+                .unwrap_or_default(),
+            codec: self
+                .codecs
+                .get(selected(&self.codec))
+                .copied()
+                .unwrap_or(Codec::H264),
+            rate,
+        })
+    }
+
+    fn fields(&self) -> [&w::HWND; 5] {
+        [
+            self.container.hwnd(),
+            self.codec.hwnd(),
+            self.rate_kind.hwnd(),
+            self.rate.hwnd(),
+            self.rate_spin.hwnd(),
+        ]
     }
 }
 
@@ -221,20 +420,20 @@ impl State {
         self.cut = Some(Cut { start, end });
     }
 
-    fn job(&self) -> Option<Job> {
+    fn job(&self, output: Output) -> Option<Job> {
         let session = self.session.as_ref()?;
         Some(Job {
             source: session.clip.clone(),
             cut: self.cut?,
             directory: session.directory.clone(),
-            quality: crate::gpu::Quality::Recorded(session.recorded.0, session.recorded.1),
+            quality: Quality::Trim(output),
         })
     }
 }
 
 impl TrimView {
     /// Creates the view hidden, to be shown over the tabs while a clip is trimmed.
-    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin) -> Self {
+    pub(super) fn new(parent: &(impl GuiParent + 'static), skin: &Skin, codecs: &[Codec]) -> Self {
         let control = gui::WindowControl::new(
             parent,
             gui::WindowControlOpts {
@@ -270,6 +469,7 @@ impl TrimView {
         let play = skinned(text::TRIM_PLAY, MARGIN, CONTROLS_Y, PLAY_WIDTH);
         let set_start = skinned(text::TRIM_SET_START, LEFT_X, CONTROLS_Y, ACTION_WIDTH);
         let set_end = skinned(text::TRIM_SET_END, RIGHT_X, CONTROLS_Y, ACTION_WIDTH);
+        let options = Options::new(&control, codecs);
         let back = skinned(text::TRIM_BACK, LEFT_X, ACTIONS_Y, ACTION_WIDTH);
         let save = skinned(text::TRIM_SAVE, RIGHT_X, ACTIONS_Y, ACTION_WIDTH);
         let time = layout::label(
@@ -304,6 +504,7 @@ impl TrimView {
             message,
             back,
             save,
+            options,
             state: RefCell::default(),
             leave: Slot::new(),
             saved: Slot::new(),
@@ -344,6 +545,7 @@ impl TrimView {
         // SAFETY: the copy is only posted to, and a window that is gone drops the message.
         let view = unsafe { self.hwnd().raw_copy() };
         let player = Player::start(session.clip.clone(), bounds, view);
+        self.0.options.prime(session.rates);
         *self.0.state.borrow_mut() = State {
             session: Some(session),
             player: Some(player),
@@ -439,6 +641,11 @@ impl TrimView {
                 Ok(())
             });
         }
+        let view = self.clone();
+        self.0.options.rate_kind.on().cbn_sel_change(move || {
+            view.0.options.switch_rate();
+            Ok(())
+        });
     }
 
     fn on_gesture(&self, gesture: Gesture) {
@@ -576,12 +783,20 @@ impl TrimView {
     }
 
     fn save(&self) {
+        let output = match self.0.options.output() {
+            Ok(output) => output,
+            Err(reason) => {
+                self.say(Tone::Error, &reason);
+                let _ = self.0.options.rate.hwnd().SetFocus();
+                return;
+            }
+        };
         let job = {
             let mut state = self.0.state.borrow_mut();
             if state.export.is_some() {
                 return;
             }
-            let Some(job) = state.job() else {
+            let Some(job) = state.job(output) else {
                 return;
             };
             if std::mem::take(&mut state.playing)
@@ -717,7 +932,10 @@ impl TrimView {
             self.0.set_start.hwnd(),
             self.0.set_end.hwnd(),
             self.0.save.hwnd(),
-        ] {
+        ]
+        .into_iter()
+        .chain(self.0.options.fields())
+        {
             if window.IsWindowEnabled() != usable {
                 window.EnableWindow(usable);
             }
@@ -852,10 +1070,11 @@ mod tests {
     }
 
     #[test]
-    fn the_view_fits_a_sixteen_by_nine_screen_and_two_rows_of_buttons() {
+    fn the_view_fits_a_sixteen_by_nine_screen_and_three_rows_of_controls() {
         assert_eq!((SCREEN_WIDTH, SCREEN_HEIGHT), (576, 324));
-        assert_eq!((WIDTH, HEIGHT), (592, 444));
+        assert_eq!((WIDTH, HEIGHT), (592, 476));
         const { assert!(TIME_X + 120 <= LEFT_X - GAP) };
+        const { assert!(RATE_X + RATE_WIDTH <= WIDTH - MARGIN) };
     }
 
     #[test]
