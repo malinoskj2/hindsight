@@ -18,7 +18,7 @@ mod timeline;
 mod wasapi;
 
 #[cfg(windows)]
-pub(crate) use choice::{Entry, entries};
+pub(crate) use choice::{Entry, Selected, entries};
 #[cfg(windows)]
 pub(crate) use listing::DeviceList;
 #[cfg(windows)]
@@ -27,6 +27,7 @@ pub(crate) use recorder::{Capture, start};
 use crate::{
     config::{Config, DeviceId},
     replay::{AudioClip, PcmClip, PerSource, Source},
+    service::WindowHandle,
 };
 use std::num::{NonZeroU16, NonZeroU32};
 use thiserror::Error;
@@ -47,6 +48,9 @@ const CHANNELS: NonZeroU16 = NonZeroU16::new(2).unwrap();
 pub(crate) enum DeviceChoice {
     Default,
     Chosen(DeviceId),
+    /// The sound of the app that owns the window, and of the processes it started, from
+    /// whichever device it plays on.
+    App(WindowHandle),
 }
 
 impl DeviceChoice {
@@ -56,7 +60,7 @@ impl DeviceChoice {
     )]
     pub(crate) const fn chosen(&self) -> Option<&DeviceId> {
         match self {
-            Self::Default => None,
+            Self::Default | Self::App(_) => None,
             Self::Chosen(device) => Some(device),
         }
     }
@@ -66,7 +70,9 @@ impl DeviceChoice {
 pub(crate) struct Sources(pub(crate) PerSource<Option<DeviceChoice>>);
 
 impl Sources {
-    pub(crate) fn of(config: &Config) -> Self {
+    /// The sources `config` records while `app` is captured. Without an app, the setting to
+    /// record the app's sound alone records the default output device.
+    pub(crate) fn of(config: &Config, app: Option<WindowHandle>) -> Self {
         let choice = |recorded: bool, device: &Option<DeviceId>| {
             recorded.then(|| {
                 device
@@ -74,8 +80,15 @@ impl Sources {
                     .map_or(DeviceChoice::Default, DeviceChoice::Chosen)
             })
         };
+        let system = match app {
+            Some(window) if config.audio && config.app_sound_only => {
+                Some(DeviceChoice::App(window))
+            }
+            _ if config.app_sound_only => config.audio.then_some(DeviceChoice::Default),
+            _ => choice(config.audio, &config.system_device),
+        };
         Self(PerSource {
-            system: choice(config.audio, &config.system_device),
+            system,
             microphone: choice(config.microphone, &config.microphone_device),
         })
     }
@@ -107,6 +120,9 @@ pub(crate) enum InputState {
     Captured,
     /// From Windows' default, because the device chosen in Settings is missing.
     StandIn,
+    /// From Windows' default output device, sound of every app, because this Windows cannot
+    /// record one app alone.
+    Everything,
     /// Silent, as there is no device.
     NoDevice,
     /// Silent, as Windows' privacy settings deny desktop apps the device.
@@ -161,4 +177,37 @@ pub(crate) fn start(
     _sources: Sources,
 ) -> Option<Capture> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_s_own_sound_is_recorded_only_while_an_app_is_captured() {
+        let window = WindowHandle::new(1).unwrap();
+        let headset = DeviceId::new("headset".to_owned()).unwrap();
+        let mut config = Config {
+            system_device: Some(headset.clone()),
+            ..Config::default()
+        };
+        assert_eq!(
+            Sources::of(&config, Some(window)).0.system,
+            Some(DeviceChoice::Chosen(headset))
+        );
+
+        config.app_sound_only = true;
+        assert_eq!(
+            Sources::of(&config, Some(window)).0.system,
+            Some(DeviceChoice::App(window))
+        );
+        assert_eq!(
+            Sources::of(&config, None).0.system,
+            Some(DeviceChoice::Default)
+        );
+
+        config.audio = false;
+        assert_eq!(Sources::of(&config, Some(window)).0.system, None);
+        assert!(!Sources::of(&config, Some(window)).any());
+    }
 }

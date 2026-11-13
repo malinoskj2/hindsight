@@ -2,17 +2,17 @@
 //! shared clock and passes it to the buffer as 16-bit PCM. Gaps are left for a save to fill.
 
 use super::{
-    InputState, InputStates, SAMPLE_RATE, Sources, aac,
+    DeviceChoice, InputState, InputStates, SAMPLE_RATE, Sources, aac,
     choice::Picked,
     pcm::{Channels, Layout},
     timeline::{Frames, Ticks, Timeline},
-    wasapi::{self, Devices, OpenError, Packet, Signal, Wake, Watch},
+    wasapi::{self, Devices, OpenError, PROCESS_LOOPBACK_BUILD, Packet, Pick, Signal, Wake, Watch},
 };
 use crate::{
     config::DeviceId,
     log,
     replay::{AudioFormat, CLOCK_RATE, Live, PerSource, Source, SourceFormat},
-    sys::{self, clock, com::Apartment},
+    sys::{self, clock, com::Apartment, foreground},
 };
 use std::{
     any::Any,
@@ -201,7 +201,7 @@ impl<'a> Pipeline<'a> {
             .recorded()
             .map(|(source, device)| Input {
                 track: Track::new(live, source, Ticks(anchor)),
-                device: Device::new(source, device.chosen().cloned()),
+                device: Device::new(source, device.clone()),
             })
             .collect();
         Some(Self {
@@ -255,7 +255,7 @@ impl Input<'_> {
 
 struct Device {
     source: Source,
-    choice: Option<DeviceId>,
+    choice: DeviceChoice,
     state: DeviceState,
     /// When to next check the devices or try to open one. `None` means now.
     due: Option<Instant>,
@@ -273,7 +273,7 @@ enum DeviceState {
 }
 
 impl Device {
-    const fn new(source: Source, choice: Option<DeviceId>) -> Self {
+    const fn new(source: Source, choice: DeviceChoice) -> Self {
         Self {
             source,
             choice,
@@ -287,8 +287,12 @@ impl Device {
 
     fn state(&self) -> InputState {
         match &self.state {
-            DeviceState::Open(stream) if stream.picked() == Picked::StandIn => InputState::StandIn,
-            DeviceState::Open(_) | DeviceState::Closed { failed: None, .. } => InputState::Captured,
+            DeviceState::Open(stream) => match stream.picked() {
+                Picked::StandIn => InputState::StandIn,
+                Picked::Everything => InputState::Everything,
+                Picked::Default | Picked::Chosen => InputState::Captured,
+            },
+            DeviceState::Closed { failed: None, .. } => InputState::Captured,
             DeviceState::Closed {
                 failed: Some(silent),
                 ..
@@ -335,7 +339,13 @@ impl Device {
             self.open(devices, now);
             return;
         };
-        let Ok(pick) = devices.pick(self.source, self.choice.as_ref()) else {
+        let followed = match (&self.choice, stream.picked()) {
+            // A capture of the app's sound follows the app from device to device by itself.
+            (DeviceChoice::App(_), Picked::Chosen) => None,
+            (DeviceChoice::App(_), _) => Some(None),
+            (choice, _) => Some(choice.chosen()),
+        };
+        let Some(Ok(pick)) = followed.map(|choice| self.pick(devices, choice)) else {
             self.due = Some(now + DEVICE_CHECK_INTERVAL);
             return;
         };
@@ -358,10 +368,33 @@ impl Device {
         if let DeviceState::Open(_) = self.state {
             return;
         }
-        let opened = devices
-            .pick(self.source, self.choice.as_ref())
-            .and_then(|pick| pick.open(self.source));
+        let opened = self.connect(devices);
         self.opened(opened, now);
+    }
+
+    fn connect(&self, devices: &Devices) -> Result<wasapi::Stream, OpenError> {
+        let DeviceChoice::App(window) = self.choice else {
+            return self
+                .pick(devices, self.choice.chosen())
+                .and_then(|pick| pick.open(self.source));
+        };
+        if !app_capture_supported() {
+            return self
+                .pick(devices, None)
+                .and_then(|pick| pick.open(self.source));
+        }
+        let (process, name) = foreground::window_process(window).ok_or(OpenError::AppGone)?;
+        wasapi::open_app(process, name)
+    }
+
+    /// Picks `choice`, or the default when `None`. In place of an app's sound, the device picked
+    /// stands in for it.
+    fn pick(&self, devices: &Devices, choice: Option<&DeviceId>) -> Result<Pick, OpenError> {
+        let pick = devices.pick(self.source, choice)?;
+        Ok(match self.choice {
+            DeviceChoice::App(_) => pick.instead_of_app(),
+            DeviceChoice::Default | DeviceChoice::Chosen(_) => pick,
+        })
     }
 
     fn opened(&mut self, opened: Result<wasapi::Stream, OpenError>, now: Instant) {
@@ -381,6 +414,12 @@ impl Device {
                         "{label} · chosen {device} missing · the default until it returns"
                     ));
                 }
+                if stream.picked() == Picked::Everything && *previous != Some(Picked::Everything) {
+                    log::warning(format!(
+                        "{label} · one app's sound needs Windows 10 version 2004 or newer · \
+                         recording every app's"
+                    ));
+                }
                 self.state = DeviceState::Open(stream);
                 self.due = Some(now + DEVICE_CHECK_INTERVAL);
             }
@@ -390,6 +429,7 @@ impl Device {
                         OpenError::NoDevice => {
                             log::info(format!("{label} · no {device} · silence until one appears"));
                         }
+                        OpenError::AppGone => log::info(format!("{label} · {error} · silence")),
                         OpenError::Windows(_, cause) => log::warning(format!(
                             "{label} · cannot capture ({error}: {cause}) · retrying every second"
                         )),
@@ -430,14 +470,22 @@ fn silent_for(error: &OpenError) -> InputState {
         OpenError::NoDevice => InputState::NoDevice,
         // What Windows returns, at whichever step, while its privacy settings deny the device.
         OpenError::Windows(_, cause) if cause.code() == E_ACCESSDENIED => InputState::Denied,
-        OpenError::Windows(..) => InputState::Unavailable,
+        OpenError::AppGone | OpenError::Windows(..) => InputState::Unavailable,
     }
 }
 
+/// Whether this Windows can capture one app's sound. An unknown build is taken to.
+fn app_capture_supported() -> bool {
+    sys::release::current()
+        .build
+        .is_none_or(|build| build >= PROCESS_LOOPBACK_BUILD)
+}
+
 impl InputState {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Captured,
         Self::StandIn,
+        Self::Everything,
         Self::NoDevice,
         Self::Denied,
         Self::Unavailable,
@@ -584,7 +632,7 @@ mod tests {
         assert_eq!(silent_for(&denied()), InputState::Denied);
         assert_eq!(silent_for(&gone), InputState::Unavailable);
 
-        let mut device = Device::new(Source::Microphone, None);
+        let mut device = Device::new(Source::Microphone, DeviceChoice::Default);
         assert_eq!(device.state(), InputState::Captured, "until it fails");
         device.opened(Err(denied()), Instant::now());
         assert_eq!(device.state(), InputState::Denied);

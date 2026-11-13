@@ -948,7 +948,11 @@ impl Machine {
         let live = Arc::new(Live::new(self.config.buffer_frames()));
         live.on_stream(self.waker());
         let stop = Arc::new(AtomicBool::new(false));
-        let sources = Sources::of(&self.config);
+        let app = match &target {
+            Target::Window { window, .. } => Some(*window),
+            Target::Monitor { .. } => None,
+        };
+        let sources = Sources::of(&self.config, app);
         let audio = sources
             .any()
             .then(|| (self.services.audio)(&live, sources))
@@ -1308,7 +1312,7 @@ impl Machine {
         let session = self
             .session
             .as_ref()
-            .filter(|_| Sources::of(&self.config).any())?;
+            .filter(|_| Sources::of(&self.config, None).any())?;
         Some(match &session.audio {
             Some(capture) if !capture.has_stopped() => Sound::Recording(capture.input_states()),
             _ => Sound::Failed,

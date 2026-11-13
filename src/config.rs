@@ -365,6 +365,8 @@ pub(crate) struct Config {
     /// `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) system_device: Option<DeviceId>,
+    /// Whether system sound is only the full-screen app's own, in place of `system_device`'s.
+    pub(crate) app_sound_only: bool,
     /// `None` for Windows' default as it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) microphone_device: Option<DeviceId>,
@@ -407,6 +409,7 @@ struct RawConfig {
     microphone: bool,
     #[serde(deserialize_with = "device_or_none")]
     system_device: Option<DeviceId>,
+    app_sound_only: bool,
     #[serde(deserialize_with = "device_or_none")]
     microphone_device: Option<DeviceId>,
     cursor: bool,
@@ -443,6 +446,7 @@ impl Default for RawConfig {
             audio,
             microphone,
             system_device,
+            app_sound_only,
             microphone_device,
             cursor,
             buffer_memory,
@@ -468,6 +472,7 @@ impl Default for RawConfig {
             audio,
             microphone,
             system_device,
+            app_sound_only,
             microphone_device,
             cursor,
             buffer_memory,
@@ -501,6 +506,7 @@ impl TryFrom<RawConfig> for Config {
             audio,
             microphone,
             system_device,
+            app_sound_only,
             microphone_device,
             cursor,
             buffer_memory,
@@ -534,6 +540,7 @@ impl TryFrom<RawConfig> for Config {
             audio,
             microphone,
             system_device,
+            app_sound_only,
             microphone_device,
             cursor,
             buffer_memory,
@@ -566,6 +573,7 @@ impl Default for Config {
             audio: true,
             microphone: false,
             system_device: None,
+            app_sound_only: false,
             microphone_device: None,
             cursor: false,
             buffer_memory: Memory::Ram,
@@ -775,6 +783,8 @@ mod tests {
         assert!(!parse(r#"{"audio":false}"#).unwrap().audio);
         assert!(!config.microphone);
         assert!(parse(r#"{"microphone":true}"#).unwrap().microphone);
+        assert!(!config.app_sound_only);
+        assert!(parse(r#"{"app_sound_only":true}"#).unwrap().app_sound_only);
         assert!(!config.cursor);
         assert!(parse(r#"{"cursor":true}"#).unwrap().cursor);
         assert_eq!(config.buffer_memory, Memory::Ram);

@@ -6,6 +6,7 @@ use super::{
     timeline::Ticks,
 };
 use crate::{config::DeviceId, replay::Source};
+use activation::Activated;
 use listener::Listener;
 use std::{ptr, sync::Arc, time::Duration};
 use task_mem::CoTaskMem;
@@ -20,22 +21,28 @@ use windows::{
                 AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                 AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioCaptureClient,
-                IAudioClient, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
-                IMMNotificationClient_Impl, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
+                AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+                AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+                ActivateAudioInterfaceAsync, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole,
+                IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+                IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+                IMMDevice, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
+                MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVE_FORMAT_PCM, WAVEFORMATEX,
                 WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
             },
             MediaFoundation::{MFAudioFormat_Float, MFAudioFormat_PCM},
         },
         System::{
             Com::{
-                CLSCTX_ALL, CoCreateInstance, STGM_READ,
-                StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
+                BLOB, CLSCTX_ALL, CoCreateInstance, STGM_READ,
+                StructuredStorage::{PROPVARIANT, PropVariantClear, PropVariantToStringAlloc},
             },
-            Threading::WaitForMultipleObjects,
+            Threading::{WaitForMultipleObjects, WaitForSingleObject},
+            Variant::VT_BLOB,
         },
     },
-    core::{GUID, HRESULT, HSTRING, PCWSTR, implement},
+    core::{GUID, HRESULT, HSTRING, IUnknown, Interface, PCWSTR, implement},
 };
 use winsafe::{HEVENT, guard::CloseHandleGuard};
 
@@ -45,6 +52,11 @@ const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
 /// 200 ms in 100 ns units. A late read loses nothing.
 const BUFFER_DURATION: i64 = 2_000_000;
+/// How long Windows has to activate a capture of one app's sound, which it does on a thread of
+/// its own.
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Windows 10 version 2004, the first build that captures one process's sound.
+pub(super) const PROCESS_LOOPBACK_BUILD: u32 = 19_041;
 const FLOAT_BITS: u16 = 32;
 
 /// An event handle. It is `Send` through winsafe: a kernel event handle is not tied to the thread
@@ -123,6 +135,8 @@ pub(super) fn wait(
 pub(super) enum OpenError {
     #[error("there is no device")]
     NoDevice,
+    #[error("the app's window is gone")]
+    AppGone,
     #[error("could not {0}")]
     Windows(&'static str, #[source] windows::core::Error),
 }
@@ -159,6 +173,12 @@ impl Pick {
 
     pub(super) const fn picked(&self) -> Picked {
         self.picked
+    }
+
+    /// Marks the device as standing in for one app's sound.
+    pub(super) const fn instead_of_app(mut self) -> Self {
+        self.picked = Picked::Everything;
+        self
     }
 
     pub(super) fn open(self, source: Source) -> Result<Stream, OpenError> {
@@ -264,6 +284,125 @@ impl Devices {
             _registration: registration,
             changed,
         })
+    }
+}
+
+/// Opens a capture of the sound of process `process` and of the processes it started, whichever
+/// device they play on. `name` names it in the log.
+pub(super) fn open_app(process: u32, name: String) -> Result<Stream, OpenError> {
+    let client = activate_app(process)?;
+    // A process capture has no mix format of its own, so the format is asked for and converted to.
+    initialize_as(
+        &client,
+        &WaveFormat::float_stereo(),
+        AUDCLNT_STREAMFLAGS_LOOPBACK
+            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    )?;
+    // SAFETY: the client is initialised, which a capture service requires. The call returns a new
+    // reference.
+    let capture: IAudioCaptureClient =
+        unsafe { client.GetService() }.map_err(failed("get the capture client"))?;
+    // SAFETY: the client is initialised, which starting requires.
+    unsafe { client.Start() }.map_err(failed("start the audio capture"))?;
+    Ok(Stream {
+        client,
+        capture,
+        layout: Layout {
+            sample: Sample::Float,
+            channels: super::CHANNELS.get(),
+        },
+        id: String::new(),
+        name,
+        picked: Picked::Chosen,
+    })
+}
+
+fn activate_app(process: u32) -> Result<IAudioClient, OpenError> {
+    let step = failed("activate the app's sound capture");
+    let params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: process,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    // The variant only points at `params`, so it is never cleared: clearing would free them.
+    let mut variant = PROPVARIANT::default();
+    // SAFETY: the variant is zeroed, so its tagged branch is the one to write the tag into.
+    let inner = unsafe { &mut *variant.Anonymous.Anonymous };
+    inner.vt = VT_BLOB;
+    inner.Anonymous.blob = BLOB {
+        cbSize: u32::try_from(size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>()).unwrap_or(u32::MAX),
+        pBlobData: ptr::from_ref(&params).cast_mut().cast(),
+    };
+    let done = Arc::new(Signal::pulse().map_err(&step)?);
+    let handler: IActivateAudioInterfaceCompletionHandler = Activated(Arc::clone(&done)).into();
+    // SAFETY: the device path is a static string, and `variant` and the `params` it points at
+    // outlive the activation, which is waited for below. Windows copies the parameters before
+    // the call returns.
+    let operation = unsafe {
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&raw const variant),
+            &handler,
+        )
+    }
+    .map_err(&step)?;
+    let milliseconds = u32::try_from(ACTIVATION_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: `done` is an open event, borrowed for the call.
+    if unsafe { WaitForSingleObject(done.handle(), milliseconds) } != WAIT_OBJECT_0 {
+        return Err(step(windows::core::Error::new(
+            E_UNEXPECTED,
+            "Windows did not finish activating it",
+        )));
+    }
+    activated(&operation).map_err(step)
+}
+
+fn activated(
+    operation: &IActivateAudioInterfaceAsyncOperation,
+) -> windows::core::Result<IAudioClient> {
+    let mut result = HRESULT::default();
+    let mut client: Option<IUnknown> = None;
+    // SAFETY: the activation has completed, which reading its result requires; the out-pointers
+    // are to locals.
+    unsafe { operation.GetActivateResult(&raw mut result, &raw mut client) }?;
+    result.ok()?;
+    client
+        .ok_or_else(|| windows::core::Error::new(E_UNEXPECTED, "no audio client"))?
+        .cast()
+}
+
+/// A module of its own so the `implement` macro's glue can be exempted from two pedantic lints.
+mod activation {
+    #![allow(
+        clippy::ref_as_ptr,
+        clippy::inline_always,
+        reason = "the `implement` macro's glue, which this module cannot change"
+    )]
+
+    use super::{
+        Arc, IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+        IActivateAudioInterfaceCompletionHandler_Impl, Signal, implement,
+    };
+
+    /// Sets its signal once Windows has activated the capture. The macro makes it agile, which
+    /// the activation requires, as it is called on a thread of Windows' own.
+    #[implement(IActivateAudioInterfaceCompletionHandler)]
+    pub(super) struct Activated(pub(super) Arc<Signal>);
+
+    impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
+        fn ActivateCompleted(
+            &self,
+            _operation: windows::core::Ref<IActivateAudioInterfaceAsyncOperation>,
+        ) -> windows::core::Result<()> {
+            self.0.set();
+            Ok(())
+        }
     }
 }
 
@@ -631,7 +770,9 @@ impl Stream {
             }?;
             let silent =
                 flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0 || data.is_null();
-            let stamped = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() == 0;
+            // A process capture may leave the stamp at zero, which no real counter reading is.
+            let stamped =
+                flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() == 0 && time != 0;
             let packet = Packet {
                 // SAFETY: the buffer holds `frames` frames of `frame_bytes`, live until released.
                 data: (!silent).then(|| unsafe {

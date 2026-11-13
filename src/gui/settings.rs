@@ -13,7 +13,7 @@ use super::{
     theme::{Skin, Tone},
 };
 use crate::{
-    audio::{self, DeviceList, Entry},
+    audio::{self, DeviceList, Entry, Selected},
     config::{
         self, Backend, Codec, Config, ConfigError, Container, DeviceId, MAX_BITRATE_MBPS,
         MAX_BUFFER_SECONDS, MAX_FRAME_RATE, MAX_SHARE_LIMIT_MB, MIN_BITRATE_MBPS,
@@ -236,7 +236,7 @@ impl SettingsPage {
         };
         let advanced = &self.0.recording.advanced;
         for field in [&advanced.system_device, &advanced.microphone_device] {
-            field.refill(devices, field.chosen().as_ref());
+            field.refill(devices);
         }
     }
 
@@ -579,6 +579,7 @@ impl SettingsPage {
             audio: recording.audio.is_checked(),
             microphone: recording.microphone.is_checked(),
             system_device: advanced.system_device.chosen(),
+            app_sound_only: advanced.system_device.selected() == Some(Entry::App),
             microphone_device: advanced.microphone_device.chosen(),
             cursor: recording.cursor.is_checked(),
             buffer_memory: chosen(&advanced.memory, &Memory::ALL),
@@ -908,7 +909,11 @@ fn device_fields(
             rows::SOUND_DEVICE,
             Source::System,
             devices,
-            config.system_device.as_ref(),
+            if config.app_sound_only {
+                Selected::App
+            } else {
+                selection(config.system_device.as_ref())
+            },
         ),
         DeviceField::new(
             page,
@@ -916,9 +921,13 @@ fn device_fields(
             rows::MICROPHONE_DEVICE,
             Source::Microphone,
             devices,
-            config.microphone_device.as_ref(),
+            selection(config.microphone_device.as_ref()),
         ),
     ]
+}
+
+fn selection(device: Option<&DeviceId>) -> Selected<'_> {
+    device.map_or(Selected::Default, Selected::Device)
 }
 
 struct DeviceField {
@@ -936,7 +945,7 @@ impl DeviceField {
         y: i32,
         source: Source,
         devices: Option<&DeviceList>,
-        chosen: Option<&DeviceId>,
+        chosen: Selected<'_>,
     ) -> Self {
         let (entries, selected) = device_entries(source, devices, chosen);
         let labels: Vec<String> = entries.iter().map(entry_label).collect();
@@ -957,7 +966,12 @@ impl DeviceField {
         }
     }
 
-    fn refill(&self, devices: &DeviceList, selected: Option<&DeviceId>) {
+    fn refill(&self, devices: &DeviceList) {
+        let selected = self.selected();
+        let selected = match &selected {
+            Some(Entry::App) => Selected::App,
+            entry => selection(entry.as_ref().and_then(Entry::device)),
+        };
         let (entries, position) = device_entries(self.source, Some(devices), selected);
         let labels: Vec<String> = entries.iter().map(entry_label).collect();
         let items = self.field.items();
@@ -967,23 +981,27 @@ impl DeviceField {
         *self.entries.borrow_mut() = entries;
     }
 
-    fn chosen(&self) -> Option<DeviceId> {
+    fn selected(&self) -> Option<Entry> {
         let index = usize::try_from(self.field.items().selected_index()?).ok()?;
-        self.entries.borrow().get(index)?.device().cloned()
+        self.entries.borrow().get(index).cloned()
+    }
+
+    fn chosen(&self) -> Option<DeviceId> {
+        self.selected()?.device().cloned()
     }
 }
 
 fn device_entries(
     source: Source,
     devices: Option<&DeviceList>,
-    selected: Option<&DeviceId>,
+    selected: Selected<'_>,
 ) -> (Vec<Entry>, usize) {
     let present = devices.map_or_else(|| Ok(Vec::new()), |devices| devices.endpoints(source));
     let present = present.unwrap_or_else(|error| {
         log::warning(text::devices_not_listed(&error));
         Vec::new()
     });
-    audio::entries(present, selected, |id| {
+    audio::entries(present, source == Source::System, selected, |id| {
         devices.and_then(|devices| devices.name(id))
     })
 }
@@ -991,6 +1009,7 @@ fn device_entries(
 fn entry_label(entry: &Entry) -> String {
     match entry {
         Entry::Default => text::DEFAULT_DEVICE.to_owned(),
+        Entry::App => text::APP_SOUND.to_owned(),
         Entry::Present(endpoint) => endpoint.name.clone(),
         Entry::Absent { name, .. } => text::absent_device(name.as_deref()),
     }

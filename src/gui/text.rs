@@ -28,6 +28,10 @@ pub(super) const fn input_notice(source: Source, state: InputState) -> Option<&'
         (Source::Microphone, InputState::StandIn) => {
             "The chosen microphone is missing; the default is recorded for now."
         }
+        (_, InputState::Everything) => {
+            "Windows 10 before version 2004 cannot record one app alone; every app's sound is \
+             recorded."
+        }
         (Source::System, InputState::NoDevice) => {
             "There is no sound device to record; sound is silent until one appears."
         }
@@ -125,6 +129,7 @@ pub(super) const SCREENSHOT_FORMAT: &str = "Image format";
 pub(super) const SOUND_DEVICE: &str = "Sound from";
 pub(super) const MICROPHONE_DEVICE: &str = "Microphone";
 pub(super) const DEFAULT_DEVICE: &str = "Default device";
+pub(super) const APP_SOUND: &str = "Only the full-screen app's own sound";
 pub(super) const ADVANCED: &str = "Advanced";
 pub(super) const APPLY: &str = "Apply";
 pub(super) const NUMBER_REQUIRED: &str =

@@ -310,6 +310,14 @@ fn is_rotated(monitor: &w::HMONITOR) -> bool {
     unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation != DMDO_DEFAULT }
 }
 
+/// The ID and file name of the process that owns `window`, or `None` once the window is gone.
+pub(crate) fn window_process(window: WindowHandle) -> Option<(u32, String)> {
+    // SAFETY: a window handle is not owned, and a stale one makes the call fail, not misbehave.
+    let window = unsafe { w::HWND::from_ptr(window.get() as *mut c_void) };
+    let (_, process) = window.GetWindowThreadProcessId();
+    (process != ALL_PROCESSES).then(|| (process, process_name(process)))
+}
+
 fn process_name(process: u32) -> String {
     w::HPROCESS::OpenProcess(co::PROCESS::QUERY_LIMITED_INFORMATION, false, process)
         .and_then(|handle| handle.QueryFullProcessImageName(co::PROCESS_NAME::WIN32))

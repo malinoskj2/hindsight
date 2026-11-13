@@ -9,6 +9,7 @@
 - Insert can be a hotkey on its own, as the function keys, Print Screen, Pause and Scroll Lock already could.
 - A new setting, Copy saves to the clipboard, puts each clip and screenshot on the clipboard as it is saved, so Ctrl+V pastes it into Discord, a chat or a folder.
 - Trim a clip: right-click it in the Clips tab and choose Trim. Play or drag through it, set where it starts and ends, and Save trim encodes that part on the GPU as a new clip beside the others, with its sound. The original is kept.
+- Record only the full-screen game's own sound, leaving out Discord, music and the rest of the desktop: under Advanced, set Sound from to Only the full-screen app's own sound. It needs Windows 10 version 2004 or newer; older Windows records all sound as before. With Whole desktop, always, all sound is recorded.
 
 ## 0.2.0
 
