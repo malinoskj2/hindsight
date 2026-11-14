@@ -1,15 +1,15 @@
 //! One owned background worker, with at most one pending copy. A newer request cancels the
 //! current conversion and replaces the pending request, so an old encode cannot win later.
 
-use super::{Copy, ShareError, limit_bytes};
+use super::{Copy, limit_bytes};
 use crate::log;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::{self, JoinHandle},
 };
@@ -164,41 +164,18 @@ fn serve(mailbox: &Mailbox, effects: &Effects) {
                     }
                 }
             }
-            Ok(path) => {
-                if path != request.path {
-                    let _ = fs::remove_file(path);
-                }
-            }
             Err(error) if !cancelled => {
                 log::warning(format!("Share · {} · {error:#}", request.path.display()));
             }
-            Err(_) => {}
+            // A finished shareable copy is kept for the next request, pasted or not.
+            Ok(_) | Err(_) => {}
         }
         state.active = None;
     }
 }
 
 fn prepare(path: &Path, limit: u64, cancel: &AtomicBool) -> Result<PathBuf> {
-    if fs::metadata(path).context("read the clip's size")?.len() <= limit {
-        return Ok(path.to_owned());
-    }
-    anyhow::ensure!(!cancel.load(Ordering::Relaxed), ShareError::Cancelled);
-    log::info(format!(
-        "Share · making a copy of {} within {} MB",
-        path.display(),
-        limit / 1_000_000
-    ));
-    encode(path, limit, cancel)
-}
-
-#[cfg(windows)]
-fn encode(path: &Path, limit: u64, cancel: &AtomicBool) -> Result<PathBuf> {
-    crate::gpu::share(path, limit, cancel).context("make the shareable copy with NVENC")
-}
-
-#[cfg(not(windows))]
-fn encode(_: &Path, _: u64, _: &AtomicBool) -> Result<PathBuf> {
-    anyhow::bail!("NVENC requires Windows")
+    super::prepare(path, limit, &AtomicU32::new(0), cancel)
 }
 
 #[cfg(windows)]
@@ -224,7 +201,7 @@ fn revision() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::ShareError, *};
     use std::{
         sync::{Barrier, mpsc},
         time::Duration,
@@ -242,6 +219,8 @@ mod tests {
 
     #[test]
     fn small_clips_pass_through_and_original_copy_never_encodes() {
+        use std::fs;
+
         let directory = tempfile::tempdir().unwrap();
         let small = directory.path().join("small.mp4");
         fs::write(&small, b"saved").unwrap();
@@ -357,6 +336,8 @@ mod tests {
 
     #[test]
     fn an_external_clipboard_change_during_encoding_is_respected() {
+        use std::fs;
+
         static REVISION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("shareable.mp4");
@@ -396,6 +377,6 @@ mod tests {
             thread::yield_now();
         }
         assert!(copied.try_recv().is_err());
-        assert!(!output.exists());
+        assert!(output.exists(), "kept as the clip's shareable copy");
     }
 }

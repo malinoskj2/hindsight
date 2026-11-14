@@ -1,6 +1,8 @@
 //! The Clips and Screenshots tabs.
 
+use self::sharing::{Copies, Progress};
 use super::{
+    art,
     layout::{self, FILL_HEIGHT, FILL_Y, GROUP_WIDTH, GROUP_X, LINE, saturating_i32},
     modal, open,
     pane::{self, Pane},
@@ -12,7 +14,7 @@ use crate::{
     log,
     saving::SavedName,
     service::Status,
-    share::Copy,
+    share::{self, Copy},
     sys::{
         callback::Slot,
         com::Apartment,
@@ -21,7 +23,7 @@ use crate::{
     },
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs,
@@ -32,6 +34,8 @@ use std::{
     time::{Duration, Instant},
 };
 use winsafe::{self as w, co, gui, prelude::*};
+
+mod sharing;
 
 const THUMB_WIDTH: i32 = 128;
 const THUMB_HEIGHT: i32 = 72;
@@ -44,6 +48,12 @@ const MARK: w::COLORREF = w::COLORREF::from_rgb(0xA6, 0xA6, 0xA6);
 /// How long a refresh waits for the folder listing before leaving it to the next tick. A local
 /// folder answers well within this time, and a slow network folder no longer freezes the window.
 const LISTING_WAIT: Duration = Duration::from_millis(200);
+const COPIES_TIMER: usize = 1;
+const COPIES_POLL_MS: u32 = 250;
+/// Of 255: the white laid over a thumbnail whose shareable copy is being made.
+const WASH_OPACITY: u8 = 128;
+const BAR_HEIGHT: i32 = 4;
+const PROGRESS_TEXT: w::COLORREF = w::COLORREF::from_rgb(0x20, 0x20, 0x20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Media {
@@ -107,6 +117,11 @@ struct Inner {
     state: RefCell<State>,
     trim: Slot<dyn Fn(&Path)>,
     copy: Slot<CopyFile>,
+    copies: RefCell<Copies>,
+    /// The share limit in MB, which decides whether a clip has a shareable copy.
+    share_limit: Cell<u32>,
+    /// The colour of the progress bar on a thumbnail.
+    bar: Cell<w::COLORREF>,
 }
 
 impl Pane for MediaPage {
@@ -154,9 +169,16 @@ impl MediaPage {
             state: RefCell::default(),
             trim: Slot::new(),
             copy: Slot::new(),
+            copies: RefCell::default(),
+            share_limit: Cell::new(config::Config::default().share_limit_mb),
+            bar: Cell::new(skin.timeline_colours().cut),
         }));
         page.events();
         page
+    }
+
+    pub(super) fn set_share_limit(&self, megabytes: u32) {
+        self.0.share_limit.set(megabytes);
     }
 
     pub(super) fn apply_look(&self, skin: &Skin) {
@@ -167,6 +189,7 @@ impl MediaPage {
             )
         });
         self.set_colours(background, text);
+        self.0.bar.set(skin.timeline_colours().cut);
     }
 
     /// Called with the clip chosen to trim.
@@ -220,6 +243,16 @@ impl MediaPage {
             Ok(1)
         });
         let page = self.clone();
+        self.0
+            .list
+            .on()
+            .nm_custom_draw(move |draw| Ok(page.custom_draw(draw)));
+        let page = self.clone();
+        self.0.page.on().wm_timer(COPIES_TIMER, move || {
+            page.collect_copies();
+            Ok(())
+        });
+        let page = self.clone();
         self.0.list.on().lvn_get_empty_markup(move |markup| {
             // The "nothing yet" text is not shown while the folder is still being read.
             if page.0.state.borrow().listings_out > 0 {
@@ -246,7 +279,7 @@ impl MediaPage {
         }
         // TrackPopupMenu pumps messages, so the timer may rebuild the list in the meantime, which
         // is why `path` was resolved first.
-        match self.choose_command() {
+        match self.choose_command(&path) {
             Ok(Some(FileCommand::Open)) => open(&path),
             Ok(Some(FileCommand::Trim)) => {
                 if let Some(trim) = self.0.trim.get() {
@@ -265,6 +298,7 @@ impl MediaPage {
                     );
                 }
             }
+            Ok(Some(FileCommand::GenerateShareable)) => self.make_copy(&path),
             Ok(Some(FileCommand::Reveal)) => {
                 if let Err(error) = shell::reveal(&path) {
                     log::warning(text::reveal_failed(&path, error));
@@ -276,11 +310,18 @@ impl MediaPage {
         }
     }
 
-    fn choose_command(&self) -> w::SysResult<Option<FileCommand>> {
+    fn choose_command(&self, path: &Path) -> w::SysResult<Option<FileCommand>> {
         let mut menu = w::HMENU::CreatePopupMenu()?;
+        let shareable = if self.0.copies.borrow().progress(path).is_some() {
+            Shareable::Making
+        } else if share::existing(path, self.limit()).is_some() {
+            Shareable::Made
+        } else {
+            Shareable::Missing
+        };
         let items: Vec<w::MenuItem> = FileCommand::ALL
             .iter()
-            .filter(|command| command.offered(self.0.media))
+            .filter(|command| command.offered(self.0.media) && command.offered_for(shareable))
             .map(|command| w::MenuItem::Entry {
                 cmd_id: command.id(),
                 text: command.text(),
@@ -303,12 +344,113 @@ impl MediaPage {
         Ok(chosen?.and_then(FileCommand::from_id))
     }
 
+    fn limit(&self) -> u64 {
+        share::limit_bytes(self.0.share_limit.get())
+    }
+
+    fn make_copy(&self, clip: &Path) {
+        self.0.copies.borrow_mut().add(clip, self.limit());
+        let _ = self
+            .0
+            .page
+            .hwnd()
+            .SetTimer(COPIES_TIMER, COPIES_POLL_MS, None);
+        self.redraw_thumbnail(clip);
+    }
+
+    fn collect_copies(&self) {
+        let (ended, busy) = {
+            let mut copies = self.0.copies.borrow_mut();
+            (copies.collect(), copies.is_busy())
+        };
+        if let Some(ended) = ended {
+            match ended.made {
+                Ok(made) => log::info(text::shareable_made(&ended.clip, &made)),
+                Err(error) => log::warning(text::shareable_failed(&ended.clip, &error)),
+            }
+            self.redraw_thumbnail(&ended.clip);
+        }
+        if busy {
+            let making = self
+                .0
+                .state
+                .borrow()
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .filter(|path| self.0.copies.borrow().progress(path).is_some())
+                .collect::<Vec<_>>();
+            for clip in making {
+                self.redraw_thumbnail(&clip);
+            }
+        } else {
+            let _ = self.0.page.hwnd().KillTimer(COPIES_TIMER);
+        }
+    }
+
+    fn redraw_thumbnail(&self, clip: &Path) {
+        let index = self
+            .0
+            .state
+            .borrow()
+            .files
+            .iter()
+            .position(|file| file.path == clip);
+        let Some(index) = index.and_then(|index| u32::try_from(index).ok()) else {
+            return;
+        };
+        if let Ok(icon) = self.0.list.items().get(index).rect(co::LVIR::ICON) {
+            let _ = self.0.list.hwnd().InvalidateRect(Some(&icon), false);
+        }
+    }
+
+    /// Draws the progress of a shareable copy over its clip's thumbnail, after the list drew the
+    /// item.
+    fn custom_draw(&self, draw: &mut w::NMLVCUSTOMDRAW) -> co::CDRF {
+        if !self.0.copies.borrow().is_busy() {
+            return co::CDRF::DODEFAULT;
+        }
+        match draw.mcd.dwDrawStage {
+            co::CDDS::PREPAINT => return co::CDRF::NOTIFYITEMDRAW,
+            co::CDDS::ITEMPREPAINT => return co::CDRF::NOTIFYPOSTPAINT,
+            co::CDDS::ITEMPOSTPAINT => {}
+            _ => return co::CDRF::DODEFAULT,
+        }
+        let progress = {
+            let state = self.0.state.borrow();
+            let copies = self.0.copies.borrow();
+            state
+                .files
+                .get(draw.mcd.dwItemSpec)
+                .and_then(|file| copies.progress(&file.path))
+        };
+        let Some(progress) = progress else {
+            return co::CDRF::DODEFAULT;
+        };
+        let item = u32::try_from(draw.mcd.dwItemSpec).unwrap_or(u32::MAX);
+        if let Ok(icon) = self.0.list.items().get(item).rect(co::LVIR::ICON) {
+            paint_progress(
+                &draw.mcd.hdc,
+                thumbnail_rect(icon),
+                progress,
+                self.0.bar.get(),
+            );
+        }
+        co::CDRF::DODEFAULT
+    }
+
     fn delete(&self, path: &Path) {
         if let Err(error) = modal::run(|| shell::recycle(path, self.0.list.hwnd())) {
             log::warning(text::recycle_failed(path, error));
             return;
         }
         log::info(text::recycled(path));
+        self.0.copies.borrow_mut().cancel(path);
+        if let Some(copy) = share::copy_path(path).filter(|copy| copy.exists())
+            && let Err(error) = fs::remove_file(&copy)
+        {
+            log::warning(text::shareable_not_removed(&copy, error));
+        }
         let folder = {
             let mut state = self.0.state.borrow_mut();
             state.thumbnails.forget(path);
@@ -459,12 +601,8 @@ impl MediaPage {
         let Ok(icon) = self.0.list.items().get(0).rect(co::LVIR::ICON) else {
             return origin;
         };
-        // The rectangle is the padded icon area, and the thumbnail is centred in it.
-        let (width, height) = thumbnail_size();
-        w::POINT::with(
-            icon.left + (icon.right - icon.left - width) / 2,
-            icon.top + (icon.bottom - icon.top - height) / 2,
-        )
+        let thumbnail = thumbnail_rect(icon);
+        w::POINT::with(thumbnail.left, thumbnail.top)
     }
 
     /// The borrow ends before the list is updated, because `LVM_SETITEM` re-enters the window
@@ -639,17 +777,19 @@ enum FileCommand {
     Trim,
     Copy,
     CopyShareable,
+    GenerateShareable,
     Reveal,
     Delete,
 }
 
 impl FileCommand {
     /// In menu order.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Open,
         Self::Trim,
         Self::Copy,
         Self::CopyShareable,
+        Self::GenerateShareable,
         Self::Reveal,
         Self::Delete,
     ];
@@ -663,13 +803,23 @@ impl FileCommand {
             Self::Trim => 4,
             Self::Copy => 5,
             Self::CopyShareable => 6,
+            Self::GenerateShareable => 7,
         }
     }
 
     fn offered(self, media: Media) -> bool {
         match self {
-            Self::Trim | Self::CopyShareable => media == Media::Clips,
+            Self::Trim | Self::CopyShareable | Self::GenerateShareable => media == Media::Clips,
             Self::Open | Self::Copy | Self::Reveal | Self::Delete => true,
+        }
+    }
+
+    /// While its copy is being made, a clip offers neither share command.
+    fn offered_for(self, shareable: Shareable) -> bool {
+        match self {
+            Self::CopyShareable => shareable == Shareable::Made,
+            Self::GenerateShareable => shareable == Shareable::Missing,
+            Self::Open | Self::Trim | Self::Copy | Self::Reveal | Self::Delete => true,
         }
     }
 
@@ -687,6 +837,7 @@ impl FileCommand {
             Self::Trim => text::MENU_TRIM,
             Self::Copy => text::MENU_COPY,
             Self::CopyShareable => text::MENU_COPY_SHAREABLE,
+            Self::GenerateShareable => text::MENU_GENERATE_SHAREABLE,
         }
     }
 }
@@ -809,6 +960,65 @@ fn newest_first(files: &mut [MediaFile]) {
 
 fn thumbnail_size() -> (i32, i32) {
     (gui::dpi_x(THUMB_WIDTH), gui::dpi_y(THUMB_HEIGHT))
+}
+
+/// The thumbnail within an item's icon rectangle, which is the padded icon area with the
+/// thumbnail centred in it.
+fn thumbnail_rect(icon: w::RECT) -> w::RECT {
+    let (width, height) = thumbnail_size();
+    let left = icon.left + (icon.right - icon.left - width) / 2;
+    let top = icon.top + (icon.bottom - icon.top - height) / 2;
+    w::RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// Washes the thumbnail white, fills the bar along its bottom edge as far as the copy has come,
+/// and writes the percentage in the middle.
+fn paint_progress(hdc: &w::HDC, thumbnail: w::RECT, progress: Progress, bar: w::COLORREF) {
+    art::wash(hdc, thumbnail, WASH_OPACITY);
+    let (label, percent) = match progress {
+        Progress::Waiting => (text::SHAREABLE_WAITING.to_owned(), 0),
+        Progress::Percent(percent) => (format!("{percent}%"), percent),
+    };
+    let width = thumbnail.right - thumbnail.left;
+    let filled = w::RECT {
+        left: thumbnail.left,
+        top: thumbnail.bottom - gui::dpi_y(BAR_HEIGHT),
+        right: thumbnail.left + width * saturating_i32(percent) / 100,
+        bottom: thumbnail.bottom,
+    };
+    if filled.right > filled.left
+        && let Ok(brush) = w::HBRUSH::CreateSolidBrush(bar)
+    {
+        let _ = hdc.FillRect(filled, &brush);
+    }
+    let mut middle = thumbnail;
+    let (Ok(mode), Ok(colour)) = (
+        hdc.SetBkMode(co::BKMODE::TRANSPARENT),
+        hdc.SetTextColor(PROGRESS_TEXT),
+    ) else {
+        return;
+    };
+    let _ = hdc.DrawText(
+        &label,
+        &mut middle,
+        co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE | co::DT::NOPREFIX,
+    );
+    let _ = hdc.SetTextColor(colour);
+    let _ = hdc.SetBkMode(mode);
+}
+
+/// Whether a clip has a shareable copy to paste, which decides the menu's share command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shareable {
+    /// The clip fits the share limit itself, or its copy was made and does.
+    Made,
+    Missing,
+    Making,
 }
 
 fn grid_positions(
@@ -1006,7 +1216,7 @@ mod tests {
             assert_eq!(FileCommand::from_id(command.id().into()), Some(command));
         }
         assert_eq!(FileCommand::from_id(0), None);
-        assert_eq!(FileCommand::from_id(7), None);
+        assert_eq!(FileCommand::from_id(8), None);
         assert_eq!(FileCommand::ALL[0], FileCommand::Open);
         let offered = |media| {
             FileCommand::ALL
@@ -1021,11 +1231,26 @@ mod tests {
                 FileCommand::Trim,
                 FileCommand::Copy,
                 FileCommand::CopyShareable,
+                FileCommand::GenerateShareable,
                 FileCommand::Reveal,
                 FileCommand::Delete
             ]
         );
         assert!(!offered(Media::Screenshots).contains(&FileCommand::Trim));
+    }
+
+    #[test]
+    fn a_clip_offers_to_copy_its_shareable_copy_once_made_and_to_make_it_otherwise() {
+        let shared = |shareable| {
+            [FileCommand::CopyShareable, FileCommand::GenerateShareable]
+                .into_iter()
+                .filter(|command| command.offered_for(shareable))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shared(Shareable::Made), [FileCommand::CopyShareable]);
+        assert_eq!(shared(Shareable::Missing), [FileCommand::GenerateShareable]);
+        assert_eq!(shared(Shareable::Making), []);
+        assert!(FileCommand::Copy.offered_for(Shareable::Making));
     }
 
     #[test]

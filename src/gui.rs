@@ -320,7 +320,11 @@ impl Main {
                 }
             }
             Control::OpenFolder => {
-                let folder = self.0.config.borrow().clip_directory();
+                let (folder, share_limit) = {
+                    let config = self.0.config.borrow();
+                    (config.clip_directory(), config.share_limit_mb)
+                };
+                self.0.clips.set_share_limit(share_limit);
                 if let Err(error) = fs::create_dir_all(&folder) {
                     log::warning(text::open_failed(&folder, error));
                     return;
@@ -964,7 +968,11 @@ impl Main {
 
     fn refresh(&self) {
         let status = self.0.worker.status();
-        let folder = self.0.config.borrow().clip_directory();
+        let (folder, share_limit) = {
+            let config = self.0.config.borrow();
+            (config.clip_directory(), config.share_limit_mb)
+        };
+        self.0.clips.set_share_limit(share_limit);
         let hotkey_error = self.hotkey_error();
         let window_notices = [
             hotkey_error.as_deref(),

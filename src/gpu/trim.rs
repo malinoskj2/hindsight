@@ -575,7 +575,12 @@ fn collect(codec: Codec, packets: &mut Vec<Arc<Packet>>, encoded: Encoded) {
 
 /// Makes a complete, size-checked MP4 for pasting. NVDEC scales on the GPU and NVENC writes
 /// H.264; the first AAC track carries the mix, without the separate editing-only microphone.
-pub(crate) fn share(path: &Path, limit: u64, cancel: &AtomicBool) -> anyhow::Result<PathBuf> {
+pub(crate) fn share(
+    path: &Path,
+    limit: u64,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
 
     let (movie, _) = Movie::open(path).context("read the saved clip")?;
@@ -599,7 +604,7 @@ pub(crate) fn share(path: &Path, limit: u64, cancel: &AtomicBool) -> anyhow::Res
                 directory: directory.clone(),
                 quality: Quality::Share(bitrate),
             };
-            Ok(export(&job, &AtomicU32::new(0), cancel)?)
+            Ok(export(&job, progress, cancel)?)
         },
     )
 }

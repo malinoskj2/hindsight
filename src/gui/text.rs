@@ -96,6 +96,8 @@ pub(super) const MENU_REVEAL: &str = "Show in &Explorer";
 pub(super) const MENU_DELETE: &str = "&Delete";
 pub(super) const MENU_COPY: &str = "&Copy";
 pub(super) const MENU_COPY_SHAREABLE: &str = "Copy &shareable";
+pub(super) const MENU_GENERATE_SHAREABLE: &str = "&Generate shareable";
+pub(super) const SHAREABLE_WAITING: &str = "Waiting";
 pub(super) const MENU_TRIM: &str = "&Trim";
 
 pub(super) const TRIM_PLAY: &str = "Play";
@@ -293,6 +295,22 @@ pub(super) fn trim_cut(cut: Cut) -> String {
         clip_time(cut.end),
         clip_time(cut.end - cut.start)
     )
+}
+
+pub(super) fn shareable_made(clip: &Path, made: &Path) -> String {
+    format!(
+        "Share · {} · shareable copy {}",
+        clip.display(),
+        made.display()
+    )
+}
+
+pub(super) fn shareable_failed(clip: &Path, error: &anyhow::Error) -> String {
+    format!("Share · {} · no shareable copy ({error:#})", clip.display())
+}
+
+pub(super) fn shareable_not_removed(copy: &Path, error: impl Display) -> String {
+    format!("Share · {} · not removed ({error})", copy.display())
 }
 
 pub(super) fn trim_rate_invalid(by_size: bool) -> String {

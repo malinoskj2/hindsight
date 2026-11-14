@@ -1,17 +1,80 @@
 //! Preparing a size-limited clipboard copy while keeping the saved original.
 
-use crate::replay::CLOCK_RATE;
+use crate::{log, replay::CLOCK_RATE};
 use anyhow::Context;
 use std::{
     fs,
-    path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use thiserror::Error;
 
 mod worker;
 
 pub(crate) use worker::Worker;
+
+/// The folder beside a clip that holds the shareable copies of the clips in its own folder.
+const FOLDER: &str = "shareable";
+
+/// Where the shareable copy of `clip` is kept: beside it, in [`FOLDER`], under its name.
+pub(crate) fn copy_path(clip: &Path) -> Option<PathBuf> {
+    let stem = clip.file_stem()?;
+    let mut name = stem.to_owned();
+    name.push(".mp4");
+    Some(clip.parent()?.join(FOLDER).join(name))
+}
+
+/// The file to paste for `clip` within `limit` bytes, if there is one already: the clip itself
+/// when it fits, or its shareable copy when that was made and fits.
+pub(crate) fn existing(clip: &Path, limit: u64) -> Option<PathBuf> {
+    let fits =
+        |path: &Path| fs::metadata(path).is_ok_and(|file| file.len() > 0 && file.len() <= limit);
+    if fits(clip) {
+        return Some(clip.to_owned());
+    }
+    copy_path(clip).filter(|copy| fits(copy))
+}
+
+/// Returns the file to paste for `clip` within `limit` bytes, making its shareable copy first
+/// when there is none. `progress` counts each attempt's encoding in thousandths.
+pub(crate) fn prepare(
+    clip: &Path,
+    limit: u64,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> anyhow::Result<PathBuf> {
+    if let Some(existing) = existing(clip, limit) {
+        return Ok(existing);
+    }
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), ShareError::Cancelled);
+    let copy = copy_path(clip).context("name the shareable copy")?;
+    log::info(format!(
+        "Share · making a copy of {} within {} MB",
+        clip.display(),
+        limit / 1_000_000
+    ));
+    let made = encode(clip, limit, progress, cancel)?;
+    if let Err(error) = fs::rename(&made, &copy) {
+        let _ = fs::remove_file(&made);
+        return Err(anyhow::Error::new(error).context("name the shareable copy"));
+    }
+    Ok(copy)
+}
+
+#[cfg(windows)]
+fn encode(
+    clip: &Path,
+    limit: u64,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> anyhow::Result<PathBuf> {
+    crate::gpu::share(clip, limit, progress, cancel).context("make the shareable copy with NVENC")
+}
+
+#[cfg(not(windows))]
+fn encode(_: &Path, _: u64, _: &AtomicU32, _: &AtomicBool) -> anyhow::Result<PathBuf> {
+    anyhow::bail!("NVENC requires Windows")
+}
 
 /// The file the user wants to paste.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +168,36 @@ pub(crate) fn encode_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_s_shareable_copy_is_named_after_it_in_the_folder_beside_it() {
+        assert_eq!(
+            copy_path(Path::new("clips/videos/2026-11-12 20-01-02.mkv")),
+            Some(PathBuf::from(
+                "clips/videos/shareable/2026-11-12 20-01-02.mp4"
+            ))
+        );
+    }
+
+    #[test]
+    fn the_file_to_paste_is_the_clip_when_it_fits_and_otherwise_a_copy_that_fits() {
+        let directory = tempfile::tempdir().unwrap();
+        let clip = directory.path().join("clip.mkv");
+        fs::File::create(&clip).unwrap().set_len(2_000).unwrap();
+        assert_eq!(existing(&clip, 2_000), Some(clip.clone()));
+        assert_eq!(existing(&clip, 1_000), None, "no copy yet");
+
+        let copy = copy_path(&clip).unwrap();
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::File::create(&copy).unwrap().set_len(900).unwrap();
+        assert_eq!(existing(&clip, 1_000), Some(copy.clone()));
+        assert_eq!(existing(&clip, 800), None, "a copy made for a larger limit");
+        assert_eq!(
+            prepare(&clip, 1_000, &AtomicU32::new(0), &AtomicBool::new(false)).unwrap(),
+            copy,
+            "an existing copy is not made again"
+        );
+    }
 
     #[test]
     fn the_budget_reserves_sound_and_container_space() {

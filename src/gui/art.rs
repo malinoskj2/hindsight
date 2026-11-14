@@ -179,6 +179,42 @@ fn weighted_average(source: &[u8], pixels: impl Iterator<Item = (usize, f32)>) -
     sum.map(|total| (total / weight.max(f32::EPSILON)).round() as u8)
 }
 
+/// Lays white over `rect` of `dest`, `opacity` of 255 opaque.
+#[expect(unsafe_code, reason = "calls AlphaBlend")]
+pub(super) fn wash(dest: &w::HDC, rect: w::RECT, opacity: u8) {
+    use windows::Win32::Graphics::Gdi::{AlphaBlend, BLENDFUNCTION, HDC};
+
+    let Some(white) = dib_section(1, 1, &[u8::MAX; PIXEL]) else {
+        return;
+    };
+    let Ok(source) = dest.CreateCompatibleDC() else {
+        return;
+    };
+    let Ok(_selected) = source.SelectObject(&*white) else {
+        return;
+    };
+    let blend = BLENDFUNCTION {
+        SourceConstantAlpha: opacity,
+        ..Default::default()
+    };
+    // SAFETY: both DCs are live for the call, and the bitmap is selected into `source`.
+    let _ = unsafe {
+        AlphaBlend(
+            HDC(dest.ptr()),
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            HDC(source.ptr()),
+            0,
+            0,
+            1,
+            1,
+            blend,
+        )
+    };
+}
+
 /// Calls `AlphaBlend` directly, because `winsafe`'s wrapper passes the blend settings by
 /// pointer.
 #[expect(unsafe_code, reason = "calls AlphaBlend")]
